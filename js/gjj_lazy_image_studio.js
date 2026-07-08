@@ -462,6 +462,26 @@ function getWidget(node, name) {
 	return GJJ_Utils.getWidget(node, name);
 }
 
+function ensureComboOption(widget, value) {
+	if (!widget || value === undefined || value === null) {
+		return false;
+	}
+	const text = String(value ?? "").trim();
+	if (!text) {
+		return false;
+	}
+	widget.options ||= {};
+	if (!Array.isArray(widget.options.values)) {
+		return false;
+	}
+	const exists = widget.options.values.some((item) => String(item ?? "") === text);
+	if (exists) {
+		return false;
+	}
+	widget.options.values = [...widget.options.values, text];
+	return true;
+}
+
 function getWidgetIndex(node, name) {
 	return Array.isArray(node?.widgets)
 		? node.widgets.findIndex((widget) => widget?.name === name)
@@ -744,6 +764,7 @@ function setWidgetValue(widget, value) {
 	if (!widget || value === undefined || value === null) {
 		return;
 	}
+	ensureComboOption(widget, value);
 	widget.value = value;
 	if (widget.inputEl) {
 		widget.inputEl.value = String(value);
@@ -1560,9 +1581,11 @@ function applyParamValues(node, params) {
 			continue;
 		}
 		const widget = getWidget(node, name);
-		if (!widget || widget.value === params[name]) {
+		if (!widget) {
 			continue;
 		}
+		ensureComboOption(widget, params[name]);
+		if (widget.value === params[name]) continue;
 		setWidgetValue(widget, params[name]);
 		changed = true;
 	}
@@ -3288,6 +3311,35 @@ function lazyPreviewHeightForNode(node, width = null) {
 	return Number(node.__gjjLazyPreviewHeight || 0);
 }
 
+function measuredLazyPreviewHeight(node) {
+	const container = node?.__gjjLazyPreview?.container;
+	if (!container || container.style.display === "none") {
+		return 0;
+	}
+	const measured = Math.ceil(Number(container.scrollHeight || container.getBoundingClientRect?.().height || 0));
+	return Number.isFinite(measured) && measured > 0 ? measured + 2 : 0;
+}
+
+function applyMeasuredLazyPreviewHeight(node) {
+	const measured = measuredLazyPreviewHeight(node);
+	if (measured <= 0) return false;
+	const current = Number(node.__gjjLazyPreviewHeight || 0);
+	if (Math.abs(current - measured) <= 1) return false;
+	node.__gjjLazyPreviewHeight = measured;
+	return true;
+}
+
+function scheduleLazyPreviewHeightSync(node) {
+	if (!node || node.__gjjLazyPreviewMeasureQueued) return;
+	node.__gjjLazyPreviewMeasureQueued = true;
+	requestAnimationFrame(() => {
+		node.__gjjLazyPreviewMeasureQueued = false;
+		if (applyMeasuredLazyPreviewHeight(node)) {
+			GJJ_Utils.refreshNode(node);
+		}
+	});
+}
+
 function updateLazyPreviewLayout(node, width = null) {
 	const preview = node?.__gjjLazyPreview;
 	const wrap = preview?.wrap;
@@ -3330,6 +3382,7 @@ function updateLazyPreviewLayout(node, width = null) {
 		const itemWidth = Number(item.width || 1);
 		const itemHeight = Number(item.height || 1);
 		node.__gjjLazyPreviewHeight = Math.max(96, Math.ceil(contentWidth * itemHeight / itemWidth) + controlHeight + 10);
+		if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 		return;
 	}
 	const columns = Math.max(1, Math.floor((contentWidth + 6) / (86 + 6)));
@@ -3337,6 +3390,7 @@ function updateLazyPreviewLayout(node, width = null) {
 	const cellWidth = Math.max(1, Math.floor((contentWidth - (columns - 1) * 6) / columns));
 	const gap = Math.max(0, rows - 1) * 6;
 	node.__gjjLazyPreviewHeight = Math.max(96, rows * cellWidth + gap + controlHeight + 10);
+	if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 }
 
 function configureImagePreviewWidget(node, widget, container) {

@@ -240,6 +240,34 @@ def _model_size_text(kind: str, name: str) -> str:
         return "未知"
 
 
+def _compact_model_name(name: Any) -> str:
+    text = str(name or "").strip().replace("\\", "/").rstrip("/")
+    leaf = text.rsplit("/", 1)[-1] if text else ""
+    stem = os.path.splitext(leaf)[0]
+    return stem or leaf or "unknown"
+
+
+def _compact_model_size_text(kind: str, name: str) -> str:
+    path = _model_full_path(kind, name)
+    if not path:
+        return "未知"
+    try:
+        size = float(os.path.getsize(path))
+    except Exception:
+        return "未知"
+    units = [("T", 1024.0 ** 4), ("G", 1024.0 ** 3), ("M", 1024.0 ** 2), ("K", 1024.0)]
+    for unit, factor in units:
+        if size >= factor:
+            value = size / factor
+            return f"{value:.1f}{unit}" if value < 10 and value % 1 else f"{round(value):.0f}{unit}"
+    return f"{max(1, int(round(size)))}B"
+
+
+def _test_caption_label(kind: str, model_name: str, elapsed: float | None = None, failed: bool = False) -> str:
+    time_text = "失败" if failed else f"{max(0, int(round(float(elapsed or 0))))}秒"
+    return f"{_compact_model_name(model_name)} ({_compact_model_size_text(kind, model_name)})[{time_text}]"
+
+
 def _load_caption_font(size: int) -> ImageFont.ImageFont:
     windir = os.environ.get("WINDIR", "C:\\Windows")
     candidates = [
@@ -659,12 +687,22 @@ def _ensure_gguf_model_folders() -> None:
 
 def _list_lazy_unet_models() -> list[str]:
     _ensure_gguf_model_folders()
-    return _dedupe_keep_order(_safe_filename_list("unet_gguf") + list_unet_models())
+    return _dedupe_keep_order(
+        _safe_filename_list("unet_gguf")
+        + list_unet_models()
+        + _safe_filename_list("diffusion_models")
+        + _safe_filename_list("checkpoints")
+    )
 
 
 def _list_lazy_clip_models() -> list[str]:
     _ensure_gguf_model_folders()
-    return _dedupe_keep_order(_safe_filename_list("clip_gguf") + list_clip_models())
+    return _dedupe_keep_order(
+        _safe_filename_list("clip_gguf")
+        + list_clip_models()
+        + _safe_filename_list("text_encoders")
+        + _safe_filename_list("clip")
+    )
 
 
 def _preferred_default(values: list[str], preferred: str) -> str:
@@ -2932,7 +2970,7 @@ class GJJ_LazyImageStudio:
                                 f"{int(item_image.shape[2])}x{int(item_image.shape[1])} -> {test_width}x{test_height}",
                             )
                             item_image = _resize_test_image_to_target(item_image, test_width, test_height)
-                        label = f"模型：{model_name}  大小：{model_size}  耗时：{item_elapsed:.1f}秒  种子：{test_seed}"
+                        label = _test_caption_label(mode, model_name, item_elapsed)
                         captioned = _caption_test_image(item_image, label)
                         captioned_images.append(captioned)
                         ui_params = item_result.get("ui", {}).get("effective_params", [{}])
@@ -2953,7 +2991,7 @@ class GJJ_LazyImageStudio:
                         if mode in {"unet", "lora"}:
                             error_image = _caption_test_image(
                                 _make_soft_error_image(test_width, test_height),
-                                f"模型：{model_name}  大小：{_model_size_text(mode, model_name)}  耗时：失败  种子：{test_seed}",
+                                _test_caption_label(mode, model_name, failed=True),
                             )
                             captioned_images.append(error_image)
                     finally:

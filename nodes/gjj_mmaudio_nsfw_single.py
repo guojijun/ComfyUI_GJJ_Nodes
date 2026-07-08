@@ -445,21 +445,22 @@ def _process_video_tensor(video_tensor: torch.Tensor, duration_sec: float, uniqu
     ])
 
     total_frames = int(video_tensor.shape[0])
-    clip_frames_count = int(clip_fps * duration_sec)
-    sync_frames_count = int(sync_fps * duration_sec)
-    if total_frames < clip_frames_count:
-        clip_frames_count = total_frames
-        duration_sec = total_frames / clip_fps
-    if total_frames < sync_frames_count:
-        sync_frames_count = total_frames
-        duration_sec = total_frames / sync_fps
+    duration_sec = max(0.1, float(duration_sec or 0.0))
+    clip_frames_count = max(1, int(round(clip_fps * duration_sec)))
+    sync_frames_count = max(1, int(round(sync_fps * duration_sec)))
 
-    clip_frames = video_tensor[:clip_frames_count].permute(0, 3, 1, 2)
-    sync_frames = video_tensor[:sync_frames_count].permute(0, 3, 1, 2)
+    def sample_frames(target_count: int) -> torch.Tensor:
+        if total_frames <= 1:
+            indices = torch.zeros((int(target_count),), dtype=torch.long, device=video_tensor.device)
+        else:
+            indices = torch.linspace(0, total_frames - 1, steps=int(target_count), device=video_tensor.device).round().long()
+            indices = indices.clamp_(0, total_frames - 1)
+        return video_tensor.index_select(0, indices)
+
+    clip_frames = sample_frames(clip_frames_count).permute(0, 3, 1, 2)
+    sync_frames = sample_frames(sync_frames_count).permute(0, 3, 1, 2)
     clip_frames = torch.stack([clip_transform(frame) for frame in clip_frames])
     sync_frames = torch.stack([sync_transform(frame) for frame in sync_frames])
-    clip_frames = clip_frames[: int(clip_fps * duration_sec)]
-    sync_frames = sync_frames[: int(sync_fps * duration_sec)]
     return clip_frames, sync_frames, float(duration_sec)
 
 
@@ -759,7 +760,7 @@ class GJJ_MMAudioNSFWSingle:
             },
         ],
         "usage": [
-            "默认显示按钮行、正向提示词和模型参数；点击 🧠 可收起模型，点击 🎬 / 🔊 分别显示视频参数和配音参数。",
+            "默认只显示按钮行；点击 🧠 / 🎬 / 🔊 分别打开模型、视频、配音浮动设置窗口，同一时间只保留一个窗口。",
             "正向提示词始终显示；开启 🌏 后会使用 translation\\opus-mt-zh-en.safetensors 翻译正向提示词。",
             "把 IMAGE、GJJ_BATCH_IMAGE 或 VIDEO 接到“媒体输入”时，📁 会禁用并以输入口为准。",
             "没有输入口连接时，点击 📁 选择本机视频；如果文件名已在 input 目录中，节点会直接使用该文件名。",

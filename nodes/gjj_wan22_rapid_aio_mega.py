@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from fractions import Fraction
+import json
+import shutil
 import re
+from pathlib import Path
 from typing import Any
 
 import comfy.model_management
@@ -9,10 +13,32 @@ import comfy.utils
 import folder_paths
 import torch
 import torch.nn.functional as F
+from comfy_api.latest import InputImpl, Types
 from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecode, common_ksampler
 
-from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
+try:
+    from aiohttp import web
+    from server import PromptServer
+except Exception:
+    web = None
+    PromptServer = None
+
+from .common_utils.model_loader import gjjutils_load_clip_from_names, gjjutils_load_model, gjjutils_load_vae
+from .common_utils.model_manager import gjjutils_model_stem_without_quant, gjjutils_resolve_model_name
+from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file
+from .gjj_multi_image_loader import load_image_tensor, parse_selected_images, resolve_selected_image_path
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+from .gjj_mmaudio_nsfw_single import (
+    _mmaudio_clip_models,
+    _mmaudio_main_models,
+    _mmaudio_models,
+    _mmaudio_synchformer_models,
+    _mmaudio_vae_models,
+    _prefer_main_model,
+    _prefer_model,
+)
+from .gjj_video_combine_runtime import DEFAULT_FORMAT as DEFAULT_VIDEO_FORMAT
+from .gjj_video_combine_runtime import DEFAULT_FRAME_RATE, _probe_video_file, combine_video, list_supported_formats
 
 
 NODE_NAME = "GJJ_Wan22RapidAIOMega"
@@ -32,9 +58,139 @@ DEFAULT_HEIGHT = 768
 DEFAULT_SEGMENT_FRAMES = 65
 DEFAULT_EMPTY_FRAME_LEVEL = 0.5
 SIZE_ALIGNMENT = 32
+IMAGE_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+IMAGE_FIT_MODES = ("拉伸", "补边", "留边", "裁剪")
+CROP_POSITIONS = ("上", "下", "左", "右", "中")
+DEFAULT_VIDEO_PREFIX = "GJJ/Wan22RapidAIOMega"
+DEFAULT_AUDIO_PROMPT = "强烈、有节奏的动作音效，贴近画面的 Foley 声音"
+DEFAULT_AUDIO_NEGATIVE = "音乐，唱歌，说话，对话，男声，背景噪声，干燥声音，安静，平静"
+GGUF_DEFAULT_CLIP = "umt5-xxl-encoder-Q4_K_M.gguf"
+GGUF_DEFAULT_VAE = "wan_2.1_vae.safetensors"
+RAPID_AIO_SEARCH_SEED = "wan2.2-rapid-mega-aio"
+WAN22_RAPID_AIO_MODEL_DOWNLOAD_URL = "https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne"
+WAN22_RAPID_AIO_MODEL_TREE = [
+    {
+        "label": "Wan Rapid AllInOne checkpoint",
+        "folder": "checkpoints",
+        "filename": "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+        "value": "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+        "kind": "checkpoint",
+        "icon": "🎬",
+        "description": "推荐的 AIO 单文件 safetensors。它自带生成视频需要的 MODEL / CLIP / VAE，节点会直接按 checkpoint 加载，不需要额外选择 Wan CLIP 和 Wan VAE。",
+    },
+    {
+        "label": "Wan Rapid AllInOne 分体主模型 GGUF",
+        "folder": "diffusion_models",
+        "filename": "wan2.2-rapid-mega-aio-nsfw-v12.2-Q4_K.gguf",
+        "value": "diffusion_models/wan2.2-rapid-mega-aio-nsfw-v12.2-Q4_K.gguf",
+        "kind": "unet_gguf",
+        "icon": "🟢",
+        "description": "低显存主扩散模型。选择 .gguf 或 diffusion_models 下的主模型时，节点会走 GJJ 内置 GGUF UNET 加载器；建议 Q4_K / Q4_K_M 或更高量化。Q2_K 对该 Wan 视频模型容易花屏，节点会阻止执行。",
+    },
+    {
+        "label": "Wan Rapid AllInOne 分体主模型 safetensors",
+        "folder": "diffusion_models",
+        "filename": "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+        "value": "diffusion_models/wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+        "kind": "unet",
+        "icon": "🔵",
+        "description": "分体 UNET 主模型。只包含视频扩散网络，不自带文本编码器和 VAE；需要同时选择 Wan CLIP 与 Wan VAE。",
+    },
+    {
+        "label": "Wan GGUF CLIP / T5 文本编码器",
+        "folder": "clip_gguf",
+        "filename": GGUF_DEFAULT_CLIP,
+        "value": GGUF_DEFAULT_CLIP,
+        "kind": "clip",
+        "icon": "🧠",
+        "description": "分体主模型使用的 Wan 文本编码器，工作流中等价于 CLIPLoaderGGUF(type=wan)。负责把正向/反向提示词编码为 Wan 条件。",
+    },
+    {
+        "label": "Wan VAE",
+        "folder": "vae",
+        "filename": GGUF_DEFAULT_VAE,
+        "value": GGUF_DEFAULT_VAE,
+        "kind": "vae",
+        "icon": "📦",
+        "description": "分体主模型使用的视频 VAE，负责把 latent 解码成视频帧，也用于首尾图/VACE 条件编码。checkpoint AIO 自带 VAE 时不需要这一项。",
+    },
+    {
+        "label": "MMAudio 主模型",
+        "folder": "mmaudio",
+        "filename": "mmaudio_large_44k_v2.pth / mmaudio_large_44k_v2_fp16.safetensors",
+        "value": "mmaudio_large_44k_v2.pth",
+        "kind": "audio_model",
+        "icon": "📢",
+        "description": "配音主生成模型。开启 📢 配音后，它根据视频画面、配音提示词和同步特征生成 44.1kHz 音频。",
+    },
+    {
+        "label": "MMAudio VAE",
+        "folder": "mmaudio",
+        "filename": "mmaudio_vae_44k_fp16.safetensors",
+        "value": "mmaudio_vae_44k_fp16.safetensors",
+        "kind": "audio_vae",
+        "icon": "🎚️",
+        "description": "MMAudio 的音频 VAE。负责音频 latent 与波形之间的转换，是配音链路必需模型。",
+    },
+    {
+        "label": "MMAudio Synchformer",
+        "folder": "mmaudio",
+        "filename": "mmaudio_synchformer_fp16.safetensors",
+        "value": "mmaudio_synchformer_fp16.safetensors",
+        "kind": "audio_sync",
+        "icon": "🎞️",
+        "description": "视频同步特征模型。负责从画面节奏、运动和时序中提取配音参考特征，让音效更贴近视频动作。",
+    },
+    {
+        "label": "MMAudio CLIP / DFN 条件模型",
+        "folder": "mmaudio",
+        "filename": "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+        "value": "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+        "kind": "audio_clip",
+        "icon": "🧩",
+        "description": "配音条件模型。用于理解配音提示词和视觉语义；没有 open_clip 或模型不可用时，配音条件能力会下降。",
+    },
+    {
+        "label": "可选 LoRA",
+        "folder": "loras",
+        "filename": "按 LoraChainConfig 选择",
+        "value": "LoraChainConfig",
+        "kind": "lora",
+        "icon": "🧵",
+        "required": False,
+        "description": "可选风格/动作/角色增强模型。通过 LoRA 串联配置输入接入，节点会在加载 Wan 模型与 CLIP 后按配置顺序应用。",
+    },
+]
+WAN22_RAPID_AIO_MODEL_TREE_TEXT = """models/
+├─ checkpoints/
+│  └─ wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors
+│     AIO 单文件，内含 MODEL / CLIP / VAE；最省心，推荐优先使用。
+├─ diffusion_models/
+│  ├─ wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors
+│  │  分体 UNET 主模型；需要配套 Wan CLIP 与 Wan VAE。
+│  └─ wan2.2-rapid-mega-aio-nsfw-v12.2-Q4_K.gguf
+│     分体 GGUF 主模型；低显存，建议 Q4_K / Q4_K_M 或更高，Q2_K 容易花屏。
+├─ text_encoders/
+│  └─ umt5-xxl-encoder-Q4_K_M.gguf
+│     Wan 文本编码器，等价 CLIPLoaderGGUF(type=wan)，用于正向/反向提示词。
+├─ vae/
+│  └─ wan_2.1_vae.safetensors
+│     分体 Wan VAE，用于视频帧解码和 VACE 条件编码。
+├─ mmaudio/
+│  ├─ mmaudio_large_44k_v2.pth 或 mmaudio_large_44k_v2_fp16.safetensors
+│  │  MMAudio 配音主模型。
+│  ├─ mmaudio_vae_44k_fp16.safetensors
+│  │  MMAudio 音频 VAE。
+│  ├─ mmaudio_synchformer_fp16.safetensors
+│  │  视频同步特征模型。
+│  └─ apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors
+│     配音 CLIP/DFN 条件模型。
+└─ loras/
+   └─ 可选 LoRA
+      通过 LoRA 串联配置输入接入，用于风格、角色、动作或加速增强。"""
 
 
-def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+def _send_status(unique_id: Any, text: str, progress: float | None = None, extra: dict[str, Any] | None = None) -> None:
     if not unique_id:
         return
     try:
@@ -43,6 +199,8 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         payload = {"node": str(unique_id), "text": str(text or "")}
         if progress is not None:
             payload["progress"] = max(0.0, min(1.0, float(progress)))
+        if extra:
+            payload.update(extra)
         PromptServer.instance.send_sync("gjj_node_progress", payload)
     except Exception:
         pass
@@ -57,6 +215,125 @@ def _safe_filename_list(category: str) -> list[str]:
         return list(folder_paths.get_filename_list(category))
     except Exception:
         return []
+
+
+def _scan_model_folder_files(category: str, suffixes: set[str]) -> list[str]:
+    names: list[str] = []
+    try:
+        roots = folder_paths.get_folder_paths(category)
+    except Exception:
+        roots = []
+    for root in roots or []:
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        for path in root_path.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in suffixes:
+                continue
+            try:
+                names.append(path.relative_to(root_path).as_posix())
+            except Exception:
+                names.append(path.name)
+    return names
+
+
+def _find_model_file(category: str, name: str) -> str | None:
+    try:
+        path = folder_paths.get_full_path(category, name)
+    except Exception:
+        path = None
+    if path:
+        return path
+    normalized = str(name or "").replace("\\", "/").lower()
+    if not normalized:
+        return None
+    try:
+        roots = folder_paths.get_folder_paths(category)
+    except Exception:
+        roots = []
+    for root in roots or []:
+        root_path = Path(root)
+        candidate = root_path / str(name or "")
+        if candidate.is_file():
+            return str(candidate)
+        for path in root_path.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root_path).as_posix().lower()
+            if rel == normalized or path.name.lower() == normalized:
+                return str(path)
+    return None
+
+
+def _ensure_checkpoint_gguf_extension() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    current = existing.get("checkpoints")
+    if not current:
+        return
+    paths, exts = current
+    ext_set = set(exts or set())
+    if ".gguf" not in ext_set:
+        existing["checkpoints"] = (paths, ext_set | {".gguf"})
+
+
+def _ensure_unet_gguf_folder() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    paths: list[str] = []
+    exts: set[str] = {".gguf"}
+    current = existing.get("unet_gguf")
+    if current:
+        current_paths, current_exts = current
+        paths.extend(str(path) for path in current_paths or [])
+        exts.update(current_exts or set())
+    for source in ("diffusion_models", "unet", "checkpoints"):
+        source_entry = existing.get(source)
+        if not source_entry:
+            continue
+        source_paths, _source_exts = source_entry
+        paths.extend(str(path) for path in source_paths or [])
+    try:
+        paths.append(str(Path(getattr(folder_paths, "models_dir", "")) / "unet_gguf"))
+    except Exception:
+        pass
+    deduped = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path).replace("\\", "/").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    existing["unet_gguf"] = (deduped, exts | {".gguf"})
+
+
+def _ensure_clip_gguf_folder() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    paths: list[str] = []
+    exts: set[str] = {".gguf"}
+    current = existing.get("clip_gguf")
+    if current:
+        current_paths, current_exts = current
+        paths.extend(str(path) for path in current_paths or [])
+        exts.update(current_exts or set())
+    for source in ("text_encoders", "clip"):
+        source_entry = existing.get(source)
+        if not source_entry:
+            continue
+        source_paths, _source_exts = source_entry
+        paths.extend(str(path) for path in source_paths or [])
+    try:
+        paths.append(str(Path(getattr(folder_paths, "models_dir", "")) / "clip_gguf"))
+    except Exception:
+        pass
+    deduped = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path).replace("\\", "/").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    existing["clip_gguf"] = (deduped, exts | {".gguf"})
 
 
 def _pick_available_name(preferred: str, available: list[str], fallback: str = "") -> str:
@@ -82,14 +359,345 @@ def _pick_available_name(preferred: str, available: list[str], fallback: str = "
     return available[0] if available else ""
 
 
+def _split_model_selection(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip().replace("\\", "/")
+    for category in ("checkpoints", "diffusion_models", "unet_gguf"):
+        prefix = f"{category}/"
+        if text.lower().startswith(prefix):
+            return category, text[len(prefix):]
+    return "", text
+
+
+def _main_model_choice(category: str, name: str) -> str:
+    clean = str(name or "").replace("\\", "/").strip()
+    if not clean:
+        return ""
+    if category in {"diffusion_models", "unet_gguf"}:
+        return f"diffusion_models/{clean}"
+    return clean
+
+
 def _list_rapid_checkpoints() -> list[str]:
-    checkpoints = _safe_filename_list("checkpoints")
-    filtered = []
-    for item in checkpoints:
-        normalized = _normalize_text(item)
-        if "wan22" in normalized and "rapid" in normalized:
-            filtered.append(item)
-    return filtered or checkpoints or [DEFAULT_CHECKPOINT]
+    _ensure_checkpoint_gguf_extension()
+    _ensure_unet_gguf_folder()
+    sources = (
+        ("checkpoints", _safe_filename_list("checkpoints") + _scan_model_folder_files("checkpoints", {".safetensors", ".gguf"})),
+        ("diffusion_models", _safe_filename_list("diffusion_models") + _scan_model_folder_files("diffusion_models", {".safetensors", ".gguf"})),
+        ("unet_gguf", _safe_filename_list("unet_gguf") + _scan_model_folder_files("unet_gguf", {".gguf"})),
+    )
+    seed_stem = gjjutils_model_stem_without_quant(RAPID_AIO_SEARCH_SEED)
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for _category, names in sources:
+        for item in names:
+            item = str(item or "").replace("\\", "/")
+            if _category == "checkpoints" and Path(item).suffix.lower() == ".gguf":
+                continue
+            choice = _main_model_choice(_category, item)
+            key = choice.lower()
+            if not item or key in seen:
+                continue
+            suffix = Path(item).suffix.lower()
+            if suffix not in {".safetensors", ".gguf"}:
+                continue
+            stem = gjjutils_model_stem_without_quant(item)
+            compact_seed = _normalize_text(seed_stem)
+            compact_item = _normalize_text(stem)
+            if compact_seed not in compact_item and compact_item not in compact_seed:
+                continue
+            seen.add(key)
+            filtered.append(choice)
+    filtered.sort(
+        key=lambda name: (
+            0 if not str(name).lower().startswith("diffusion_models/") and str(name).lower().endswith(".safetensors") else 1,
+            0 if str(name).lower().startswith("diffusion_models/") and str(name).lower().endswith(".safetensors") else 1,
+            0 if str(name).lower().endswith(".gguf") else 1,
+            str(name).lower(),
+        )
+    )
+    return filtered or [DEFAULT_CHECKPOINT]
+
+
+def _list_wan_gguf_clip_models() -> list[str]:
+    _ensure_clip_gguf_folder()
+    names = _safe_filename_list("clip_gguf") + _scan_model_folder_files("clip_gguf", {".gguf"})
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for item in names:
+        item = str(item or "").replace("\\", "/")
+        key = item.lower()
+        if not item or key in seen or not key.endswith(".gguf"):
+            continue
+        seen.add(key)
+        filtered.append(item)
+    filtered.sort(key=lambda name: (0 if "umt5" in str(name).lower() else 1, str(name).lower()))
+    return [""] + (filtered or [GGUF_DEFAULT_CLIP])
+
+
+def _list_wan_vae_models() -> list[str]:
+    names = _safe_filename_list("vae") + _scan_model_folder_files("vae", {".safetensors", ".pt", ".pth", ".ckpt"})
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for item in names:
+        item = str(item or "").replace("\\", "/")
+        key = item.lower()
+        if not item or key in seen:
+            continue
+        if Path(item).suffix.lower() not in {".safetensors", ".pt", ".pth", ".ckpt"}:
+            continue
+        seen.add(key)
+        filtered.append(item)
+    filtered.sort(key=lambda name: (0 if "wan" in str(name).lower() and "vae" in str(name).lower() else 1, str(name).lower()))
+    return [""] + (filtered or [GGUF_DEFAULT_VAE])
+
+
+def _is_gguf_model(value: Any) -> bool:
+    return _split_model_selection(value)[1].lower().endswith(".gguf")
+
+
+def _is_q2_gguf_model(value: Any) -> bool:
+    clean_name = _split_model_selection(value)[1].lower()
+    return clean_name.endswith(".gguf") and any(token in clean_name for token in ("q2_k", "q2-k"))
+
+
+def _extract_model_clip_vae(value: Any):
+    if isinstance(value, dict):
+        if all(key in value for key in ("model", "clip", "vae")):
+            return value["model"], value["clip"], value["vae"]
+        value = value.get("result", value)
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        return value[0], value[1], value[2]
+    return None
+
+
+def _call_loader_with_checkpoint(loader: Any, method_name: str, checkpoint_name: str, checkpoint_path: str | None = None):
+    method = getattr(loader, method_name, None)
+    if not callable(method):
+        return None
+    errors: list[Exception] = []
+    values = [checkpoint_name]
+    if checkpoint_path and checkpoint_path not in values:
+        values.append(checkpoint_path)
+    keyword_names = (
+        "ckpt_name",
+        "checkpoint_name",
+        "model_name",
+        "model",
+        "gguf_name",
+        "path",
+        "ckpt_path",
+        "checkpoint_path",
+        "model_path",
+    )
+    for value in values:
+        for key in keyword_names:
+            try:
+                return method(**{key: value})
+            except TypeError as exc:
+                errors.append(exc)
+            except Exception:
+                raise
+    for kwargs in (
+        {"ckpt_name": checkpoint_name},
+        {"checkpoint_name": checkpoint_name},
+        {"model_name": checkpoint_name},
+        {"model": checkpoint_name},
+    ):
+        try:
+            return method(**kwargs)
+        except TypeError as exc:
+            errors.append(exc)
+        except Exception:
+            raise
+    try:
+        return method(checkpoint_name)
+    except TypeError as exc:
+        errors.append(exc)
+    if errors:
+        raise errors[-1]
+    return None
+
+
+def _node_class(class_name: str):
+    try:
+        import nodes as comfy_nodes
+    except Exception as exc:
+        raise RuntimeError(f"无法访问 ComfyUI 节点注册表：{exc}") from exc
+    mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}) or {}
+    node_cls = mappings.get(class_name)
+    if node_cls is None:
+        raise RuntimeError(f"当前 ComfyUI 没有注册节点：{class_name}")
+    return node_cls
+
+
+def _call_node_function(node_cls: Any, *args, **kwargs):
+    node = node_cls()
+    function_name = str(getattr(node_cls, "FUNCTION", "") or "").strip()
+    method_names = [function_name] if function_name else []
+    method_names.extend(name for name in ("load_unet", "load_clip", "load_vae", "load_checkpoint", "load") if name not in method_names)
+    errors: list[str] = []
+    for method_name in method_names:
+        method = getattr(node, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method(*args, **kwargs)
+        except TypeError as exc:
+            errors.append(f"{method_name}: {exc}")
+    raise RuntimeError("; ".join(errors) or f"{node_cls.__name__} 没有可调用的加载函数")
+
+
+def _load_wan_clip_model(clip_name: str):
+    if _is_gguf_model(clip_name):
+        try:
+            from ..vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+        except ImportError:
+            from vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+        try:
+            return load_gjj_gguf_clip(clip_name, "wan")
+        except ModuleNotFoundError as exc:
+            if getattr(exc, "name", "") == "gguf":
+                raise RuntimeError(
+                    "加载 GGUF Wan CLIP 需要安装 gguf Python 依赖。"
+                    "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+                ) from exc
+            raise
+        except Exception as exc:
+            error_text = str(exc)
+            if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+                raise RuntimeError(
+                    "加载 GGUF Wan CLIP 需要安装 gguf Python 依赖。"
+                    "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+                ) from exc
+            raise RuntimeError(f"GJJ 内置 GGUF Wan CLIP 加载失败：{clip_name}\n{exc}") from exc
+    return gjjutils_load_clip_from_names([clip_name], "wan")
+
+
+def _load_wan_split_workflow_models(unet_name: str, clip_name: str = GGUF_DEFAULT_CLIP, vae_name: str = GGUF_DEFAULT_VAE):
+    _ensure_unet_gguf_folder()
+    _ensure_clip_gguf_folder()
+    source_category, clean_unet_name = _split_model_selection(unet_name)
+    is_gguf = _is_gguf_model(clean_unet_name)
+    resolved_unet = gjjutils_resolve_model_name(
+        clean_unet_name,
+        "unet_gguf" if is_gguf else "diffusion_models",
+        candidates=[clean_unet_name, RAPID_AIO_SEARCH_SEED, DEFAULT_CHECKPOINT],
+        extensions={".gguf"} if is_gguf else {".safetensors", ".pt", ".pth", ".ckpt"},
+        label="Wan Rapid-AIO 分体主模型",
+    )
+    if _is_q2_gguf_model(resolved_unet):
+        raise RuntimeError(
+            "当前 Wan Rapid AllInOne 的 Q2_K GGUF 会生成噪声/花屏视频，已阻止执行。\n"
+            f"主模型：{resolved_unet}\n"
+            "请改用 Q4_K / Q4_K_M / 更高量化 GGUF，或使用同仓库 .safetensors AIO。"
+        )
+    resolved_clip = gjjutils_resolve_model_name(
+        clip_name or GGUF_DEFAULT_CLIP,
+        "clip_gguf",
+        candidates=[clip_name, GGUF_DEFAULT_CLIP, "umt5 xxl encoder"],
+        extensions={".gguf"},
+        label="Wan GGUF CLIP",
+    )
+    resolved_vae = gjjutils_resolve_model_name(
+        vae_name or GGUF_DEFAULT_VAE,
+        "vae",
+        candidates=[vae_name, GGUF_DEFAULT_VAE, "wan 2.1 vae", "wan2 vae"],
+        extensions={".safetensors", ".pt", ".pth", ".ckpt"},
+        label="Wan VAE",
+    )
+    model = gjjutils_load_model(resolved_unet, "default")
+    clip = _load_wan_clip_model(resolved_clip)
+    vae = gjjutils_load_vae(resolved_vae)
+    return model, clip, vae
+
+
+def _load_aio_checkpoint_gguf(checkpoint_name: str, clip_name: str = GGUF_DEFAULT_CLIP, vae_name: str = GGUF_DEFAULT_VAE):
+    try:
+        return _load_wan_split_workflow_models(checkpoint_name, clip_name, vae_name)
+    except Exception as workflow_exc:
+        workflow_error = str(workflow_exc)
+        try:
+            import nodes as comfy_nodes
+        except Exception as exc:
+            raise RuntimeError(f"{workflow_error}\n无法访问 ComfyUI 节点注册表：{exc}") from exc
+
+    mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}) or {}
+    checkpoint_path = _find_model_file("checkpoints", checkpoint_name)
+    candidates = []
+    for class_name, node_cls in mappings.items():
+        lowered = str(class_name or "").lower()
+        if "gguf" not in lowered:
+            continue
+        if not any(token in lowered for token in ("checkpoint", "ckpt", "loader")):
+            continue
+        if any(token in lowered for token in ("unet", "clip", "vae", "lora")):
+            continue
+        priority = 0 if any(token in lowered for token in ("checkpoint", "ckpt")) else 1
+        candidates.append((priority, str(class_name), node_cls))
+    candidates.sort(key=lambda item: (item[0], item[1].lower()))
+
+    errors: list[str] = []
+    for _priority, class_name, node_cls in candidates:
+        try:
+            loader = node_cls()
+            method_names = ["load_checkpoint"]
+            function_name = str(getattr(node_cls, "FUNCTION", "") or "").strip()
+            if function_name and function_name not in method_names:
+                method_names.append(function_name)
+            method_names.extend(name for name in ("load", "load_gguf", "load_model") if name not in method_names)
+            for method_name in method_names:
+                result = _call_loader_with_checkpoint(loader, method_name, checkpoint_name, checkpoint_path)
+                extracted = _extract_model_clip_vae(result)
+                if extracted is not None:
+                    return extracted
+        except Exception as exc:
+            errors.append(f"{class_name}: {exc}")
+
+    if not candidates:
+        raise RuntimeError(f"{workflow_error}\n没有发现已注册的 checkpoint GGUF 加载器。")
+    raise RuntimeError(f"{workflow_error}\n已发现 checkpoint GGUF 加载器，但未能得到 Model/CLIP/VAE：\n" + "\n".join(errors[:6]))
+
+
+def _is_split_model_selection(model_name: str) -> bool:
+    if _is_gguf_model(model_name):
+        return True
+    source_category, clean_name = _split_model_selection(model_name)
+    if source_category in {"diffusion_models", "unet_gguf"}:
+        return True
+    if source_category == "checkpoints":
+        return False
+    diffusion_path = _find_model_file("diffusion_models", clean_name)
+    checkpoint_path = _find_model_file("checkpoints", clean_name)
+    return bool(diffusion_path and not checkpoint_path)
+
+
+def _load_rapid_pipeline(checkpoint_name: str, wan_clip_model: str = GGUF_DEFAULT_CLIP, wan_vae_model: str = GGUF_DEFAULT_VAE):
+    resolved_checkpoint = _require_checkpoint_name(checkpoint_name)
+    if _is_split_model_selection(resolved_checkpoint):
+        try:
+            return resolved_checkpoint, *_load_wan_split_workflow_models(resolved_checkpoint, wan_clip_model, wan_vae_model)
+        except Exception as exc:
+            raise RuntimeError(
+                "当前选择的是 Wan Rapid AllInOne 分体主模型，已按 GJJ 零依赖链路加载：内置 UNET/GGUF UNET + 内置 GGUF Wan CLIP + 内置 VAE。\n"
+                f"主模型：{resolved_checkpoint}\n"
+                "但当前分体模型组合加载失败。请检查主模型、Wan CLIP 和 Wan VAE 是否能被 GJJ 公共模型搜索找到。\n"
+                f"原始错误：{exc}"
+            ) from exc
+    if _is_gguf_model(resolved_checkpoint):
+        try:
+            return resolved_checkpoint, *_load_aio_checkpoint_gguf(resolved_checkpoint, wan_clip_model, wan_vae_model)
+        except Exception as exc:
+            raise RuntimeError(
+                "当前选择的是 Wan Rapid AllInOne GGUF，已按 GJJ 零依赖链路加载：内置 GGUF UNET + 内置 GGUF Wan CLIP + 内置 VAE。\n"
+                f"GGUF：{resolved_checkpoint}\n"
+                "但当前 GGUF 组合加载失败。请检查 gguf Python 依赖、"
+                f"{GGUF_DEFAULT_CLIP} 和 {GGUF_DEFAULT_VAE} 是否能被 GJJ 公共模型搜索找到。\n"
+                f"原始错误：{exc}"
+            ) from exc
+    try:
+        return resolved_checkpoint, *CheckpointLoaderSimple().load_checkpoint(resolved_checkpoint)
+    except Exception as exc:
+        raise
 
 
 def _require_checkpoint_name(preferred: str) -> str:
@@ -97,8 +705,16 @@ def _require_checkpoint_name(preferred: str) -> str:
     resolved = _pick_available_name(preferred, available, DEFAULT_CHECKPOINT)
     if not resolved:
         raise RuntimeError(f"未找到 Wan Rapid-AIO Checkpoint：{preferred or DEFAULT_CHECKPOINT}")
-    full_path = folder_paths.get_full_path("checkpoints", resolved)
-    if not full_path:
+    source_category, clean_name = _split_model_selection(resolved)
+    if _is_gguf_model(resolved):
+        full_path = _find_model_file("unet_gguf", clean_name) or _find_model_file("diffusion_models", clean_name) or _find_model_file("checkpoints", clean_name)
+    elif source_category == "diffusion_models":
+        full_path = _find_model_file("diffusion_models", clean_name)
+    elif source_category == "checkpoints":
+        full_path = _find_model_file("checkpoints", clean_name)
+    else:
+        full_path = _find_model_file("diffusion_models", clean_name) or _find_model_file("checkpoints", clean_name)
+    if not full_path and not _is_gguf_model(resolved):
         raise RuntimeError(f"未找到 Wan Rapid-AIO Checkpoint：{resolved}")
     return resolved
 
@@ -157,6 +773,113 @@ def _align_up(value: int, alignment: int = SIZE_ALIGNMENT) -> int:
     return ((value + alignment - 1) // alignment) * alignment
 
 
+def _align_size_widget_value(value: int) -> int:
+    return max(320, min(1536, _align_up(int(value), SIZE_ALIGNMENT)))
+
+
+def _unwrap_list_param(value: Any) -> Any:
+    try:
+        while isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+    except Exception:
+        pass
+    return value
+
+
+def _bool_param(value: Any, default: bool = False) -> bool:
+    value = _unwrap_list_param(value)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on", "开启", "启用", "是"}:
+        return True
+    if text in {"false", "0", "no", "off", "关闭", "禁用", "否"}:
+        return False
+    return bool(value)
+
+
+def _parse_segment_timeline_config(value: Any) -> list[dict[str, Any]]:
+    value = _unwrap_list_param(value)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except Exception:
+            return []
+    if not isinstance(value, list):
+        return []
+
+    configs: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        duration = item.get("duration", item.get("seconds", None))
+        try:
+            duration_value = max(3.0, min(10.0, float(duration)))
+        except Exception:
+            duration_value = 0.0
+        transition = str(item.get("transition") or "首尾帧").strip()
+        if transition not in {"首尾帧", "硬切"}:
+            transition = "首尾帧"
+        configs.append(
+            {
+                "duration": duration_value,
+                "prompt": str(item.get("prompt") or "").strip(),
+                "transition": transition,
+            }
+        )
+    return configs
+
+
+def _split_positive_prompt_segments(text: Any) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+    parts = [part.strip() for part in re.split(r"\n\s*(?:-{3,}|#{3,}|={3,})\s*\n", normalized) if part.strip()]
+    if len(parts) <= 1:
+        parts = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if len(parts) <= 1:
+        return []
+    cleaned: list[str] = []
+    for part in parts:
+        cleaned_part = re.sub(r"^(?:第?\s*\d+\s*[段.、:：-]\s*|\d+\s*[.、:：-]\s*)", "", part).strip()
+        if cleaned_part:
+            cleaned.append(cleaned_part)
+    return cleaned
+
+
+def _timeline_segment_frames(config: dict[str, Any] | None, fallback_frames: Any, fps: Any) -> int:
+    try:
+        fallback = max(1, int(fallback_frames))
+    except Exception:
+        fallback = int(DEFAULT_SEGMENT_FRAMES)
+    if not config or float(config.get("duration") or 0.0) <= 0:
+        return fallback
+    try:
+        duration = max(3.0, min(10.0, float(config.get("duration"))))
+        frame_count = max(5, int(round(duration * max(1.0, float(fps or DEFAULT_FRAME_RATE)))))
+    except Exception:
+        return fallback
+    remainder = (frame_count - 1) % 4
+    if remainder:
+        frame_count += 4 - remainder
+    return frame_count
+
+
+def _input_sequence_source(images: Any, pack_to_sequence: bool) -> Any:
+    if bool(pack_to_sequence):
+        return images
+    if isinstance(images, (list, tuple)) and images:
+        return images[0]
+    return images
+
+
 def _is_empty_loader_placeholder(images: torch.Tensor) -> bool:
     if images is None or not isinstance(images, torch.Tensor) or images.ndim != 4:
         return False
@@ -165,22 +888,120 @@ def _is_empty_loader_placeholder(images: torch.Tensor) -> bool:
     return bool(torch.count_nonzero(images).item() == 0)
 
 
-def _extract_image_frames(images: torch.Tensor | None) -> list[torch.Tensor]:
+def _ensure_rgb_image_batch(images: torch.Tensor, label: str = "图片输入") -> torch.Tensor:
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+    if images.ndim != 4:
+        raise RuntimeError(f"{label}维度无效：{tuple(images.shape)}")
+
+    channels = int(images.shape[-1])
+    if channels == 3:
+        return images
+    if channels == 4:
+        return images[:, :, :, :3].contiguous()
+    if channels == 1:
+        return images.expand(-1, -1, -1, 3).contiguous()
+    raise RuntimeError(f"{label}通道数无效：{channels}，需要 RGB/RGBA/灰度图片。")
+
+
+def _extract_image_frames(images: Any, _seen: set[int] | None = None) -> list[torch.Tensor]:
     if images is None:
         return []
+    if _seen is None:
+        _seen = set()
+    if not isinstance(images, (torch.Tensor, str, bytes, int, float, bool)):
+        object_id = id(images)
+        if object_id in _seen:
+            return []
+        _seen.add(object_id)
+
+    if callable(getattr(images, "get_components", None)):
+        try:
+            components = images.get_components()
+        except Exception as exc:
+            raise RuntimeError(f"读取 VIDEO/媒体组件失败：{exc}") from exc
+        for key in ("images", "frames", "image"):
+            value = _component_value(components, key)
+            if value is not None:
+                return _extract_image_frames(value, _seen)
+        return []
+
+    if isinstance(images, dict):
+        frames: list[torch.Tensor] = []
+        for key in ("images", "frames", "image", "samples", "batch", "items", "children", "media"):
+            if key in images and images.get(key) is not None:
+                frames.extend(_extract_image_frames(images.get(key), _seen))
+        if frames:
+            return frames
+        raise RuntimeError(f"不支持的图片输入字典：{sorted(str(key) for key in images.keys())}")
+
+    if isinstance(images, (list, tuple, set)):
+        frames: list[torch.Tensor] = []
+        for item in images:
+            frames.extend(_extract_image_frames(item, _seen))
+        return frames
+
+    def extend_if_images(target: list[torch.Tensor], child: Any) -> None:
+        try:
+            target.extend(_extract_image_frames(child, _seen))
+        except RuntimeError:
+            return
+
+    container_frames: list[torch.Tensor] = []
+    for name in ("images", "frames", "image", "imgs", "batch", "queue", "items", "values", "selected", "image_list", "image_queue"):
+        try:
+            child = getattr(images, name, None)
+        except Exception:
+            child = None
+        if child is not None and child is not images:
+            extend_if_images(container_frames, child)
+    try:
+        for child in vars(images).values():
+            if child is not images:
+                extend_if_images(container_frames, child)
+    except Exception:
+        pass
+    if container_frames:
+        return container_frames
+
     if not isinstance(images, torch.Tensor):
         raise RuntimeError(f"不支持的图片输入类型：{type(images)!r}")
 
-    batch = images
-    if batch.ndim == 3:
-        batch = batch.unsqueeze(0)
-    if batch.ndim != 4:
-        raise RuntimeError(f"图片输入维度无效：{tuple(batch.shape)}")
+    batch = _ensure_rgb_image_batch(images)
     if _is_empty_loader_placeholder(batch):
         return []
 
     batch = batch.detach().float().cpu().clamp(0.0, 1.0).contiguous()
     return [batch[index:index + 1].contiguous() for index in range(int(batch.shape[0]))]
+
+
+def _extract_local_image_frames(local_image_files: Any) -> list[torch.Tensor]:
+    frames: list[torch.Tensor] = []
+    for entry in parse_selected_images(local_image_files):
+        path = resolve_selected_image_path(entry)
+        frames.extend(_extract_image_frames(load_image_tensor(path)))
+    return frames
+
+
+def _make_transition_pair_image(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    first_batch = _ensure_rgb_image_batch(first).detach().float().cpu().clamp(0.0, 1.0)
+    second_batch = _ensure_rgb_image_batch(second).detach().float().cpu().clamp(0.0, 1.0)
+    first_frame = first_batch[:1].contiguous()
+    second_frame = second_batch[:1].contiguous()
+    target_height = max(int(first_frame.shape[1]), int(second_frame.shape[1]), 64)
+
+    def resize_to_height(frame: torch.Tensor) -> torch.Tensor:
+        height = int(frame.shape[1])
+        width = int(frame.shape[2])
+        if height == target_height:
+            return frame
+        target_width = max(1, int(round(width * (target_height / max(1, height)))))
+        return comfy.utils.common_upscale(frame.movedim(-1, 1), target_width, target_height, "lanczos", "disabled").movedim(1, -1).contiguous()
+
+    left = resize_to_height(first_frame)
+    right = resize_to_height(second_frame)
+    separator = torch.ones((1, target_height, 8, 3), dtype=left.dtype, device=left.device) * 0.1
+    return torch.cat([left, separator, right], dim=2).contiguous()
 
 
 def _resolve_generation_size(image_frames: list[torch.Tensor], width: int, height: int, auto_use_first_image_size: bool) -> tuple[int, int]:
@@ -189,7 +1010,71 @@ def _resolve_generation_size(image_frames: list[torch.Tensor], width: int, heigh
         source_height = int(first.shape[1])
         source_width = int(first.shape[2])
         return _align_up(source_width), _align_up(source_height)
-    return _align_up(width), _align_up(height)
+    return _align_size_widget_value(width), _align_size_widget_value(height)
+
+
+def _crop_offset(extra: int, position: str, axis: str) -> int:
+    if extra <= 0:
+        return 0
+    normalized = str(position or "中").strip()
+    if axis == "x":
+        if normalized == "左":
+            return 0
+        if normalized == "右":
+            return int(extra)
+    if axis == "y":
+        if normalized == "上":
+            return 0
+        if normalized == "下":
+            return int(extra)
+    return int(extra) // 2
+
+
+def _fit_image_batch_to_size(
+    images: torch.Tensor | None,
+    target_width: int,
+    target_height: int,
+    fit_mode: str,
+    crop_position: str,
+) -> torch.Tensor | None:
+    if images is None:
+        return None
+    batch = _ensure_rgb_image_batch(images).detach().float().cpu().clamp(0.0, 1.0).contiguous()
+    source_height = int(batch.shape[1])
+    source_width = int(batch.shape[2])
+    target_width = max(1, int(target_width))
+    target_height = max(1, int(target_height))
+    if source_width == target_width and source_height == target_height:
+        return batch
+
+    mode = str(fit_mode or "裁剪").strip()
+    if mode not in IMAGE_FIT_MODES:
+        mode = "裁剪"
+
+    if mode == "拉伸":
+        return comfy.utils.common_upscale(batch.movedim(-1, 1), target_width, target_height, "lanczos", "disabled").movedim(1, -1).contiguous()
+
+    scale = max(target_width / max(1, source_width), target_height / max(1, source_height)) if mode == "裁剪" else min(target_width / max(1, source_width), target_height / max(1, source_height))
+    scaled_width = max(1, int(round(source_width * scale)))
+    scaled_height = max(1, int(round(source_height * scale)))
+    scaled = comfy.utils.common_upscale(batch.movedim(-1, 1), scaled_width, scaled_height, "lanczos", "disabled").movedim(1, -1).contiguous()
+
+    if mode == "裁剪":
+        left = _crop_offset(scaled_width - target_width, crop_position, "x")
+        top = _crop_offset(scaled_height - target_height, crop_position, "y")
+        return scaled[:, top:top + target_height, left:left + target_width, :].contiguous()
+
+    if scaled_width > target_width or scaled_height > target_height:
+        left_crop = _crop_offset(scaled_width - target_width, crop_position, "x")
+        top_crop = _crop_offset(scaled_height - target_height, crop_position, "y")
+        scaled = scaled[:, top_crop:top_crop + min(scaled_height, target_height), left_crop:left_crop + min(scaled_width, target_width), :].contiguous()
+        scaled_height = int(scaled.shape[1])
+        scaled_width = int(scaled.shape[2])
+    canvas = torch.ones((int(scaled.shape[0]), target_height, target_width, 3), dtype=scaled.dtype, device=scaled.device) * float(DEFAULT_EMPTY_FRAME_LEVEL)
+    left = _crop_offset(target_width - scaled_width, crop_position, "x")
+    top = _crop_offset(target_height - scaled_height, crop_position, "y")
+    canvas[:, top:top + scaled_height, left:left + scaled_width, :] = scaled
+    return canvas.contiguous()
 
 
 def _build_vace_control_frames(
@@ -202,6 +1087,13 @@ def _build_vace_control_frames(
     start_index: int = 0,
     end_index: int = -1,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if start_image is not None:
+        start_image = _ensure_rgb_image_batch(start_image, "起始图片")
+    if end_image is not None:
+        end_image = _ensure_rgb_image_batch(end_image, "结束图片")
+    if control_images is not None:
+        control_images = _ensure_rgb_image_batch(control_images, "控制图片")
+
     if start_image is None and end_image is None and control_images is None:
         return None, None
 
@@ -361,6 +1253,420 @@ def _concat_segments(segments: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(segments, dim=0).contiguous()
 
 
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_component_frame_count(video_output: Any) -> int:
+    if not callable(getattr(video_output, "get_components", None)):
+        return 0
+    try:
+        components = video_output.get_components()
+    except Exception:
+        return 0
+    images = _component_value(components, "images")
+    if isinstance(images, torch.Tensor) and images.ndim >= 1:
+        return int(images.shape[0])
+    frames = _component_value(components, "frames")
+    if isinstance(frames, torch.Tensor) and frames.ndim >= 1:
+        return int(frames.shape[0])
+    return 0
+
+
+def _video_component_dimensions(video_output: Any) -> tuple[int, int]:
+    if callable(getattr(video_output, "get_dimensions", None)):
+        try:
+            width, height = video_output.get_dimensions()
+            if int(width) > 0 and int(height) > 0:
+                return int(width), int(height)
+        except Exception:
+            pass
+    if not callable(getattr(video_output, "get_components", None)):
+        return 0, 0
+    try:
+        components = video_output.get_components()
+    except Exception:
+        return 0, 0
+    for key in ("images", "frames"):
+        frames = _component_value(components, key)
+        if isinstance(frames, torch.Tensor) and frames.ndim >= 3:
+            return int(frames.shape[-2]), int(frames.shape[-3])
+    return 0, 0
+
+
+def _direct_video_from_frames(frames: torch.Tensor, fps: float, audio: Any = None):
+    frame_rate = Fraction(float(max(0.01, fps))).limit_denominator(1000)
+    safe_frames = frames.detach().float().cpu().clamp(0.0, 1.0).contiguous()
+    if int(safe_frames.shape[-1]) > 3:
+        safe_frames = safe_frames[..., :3].contiguous()
+    return InputImpl.VideoFromComponents(Types.VideoComponents(images=safe_frames, audio=audio, frame_rate=frame_rate))
+
+
+class _GJJWanVideoFileOutput:
+    def __init__(self, path: str, fallback: Any = None):
+        self.path = str(path or "")
+        self.fallback = fallback
+
+    def save_to(self, path: str, *args, metadata: dict[str, Any] | None = None, **kwargs):
+        if not self.path or not Path(self.path).is_file():
+            if callable(getattr(self.fallback, "save_to", None)):
+                if metadata is not None and "metadata" not in kwargs:
+                    kwargs["metadata"] = metadata
+                return self.fallback.save_to(path, *args, **kwargs)
+            raise RuntimeError(f"VIDEO 文件不存在，无法保存：{self.path}")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if str(target.resolve()).lower() != str(Path(self.path).resolve()).lower():
+            shutil.copy2(self.path, target)
+
+    def get_components(self):
+        if callable(getattr(self.fallback, "get_components", None)):
+            return self.fallback.get_components()
+        raise RuntimeError("此 VIDEO 优先作为文件直通保存；当前环境无法从文件型 VIDEO 拆出帧组件。")
+
+    def get_frame_rate(self):
+        if callable(getattr(self.fallback, "get_frame_rate", None)):
+            try:
+                frame_rate = self.fallback.get_frame_rate()
+                if frame_rate is not None:
+                    return frame_rate
+            except Exception:
+                pass
+        if self.path and Path(self.path).is_file():
+            _width, _height, fps, _frames, _duration = _probe_video_file(Path(self.path))
+            if float(fps or 0) > 0:
+                return Fraction(float(fps)).limit_denominator(1000)
+        return None
+
+    def get_dimensions(self):
+        width, height = _video_component_dimensions(self.fallback)
+        if width > 0 and height > 0:
+            return width, height
+        if self.path and Path(self.path).is_file():
+            width, height, _fps, _frames, _duration = _probe_video_file(Path(self.path))
+            if int(width) > 0 and int(height) > 0:
+                return int(width), int(height)
+        raise RuntimeError(f"无法读取 VIDEO 尺寸：{self.path}")
+
+
+def _video_from_file(path: str):
+    if path:
+        try:
+            return InputImpl.VideoFromFile(str(path))
+        except Exception:
+            try:
+                from comfy_api.input_impl import VideoFromFile
+
+                return VideoFromFile(str(path))
+            except Exception:
+                return None
+    return None
+
+
+def _preview_ui_from_temp_file(path: str, ui_payload: dict[str, Any], format_name: str, fps: float) -> tuple[str, dict[str, Any]]:
+    source = Path(str(path or ""))
+    if not source.is_file():
+        return str(path or ""), ui_payload
+    info = gjjutils_write_temp_file(source, suffix=source.suffix or ".mp4")
+    temp_path = gjjutils_temp_path(str(info.get("filename") or ""))
+    try:
+        if source.resolve() != temp_path.resolve():
+            source.unlink(missing_ok=True)
+    except Exception:
+        pass
+    width, height, probed_fps, frame_count, _duration = _probe_video_file(temp_path)
+    preview_item = {
+        "filename": str(info.get("filename") or temp_path.name),
+        "subfolder": str(info.get("subfolder") or "GJJ"),
+        "type": "temp",
+        "format": str(format_name or DEFAULT_VIDEO_FORMAT),
+        "frame_rate": float(probed_fps or fps or DEFAULT_FRAME_RATE),
+        "width": int(width or 0),
+        "height": int(height or 0),
+        "frame_count": int(frame_count or 0),
+    }
+    updated = dict(ui_payload or {})
+    updated.update(
+        {
+            "preview_main_path": (str(temp_path),),
+            "preview_format": (str(format_name or DEFAULT_VIDEO_FORMAT),),
+            "preview_is_video": (True,),
+            "preview_width": (int(width or 0),),
+            "preview_height": (int(height or 0),),
+            "preview_media": [preview_item],
+            "animated": [dict(preview_item)],
+        }
+    )
+    return str(temp_path), updated
+
+
+def _combined_video_from_frames(
+    frames: torch.Tensor,
+    fps: float,
+    audio: Any,
+    filename_prefix: str,
+    format_name: str,
+    unique_id: Any = None,
+    save_output: bool = True,
+):
+    from .gjj_video_combine import GJJ_VideoCombine
+
+    combined = GJJ_VideoCombine().combine(
+        images=frames,
+        frame_rate=float(fps),
+        loop_count=0,
+        filename_prefix=str(filename_prefix or DEFAULT_VIDEO_PREFIX).strip() or DEFAULT_VIDEO_PREFIX,
+        format_name=str(format_name or DEFAULT_VIDEO_FORMAT).strip() or DEFAULT_VIDEO_FORMAT,
+        pingpong=False,
+        save_output=bool(save_output),
+        use_source_fps=False,
+        delete_tail_frame=False,
+        save_metadata=False,
+        trim_to_audio=False,
+        pix_fmt="yuv420p",
+        crf="19",
+        vae=None,
+        audio=audio,
+        unique_id=unique_id,
+    )
+    ui_payload = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
+    result = combined.get("result") if isinstance(combined, dict) else combined
+    video_output = None
+    main_path = ""
+    if isinstance(result, (list, tuple)) and result:
+        video_output = result[0]
+        if len(result) > 1:
+            main_path = str(result[1] or "")
+    raw_path = ui_payload.get("preview_main_path")
+    if not main_path and isinstance(raw_path, (list, tuple)) and raw_path:
+        main_path = str(raw_path[0] or "")
+    elif not main_path and isinstance(raw_path, str):
+        main_path = raw_path
+    if main_path and not bool(save_output):
+        main_path, ui_payload = _preview_ui_from_temp_file(main_path, ui_payload, format_name, float(fps or DEFAULT_FRAME_RATE))
+    file_video = _video_from_file(main_path)
+    if main_path:
+        return _GJJWanVideoFileOutput(main_path, file_video or video_output), main_path, ui_payload
+    return (file_video or video_output or _direct_video_from_frames(frames, fps, audio)), main_path, ui_payload
+
+
+PROMPT_INFER_OPTIONS_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/options"
+PROMPT_INFER_RUN_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/run"
+PROMPT_INFER_SYSTEM = (
+    "你是视频生成提示词专家。根据参考图中左侧起始画面和右侧目标画面，"
+    "反推出适合 Wan 图生视频首尾帧转场的中文提示词。只描述主体动作、镜头运动、场景变化、光线氛围和自然过渡，"
+    "不要解释，不要编号，不要 Markdown，不要输出标题。"
+)
+PROMPT_INFER_USER = (
+    "左边是起始帧，右边是结束帧。请生成一条 1 句到 2 句的转场视频提示词，"
+    "让画面从左图自然运动到右图。只输出提示词正文。"
+)
+
+
+def _clean_inferred_prompt(text: Any) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^\s*(?:转场提示词|视频提示词|提示词|结果)\s*[:：]\s*", "", cleaned)
+    cleaned = cleaned.strip().strip("`").strip()
+    return cleaned
+
+
+def _prompt_infer_options() -> dict[str, list[str]]:
+    options: dict[str, list[str]] = {}
+    try:
+        from .gjj_llama_common import llm_main_model_options
+
+        options["GJJ_LlamaAssistant"] = [str(item) for item in llm_main_model_options()]
+    except Exception:
+        options["GJJ_LlamaAssistant"] = []
+    try:
+        from .gjj_gemma_text_generate import _text_encoder_options
+
+        options["GJJ_GemmaTextGenerate"] = [str(item) for item in _text_encoder_options()]
+    except Exception:
+        options["GJJ_GemmaTextGenerate"] = []
+    try:
+        from .gjj_image_analysis import _ollama_assistant_model_options
+
+        options["GJJ_OllamaAssistant"] = [str(item) for item in _ollama_assistant_model_options()]
+    except Exception:
+        options["GJJ_OllamaAssistant"] = []
+    return options
+
+
+def _infer_transition_prompt(method: str, model: str, pair_image: torch.Tensor, unique_id: Any = None, keep_model: bool = True) -> str:
+    method = str(method or "GJJ_OllamaAssistant").strip()
+    model = str(model or "").strip()
+    model_keep_alive = "保持模型" if bool(keep_model) else "卸载模型"
+    if method == "GJJ_LlamaAssistant":
+        from .gjj_llama_assistant import (
+            CACHE_TYPE_OPTIONS,
+            DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE,
+            DEFAULT_SYSTEM_PROMPT_TEMPLATES,
+            GJJ_LlamaAssistant,
+            best_mmproj_for_main_model,
+            llm_mmproj_options,
+        )
+
+        mmproj = best_mmproj_for_main_model(model, llm_mmproj_options())
+        result = GJJ_LlamaAssistant().run(
+            model,
+            mmproj,
+            model_keep_alive,
+            "关闭思考",
+            0.7,
+            1024,
+            "每次随机",
+            0,
+            80,
+            0.95,
+            0.03,
+            0.3,
+            0.2,
+            1.15,
+            8192,
+            -1,
+            24,
+            1024,
+            False,
+            False,
+            CACHE_TYPE_OPTIONS[0],
+            CACHE_TYPE_OPTIONS[0],
+            False,
+            0,
+            f"{PROMPT_INFER_SYSTEM}\n{DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE}",
+            DEFAULT_SYSTEM_PROMPT_TEMPLATES,
+            DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE,
+            PROMPT_INFER_USER,
+            image=pair_image,
+            unique_id=unique_id,
+        )
+        payload = result.get("result") if isinstance(result, dict) else result
+        return _clean_inferred_prompt(payload[0] if isinstance(payload, (list, tuple)) else payload)
+
+    if method == "GJJ_GemmaTextGenerate":
+        from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
+
+        result = GJJ_GemmaTextGenerate().generate(
+            model,
+            "ideogram4",
+            "default",
+            PROMPT_INFER_USER,
+            1024,
+            "on",
+            0.7,
+            64,
+            0.95,
+            0.05,
+            1.05,
+            0,
+            "0.0",
+            False,
+            True,
+            media=pair_image,
+            unique_id=unique_id,
+            system_prompt=PROMPT_INFER_SYSTEM,
+        )
+        return _clean_inferred_prompt(result[0] if isinstance(result, (list, tuple)) else result)
+
+    if method == "GJJ_OllamaAssistant":
+        from .gjj_image_analysis import DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT_TEMPLATES, GJJ_OllamaAssistant
+        from .gjj_ollama_common import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
+
+        result = GJJ_OllamaAssistant().run(
+            DEFAULT_OLLAMA_HOST,
+            model,
+            model_keep_alive,
+            "关闭思考",
+            0.7,
+            1024,
+            f"{PROMPT_INFER_SYSTEM}\n{DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE}",
+            DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT_TEMPLATES,
+            DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE,
+            PROMPT_INFER_USER,
+            image=pair_image,
+            unique_id=unique_id,
+        )
+        return _clean_inferred_prompt(result[0] if isinstance(result, (list, tuple)) else result)
+
+    raise RuntimeError(f"未知反推方式：{method}")
+
+
+def _register_prompt_infer_routes() -> None:
+    if web is None or PromptServer is None:
+        return
+    routes = PromptServer.instance.routes
+
+    @routes.get(PROMPT_INFER_OPTIONS_API)
+    async def get_prompt_infer_options(_request):
+        return web.json_response({"ok": True, "methods": _prompt_infer_options()})
+
+    @routes.post(PROMPT_INFER_RUN_API)
+    async def post_prompt_infer_run(request):
+        try:
+            data = await request.json()
+            items = parse_selected_images(json.dumps(data.get("items") or [], ensure_ascii=False))
+            segment_index = int(data.get("segment_index") or 0)
+            if segment_index < 0 or segment_index + 1 >= len(items):
+                return web.json_response({"ok": False, "error": "请选择有效的相邻两张素材。"}, status=400)
+            first = load_image_tensor(resolve_selected_image_path(items[segment_index]))
+            second = load_image_tensor(resolve_selected_image_path(items[segment_index + 1]))
+            pair_image = _make_transition_pair_image(first, second)
+            prompt = _infer_transition_prompt(
+                str(data.get("method") or "GJJ_OllamaAssistant"),
+                str(data.get("model") or ""),
+                pair_image,
+                unique_id=data.get("node_id"),
+                keep_model=bool(data.get("keep_model", True)),
+            )
+            if not prompt:
+                return web.json_response({"ok": False, "error": "模型没有返回可用提示词。"}, status=500)
+            return web.json_response({"ok": True, "prompt": prompt})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+_register_prompt_infer_routes()
+
+
+def _segment_preview_extra(
+    frames: torch.Tensor,
+    fps: float,
+    filename_prefix: str,
+    format_name: str,
+    segment_index: int,
+) -> dict[str, Any]:
+    try:
+        _video, preview_path, ui_payload = _combined_video_from_frames(
+            frames,
+            float(fps or DEFAULT_FRAME_RATE),
+            None,
+            f"{str(filename_prefix or DEFAULT_VIDEO_PREFIX).strip() or DEFAULT_VIDEO_PREFIX}_preview_segment_{segment_index + 1:03d}",
+            str(format_name or DEFAULT_VIDEO_FORMAT).strip() or DEFAULT_VIDEO_FORMAT,
+            unique_id=None,
+            save_output=False,
+        )
+        extra = dict(ui_payload or {})
+        extra["segment_preview_index"] = [segment_index + 1]
+        if preview_path:
+            extra["segment_preview_path"] = [preview_path]
+        return extra
+    except Exception as exc:
+        return {"segment_preview_error": [str(exc)]}
+
+
+def _video_component_audio(video_output: Any) -> Any:
+    if not callable(getattr(video_output, "get_components", None)):
+        return None
+    try:
+        return _component_value(video_output.get_components(), "audio")
+    except Exception:
+        return None
+
+
 def _build_route_name(image_count: int) -> str:
     if image_count <= 0:
         return "T2V 流畅"
@@ -374,6 +1680,9 @@ def _build_route_name(image_count: int) -> str:
 class GJJ_Wan22RapidAIOMega:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
+    OUTPUT_NODE = True
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (False, False)
     DESCRIPTION = (
         "将 Wan2.2_Rapid-AIO-Mega 工作流封装为 GJJ 零依赖本地节点。"
         "未接图走 T2V，接 1 张图走 I2V，接 2 张图走首尾帧，多张图会按相邻图片自动串接生成整段帧序列。"
@@ -387,9 +1696,41 @@ class GJJ_Wan22RapidAIOMega:
         "首尾帧",
         "多图串接",
     ]
-    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
-    RETURN_NAMES = ("视频帧序列",)
-    OUTPUT_TOOLTIPS = ("解码后的视频帧序列；这里复用 GJJ_BATCH_IMAGE 类型，可直接连接 GJJ · 视频合成器 的 图像/Latent 输入。",)
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "VIDEO")
+    RETURN_NAMES = ("视频帧序列", "视频")
+    OUTPUT_TOOLTIPS = (
+        "解码后的视频帧序列；这里复用 GJJ_BATCH_IMAGE 类型，可直接连接 GJJ · 视频合成器 的 图像/Latent 输入。",
+        "官方 VIDEO 输出，可直接连接保存、剪辑或配音节点。",
+    )
+    GJJ_HELP = {
+        "title": "Wan多合一合成视频流畅器",
+        "description": (
+            "Wan2.2 Rapid AllInOne 视频节点。支持 checkpoint AIO 单文件，也支持 diffusion_models 分体 safetensors / GGUF；"
+            "GGUF 和 diffusion_models 分体模式需要 Wan CLIP 与 Wan VAE。开启 📢 后会额外使用 MMAudio 模型树为视频配音。"
+        ),
+        "notice": (
+            "模型选择规则：checkpoints 下的 safetensors AIO 自带 CLIP/VAE；"
+            "diffusion_models 或 .gguf 主模型必须配套 Wan CLIP 和 Wan VAE。"
+            "Q2_K 对该 Wan 视频模型容易输出花屏，节点会阻止执行；建议 Q4_K / Q4_K_M 或更高量化。"
+        ),
+        "model_download_url": WAN22_RAPID_AIO_MODEL_DOWNLOAD_URL,
+        "copy_text": WAN22_RAPID_AIO_MODEL_DOWNLOAD_URL,
+        "copy_label": "复制 Wan Rapid AIO 下载地址",
+        "model_tree": WAN22_RAPID_AIO_MODEL_TREE,
+        "model_tree_text": WAN22_RAPID_AIO_MODEL_TREE_TEXT,
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
+        "models": [
+            {
+                "label": item["label"],
+                "subdir": f"models/{item.get('folder', '')}".rstrip("/"),
+                "filename": item.get("filename", ""),
+                "description": item.get("description", ""),
+            }
+            for item in WAN22_RAPID_AIO_MODEL_TREE
+            if item.get("required", True)
+        ],
+    }
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
@@ -398,6 +1739,13 @@ class GJJ_Wan22RapidAIOMega:
     def INPUT_TYPES(cls):
         checkpoints = _list_rapid_checkpoints()
         default_checkpoint = _pick_available_name(DEFAULT_CHECKPOINT, checkpoints, DEFAULT_CHECKPOINT)
+        audio_models = _mmaudio_models()
+        audio_main_models = _mmaudio_main_models(audio_models)
+        audio_vae_models = _mmaudio_vae_models(audio_models)
+        audio_synchformer_models = _mmaudio_synchformer_models(audio_models)
+        audio_clip_models = _mmaudio_clip_models(audio_models)
+        wan_clip_models = _list_wan_gguf_clip_models()
+        wan_vae_models = _list_wan_vae_models()
         return {
             "required": {
                 "positive_prompt": (
@@ -457,8 +1805,8 @@ class GJJ_Wan22RapidAIOMega:
                         "min": 1,
                         "max": 1024,
                         "step": 4,
-                        "display_name": "每段帧数",
-                        "tooltip": "单图/双图时就是整段帧数；多图串接时表示每一段相邻图片之间的帧数。",
+                        "display_name": "默认每段帧数",
+                        "tooltip": "默认素材分段帧数；修改后会覆盖素材时间线中的每段时长。",
                     },
                 ),
                 "auto_use_first_image_size": (
@@ -480,10 +1828,191 @@ class GJJ_Wan22RapidAIOMega:
                         "tooltip": "统一控制所有分段的随机种子；多图串接时会复用同一个种子保持整体观感一致。",
                     },
                 ),
+                "local_image_files": (
+                    "STRING",
+                    {
+                        "default": "[]",
+                        "multiline": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "内部硬盘图片",
+                        "tooltip": "由顶部 📂 按钮写入；当批量图片输入口有外部链接时会自动忽略。",
+                    },
+                ),
+                "randomize_seed_on_click": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "点击随机种",
+                        "tooltip": "由顶部 🎲 开关控制；关闭时固定当前种子。",
+                    },
+                ),
+                "output_fps": (
+                    "FLOAT",
+                    {
+                        "default": float(DEFAULT_FRAME_RATE),
+                        "min": 1.0,
+                        "max": 120.0,
+                        "step": 1.0,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "视频帧率",
+                        "tooltip": "VIDEO 输出帧率。",
+                    },
+                ),
+                "video_format": (
+                    list_supported_formats(),
+                    {
+                        "default": DEFAULT_VIDEO_FORMAT if DEFAULT_VIDEO_FORMAT in list_supported_formats() else list_supported_formats()[0],
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "视频格式",
+                        "tooltip": "VIDEO 文件写出格式；默认 H.264 MP4。",
+                    },
+                ),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_VIDEO_PREFIX,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "文件名前缀",
+                        "tooltip": "VIDEO 输出文件名前缀。",
+                    },
+                ),
+                "audio_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "启用配音",
+                        "tooltip": "开启后使用 GJJ_MMAudioNSFWSingle 为生成的视频配音。",
+                    },
+                ),
+                "audio_prompt": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_AUDIO_PROMPT,
+                        "multiline": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音正向提示词",
+                    },
+                ),
+                "audio_negative_prompt": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_AUDIO_NEGATIVE,
+                        "multiline": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音反向提示词",
+                    },
+                ),
+                "audio_mmaudio_model": (
+                    audio_main_models,
+                    {
+                        "default": _prefer_main_model(audio_main_models),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音 MMAudio 主模型",
+                    },
+                ),
+                "audio_vae_model": (
+                    audio_vae_models,
+                    {
+                        "default": _prefer_model(audio_vae_models, ("vae", "44k")),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音 VAE 模型",
+                    },
+                ),
+                "audio_synchformer_model": (
+                    audio_synchformer_models,
+                    {
+                        "default": _prefer_model(audio_synchformer_models, ("synchformer",)),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音 Synchformer 模型",
+                    },
+                ),
+                "audio_clip_model": (
+                    audio_clip_models,
+                    {
+                        "default": _prefer_model(audio_clip_models, ("clip",)),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "配音 CLIP/DFN 模型",
+                    },
+                ),
+                "wan_clip_model": (
+                    wan_clip_models,
+                    {
+                        "default": _prefer_model(wan_clip_models, ("umt5", "gguf")),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "Wan GGUF CLIP",
+                        "tooltip": "仅主模型选择 .gguf 时使用；对应工作流 CLIPLoaderGGUF，type=wan。",
+                    },
+                ),
+                "wan_vae_model": (
+                    wan_vae_models,
+                    {
+                        "default": _prefer_model(wan_vae_models, ("wan", "vae")),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "Wan VAE",
+                        "tooltip": "仅主模型选择 .gguf 时使用；对应工作流 VAELoader。",
+                    },
+                ),
+                "image_fit_mode": (
+                    list(IMAGE_FIT_MODES),
+                    {
+                        "default": "裁剪",
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "图片适配",
+                        "tooltip": "拉伸=直接缩放；补边/留边=等比缩放并补中性边；裁剪=短边等比缩放后按位置裁剪长边。",
+                    },
+                ),
+                "crop_position": (
+                    list(CROP_POSITIONS),
+                    {
+                        "default": "中",
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "裁剪/补边位置",
+                        "tooltip": "裁剪长边或补边时使用的位置：上、下、左、右、中。",
+                    },
+                ),
+                "pack_input_images_to_sequence": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "输入图片打包到序列",
+                        "tooltip": "开启后，未经过 GJJ_ImageBatchMulti 的多图输入也会在本节点内按顺序收拢为首尾帧序列；关闭时只使用传入列表的第一项。",
+                    },
+                ),
+                "segment_timeline_config": (
+                    "STRING",
+                    {
+                        "default": "[]",
+                        "multiline": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "素材时间线配置",
+                        "tooltip": "由前端素材时间线写入：每两张图片之间的时长、提示词和转场方式。",
+                    },
+                ),
             },
             "optional": {
                 "images": (
-                    GJJ_BATCH_IMAGE_TYPE,
+                    IMAGE_INPUT_TYPE,
                     {
                         "display_name": "批量图片",
                         "tooltip": "推荐直接连接 GJJ · 多图片加载预览器 的 批量图片队列。未接图走 T2V，1 张走 I2V，2 张走首尾帧，多张走相邻两图依次串接。",
@@ -512,24 +2041,77 @@ class GJJ_Wan22RapidAIOMega:
         segment_frames,
         auto_use_first_image_size,
         seed,
+        local_image_files="[]",
+        randomize_seed_on_click=False,
+        output_fps=DEFAULT_FRAME_RATE,
+        video_format=DEFAULT_VIDEO_FORMAT,
+        filename_prefix=DEFAULT_VIDEO_PREFIX,
+        audio_enabled=False,
+        audio_prompt=DEFAULT_AUDIO_PROMPT,
+        audio_negative_prompt=DEFAULT_AUDIO_NEGATIVE,
+        audio_mmaudio_model="",
+        audio_vae_model="",
+        audio_synchformer_model="",
+        audio_clip_model="",
+        wan_clip_model=GGUF_DEFAULT_CLIP,
+        wan_vae_model=GGUF_DEFAULT_VAE,
+        image_fit_mode="裁剪",
+        crop_position="中",
+        pack_input_images_to_sequence=True,
+        segment_timeline_config="[]",
         images=None,
         lora_chain_config="",
         unique_id=None,
     ):
         try:
-            image_frames = _extract_image_frames(images)
-            image_count = len(image_frames)
+            positive_prompt = _unwrap_list_param(positive_prompt)
+            negative_prompt = _unwrap_list_param(negative_prompt)
+            checkpoint_name = _unwrap_list_param(checkpoint_name)
+            width = _unwrap_list_param(width)
+            height = _unwrap_list_param(height)
+            segment_frames = _unwrap_list_param(segment_frames)
+            auto_use_first_image_size = _bool_param(auto_use_first_image_size, True)
+            seed = _unwrap_list_param(seed)
+            local_image_files = _unwrap_list_param(local_image_files)
+            randomize_seed_on_click = _bool_param(randomize_seed_on_click, False)
+            output_fps = _unwrap_list_param(output_fps)
+            video_format = _unwrap_list_param(video_format)
+            filename_prefix = _unwrap_list_param(filename_prefix)
+            audio_enabled = _bool_param(audio_enabled, False)
+            audio_prompt = _unwrap_list_param(audio_prompt)
+            audio_negative_prompt = _unwrap_list_param(audio_negative_prompt)
+            audio_mmaudio_model = _unwrap_list_param(audio_mmaudio_model)
+            audio_vae_model = _unwrap_list_param(audio_vae_model)
+            audio_synchformer_model = _unwrap_list_param(audio_synchformer_model)
+            audio_clip_model = _unwrap_list_param(audio_clip_model)
+            wan_clip_model = _unwrap_list_param(wan_clip_model)
+            wan_vae_model = _unwrap_list_param(wan_vae_model)
+            image_fit_mode = _unwrap_list_param(image_fit_mode)
+            crop_position = _unwrap_list_param(crop_position)
+            pack_input_images_to_sequence = _bool_param(pack_input_images_to_sequence, True)
+            timeline_config = _parse_segment_timeline_config(segment_timeline_config)
+            lora_chain_config = _unwrap_list_param(lora_chain_config)
+            unique_id = _unwrap_list_param(unique_id)
+
+            image_source = _input_sequence_source(images, pack_input_images_to_sequence)
+            raw_image_frames = _extract_image_frames(image_source) if image_source is not None else _extract_local_image_frames(local_image_files)
+            image_count = len(raw_image_frames)
             route_name = _build_route_name(image_count)
             resolved_width, resolved_height = _resolve_generation_size(
-                image_frames,
+                raw_image_frames,
                 int(width),
                 int(height),
-                bool(auto_use_first_image_size),
+                auto_use_first_image_size,
             )
+            image_frames = [
+                fitted
+                for frame in raw_image_frames
+                if (fitted := _fit_image_batch_to_size(frame, resolved_width, resolved_height, str(image_fit_mode), str(crop_position))) is not None
+            ]
+            image_count = len(image_frames)
 
             _send_status(unique_id, "1/7 加载 Wan Rapid-AIO Checkpoint...", 0.06)
-            resolved_checkpoint = _require_checkpoint_name(checkpoint_name)
-            model, clip, vae = CheckpointLoaderSimple().load_checkpoint(resolved_checkpoint)
+            resolved_checkpoint, model, clip, vae = _load_rapid_pipeline(checkpoint_name, wan_clip_model, wan_vae_model)
             model = _apply_sd3_shift(model, DEFAULT_SHIFT)
 
             _send_status(unique_id, "2/7 应用 LoRA串联配置...", 0.14)
@@ -543,6 +2125,7 @@ class GJJ_Wan22RapidAIOMega:
             _send_status(unique_id, "3/7 编码提示词...", 0.2)
             positive = CLIPTextEncode().encode(clip, str(positive_prompt or "").strip() or DEFAULT_POSITIVE)[0]
             negative = CLIPTextEncode().encode(clip, str(negative_prompt or "").strip() or DEFAULT_NEGATIVE)[0]
+            positive_prompt_segments = _split_positive_prompt_segments(positive_prompt)
 
             segment_count = 1 if image_count <= 1 else image_count - 1
             _send_status(
@@ -552,7 +2135,19 @@ class GJJ_Wan22RapidAIOMega:
             )
 
             collected_segments: list[torch.Tensor] = []
+            decoded_segment_frames: list[int] = []
             for segment_index in range(segment_count):
+                segment_config = timeline_config[segment_index] if segment_index < len(timeline_config) else None
+                segment_frame_count = _timeline_segment_frames(segment_config, segment_frames, output_fps)
+                segment_prompt = str((segment_config or {}).get("prompt") or "").strip()
+                if not segment_prompt and segment_index < len(positive_prompt_segments):
+                    segment_prompt = positive_prompt_segments[segment_index]
+                segment_transition = str((segment_config or {}).get("transition") or "首尾帧").strip()
+                if segment_prompt:
+                    active_positive = CLIPTextEncode().encode(clip, segment_prompt)[0]
+                else:
+                    active_positive = positive
+
                 if image_count <= 0:
                     segment_start = None
                     segment_end = None
@@ -563,28 +2158,28 @@ class GJJ_Wan22RapidAIOMega:
                     strength = 1.0
                 else:
                     segment_start = image_frames[segment_index]
-                    segment_end = image_frames[segment_index + 1]
+                    segment_end = None if segment_transition == "硬切" else image_frames[segment_index + 1]
                     strength = 1.0
 
                 progress_base = 0.28 + (0.48 * (segment_index / max(1, segment_count)))
                 _send_status(
                     unique_id,
-                    f"5/7 第 {segment_index + 1}/{segment_count} 段：构建 VACE 条件...",
+                    f"5/7 第 {segment_index + 1}/{segment_count} 段：构建 VACE 条件（{segment_transition}，{segment_frame_count} 帧）...",
                     progress_base + 0.05,
                 )
                 control_images, control_masks = _build_vace_control_frames(
-                    num_frames=int(segment_frames),
+                    num_frames=segment_frame_count,
                     empty_frame_level=DEFAULT_EMPTY_FRAME_LEVEL,
                     start_image=segment_start,
                     end_image=segment_end,
                 )
                 segment_positive, segment_negative, segment_latent, _ = _build_vace_latent(
-                    positive,
+                    active_positive,
                     negative,
                     vae,
                     resolved_width,
                     resolved_height,
-                    int(segment_frames),
+                    segment_frame_count,
                     1,
                     strength,
                     control_video=control_images,
@@ -618,22 +2213,98 @@ class GJJ_Wan22RapidAIOMega:
                 decoded = VAEDecode().decode(vae, sampled)[0].detach().float().cpu().contiguous()
                 if segment_index > 0 and int(decoded.shape[0]) > 1:
                     decoded = decoded[1:].contiguous()
+                decoded_segment_frames.append(int(decoded.shape[0]))
                 collected_segments.append(decoded)
+                segment_preview = _segment_preview_extra(
+                    decoded,
+                    float(output_fps or DEFAULT_FRAME_RATE),
+                    str(filename_prefix or DEFAULT_VIDEO_PREFIX),
+                    str(video_format or DEFAULT_VIDEO_FORMAT),
+                    segment_index,
+                )
+                _send_status(
+                    unique_id,
+                    f"第 {segment_index + 1}/{segment_count} 段已生成，已更新节点预览",
+                    min(0.86, progress_base + 0.44),
+                    segment_preview,
+                )
 
             _send_status(unique_id, "7/7 合并全部帧序列...", 0.88)
             frames = _concat_segments(collected_segments)
+            output_audio = None
+            if bool(audio_enabled):
+                _send_status(unique_id, "7/7 使用 MMAudio 生成配音...", 0.94)
+                from .gjj_mmaudio_nsfw_single import GJJ_MMAudioNSFWSingle
+
+                audio_result = GJJ_MMAudioNSFWSingle().generate(
+                    force_rate=float(output_fps or DEFAULT_FRAME_RATE),
+                    custom_width=0,
+                    custom_height=0,
+                    frame_load_cap=0,
+                    skip_first_frames=0,
+                    select_every_nth=1,
+                    duration_mode="源视频时长",
+                    duration=max(0.1, int(frames.shape[0]) / max(1.0, float(output_fps or DEFAULT_FRAME_RATE))),
+                    steps=150,
+                    cfg=9.0,
+                    seed=int(seed),
+                    prompt=str(audio_prompt or DEFAULT_AUDIO_PROMPT),
+                    negative_prompt=str(audio_negative_prompt or DEFAULT_AUDIO_NEGATIVE),
+                    mask_away_clip=False,
+                    force_offload=True,
+                    base_precision="fp16",
+                    feature_precision="fp16",
+                    filename_prefix=str(filename_prefix or DEFAULT_VIDEO_PREFIX),
+                    format_name=str(video_format or DEFAULT_VIDEO_FORMAT),
+                    save_output=False,
+                    pix_fmt="yuv420p",
+                    crf="19",
+                    mmaudio_model=str(audio_mmaudio_model or "").strip() or None,
+                    vae_model=str(audio_vae_model or "").strip() or None,
+                    synchformer_model=str(audio_synchformer_model or "").strip() or None,
+                    clip_model=str(audio_clip_model or "").strip() or None,
+                    source_media=frames,
+                    unique_id=unique_id,
+                )
+                audio_tuple = audio_result.get("result") if isinstance(audio_result, dict) else audio_result
+                video_output = audio_tuple[0]
+                output_audio = audio_tuple[1] if isinstance(audio_tuple, (list, tuple)) and len(audio_tuple) > 1 else None
+                if output_audio is None:
+                    output_audio = _video_component_audio(video_output)
+            else:
+                video_output = None
             total_frames = int(frames.shape[0])
-            _send_status(unique_id, f"完成：{route_name}，共 {total_frames} 帧", 1.0)
-            return {
-                "ui": {
+            encoded_video, encoded_video_path, encoded_ui = _combined_video_from_frames(
+                frames,
+                float(output_fps or DEFAULT_FRAME_RATE),
+                output_audio,
+                str(filename_prefix or DEFAULT_VIDEO_PREFIX),
+                str(video_format or DEFAULT_VIDEO_FORMAT),
+                unique_id=unique_id,
+                save_output=True,
+            )
+            video_output = encoded_video
+            video_component_frames = _video_component_frame_count(video_output)
+            ui_payload = dict(encoded_ui or {})
+            if ui_payload.get("preview_media") and not ui_payload.get("animated"):
+                ui_payload["animated"] = [dict(item) for item in ui_payload.get("preview_media") or [] if isinstance(item, dict)]
+            ui_payload.update(
+                {
                     "mode_summary": [route_name],
                     "frame_count": [total_frames],
                     "frame_size": [f"{resolved_width}x{resolved_height}"],
                     "resolved_width": [resolved_width],
                     "resolved_height": [resolved_height],
                     "source_image_count": [image_count],
-                },
-                "result": (frames,),
+                    "video_component_frames": [video_component_frames],
+                    "decoded_segment_frames": [",".join(str(value) for value in decoded_segment_frames)],
+                    "encoded_video_path": [encoded_video_path],
+                }
+            )
+            _send_status(unique_id, f"完成：{route_name}，共 {total_frames} 帧", 1.0, ui_payload)
+            return {
+                "ui": ui_payload,
+                "result": (frames, video_output),
             }
         except RuntimeError as exc:
             _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}", 0.0)
@@ -648,4 +2319,4 @@ class GJJ_Wan22RapidAIOMega:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Wan22RapidAIOMega}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎬 Wan多合一合成视频流畅器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎬 Wan多合一视频生成器(NSFW)"}

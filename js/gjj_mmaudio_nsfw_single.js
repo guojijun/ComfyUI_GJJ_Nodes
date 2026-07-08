@@ -8,6 +8,7 @@ const ADVANCED_PROPERTY = "gjj_mmaudio_nsfw_show_advanced";
 const MODEL_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_model_panel";
 const VIDEO_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_video_panel";
 const AUDIO_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_audio_panel";
+const ACTIVE_PANEL_PROPERTY = "gjj_mmaudio_nsfw_active_floating_panel";
 const VIDEO_EXTENSIONS = ".mp4,.webm,.mov,.mkv,.avi,.m4v,.flv,.wmv,.mpeg,.mpg";
 const MODEL_WIDGETS = new Set([
 	"mmaudio_model",
@@ -41,6 +42,14 @@ const AUDIO_WIDGETS = new Set([
 	"mask_away_clip",
 ]);
 const ALWAYS_HIDDEN_WIDGETS = new Set(["video", "translation_enabled", "translation_device", "translation_unload_after_use"]);
+const BASE_WIDGETS = new Set(["prompt"]);
+const ALL_PARAM_WIDGETS = new Set([
+	...MODEL_WIDGETS,
+	...VIDEO_WIDGETS,
+	...AUDIO_WIDGETS,
+	...ALWAYS_HIDDEN_WIDGETS,
+	...BASE_WIDGETS,
+]);
 const RESTORE_WIDGET_TYPES = {
 	video: "text",
 	mmaudio_model: "combo",
@@ -107,25 +116,22 @@ function scheduleRefreshNode(node) {
 
 function migrateLegacyAdvancedState(node) {
 	if (!node?.properties) return;
-	if (node.properties[ADVANCED_PROPERTY] !== true) return;
-	if (node.properties[VIDEO_PANEL_PROPERTY] === undefined) {
-		node.properties[VIDEO_PANEL_PROPERTY] = true;
-	}
-	if (node.properties[AUDIO_PANEL_PROPERTY] === undefined) {
-		node.properties[AUDIO_PANEL_PROPERTY] = true;
-	}
+	delete node.properties[ADVANCED_PROPERTY];
+	delete node.properties[MODEL_PANEL_PROPERTY];
+	delete node.properties[VIDEO_PANEL_PROPERTY];
+	delete node.properties[AUDIO_PANEL_PROPERTY];
 }
 
 function modelPanelOpen(node) {
-	return node?.properties?.[MODEL_PANEL_PROPERTY] !== false;
+	return node?.properties?.[ACTIVE_PANEL_PROPERTY] === "model";
 }
 
 function videoPanelOpen(node) {
-	return Boolean(node?.properties?.[VIDEO_PANEL_PROPERTY]);
+	return node?.properties?.[ACTIVE_PANEL_PROPERTY] === "video";
 }
 
 function audioPanelOpen(node) {
-	return Boolean(node?.properties?.[AUDIO_PANEL_PROPERTY]);
+	return node?.properties?.[ACTIVE_PANEL_PROPERTY] === "audio";
 }
 
 function getWidget(node, name) {
@@ -259,15 +265,15 @@ function toggleTranslation(node) {
 }
 
 function toggleModelPanel(node) {
-	setPanelOpen(node, MODEL_PANEL_PROPERTY, !modelPanelOpen(node));
+	setActivePanel(node, modelPanelOpen(node) ? "" : "model");
 }
 
 function toggleVideoPanel(node) {
-	setPanelOpen(node, VIDEO_PANEL_PROPERTY, !videoPanelOpen(node));
+	setActivePanel(node, videoPanelOpen(node) ? "" : "video");
 }
 
 function toggleAudioPanel(node) {
-	setPanelOpen(node, AUDIO_PANEL_PROPERTY, !audioPanelOpen(node));
+	setActivePanel(node, audioPanelOpen(node) ? "" : "audio");
 }
 
 function makeButton(label, title, onClick) {
@@ -340,6 +346,59 @@ function ensureStyle() {
 			background: #4b3f1f;
 			border-color: #c7a84a;
 		}
+		.gjj-mmaudio-nsfw-panel {
+			position: fixed;
+			z-index: 100000;
+			width: min(380px, calc(100vw - 24px));
+			max-height: min(620px, calc(100vh - 24px));
+			padding: 10px;
+			border: 1px solid #49616b;
+			border-radius: 8px;
+			background: #10181d;
+			box-shadow: 0 16px 42px rgba(0,0,0,.48);
+			color: #e4eef0;
+			font: 12px/1.35 system-ui, "Microsoft YaHei", sans-serif;
+			overflow: auto;
+			box-sizing: border-box;
+		}
+		.gjj-mmaudio-nsfw-panel-title {
+			font-weight: 800;
+			color: #f3faf8;
+			margin: 0 0 8px;
+		}
+		.gjj-mmaudio-nsfw-panel-body {
+			display: flex;
+			flex-direction: column;
+			gap: 8px;
+		}
+		.gjj-mmaudio-nsfw-field {
+			display: grid;
+			grid-template-columns: 104px minmax(0, 1fr);
+			gap: 8px;
+			align-items: center;
+		}
+		.gjj-mmaudio-nsfw-field span {
+			color: #b9c9cd;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.gjj-mmaudio-nsfw-field input,
+		.gjj-mmaudio-nsfw-field select,
+		.gjj-mmaudio-nsfw-field textarea {
+			width: 100%;
+			box-sizing: border-box;
+			border: 1px solid #354952;
+			border-radius: 5px;
+			background: #0b1115;
+			color: #e7f3f3;
+			padding: 4px 6px;
+			font: inherit;
+		}
+		.gjj-mmaudio-nsfw-field textarea {
+			min-height: 72px;
+			resize: vertical;
+		}
 	`;
 	document.head.appendChild(style);
 }
@@ -381,6 +440,128 @@ function updateToolbar(node) {
 			? "配音参数：显示。点击收起采样和反向提示词设置。"
 			: "配音参数：隐藏。点击显示采样和反向提示词设置。";
 	}
+}
+
+function closeFloatingPanel(node) {
+	node?.__gjjMMAudioFloatingPanel?.remove?.();
+	if (node) node.__gjjMMAudioFloatingPanel = null;
+}
+
+function widgetLabel(widget) {
+	return String(widget?.options?.display_name || widget?.label || widget?.name || "");
+}
+
+function panelField(label, element) {
+	const wrap = document.createElement("label");
+	wrap.className = "gjj-mmaudio-nsfw-field";
+	const title = document.createElement("span");
+	title.textContent = label;
+	title.title = label;
+	wrap.append(title, element);
+	return wrap;
+}
+
+function controlForWidget(node, widgetName) {
+	const widget = getWidget(node, widgetName);
+	if (!widget) {
+		const missing = document.createElement("div");
+		missing.textContent = "参数不可用";
+		missing.style.color = "#c95d5d";
+		return missing;
+	}
+	const values = widget.options?.values || widget.options?.comboValues || widget.values;
+	if (Array.isArray(values)) {
+		const select = document.createElement("select");
+		for (const value of values) {
+			const option = document.createElement("option");
+			option.value = String(value);
+			option.textContent = String(value);
+			option.selected = String(widget.value) === String(value);
+			select.appendChild(option);
+		}
+		select.onchange = () => setWidgetValue(node, widgetName, select.value);
+		return select;
+	}
+	if (widget.type === "toggle" || typeof widget.value === "boolean") {
+		const input = document.createElement("input");
+		input.type = "checkbox";
+		input.checked = Boolean(widget.value);
+		input.onchange = () => {
+			setWidgetValue(node, widgetName, input.checked);
+			updateToolbar(node);
+		};
+		return input;
+	}
+	const isNumber = widget.type === "number" || typeof widget.value === "number";
+	const input = document.createElement(widgetName === "prompt" || widgetName === "negative_prompt" ? "textarea" : "input");
+	if (input.tagName !== "TEXTAREA") input.type = isNumber ? "number" : "text";
+	if (isNumber) {
+		if (Number.isFinite(Number(widget.options?.min))) input.min = String(widget.options.min);
+		if (Number.isFinite(Number(widget.options?.max))) input.max = String(widget.options.max);
+		if (Number.isFinite(Number(widget.options?.step))) input.step = String(widget.options.step);
+	}
+	input.value = widget.value ?? "";
+	input.oninput = () => setWidgetValue(node, widgetName, isNumber ? Number(input.value) : input.value);
+	return input;
+}
+
+function addFields(node, body, names) {
+	for (const name of names) {
+		const widget = getWidget(node, name);
+		body.appendChild(panelField(widgetLabel(widget) || name, controlForWidget(node, name)));
+	}
+}
+
+function panelAnchor(node, panelName) {
+	const buttons = node?.__gjjMMAudioToolbarButtons || {};
+	if (panelName === "model") return buttons.model;
+	if (panelName === "video") return buttons.video;
+	if (panelName === "audio") return buttons.audio;
+	return buttons.open || buttons.model;
+}
+
+function showFloatingPanel(node, panelName) {
+	closeFloatingPanel(node);
+	if (!panelName) return;
+	ensureStyle();
+	const panel = document.createElement("div");
+	panel.className = "gjj-mmaudio-nsfw-panel";
+	const anchor = panelAnchor(node, panelName);
+	const rect = anchor?.getBoundingClientRect?.() || { left: 20, bottom: 20 };
+	panel.style.left = `${Math.min(window.innerWidth - 392, Math.max(12, rect.left))}px`;
+	panel.style.top = `${Math.min(window.innerHeight - 80, Math.max(12, rect.bottom + 8))}px`;
+
+	const title = document.createElement("div");
+	title.className = "gjj-mmaudio-nsfw-panel-title";
+	const body = document.createElement("div");
+	body.className = "gjj-mmaudio-nsfw-panel-body";
+	panel.append(title, body);
+
+	if (panelName === "model") {
+		title.textContent = "模型参数";
+		addFields(node, body, ["mmaudio_model", "vae_model", "synchformer_model", "clip_model", "force_offload", "base_precision", "feature_precision", "translation_enabled", "translation_device", "translation_unload_after_use"]);
+	} else if (panelName === "video") {
+		title.textContent = "视频参数";
+		addFields(node, body, ["video", "force_rate", "custom_width", "custom_height", "frame_load_cap", "skip_first_frames", "select_every_nth", "filename_prefix", "format_name", "save_output", "pix_fmt", "crf"]);
+	} else if (panelName === "audio") {
+		title.textContent = "配音参数";
+		addFields(node, body, ["prompt", "negative_prompt", "duration_mode", "duration", "steps", "cfg", "seed", "mask_away_clip"]);
+	}
+
+	document.body.appendChild(panel);
+	node.__gjjMMAudioFloatingPanel = panel;
+	setTimeout(() => {
+		const onDown = (event) => {
+			if (!panel.contains(event.target) && event.target !== anchor) {
+				node.properties ||= {};
+				node.properties[ACTIVE_PANEL_PROPERTY] = "";
+				closeFloatingPanel(node);
+				updateToolbar(node);
+				document.removeEventListener("mousedown", onDown, true);
+			}
+		};
+		document.addEventListener("mousedown", onDown, true);
+	}, 0);
 }
 
 function rememberWidgetState(widget) {
@@ -461,9 +642,6 @@ function applyPanelVisibility(node) {
 	}
 	node.properties = node.properties || {};
 	migrateLegacyAdvancedState(node);
-	const showModel = modelPanelOpen(node);
-	const showVideo = videoPanelOpen(node);
-	const showAudio = audioPanelOpen(node);
 	for (const widget of node.widgets) {
 		if (!widget.__gjjMMAudioVisibilityState) {
 			rememberWidgetState(widget);
@@ -471,42 +649,26 @@ function applyPanelVisibility(node) {
 	}
 	for (const widget of node?.widgets || []) {
 		const name = String(widget?.name || "");
-		if (ALWAYS_HIDDEN_WIDGETS.has(name)) {
+		if (ALL_PARAM_WIDGETS.has(name)) {
 			setWidgetHidden(widget, true);
-		} else if (MODEL_WIDGETS.has(name)) {
-			setWidgetHidden(widget, !showModel);
-		} else if (VIDEO_WIDGETS.has(name)) {
-			setWidgetHidden(widget, !showVideo);
-		} else if (AUDIO_WIDGETS.has(name)) {
-			setWidgetHidden(widget, !showAudio);
 		}
 	}
 	updateToolbar(node);
+	showFloatingPanel(node, node.properties[ACTIVE_PANEL_PROPERTY] || "");
 	refreshNode(node);
 }
 
-function setPanelOpen(node, property, open) {
+function setActivePanel(node, panelName) {
 	if (!node) {
 		return;
 	}
 	node.properties = node.properties || {};
-	node.properties[property] = Boolean(open);
-	if (property === VIDEO_PANEL_PROPERTY || property === AUDIO_PANEL_PROPERTY) {
-		node.properties[ADVANCED_PROPERTY] = Boolean(node.properties[VIDEO_PANEL_PROPERTY] || node.properties[AUDIO_PANEL_PROPERTY]);
-	}
+	node.properties[ACTIVE_PANEL_PROPERTY] = panelName || "";
 	applyPanelVisibility(node);
 }
 
 function moveToolbarToTop(node) {
-	const toolbar = node?.__gjjMMAudioToolbarWidget;
-	if (!toolbar || !Array.isArray(node.widgets)) {
-		return;
-	}
-	const index = node.widgets.indexOf(toolbar);
-	if (index > 0) {
-		node.widgets.splice(index, 1);
-		node.widgets.unshift(toolbar);
-	}
+	return node;
 }
 
 function schedulePanelVisibility(node) {

@@ -248,8 +248,40 @@ def _ensure_unet_gguf_folder() -> None:
         existing["unet_gguf"] = ([os.path.join(models_dir, "diffusion_models")], {".gguf"})
 
 
+def _ensure_clip_gguf_folder() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    paths: list[str] = []
+    exts: set[str] = {".gguf"}
+    current = existing.get("clip_gguf")
+    if current:
+        current_paths, current_exts = current
+        paths.extend(str(path) for path in current_paths or [])
+        exts.update(current_exts or set())
+    for source in ("text_encoders", "clip"):
+        source_entry = existing.get(source)
+        if not source_entry:
+            continue
+        source_paths, _source_exts = source_entry
+        paths.extend(str(path) for path in source_paths or [])
+    models_dir = str(getattr(folder_paths, "models_dir", "") or "").strip()
+    if models_dir:
+        paths.append(os.path.join(models_dir, "clip_gguf"))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        norm = os.path.normpath(str(path or ""))
+        key = norm.lower()
+        if norm and key not in seen:
+            unique.append(norm)
+            seen.add(key)
+    if unique:
+        existing["clip_gguf"] = (unique, exts | {".gguf"})
+
+
 _ensure_folder_extensions("checkpoints", {".gguf"})
 _ensure_unet_gguf_folder()
+_ensure_clip_gguf_folder()
 _ensure_model_folder("sam2")
 
 
@@ -313,6 +345,14 @@ WAN22_T2V_HIGH_NAMES = ["wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", "Wan
 WAN22_T2V_LOW_NAMES = ["wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", "Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors"]
 WAN22_I2V_HIGH_NAMES = ["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_high_noise_14B_fp16.safetensors"]
 WAN22_I2V_LOW_NAMES = ["wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp16.safetensors"]
+WAN22_RAPID_AIO_GGUF_NAMES = [
+    "wan2.2-rapid-mega-aio-nsfw-v12.2-Q4_K.gguf",
+    "wan2.2-rapid-mega-aio-nsfw-v12.2_Q4_K.gguf",
+    "wan2.2-rapid-mega-aio-nsfw-v12.2-Q4_K_M.gguf",
+    "wan2.2-rapid-mega-aio-nsfw-v12.2_Q4_K_M.gguf",
+]
+WAN22_RAPID_AIO_CLIP_GGUF_NAMES = ["umt5-xxl-encoder-Q4_K_M.gguf", "umt5-xxl-encoder-Q4_K.gguf"]
+WAN22_RAPID_AIO_VAE_NAMES = ["wan_2.1_vae.safetensors", "ComfyUI-wan_2.1_vae.safetensors", "wan2.2_vae.safetensors", *WAN21_VAE_NAMES]
 WAN22_I2V_LORA_HIGH_NAMES = ["wan/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"]
 WAN22_I2V_LORA_LOW_NAMES = ["wan/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"]
 WAN22_T2V_LORA_HIGH_NAMES = ["wan/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors"]
@@ -836,6 +876,43 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             ),
         ],
     },
+    "wan22_rapid_aio_gguf_lowvram": {
+        "label": "Wan2.2 T2V/I2V GGUF 低显存配置",
+        "clip_type": "wan",
+        "slots": [
+            S(
+                "model",
+                "Rapid AIO GGUF主模型",
+                "diffusion_models",
+                "diffusion",
+                ["wan2.2", "rapid", "mega", "aio", "gguf"],
+                loader="unet",
+                preferred_name=WAN22_RAPID_AIO_GGUF_NAMES[0],
+                official_names=WAN22_RAPID_AIO_GGUF_NAMES,
+                disallow_q2_gguf=True,
+            ),
+            S(
+                "clip",
+                "Wan GGUF CLIP",
+                "text_encoders",
+                "clip",
+                ["umt5", "xxl"],
+                search_folders=["clip_gguf"],
+                preferred_name=WAN22_RAPID_AIO_CLIP_GGUF_NAMES[0],
+                official_names=[*WAN22_RAPID_AIO_CLIP_GGUF_NAMES, *WAN_T5_NAMES],
+                weight_dtype="default",
+            ),
+            S(
+                "vae",
+                "Wan VAE",
+                "vae",
+                "vae",
+                ["wan", "vae"],
+                preferred_name=WAN22_RAPID_AIO_VAE_NAMES[0],
+                official_names=WAN22_RAPID_AIO_VAE_NAMES,
+            ),
+        ],
+    },
 }
 
 _CONFIG_FOLDERS: list[str] = []
@@ -1234,6 +1311,11 @@ def _filename_list_for_folders(folders: list[str] | tuple[str, ...] | str) -> li
 
 def _is_gguf_model(value: Any) -> bool:
     return str(value or "").replace("\\", "/").lower().endswith(".gguf")
+
+
+def _is_q2_gguf_model(value: Any) -> bool:
+    text = str(value or "").replace("\\", "/").lower()
+    return text.endswith(".gguf") and re.search(r"(?:^|[-_./])q2[_-]k(?:[-_./]|$)", text) is not None
 
 
 def _is_usable_file(name: str, allow_any: bool = False) -> bool:
@@ -1760,7 +1842,13 @@ def _clip_type_from_text(clip_type: str):
 
 
 def _load_clip(name: str, clip_type: str = "wan", weight_dtype: str = "default"):
-    path = folder_paths.get_full_path_or_raise("text_encoders", name)
+    if _is_gguf_model(name):
+        _ensure_gguf_dependency(name, model_kind="CLIP")
+    path = folder_paths.get_full_path("text_encoders", name)
+    if not path and _is_gguf_model(name):
+        path = folder_paths.get_full_path("clip_gguf", name)
+    if not path:
+        path = folder_paths.get_full_path_or_raise("text_encoders", name)
     dtype = _torch_dtype(weight_dtype)
     kwargs: dict[str, Any] = {
         "embedding_directory": folder_paths.get_folder_paths("embeddings"),
@@ -3066,6 +3154,12 @@ class GJJ_VideoUniversalModelLoader:
 
             slot_id = str(slot.get("id", f"slot_{index}"))
             resolved_names[slot_id] = name
+            if bool(slot.get("disallow_q2_gguf", False)) and _is_q2_gguf_model(name):
+                raise RuntimeError(
+                    f"[{cfg.get('label', config_key)}] 当前 AIO GGUF 主模型不支持 Q2_K，容易输出噪声/花屏视频。\n"
+                    f"当前选择：{name}\n"
+                    "请改用 Q4_K / Q4_K_M 或更高量化。"
+                )
             slot, dtype = _apply_name_derived_settings(slot, kind, name, dtype)
 
             if _is_lora_slot(slot):

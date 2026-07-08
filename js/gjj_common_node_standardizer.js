@@ -1401,6 +1401,55 @@ function modelTreeText(items, emptyText) {
 	return lines.join("\n");
 }
 
+function modelTreeTextLineHasIcon(text) {
+	const clean = String(text || "").trim();
+	if (!clean) return false;
+	return ["📁", ...new Set(Object.values(MODEL_TREE_ICON_BY_KIND))].some((icon) => clean.startsWith(icon));
+}
+
+function modelTreeIconForTextPath(pathText) {
+	const text = String(pathText || "").replaceAll("\\", "/").replaceAll("-", "_").toLowerCase();
+	if (text.includes("clip_vision")) return MODEL_TREE_ICON_BY_KIND.clip_vision;
+	if (text.includes("audio_encoder") || text.includes("audio_encoders")) return MODEL_TREE_ICON_BY_KIND.audio_encoder;
+	if (text.includes("latent_upscale_model") || text.includes("latent_upscale_models") || text.includes("upscale_models")) return MODEL_TREE_ICON_BY_KIND.latent_upscale_model;
+	if (text.includes("checkpoint_clip")) return MODEL_TREE_ICON_BY_KIND.checkpoint_clip;
+	if (text.includes("checkpoint_vae")) return MODEL_TREE_ICON_BY_KIND.checkpoint_vae;
+	if (text.includes("ltx_audio_vae")) return MODEL_TREE_ICON_BY_KIND.ltx_audio_vae;
+	if (text.includes("wan_t5_encoder") || text.includes("text_encoders") || text.includes("clip_gguf") || text.includes("/clip/") || text.includes("clip/") || text.includes("clip") || text.includes("t5")) return MODEL_TREE_ICON_BY_KIND.clip;
+	if (text.includes("wan_vae") || text.includes("/vae/") || text.includes("vae/") || text.includes("vae")) return MODEL_TREE_ICON_BY_KIND.vae;
+	if (text.includes("loras") || text.includes("/lora/") || text.includes("lora/")) return MODEL_TREE_ICON_BY_KIND.loras;
+	if (text.includes("checkpoint_model") || text.includes("checkpoints")) return MODEL_TREE_ICON_BY_KIND.checkpoint_model;
+	if (text.includes("wanvideo_model") || text.includes("diffusion_models") || text.includes("unet_gguf") || text.includes("diffusion")) return MODEL_TREE_ICON_BY_KIND.diffusion;
+	if (text.includes("name_any")) return MODEL_TREE_ICON_BY_KIND.name_any;
+	return MODEL_TREE_ICON_BY_KIND.empty;
+}
+
+function decorateModelTreeText(text) {
+	const folderStack = [];
+	return String(text || "").trim().split(/\r?\n/).map((line) => {
+		const match = String(line || "").match(/^([│\s]*(?:[├└][─-]+\s*)?)(.*)$/u);
+		if (!match) return line;
+		const [, prefix, rawRest] = match;
+		const rest = String(rawRest || "").trim();
+		if (!rest || modelTreeTextLineHasIcon(rest)) return line;
+		const isFolder = /\/$/.test(rest);
+		const branchPrefix = String(prefix || "").replace(/[├└][─-]+\s*$/u, "");
+		const level = Math.max(0, (branchPrefix.match(/│/g) || []).length + (branchPrefix.match(/ {4}/g) || []).length);
+		const cleanName = rest.replace(/\/+$/, "");
+		if (isFolder) {
+			folderStack[level] = cleanName;
+			folderStack.length = level + 1;
+			return `${prefix}📁 ${rest}`;
+		}
+		const restLower = rest.toLowerCase();
+		if (!Array.from(MODEL_TREE_FILE_EXTENSIONS).some((ext) => restLower.includes(ext))) {
+			return line;
+		}
+		const pathText = [...folderStack.slice(0, level + 1), rest].filter(Boolean).join("/");
+		return `${prefix}${modelTreeIconForTextPath(pathText)} ${rest}`;
+	}).join("\n");
+}
+
 function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DOWNLOAD_URL) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-help-model-content gjj-help-model-tree";
@@ -1418,7 +1467,7 @@ function createModelHelpTextContent(text, downloadUrl = DEFAULT_MODEL_DOWNLOAD_U
 	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
 	const pre = document.createElement("pre");
 	pre.className = "gjj-help-model-tree-pre";
-	pre.textContent = String(text || "").trim();
+	pre.textContent = decorateModelTreeText(text);
 	wrap.appendChild(pre);
 	return wrap;
 }
