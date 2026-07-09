@@ -948,6 +948,15 @@ def _split_sigmas(sigmas: torch.Tensor, high_steps: int) -> tuple[torch.Tensor, 
     return sigmas[: high_steps + 1], sigmas[high_steps:]
 
 
+def _resolve_sampling_steps(mode: str, steps: int, high_steps: int, use_accel_lora: bool) -> tuple[int, int]:
+    mode = str(mode or "").upper()
+    if not use_accel_lora:
+        return steps, high_steps
+    if mode != "T2I":
+        return 4, 2
+    return steps, high_steps
+
+
 def _node_output_first(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return value[0]
@@ -1341,8 +1350,8 @@ class GJJ_BerniniStudio:
                 "height": ("INT", {"default": 480, "min": 16, "max": 8192, "step": 16, "display_name": "高度", "tooltip": "输出高度。"}),
                 "length": ("INT", {"default": 81, "min": 1, "max": 8192, "step": 4, "display_name": "帧数", "tooltip": "视频帧数。"}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "step": 1, "display_name": "批次数", "tooltip": "latent 批次数。"}),
-                "steps": ("INT", {"default": 6, "min": 1, "max": 1000, "step": 1, "display_name": "步数", "tooltip": "总采样步数。默认对齐 BERNINI.json。"}),
-                "high_steps": ("INT", {"default": 3, "min": 1, "max": 1000, "step": 1, "display_name": "高噪步数", "tooltip": "双阶段中 High 模型使用的前半段步数。默认 3。"}),
+                "steps": ("INT", {"default": 4, "min": 1, "max": 1000, "step": 1, "display_name": "步数", "tooltip": "总采样步数。加速 LoRA 默认参数为 4；非 T2I 模式启用加速 LoRA 时固定为 4。"}),
+                "high_steps": ("INT", {"default": 2, "min": 1, "max": 1000, "step": 1, "display_name": "高噪步数", "tooltip": "双阶段中 High 模型使用的前半段步数。加速 LoRA 默认参数为 2；非 T2I 模式启用加速 LoRA 时固定为 2。"}),
                 "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.01, "display_name": "CFG", "tooltip": "提示词引导强度。"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xffffffffffffffff, "display_name": "种子", "tooltip": "随机种子。"}),
                 "sampler_name": ("STRING", {"default": "euler", "display_name": "采样器", "tooltip": "默认 euler。"}),
@@ -1610,12 +1619,7 @@ class GJJ_BerniniStudio:
         batch_size = 1 if mode_output_kind == "image" else _as_int(kwargs.get("batch_size"), 1, 1, 4096)
         steps = _as_int(kwargs.get("steps"), 6, 1, 1000)
         high_steps = _as_int(kwargs.get("high_steps"), 3, 1, steps)
-        if mode == "T2I" and steps == 6 and high_steps == 3:
-            steps = 20
-            high_steps = 10
-        elif mode == "I2V" and steps == 20 and high_steps == 10:
-            steps = 6
-            high_steps = 3
+        steps, high_steps = _resolve_sampling_steps(mode, steps, high_steps, _as_bool(kwargs.get("use_accel_lora"), True))
         sigmas = _basic_sigmas(patched_low, _as_text(kwargs.get("scheduler"), "simple"), steps, _as_float(kwargs.get("denoise"), 1.0, 0.0, 1.0))
         high_sigmas, low_sigmas = _split_sigmas(sigmas, high_steps)
         sampler = _ksampler(_as_text(kwargs.get("sampler_name"), "euler"))

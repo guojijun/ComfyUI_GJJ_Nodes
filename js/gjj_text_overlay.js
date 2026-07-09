@@ -1095,8 +1095,19 @@ function objectPreviewCache(node) {
 	return node.__gjjTextOverlayObjectPreviewCache;
 }
 
+function invalidObjectPreviewSources(node) {
+	if (!node.__gjjTextOverlayInvalidObjectPreviewSources) node.__gjjTextOverlayInvalidObjectPreviewSources = new Set();
+	return node.__gjjTextOverlayInvalidObjectPreviewSources;
+}
+
+function loadingObjectPreviewSources(node) {
+	if (!node.__gjjTextOverlayLoadingObjectPreviewSources) node.__gjjTextOverlayLoadingObjectPreviewSources = new Set();
+	return node.__gjjTextOverlayLoadingObjectPreviewSources;
+}
+
 function setObjectPreviewInfo(node, key, info) {
 	if (!key || !info?.src) return;
+	invalidObjectPreviewSources(node).delete(String(info.src));
 	objectPreviewCache(node).set(key, info);
 }
 
@@ -1141,6 +1152,40 @@ function removeWatermarkObject(node, index, notify = true) {
 	else if (selected > index) node.__gjjTextOverlaySelectedObjectIndex = selected - 1;
 	setWatermarkObjects(node, objects, notify);
 	return true;
+}
+
+function removeWatermarkObjectsByPreviewKey(node, key, notify = true) {
+	if (!key) return false;
+	const objects = watermarkObjects(node);
+	const next = objects.filter((item) => objectPreviewKey(item) !== key);
+	if (next.length === objects.length) return false;
+	const selected = selectedWatermarkObjectIndex(node);
+	node.__gjjTextOverlaySelectedObjectIndex = Math.min(Math.max(0, selected), next.length - 1);
+	setWatermarkObjects(node, next, notify);
+	return true;
+}
+
+function scheduleInvalidWatermarkObjectCleanup(node, item, src) {
+	if (!node || !src) return;
+	const invalidSources = invalidObjectPreviewSources(node);
+	invalidSources.add(String(src));
+	const key = objectPreviewKey(item);
+	if (key) objectPreviewCache(node).delete(key);
+	if (!item?.linked_key && key) {
+		if (!node.__gjjTextOverlayInvalidObjectKeys) node.__gjjTextOverlayInvalidObjectKeys = new Set();
+		node.__gjjTextOverlayInvalidObjectKeys.add(key);
+	}
+	clearTimeout(node.__gjjTextOverlayInvalidObjectCleanupTimer);
+	node.__gjjTextOverlayInvalidObjectCleanupTimer = setTimeout(() => {
+		const keys = Array.from(node.__gjjTextOverlayInvalidObjectKeys || []);
+		node.__gjjTextOverlayInvalidObjectKeys?.clear?.();
+		let changed = false;
+		for (const itemKey of keys) {
+			changed = removeWatermarkObjectsByPreviewKey(node, itemKey, false) || changed;
+		}
+		if (changed) showPanelStatus(node, "已清理失效资源", 1200);
+		renderPanel(node, { fitText: false });
+	}, 80);
 }
 
 function selectedWatermarkObjectIndex(node) {
@@ -2668,6 +2713,14 @@ function renderWatermarkObjects(node, displayScale) {
 		const preview = objectPreviewInfo(node, item);
 		const src = preview?.src || storedImageSrc(item) || item.src;
 		if (!src) continue;
+		const srcKey = String(src);
+		const loadKey = `${objectPreviewKey(item) || index}:${srcKey}`;
+		if (invalidObjectPreviewSources(node).has(srcKey)) continue;
+		if (loadingObjectPreviewSources(node).has(loadKey)) {
+			node.__gjjTextOverlaySkippedLoadingObjectPreview = true;
+			continue;
+		}
+		loadingObjectPreviewSources(node).add(loadKey);
 		const wrap = document.createElement("div");
 		wrap.className = "gjj-text-overlay-object";
 		wrap.dataset.index = String(index);
@@ -2684,16 +2737,22 @@ function renderWatermarkObjects(node, displayScale) {
 		wrap.style.width = `${displayW}px`;
 		wrap.style.height = `${displayH}px`;
 		const img = document.createElement("img");
-		img.src = src;
 		img.draggable = false;
 		img.style.filter = foregroundStrokeFilter(item, displayScale);
 		img.style.transform = item.mirror_x ? "scaleX(-1)" : "";
-		img.onerror = () => {
-			if (removeWatermarkObject(node, index)) {
-				showPanelStatus(node, "已清理失效资源", 1200);
-				renderPanel(node, { fitText: false });
+		img.onload = () => {
+			loadingObjectPreviewSources(node).delete(loadKey);
+			if (node.__gjjTextOverlaySkippedLoadingObjectPreview) {
+				node.__gjjTextOverlaySkippedLoadingObjectPreview = false;
+				scheduleRenderPanel(node, { fitText: false });
 			}
 		};
+		img.onerror = () => {
+			img.onerror = null;
+			loadingObjectPreviewSources(node).delete(loadKey);
+			scheduleInvalidWatermarkObjectCleanup(node, item, src);
+		};
+		img.src = src;
 		const resizeNw = document.createElement("div");
 		resizeNw.className = "gjj-text-overlay-resize";
 		resizeNw.dataset.corner = "nw";

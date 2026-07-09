@@ -215,7 +215,5 @@ app.registerExtension({
         };
 
         menu.append(loadButton);
-
-        console.log("[GJJ Workflow Encrypt] UI 扩展已加载");
     }
 });

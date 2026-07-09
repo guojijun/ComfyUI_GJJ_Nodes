@@ -1702,7 +1702,6 @@ import { app } from "/scripts/app.js";
 				const fixedLinks = sanitizeLiveGraphLinks(app?.graph);
 				if (fixedLinks) console.warn(`[GJJ] 工作流修复：已清理当前画布 ${fixedLinks} 个悬空链接。`);
 			}, 800);
-			console.log("[GJJ] 工作流修复通知已启用");
 		},
 	});
 })();

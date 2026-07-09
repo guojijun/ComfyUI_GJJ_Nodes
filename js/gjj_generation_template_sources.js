@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 
 export const TEMPLATE_SOURCE_PROPERTY = "gjj_generation_template_sources";
+let ACTIVE_TEMPLATE_SOURCE_POPUP = null;
 
 function getWidget(node, name) {
 	return node?.widgets?.find((widget) => widget?.name === name) || null;
@@ -272,11 +273,20 @@ function resolveVariableValue(node, variableName) {
 
 function closePopup(popup) {
 	popup?.remove?.();
+	if (!popup || ACTIVE_TEMPLATE_SOURCE_POPUP === popup) {
+		ACTIVE_TEMPLATE_SOURCE_POPUP = null;
+	}
+}
+
+export function closeTemplateSourcePicker() {
+	closePopup(ACTIVE_TEMPLATE_SOURCE_POPUP);
 }
 
 function openVariablePicker(node, field = null) {
 	const fields = field ? [field] : (node.__gjjTemplateSourceFields || []);
 	if (!fields.length) return;
+	window.dispatchEvent(new CustomEvent("gjj-template-source-picker-opening", { detail: { node } }));
+	closeTemplateSourcePicker();
 	const sources = selectedSources(node);
 	const draftSources = { ...sources };
 	const allOptions = variableOptions(node);
@@ -487,8 +497,20 @@ function openVariablePicker(node, field = null) {
 	footer.append(cancel, confirm);
 	popup.append(head, search, columns, footer);
 	document.body.appendChild(popup);
+	ACTIVE_TEMPLATE_SOURCE_POPUP = popup;
 	render();
 	search.focus();
+}
+
+export function openTemplateSourcePicker(node, fields = null, button = null) {
+	installTemplateSourceListeners();
+	if (Array.isArray(fields) && fields.length) node.__gjjTemplateSourceFields = fields;
+	if (button) {
+		node.__gjjTemplateSourceButton = button;
+		node.__gjjTemplateSourcePanel = button;
+	}
+	updateTemplateSourcePanel(node, node.__gjjTemplateSourceFields || fields || []);
+	openVariablePicker(node);
 }
 
 function buttonStyle(active) {
@@ -523,6 +545,7 @@ function installTemplateSourceListeners() {
 	window.__gjjGenerationTemplateSourceListeners = true;
 	window.addEventListener("gjj-template-params-updated", () => setTimeout(refreshAllTemplateSourcePanels, 40));
 	window.addEventListener("gjj-variable-broadcast-updated", () => setTimeout(refreshAllTemplateSourcePanels, 40));
+	window.addEventListener("gjj-close-template-source-picker", () => closeTemplateSourcePicker());
 }
 
 export function installTemplateSourcePanel(node, fields, options = {}) {

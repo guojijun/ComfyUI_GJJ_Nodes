@@ -1879,7 +1879,6 @@ import { api } from "/scripts/api.js";
 		};
 		for (const widget of Array.isArray(live?.widgets) ? live.widgets : []) {
 			add(widget?.element);
-			add(widget?.inputEl);
 			add(widget?.root);
 			add(widget?.div);
 		}
@@ -5056,7 +5055,6 @@ import { api } from "/scripts/api.js";
 			installKeyboardShortcuts();
 			installNodeColorPanelDismiss();
 			startPositionSync();
-			console.log("[GJJ] 工作流截图保存按钮与快捷键已启用");
 		},
 	});
 })();

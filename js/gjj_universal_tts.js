@@ -2332,7 +2332,6 @@ api?.addEventListener?.("gjj_node_audio", (event) => {
 });
 
 if (app?.registerExtension) {
-	console.log("[GJJ] Universal TTS UI loaded");
 	app.registerExtension({
 		name: "Comfy.GJJ.UniversalTTS",
 		beforeRegisterNodeDef(nodeType, nodeData) {

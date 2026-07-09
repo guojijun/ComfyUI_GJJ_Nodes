@@ -2,18 +2,20 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
-import { createTemplateSourceButton, updateTemplateSourcePanel, TEMPLATE_SOURCE_PROPERTY } from "./gjj_generation_template_sources.js";
 
 const NODE_TYPE = "GJJ_BerniniStudio";
 const MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_CHAIN_CONFIG_TYPE = "LORA_CHAIN_CONFIG";
+const PANEL_STYLE_ID = "gjj-bernini-studio-panel-style";
 const PANEL_WIDGET = "__gjj_bernini_panel";
 const PREVIEW_WIDGET = "__gjj_bernini_preview";
 const SETTINGS_PROPERTY = "gjj_bernini_settings_open";
+const ACTIVE_POPUP_PROPERTY = "gjj_bernini_active_popup";
 const TRANSLATE_PROPERTY = "gjj_bernini_translate_enabled";
 const VALUES_PROPERTY = "gjj_bernini_values";
 const LINK_MEMORY_PROPERTY = "gjj_bernini_link_memory";
+const TEMPLATE_SOURCE_PROPERTY = "gjj_generation_template_sources";
 const TOP_INPUTS = [
 	["source_media", "🎞️ 源媒体"],
 	["reference_media_1", "🖼️ 参考媒体 1"],
@@ -29,13 +31,19 @@ const LEGACY_INPUT_NAMES = new Set([
 	"region_control",
 ]);
 const SETTINGS_GROUPS = [
-	["生成参数", ["mode", "width", "height", "length", "segment_frames", "batch_size", "steps", "high_steps", "cfg", "seed", "sampler_name", "scheduler", "denoise", "ref_max_size"]],
-	["输出参数", ["frame_rate", "filename_prefix", "format_name", "vae_tiling", "tile_x", "tile_y"]],
-	["运行优化", ["use_accel_lora", "enable_sage_attention", "enable_fp16_accumulation"]],
-	["模型参数", ["high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora"]],
+	["生成参数", ["mode", "steps", "high_steps", "cfg", "seed", "sampler_name", "scheduler", "denoise"]],
 	["提示词补充", ["extra_instruction", "negative_prompt"]],
 	["长视频衔接", ["prev_segment_ref_frames", "use_prev_segment_latent"]],
 ];
+const MODEL_SETTINGS_GROUPS = [
+	["模型参数", ["high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora"]],
+	["运行优化", ["use_accel_lora", "enable_sage_attention", "enable_fp16_accumulation", "keep_model"]],
+];
+const SIZE_SETTINGS_GROUPS = [
+	["画面尺寸", ["width", "height", "length", "segment_frames", "batch_size", "ref_max_size", "resize_to_panel"]],
+	["输出参数", ["frame_rate", "filename_prefix", "format_name", "vae_tiling", "tile_x", "tile_y"]],
+];
+const ALL_SETTINGS_GROUPS = SETTINGS_GROUPS.concat(MODEL_SETTINGS_GROUPS, SIZE_SETTINGS_GROUPS);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "提示词", "正向"] },
 	{ name: "extra_instruction", label: "附加指令", type: "STRING", aliases: ["extra", "instruction", "附加", "指令"] },
@@ -72,7 +80,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prev_segment_ref_frames", label: "上一段尾帧参考", type: "INT", aliases: ["prev_segment", "tail_frames", "上一段", "尾帧", "参考帧"] },
 	{ name: "use_prev_segment_latent", label: "上一段Latent", type: "BOOLEAN", aliases: ["prev_latent", "latent", "上一段latent"] },
 ];
-const HIDDEN_WIDGETS = new Set(SETTINGS_GROUPS.flatMap(([, names]) => names).concat(["prompt", "translation_enabled", "keep_model", "randomize_seed", "resize_to_panel"]));
+const HIDDEN_WIDGETS = new Set(ALL_SETTINGS_GROUPS.flatMap(([, names]) => names).concat(["prompt", "translation_enabled", "randomize_seed"]));
 const BACKEND_WIDGETS = [
 	"prompt",
 	"extra_instruction",
@@ -203,6 +211,7 @@ const MODE_BUTTON_LABELS = {
 const MODE_DEFAULT_VALUES = {
 	T2I: { steps: 20, high_steps: 10 },
 };
+let templateSourceModulePromise = null;
 
 function widget(node, name) {
 	return GJJ_Utils.getWidget(node, name);
@@ -220,9 +229,13 @@ function setValue(node, name, nextValue) {
 	if (target.element && "value" in target.element) target.element.value = nextValue;
 	target.callback?.(nextValue, app.canvas, node, undefined, target);
 	const panelControl = node.__gjjBerniniPanel?.controls?.get?.(name);
-	if (panelControl && document.activeElement !== panelControl) {
-		if (panelControl.type === "checkbox") panelControl.checked = Boolean(nextValue);
-		else panelControl.value = String(nextValue ?? "");
+	if (panelControl) {
+		if (panelControl.dataset?.booleanControl === "true") {
+			setBooleanButtonState(panelControl, Boolean(nextValue));
+		} else if (document.activeElement !== panelControl) {
+			if (panelControl.type === "checkbox") panelControl.checked = Boolean(nextValue);
+			else panelControl.value = String(nextValue ?? "");
+		}
 	}
 	node.graph?.change?.();
 	GJJ_Utils.dirtyCanvas(node);
@@ -230,23 +243,27 @@ function setValue(node, name, nextValue) {
 		updateGenerateButton(node);
 		updateModeButtons(node);
 	}
+	if (name === "mode" || name === "use_accel_lora" || name === "steps" || name === "high_steps") {
+		applyModeDefaults(node, value(node, "mode", "auto"));
+	}
 	if (name === "keep_model") updateKeepModelButton(node);
 	if (name === "randomize_seed") updateRandomizeSeedButton(node);
-	if (name === "resize_to_panel") updateResizeButton(node);
+	if (name === "resize_to_panel") {
+		updateResizeButton(node);
+		syncPanel(node);
+	}
 }
 
 function applyModeDefaults(node, mode) {
 	const modeName = String(mode || "").toUpperCase();
-	if (modeName === "T2I") {
-		if (Number(value(node, "steps", DEFAULT_VALUES.steps)) === 6 && Number(value(node, "high_steps", DEFAULT_VALUES.high_steps)) === 3) {
-			setValue(node, "steps", 20);
-			setValue(node, "high_steps", 10);
-		}
+	const useAccel = Boolean(value(node, "use_accel_lora", DEFAULT_VALUES.use_accel_lora));
+	const setNumberIfNeeded = (name, nextValue) => {
+		if (Number(value(node, name, DEFAULT_VALUES[name])) !== nextValue) setValue(node, name, nextValue);
+	};
+	if (useAccel && modeName && modeName !== "AUTO" && modeName !== "T2I") {
+		setNumberIfNeeded("steps", 4);
+		setNumberIfNeeded("high_steps", 2);
 		return;
-	}
-	if (modeName === "I2V" && Number(value(node, "steps", DEFAULT_VALUES.steps)) === 20 && Number(value(node, "high_steps", DEFAULT_VALUES.high_steps)) === 10) {
-		setValue(node, "steps", 6);
-		setValue(node, "high_steps", 3);
 	}
 }
 
@@ -260,6 +277,39 @@ function selectedTemplateSources(node) {
 		} catch (_) {}
 	}
 	return {};
+}
+
+function hasSelectedTemplateSources(node) {
+	return Object.values(selectedTemplateSources(node)).some((item) => String(item || "").trim());
+}
+
+function loadTemplateSourceModule() {
+	if (!templateSourceModulePromise) {
+		templateSourceModulePromise = import("./gjj_generation_template_sources.js").catch((error) => {
+			templateSourceModulePromise = null;
+			console.error("[GJJ BerniniStudio] 模板变量模块按需加载失败", error);
+			throw error;
+		});
+	}
+	return templateSourceModulePromise;
+}
+
+function updateTemplateSourcePanelLazy(node, fields = TEMPLATE_SOURCE_FIELDS, force = false) {
+	if (!node) return;
+	node.__gjjTemplateSourceFields = fields;
+	if (!force && !hasSelectedTemplateSources(node) && !node.__gjjTemplateSourceLoaded) return;
+	loadTemplateSourceModule().then((module) => {
+		node.__gjjTemplateSourceLoaded = true;
+		module.updateTemplateSourcePanel?.(node, fields);
+	}).catch(() => {});
+}
+
+async function openTemplateSourcePickerLazy(node, button) {
+	const module = await loadTemplateSourceModule();
+	node.__gjjTemplateSourceLoaded = true;
+	setActivePopup(node, "");
+	module.openTemplateSourcePicker?.(node, TEMPLATE_SOURCE_FIELDS, button);
+	module.updateTemplateSourcePanel?.(node, TEMPLATE_SOURCE_FIELDS);
 }
 
 function normalizeValue(name, input) {
@@ -336,6 +386,7 @@ function valuesFromSerialized(serializedNode) {
 
 function writeSerializedValues(node, serializedNode = null) {
 	if (!node || node.__gjjBerniniRestoring) return;
+	applyModeDefaults(node, value(node, "mode", "auto"));
 	const values = collectValues(node);
 	node.properties ||= {};
 	node.properties[VALUES_PROPERTY] = { ...values };
@@ -355,7 +406,10 @@ function protect(element) {
 	if (!element || element.__gjjBerniniProtected) return;
 	element.__gjjBerniniProtected = true;
 	for (const eventName of ["pointerdown", "mousedown", "dblclick", "contextmenu", "wheel"]) {
-		element.addEventListener(eventName, (event) => event.stopPropagation(), true);
+		element.addEventListener(eventName, (event) => {
+			if (element.classList?.contains("gjj-bs-popover") && event.target !== element) return;
+			event.stopPropagation();
+		}, true);
 	}
 }
 
@@ -388,6 +442,48 @@ function makeButton(label, title, className, handler) {
 	protect(button);
 	bindButton(button, handler);
 	return button;
+}
+
+function activePopup(node) {
+	const explicit = String(node?.properties?.[ACTIVE_POPUP_PROPERTY] || "");
+	if (explicit) return explicit;
+	return node?.properties?.[SETTINGS_PROPERTY] ? "settings" : "";
+}
+
+function closePanelPopups(node) {
+	if (!node || String(node.comfyClass || node.type || "") !== NODE_TYPE) return;
+	node.properties ||= {};
+	node.properties[ACTIVE_POPUP_PROPERTY] = "";
+	node.properties[SETTINGS_PROPERTY] = false;
+	const state = node.__gjjBerniniPanel;
+	state?.settings?.classList.remove("open");
+	state?.modelSettings?.classList.remove("open");
+	state?.sizeSettings?.classList.remove("open");
+	state?.settingsButton?.classList.remove("active");
+	state?.keepModel?.classList.remove("popup-open");
+	state?.resize?.classList.remove("popup-open");
+}
+
+function closeOtherPanelPopups(node) {
+	for (const item of app.graph?._nodes || []) {
+		if (!item || item === node || String(item.comfyClass || item.type || "") !== NODE_TYPE) continue;
+		closePanelPopups(item);
+	}
+}
+
+function setActivePopup(node, name = "") {
+	node.properties ||= {};
+	if (name) {
+		window.dispatchEvent(new CustomEvent("gjj-close-template-source-picker"));
+		closeOtherPanelPopups(node);
+	}
+	node.properties[ACTIVE_POPUP_PROPERTY] = name;
+	node.properties[SETTINGS_PROPERTY] = name === "settings";
+	syncPanel(node);
+}
+
+function togglePopup(node, name) {
+	setActivePopup(node, activePopup(node) === name ? "" : name);
 }
 
 function linkTypeForInput(node, name) {
@@ -511,6 +607,11 @@ function linkedInputKind(node, name) {
 	return "";
 }
 
+function sourceSizeComesFromInput(node) {
+	const sourceInput = node?.inputs?.find?.((item) => String(item?.name || "") === "source_media");
+	return inputLinked(sourceInput) && !Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel));
+}
+
 function mediaInputState(node) {
 	const sourceKind = linkedInputKind(node, "source_media");
 	const refKinds = [
@@ -597,7 +698,7 @@ function updateKeepModelButton(node) {
 	if (!button) return;
 	const enabled = Boolean(value(node, "keep_model", DEFAULT_VALUES.keep_model));
 	button.textContent = "🧠";
-	button.title = enabled ? "保持模型：开启，复用已加载模型" : "保持模型：关闭，每次重新加载模型";
+	button.title = enabled ? "模型参数；保持模型已开启，复用已加载模型" : "模型参数；保持模型已关闭，每次重新加载模型";
 	button.classList.toggle("active", enabled);
 }
 
@@ -615,7 +716,7 @@ function updateResizeButton(node) {
 	if (!button) return;
 	const enabled = Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel));
 	button.textContent = "📐";
-	button.title = enabled ? "按面板尺寸：开启，按宽高缩放裁剪" : "按面板尺寸：关闭，优先沿用源媒体尺寸";
+	button.title = enabled ? "尺寸参数；按面板尺寸已开启，按宽高缩放裁剪" : "尺寸参数；按面板尺寸已关闭，优先沿用源媒体尺寸";
 	button.classList.toggle("active", enabled);
 }
 
@@ -751,16 +852,26 @@ function widgetChoices(target) {
 	return Array.isArray(choices) ? choices.map(String) : [];
 }
 
+function setBooleanButtonState(control, enabled) {
+	const label = control?.dataset?.label || "";
+	if (!control) return;
+	control.classList.toggle("active", Boolean(enabled));
+	control.textContent = `${label}${label ? "：" : ""}${enabled ? "开启" : "关闭"}`;
+	control.title = `${label || "开关"}：${enabled ? "开启" : "关闭"}`;
+}
+
 function makeControl(node, name) {
 	const target = widget(node, name);
 	if (!target) return null;
 	const choices = widgetChoices(target);
 	let control;
 	if (typeof target.value === "boolean") {
-		control = document.createElement("input");
-		control.type = "checkbox";
-		control.checked = Boolean(target.value);
-		control.addEventListener("change", () => setValue(node, name, control.checked));
+		control = document.createElement("button");
+		control.type = "button";
+		control.dataset.booleanControl = "true";
+		control.dataset.label = target.options?.display_name || target.label || name;
+		setBooleanButtonState(control, Boolean(target.value));
+		bindButton(control, () => setValue(node, name, !Boolean(value(node, name, DEFAULT_VALUES[name]))));
 	} else if (choices.length) {
 		control = document.createElement("select");
 		for (const choice of choices) {
@@ -800,33 +911,102 @@ function makeControl(node, name) {
 	return control;
 }
 
-function buildSettings(node) {
+function buildSettings(node, groups, title, popupName) {
 	const settings = document.createElement("div");
-	settings.className = "gjj-bs-settings";
+	settings.className = `gjj-bs-popover gjj-bs-${popupName}-popover`;
+	settings.dataset.popupName = popupName;
+	protect(settings);
 	const controls = new Map();
-	for (const [title, names] of SETTINGS_GROUPS) {
+	const header = document.createElement("div");
+	header.className = "gjj-bs-pop-head";
+	const caption = document.createElement("div");
+	caption.className = "gjj-bs-pop-title";
+	caption.textContent = title;
+	const confirm = makeButton("确定", `关闭${title}`, "gjj-bs-confirm", () => setActivePopup(node, ""));
+	header.append(caption, confirm);
+	settings.appendChild(header);
+	for (const [sectionTitle, names] of groups) {
 		const section = document.createElement("section");
 		const heading = document.createElement("div");
 		heading.className = "gjj-bs-heading";
-		heading.textContent = title;
+		heading.textContent = sectionTitle;
 		section.appendChild(heading);
 		const grid = document.createElement("div");
 		grid.className = "gjj-bs-grid";
+		let booleanRow = null;
 		for (const name of names) {
 			const control = makeControl(node, name);
 			if (!control) continue;
 			controls.set(name, control);
+			const labelText = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
+			if (control.dataset?.booleanControl === "true") {
+				control.dataset.label = labelText;
+				setBooleanButtonState(control, Boolean(value(node, name, DEFAULT_VALUES[name])));
+				if (!booleanRow) {
+					booleanRow = document.createElement("div");
+					booleanRow.className = "gjj-bs-boolean-row";
+					grid.appendChild(booleanRow);
+				}
+				booleanRow.appendChild(control);
+				continue;
+			}
 			const row = document.createElement("label");
 			row.className = control.tagName === "TEXTAREA" ? "gjj-bs-field wide" : "gjj-bs-field";
 			const label = document.createElement("span");
-			label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
+			label.textContent = labelText;
 			row.append(label, control);
 			grid.appendChild(row);
 		}
 		section.appendChild(grid);
 		settings.appendChild(section);
 	}
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "click"]) {
+		settings.addEventListener(eventName, (event) => event.stopPropagation());
+	}
 	return { settings, controls };
+}
+
+function positionSettingsPopup(popup, anchor) {
+	if (!popup || !anchor) return;
+	const rect = anchor.getBoundingClientRect?.();
+	const viewportWidth = Math.max(320, window.innerWidth || 720);
+	const viewportHeight = Math.max(240, window.innerHeight || 540);
+	const desiredWidth = popup.dataset.popupName === "model" ? 560 : 560;
+	const popupWidth = Math.min(desiredWidth, Math.max(360, viewportWidth - 28));
+	const left = Math.min(viewportWidth - popupWidth - 14, Math.max(14, rect?.left || 80));
+	const top = Math.min(viewportHeight - 120, Math.max(14, (rect?.bottom || 80) + 6));
+	popup.style.width = `${Math.round(popupWidth)}px`;
+	popup.style.maxHeight = `${Math.round(Math.max(220, viewportHeight - top - 20))}px`;
+	popup.style.left = `${Math.round(left)}px`;
+	popup.style.top = `${Math.round(top)}px`;
+}
+
+function ensurePanelStyle() {
+	if (document.getElementById(PANEL_STYLE_ID)) return;
+	const style = document.createElement("style");
+	style.id = PANEL_STYLE_ID;
+	style.textContent = `
+		.gjj-bs-root,.gjj-bs-root *{box-sizing:border-box}.gjj-bs-root{display:flex;flex-direction:column;gap:7px;width:100%;padding:2px 0 4px;font:12px/1.4 system-ui;color:#dce7e9;pointer-events:auto}
+		.gjj-bs-toolbar{display:flex;flex-wrap:wrap;gap:6px;width:100%;align-items:center}.gjj-bs-button{min-height:32px;border-radius:6px;border:1px solid #50616a;color:#e8f0f2;font-weight:700;cursor:pointer;padding:0 10px;white-space:normal;line-height:1.15}
+		.gjj-bs-generate{flex:0 0 auto;min-width:116px;padding:0 12px;background:linear-gradient(135deg,#075a45,#0b9b70);border-color:#24c68b}.gjj-bs-translate,.gjj-bs-seed,.gjj-bs-cache,.gjj-bs-vars,.gjj-bs-settings-button,.gjj-bs-link,.gjj-bs-resize{flex:0 0 38px;padding:0;background:linear-gradient(135deg,#28323a,#3e4b55)}
+		.gjj-bs-vars{border-color:#d6a642;color:#ffe8a3}.gjj-bs-settings-button{border-color:#24c68b}.gjj-bs-button:hover{filter:brightness(1.18);transform:translateY(-1px)}.gjj-bs-button.active{background:linear-gradient(135deg,#164d3c,#287b59);border-color:#61c994}.gjj-bs-button.popup-open{box-shadow:0 0 0 1px #9ed6df inset}
+		.gjj-bs-prompt-field{display:flex;flex-direction:column;gap:4px;color:#b9c8cc}.gjj-bs-prompt-head{display:flex;align-items:center;gap:6px;width:100%;min-width:0}.gjj-bs-prompt-title{flex:0 0 auto;white-space:nowrap}.gjj-bs-prompt{min-height:58px;resize:vertical}
+		.gjj-bs-mode-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.gjj-bs-mode-button{flex:0 0 auto;min-height:20px;padding:0 7px;border-radius:5px;font-size:11px;background:#18242a;border-color:#3c5058;color:#d7e4e7}
+		.gjj-bs-popover{position:fixed;z-index:100000;display:none;flex-direction:column;gap:9px;padding:9px;border:1px solid #45606a;border-radius:8px;background:#10191e;color:#dce7e9;box-shadow:0 12px 32px rgba(0,0,0,.45);font:12px/1.4 system-ui,'Microsoft YaHei',sans-serif;box-sizing:border-box;overflow:auto}.gjj-bs-popover.open{display:flex}.gjj-bs-pop-head{position:sticky;top:-9px;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px;margin:-9px -9px 0;padding:8px 9px 6px;border-bottom:1px solid #263842;background:#10191e}.gjj-bs-pop-title{font-weight:800;color:#d8f5f3}.gjj-bs-confirm{flex:0 0 auto;min-height:24px;padding:0 10px;background:#1d3d34;border-color:#24c68b}
+		.gjj-bs-heading{font-weight:800;color:#9ed6df;margin-bottom:5px}.gjj-bs-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}.gjj-bs-field{display:flex;align-items:center;gap:8px;min-width:0}.gjj-bs-field.wide{align-items:flex-start;flex-direction:column}.gjj-bs-field>span{flex:0 0 92px;color:#aebbc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+		.gjj-bs-control{flex:1;min-width:0;width:100%;border:1px solid #40515a;border-radius:5px;background:#0e1519;color:#eaf2f3;padding:5px 7px}.gjj-bs-control:is(textarea){min-height:64px;resize:vertical}
+		select.gjj-bs-control{border-color:#3c7f91;background:#122932;color:#f0fbff;font-weight:650;box-shadow:0 0 0 1px rgba(77,171,193,.18) inset;cursor:pointer}select.gjj-bs-control:hover{border-color:#62b9cb;background:#15323d}select.gjj-bs-control:focus{outline:none;border-color:#8bd8e8;box-shadow:0 0 0 1px rgba(139,216,232,.6),0 0 0 3px rgba(35,130,154,.28)}select.gjj-bs-control option{background:#102229;color:#f0fbff}
+		.gjj-bs-boolean-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}.gjj-bs-boolean-row>.gjj-bs-control{flex:1 1 0;min-width:0;width:auto;min-height:28px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#152026;color:#b9c8cc}.gjj-bs-boolean-row>.gjj-bs-control.active{border-color:#24c68b;background:#164d3c;color:#eafff7}
+		.gjj-bs-preview-wrap{display:flex;flex-direction:column;gap:5px;width:100%}.gjj-bs-preview-status{color:#92a7ad;font-size:11px}.gjj-bs-preview{display:none;width:100%;height:auto;object-fit:contain;border:1px solid #334850;border-radius:8px;background:#0b1114}
+	`;
+	(document.head || document.body || document.documentElement).appendChild(style);
+}
+
+function cleanupPanelPopups(node) {
+	const state = node?.__gjjBerniniPanel;
+	for (const popup of [state?.settings, state?.modelSettings, state?.sizeSettings]) {
+		popup?.remove?.();
+	}
 }
 
 function createPanel(node) {
@@ -834,19 +1014,7 @@ function createPanel(node) {
 	const root = document.createElement("div");
 	root.className = "gjj-bs-root";
 	protect(root);
-	const style = document.createElement("style");
-	style.textContent = `
-		.gjj-bs-root,.gjj-bs-root *{box-sizing:border-box}.gjj-bs-root{display:flex;flex-direction:column;gap:7px;width:100%;padding:2px 0 4px;font:12px/1.4 system-ui;color:#dce7e9;pointer-events:auto}
-		.gjj-bs-toolbar{display:flex;flex-wrap:wrap;gap:6px;width:100%;align-items:center}.gjj-bs-button{min-height:32px;border-radius:6px;border:1px solid #50616a;color:#e8f0f2;font-weight:700;cursor:pointer;padding:0 10px;white-space:normal;line-height:1.15}
-		.gjj-bs-generate{flex:0 0 auto;min-width:116px;padding:0 12px;background:linear-gradient(135deg,#075a45,#0b9b70);border-color:#24c68b}.gjj-bs-translate,.gjj-bs-seed,.gjj-bs-cache,.gjj-bs-vars,.gjj-bs-settings-button,.gjj-bs-link,.gjj-bs-resize{flex:0 0 38px;padding:0;background:linear-gradient(135deg,#28323a,#3e4b55)}
-		.gjj-bs-vars{border-color:#d6a642;color:#ffe8a3}.gjj-bs-settings-button{border-color:#24c68b}.gjj-bs-button:hover{filter:brightness(1.18);transform:translateY(-1px)}.gjj-bs-button.active{background:linear-gradient(135deg,#164d3c,#287b59);border-color:#61c994}
-		.gjj-bs-prompt-field{display:flex;flex-direction:column;gap:4px;color:#b9c8cc}.gjj-bs-prompt-head{display:flex;align-items:center;gap:6px;width:100%;min-width:0}.gjj-bs-prompt-title{flex:0 0 auto;white-space:nowrap}.gjj-bs-prompt{min-height:58px;resize:vertical}
-		.gjj-bs-mode-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.gjj-bs-mode-button{flex:0 0 auto;min-height:20px;padding:0 7px;border-radius:5px;font-size:11px;background:#18242a;border-color:#3c5058;color:#d7e4e7}
-		.gjj-bs-settings{display:none;flex-direction:column;gap:9px;padding:8px;border:1px solid #41535b;border-radius:8px;background:#11191d}.gjj-bs-settings.open{display:flex}
-		.gjj-bs-heading{font-weight:800;color:#9ed6df;margin-bottom:5px}.gjj-bs-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.gjj-bs-field{display:flex;align-items:center;gap:6px;min-width:0}.gjj-bs-field.wide{grid-column:1/-1;align-items:flex-start;flex-direction:column}.gjj-bs-field>span{flex:0 0 78px;color:#aebbc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-		.gjj-bs-control{flex:1;min-width:0;width:100%;border:1px solid #40515a;border-radius:5px;background:#0e1519;color:#eaf2f3;padding:5px 7px}.gjj-bs-control[type=checkbox]{flex:0 0 auto;width:18px;height:18px}.gjj-bs-control:is(textarea){min-height:64px;resize:vertical}
-		.gjj-bs-preview-wrap{display:flex;flex-direction:column;gap:5px;width:100%}.gjj-bs-preview-status{color:#92a7ad;font-size:11px}.gjj-bs-preview{display:none;width:100%;height:auto;object-fit:contain;border:1px solid #334850;border-radius:8px;background:#0b1114}
-	`;
+	ensurePanelStyle();
 	const toolbar = document.createElement("div");
 	toolbar.className = "gjj-bs-toolbar";
 	const generate = makeButton("🎬 生成视频", "只执行当前 Bernini 节点并生成视频", "gjj-bs-generate", async () => {
@@ -898,28 +1066,37 @@ function createPanel(node) {
 	const seed = makeButton("🎲", "随机种子：关闭，保持当前种子并允许复用缓存", "gjj-bs-seed", () => {
 		setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", DEFAULT_VALUES.randomize_seed)));
 	});
-	const keepModel = makeButton("🧠", "保持模型：开启，复用已加载模型", "gjj-bs-cache", () => {
-		setValue(node, "keep_model", !Boolean(value(node, "keep_model", DEFAULT_VALUES.keep_model)));
+	const keepModel = makeButton("🧠", "打开模型与运行参数", "gjj-bs-cache", () => {
+		togglePopup(node, "model");
 	});
-	const resize = makeButton("📐", "按面板尺寸：开启，按宽高缩放裁剪", "gjj-bs-resize", () => {
-		setValue(node, "resize_to_panel", !Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel)));
+	const resize = makeButton("📐", "打开尺寸与输出参数", "gjj-bs-resize", () => {
+		togglePopup(node, "size");
 	});
 	const mediaLink = makeButton("🔗", "记住并断开/恢复媒体输入连接", "gjj-bs-link", () => {
 		toggleMediaLinks(node);
 	});
-	const templateSource = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, []);
-	templateSource.classList.add("gjj-bs-button", "gjj-bs-vars");
-	templateSource.textContent = "⚡";
-	templateSource.title = "从 GJJ_TemplateParams / GJJ_SETNODE / 变量读取系统选择 Bernini 参数来源";
+	const templateSource = makeButton("⚡", "从 GJJ_TemplateParams / GJJ_SETNODE / 变量读取系统选择 Bernini 参数来源", "gjj-bs-vars", async () => {
+		const old = templateSource.textContent;
+		templateSource.textContent = "…";
+		templateSource.disabled = true;
+		try {
+			await openTemplateSourcePickerLazy(node, templateSource);
+		} finally {
+			templateSource.textContent = old || "⚡";
+			templateSource.disabled = false;
+			syncPanel(node);
+		}
+	});
 	templateSource.style.width = "38px";
 	templateSource.style.flex = "0 0 38px";
 	templateSource.style.padding = "0";
-	const settingsButton = makeButton("⚙️", "展开或收起参数", "gjj-bs-settings-button", () => {
-		node.properties ||= {};
-		node.properties[SETTINGS_PROPERTY] = !Boolean(node.properties[SETTINGS_PROPERTY]);
-		syncPanel(node);
+	node.__gjjTemplateSourceButton = templateSource;
+	node.__gjjTemplateSourcePanel = templateSource;
+	node.__gjjTemplateSourceFields = TEMPLATE_SOURCE_FIELDS;
+	const settingsButton = makeButton("⚙️", "打开生成与提示词参数", "gjj-bs-settings-button", () => {
+		togglePopup(node, "settings");
 	});
-	toolbar.append(generate, translate, seed, keepModel, resize, mediaLink, templateSource, settingsButton);
+	toolbar.append(generate, translate, seed, mediaLink, templateSource, keepModel, resize, settingsButton);
 	const promptField = document.createElement("label");
 	promptField.className = "gjj-bs-prompt-field";
 	const promptHead = document.createElement("div");
@@ -938,8 +1115,12 @@ function createPanel(node) {
 	protect(modeButtons);
 	promptHead.append(promptLabel, modeButtons);
 	promptField.append(promptHead, prompt);
-	const settingsState = buildSettings(node);
-	root.append(style, toolbar, promptField, settingsState.settings);
+	const settingsState = buildSettings(node, SETTINGS_GROUPS, "生成参数", "settings");
+	const modelSettingsState = buildSettings(node, MODEL_SETTINGS_GROUPS, "模型参数", "model");
+	const sizeSettingsState = buildSettings(node, SIZE_SETTINGS_GROUPS, "尺寸参数", "size");
+	const controls = new Map([...settingsState.controls, ...modelSettingsState.controls, ...sizeSettingsState.controls]);
+	root.append(toolbar, promptField);
+	(document.body || document.documentElement).append(settingsState.settings, modelSettingsState.settings, sizeSettingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
 	domWidget.computeSize = (width) => [Math.max(430, Number(width || 430)), Math.max(38, root.scrollHeight + 4)];
 	node.__gjjBerniniPanel = {
@@ -956,7 +1137,9 @@ function createPanel(node) {
 		prompt,
 		modeButtons,
 		settings: settingsState.settings,
-		controls: settingsState.controls,
+		modelSettings: modelSettingsState.settings,
+		sizeSettings: sizeSettingsState.settings,
+		controls,
 		domWidget,
 	};
 	syncPanel(node);
@@ -1009,7 +1192,7 @@ function updatePreview(node, images, segment = null, total = null, label = "") {
 function syncPanel(node) {
 	const state = node.__gjjBerniniPanel;
 	if (!state) return;
-	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
+	updateTemplateSourcePanelLazy(node, TEMPLATE_SOURCE_FIELDS);
 	if (state.templateSource) {
 		state.templateSource.textContent = "⚡";
 		state.templateSource.style.width = "38px";
@@ -1023,23 +1206,40 @@ function syncPanel(node) {
 	updateRandomizeSeedButton(node);
 	updateResizeButton(node);
 	updateMediaLinkButton(node);
-	const open = Boolean(node.properties?.[SETTINGS_PROPERTY]);
-	state.settings.classList.toggle("open", open);
-	state.settingsButton.classList.toggle("active", open);
+	const popup = activePopup(node);
+	state.settings.classList.toggle("open", popup === "settings");
+	state.modelSettings?.classList.toggle("open", popup === "model");
+	state.sizeSettings?.classList.toggle("open", popup === "size");
+	state.settingsButton.classList.toggle("active", popup === "settings");
+	state.keepModel?.classList.toggle("popup-open", popup === "model");
+	state.resize?.classList.toggle("popup-open", popup === "size");
+	if (popup === "settings") positionSettingsPopup(state.settings, state.settingsButton);
+	else if (popup === "model") positionSettingsPopup(state.modelSettings, state.keepModel);
+	else if (popup === "size") positionSettingsPopup(state.sizeSettings, state.resize);
 	state.translate.classList.toggle("active", Boolean(node.properties?.[TRANSLATE_PROPERTY] || value(node, "translation_enabled", false)));
 	if (document.activeElement !== state.prompt) {
 		state.prompt.value = String(value(node, "prompt", ""));
 	}
 	const sources = selectedTemplateSources(node);
+	const sourceControlsSize = sourceSizeComesFromInput(node);
 	for (const [name, control] of state.controls || []) {
-		if (!control || document.activeElement === control) continue;
+		if (!control) continue;
 		const current = value(node, name, DEFAULT_VALUES[name]);
-		if (control.type === "checkbox") control.checked = Boolean(current);
-		else control.value = String(current ?? "");
-		const controlled = Boolean(String(sources[name] || "").trim());
+		const focused = document.activeElement === control;
+		if (control.dataset?.booleanControl === "true") {
+			setBooleanButtonState(control, Boolean(current));
+		} else if (!focused) {
+			if (control.type === "checkbox") control.checked = Boolean(current);
+			else control.value = String(current ?? "");
+		}
+		const templateControlled = Boolean(String(sources[name] || "").trim());
+		const sizeControlled = sourceControlsSize && (name === "width" || name === "height");
+		const controlled = templateControlled || sizeControlled;
 		control.disabled = controlled;
 		control.style.opacity = controlled ? "0.52" : "";
-		control.title = controlled ? `参数已由变量 ${sources[name]} 接管` : (widget(node, name)?.options?.tooltip || widget(node, name)?.tooltip || name);
+		control.title = templateControlled
+			? `参数已由变量 ${sources[name]} 接管`
+			: (sizeControlled ? "源媒体已外接且未按面板尺寸输出，宽高将自动沿用源媒体尺寸。" : (widget(node, name)?.options?.tooltip || widget(node, name)?.tooltip || name));
 	}
 	const promptControlled = Boolean(String(sources.prompt || "").trim());
 	state.prompt.disabled = promptControlled;
@@ -1079,7 +1279,7 @@ function stabilize(node) {
 	hideBackendWidgets(node);
 	createPanel(node);
 	createPreview(node);
-	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
+	updateTemplateSourcePanelLazy(node, TEMPLATE_SOURCE_FIELDS);
 	syncPanel(node);
 	node.size ||= [430, 260];
 	node.size[0] = Math.max(430, Number(node.size[0] || 430));
@@ -1126,6 +1326,11 @@ app.registerExtension({
 			schedule(this);
 			return result;
 		};
+		const originalRemoved = nodeType.prototype.onRemoved;
+		nodeType.prototype.onRemoved = function (...args) {
+			cleanupPanelPopups(this);
+			return originalRemoved?.apply(this, args);
+		};
 		const originalExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
 			const result = originalExecuted?.apply(this, arguments);
@@ -1163,6 +1368,13 @@ app.registerExtension({
 			const node = event?.detail?.node;
 			if (String(node?.comfyClass) !== NODE_TYPE) return;
 			syncPanel(node);
+		});
+		window.addEventListener("gjj-template-source-picker-opening", (event) => {
+			for (const node of app.graph?._nodes || []) {
+				if (String(node?.comfyClass) !== NODE_TYPE) continue;
+				closePanelPopups(node);
+				syncPanel(node);
+			}
 		});
 		for (const node of app.graph?._nodes || []) {
 			if (String(node?.comfyClass) === NODE_TYPE) stabilize(node);

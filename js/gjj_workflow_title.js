@@ -205,7 +205,6 @@ function collapseWidget(widget) {
 	widget.hidden = true;
 	widget.computeSize = () => [0, -4];
 	widget.type = widget.type || "hidden";
-	collapseElement(widget.inputEl);
 	collapseElement(widget.element);
 	collapseElement(widget.widget);
 }

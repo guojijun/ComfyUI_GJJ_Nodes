@@ -1840,6 +1840,17 @@ function setGraphLinkOriginSlot(linkId, slotIndex) {
 	else link.origin_slot = slotIndex;
 }
 
+function removeOutputSlotDirect(node, index) {
+	if (!Array.isArray(node?.outputs) || index < 0 || index >= node.outputs.length) return false;
+	disconnectOutputLinks(node, index);
+	node.outputs.splice(index, 1);
+	for (let slot = index; slot < node.outputs.length; slot += 1) {
+		for (const linkId of node.outputs[slot]?.links || []) setGraphLinkOriginSlot(linkId, slot);
+		node.outputs[slot].slot_index = slot;
+	}
+	return true;
+}
+
 function migrateLegacySamplingOutputs(node) {
 	if (!Array.isArray(node?.outputs) || node.__gjjMBExtraOutputMigrationDone) return;
 	const outputs = node.outputs;
@@ -1865,9 +1876,7 @@ function ensureOutputCount(node, metaList) {
 	while (node.outputs.length > count) {
 		const index = node.outputs.length - 1;
 		if (outputHasLinks(node.outputs[index])) break;
-		disconnectOutputLinks(node, index);
-		if (typeof node.removeOutput === "function") node.removeOutput(index);
-		else node.outputs.splice(index, 1);
+		removeOutputSlotDirect(node, index);
 	}
 	while (node.outputs.length < count) {
 		const meta = metaList[node.outputs.length] || OUTPUT_META[node.outputs.length] || CORE_OUTPUT_META[0];

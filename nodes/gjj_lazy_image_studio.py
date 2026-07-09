@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from nodes import (
+    CheckpointLoaderSimple,
     EmptyLatentImage,
     VAEDecode,
     VAEEncode,
@@ -86,7 +87,9 @@ from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import (
     apply_lora_chain_config,
     build_lora_trigger_text,
+    clean_lora_config_name,
     normalize_lora_chain_data,
+    parse_lora_data,
 )
 from .gjj_multi_image_loader import (
     load_image_tensor,
@@ -115,6 +118,9 @@ NODE_NAME = "GJJ_LazyImageStudio"
 MAX_MAIN_IMAGE_INDEX = 9999
 DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
 DEFAULT_UNET_DTYPE = "default"
+DEFAULT_MODEL_SOURCE = "UNET 主模型"
+MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]
+DEFAULT_CHECKPOINT_NAME = ""
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
@@ -122,6 +128,14 @@ LTX_NAG_SCALE = 11.0
 LTX_NAG_ALPHA = 0.25
 LTX_NAG_TAU = 2.5
 REFERENCE_IMAGE_MEGAPIXELS = 1.0
+
+
+def _is_checkpoint_model_source(model_source: Any, ckpt_name: Any = "") -> bool:
+    source_text = str(model_source or "").strip().lower()
+    checkpoint_text = str(ckpt_name or "").strip()
+    return source_text in {"底模 checkpoint", "checkpoint", "ckpt"} or (
+        not source_text and bool(checkpoint_text)
+    )
 REFERENCE_IMAGE_RESOLUTION_STEPS = 1
 FLUX2_REFERENCE_RESOLUTION_STEPS = 16
 IMAGE_RATIO_EPSILON = 0.015
@@ -693,6 +707,10 @@ def _list_lazy_unet_models() -> list[str]:
         + _safe_filename_list("diffusion_models")
         + _safe_filename_list("checkpoints")
     )
+
+
+def _list_lazy_checkpoints() -> list[str]:
+    return _safe_filename_list("checkpoints") or [DEFAULT_CHECKPOINT_NAME]
 
 
 def _list_lazy_clip_models() -> list[str]:
@@ -1825,7 +1843,7 @@ class GJJ_LazyImageStudio:
         "dynamic_model_tree_only": True,
         "model_download_url": DEFAULT_MODEL_URL,
         "notice": (
-            "模型树会按当前面板选择动态生成：UNET、CLIP、VAE 来自对应模型目录；"
+            "模型树会按当前面板选择动态生成：可使用 UNET+CLIP+VAE，或直接使用 checkpoints 底模；"
             "节点内置 LoRA 行和外部 LoRA串联配置也会一并显示。"
         ),
     }
@@ -1919,6 +1937,7 @@ class GJJ_LazyImageStudio:
         diffusion_models = _filtered if _filtered else _raw_diffusion_models
         clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
         vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+        checkpoint_models = _list_lazy_checkpoints()
         # 确保 loras 目录存在并获取文件列表
         try:
             lora_files = folder_paths.get_filename_list("loras")
@@ -2172,6 +2191,28 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "model_source": (
+                        MODEL_SOURCE_OPTIONS,
+                        {
+                            "default": DEFAULT_MODEL_SOURCE,
+                            "display_name": "🧠 模型来源",
+                            "tooltip": "UNET 主模型：使用 diffusion_models/unet_gguf + CLIP + VAE；底模 checkpoint：像 GJJ_CheckpointDirectGenerator 一样直接加载 models/checkpoints。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "ckpt_name": (
+                        checkpoint_models,
+                        {
+                            "default": _preferred_default(checkpoint_models, DEFAULT_CHECKPOINT_NAME),
+                            "display_name": "🎨 底模模型",
+                            "tooltip": "从 models/checkpoints 选择可直接生图的底模；仅在模型来源为“底模 checkpoint”时生效。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -2203,6 +2244,7 @@ class GJJ_LazyImageStudio:
         clip_type: str,
         lora_chain_config: str = "",
         lora_data: str = "",
+        use_checkpoint_model: bool = False,
     ):
         current_model = model
         current_clip = clip
@@ -2231,11 +2273,64 @@ class GJJ_LazyImageStudio:
         ]
         if effective_lora_rows:
             print(f"[GJJ] LazyImageStudio 应用 LoRA 数量：{len(effective_lora_rows)}")
-            current_model, current_clip, _ = apply_lora_chain_config(
-                current_model,
-                current_clip,
-                lora_data=final_lora_data,
-                loaded_lora_cache=None,
+            if use_checkpoint_model:
+                print("[GJJ] LazyImageStudio 底模 checkpoint 分支：使用原生 LoRA 应用路径")
+                current_model, current_clip = self._apply_checkpoint_loras(
+                    current_model,
+                    current_clip,
+                    clip_type,
+                    final_lora_data,
+                )
+            else:
+                current_model, current_clip, _ = apply_lora_chain_config(
+                    current_model,
+                    current_clip,
+                    lora_data=final_lora_data,
+                    loaded_lora_cache=None,
+                )
+        return current_model, current_clip
+
+    def _apply_checkpoint_loras(
+        self,
+        model,
+        clip,
+        clip_type: str,
+        lora_data: str,
+    ):
+        current_model = model
+        current_clip = clip
+        skip_clip_lora = _should_skip_clip_lora_for_family(clip_type)
+        for item in parse_lora_data(lora_data):
+            if item.get("enabled", True) is False:
+                continue
+            lora_name = clean_lora_config_name(item.get("name", ""))
+            if not lora_name:
+                continue
+            try:
+                strength = float(item.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            if abs(strength) < 1e-5:
+                continue
+
+            lora_state = self._load_lora_state(lora_name)
+            try:
+                patched_model, patched_clip = apply_lora_to_model_and_clip(
+                    current_model,
+                    None if skip_clip_lora else current_clip,
+                    lora_state,
+                    strength,
+                    0.0 if skip_clip_lora else strength,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"LoRA 应用失败：{lora_name}\n{exc}") from exc
+
+            current_model = patched_model
+            if not skip_clip_lora and patched_clip is not None:
+                current_clip = patched_clip
+            print(
+                f"[GJJ] LazyImageStudio checkpoint LoRA 已应用：{lora_name} "
+                f"(model={strength}, clip={0.0 if skip_clip_lora else strength})"
             )
         return current_model, current_clip
 
@@ -2756,8 +2851,22 @@ class GJJ_LazyImageStudio:
         clip_names: list[str],
         clip_type: str,
         vae_name: str,
+        model_source: str = DEFAULT_MODEL_SOURCE,
+        ckpt_name: str = DEFAULT_CHECKPOINT_NAME,
         unique_id: Any = None,
     ):
+        if _is_checkpoint_model_source(model_source, ckpt_name):
+            checkpoint_name = str(ckpt_name or "").strip()
+            if not checkpoint_name:
+                raise RuntimeError("未选择底模 checkpoint，请先在 🧠 模型设置里选择底模模型。")
+            try:
+                print(f"[DEBUG] Loading checkpoint model: {checkpoint_name}")
+                model, clip, vae = CheckpointLoaderSimple().load_checkpoint(checkpoint_name)
+                print(f"[DEBUG] Successfully loaded checkpoint model: {checkpoint_name}")
+                print(f"\033[95m🎨 Checkpoint: {checkpoint_name}\033[0m")
+                return model, clip, vae
+            except Exception as exc:
+                raise _format_runtime_error("底模 checkpoint 加载", exc) from exc
         model = _load_model(unet_name, unet_dtype, clip_type, unique_id=unique_id)
         clip = _load_clip_from_names(clip_names, clip_type)
         vae = _load_vae(vae_name)
@@ -2792,6 +2901,8 @@ class GJJ_LazyImageStudio:
         keep_model_loaded=False,
         test_config="",
         use_input_image_size=True,
+        model_source=DEFAULT_MODEL_SOURCE,
+        ckpt_name=DEFAULT_CHECKPOINT_NAME,
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -2825,6 +2936,8 @@ class GJJ_LazyImageStudio:
         keep_model_loaded = _unwrap_list_input(keep_model_loaded)
         test_config = _unwrap_list_input(test_config)
         use_input_image_size = _unwrap_list_input(use_input_image_size)
+        model_source = _unwrap_list_input(model_source)
+        ckpt_name = _unwrap_list_input(ckpt_name)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
@@ -2842,21 +2955,32 @@ class GJJ_LazyImageStudio:
                 test_config_data = {}
 
         # 兼容旧工作流：如果隐藏输入未提交，再从 workflow properties 读取。
-        if not str(lora_data or "").strip():
-            try:
-                if extra_pnginfo and isinstance(extra_pnginfo, dict):
-                    workflow = extra_pnginfo.get("workflow", {})
-                    if isinstance(workflow, dict):
-                        nodes = workflow.get("nodes", [])
-                        if isinstance(nodes, list):
-                            uid = str(unique_id)
-                            for n in nodes:
-                                if isinstance(n, dict) and str(n.get("id")) == uid:
-                                    props = n.get("properties", {}) or {}
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow", {})
+                if isinstance(workflow, dict):
+                    nodes = workflow.get("nodes", [])
+                    if isinstance(nodes, list):
+                        uid = str(unique_id)
+                        for n in nodes:
+                            if isinstance(n, dict) and str(n.get("id")) == uid:
+                                props = n.get("properties", {}) or {}
+                                if not str(lora_data or "").strip():
                                     lora_data = str(props.get("lora_data", ""))
-                                    break
-            except Exception:
+                                if not str(ckpt_name or "").strip():
+                                    ckpt_name = str(props.get("ckpt_name", ""))
+                                if not str(model_source or "").strip() or (
+                                    str(model_source or "") == DEFAULT_MODEL_SOURCE
+                                    and str(props.get("model_source", "")) == "底模 checkpoint"
+                                ):
+                                    model_source = str(props.get("model_source", model_source))
+                                break
+        except Exception:
+            if not str(lora_data or "").strip():
                 lora_data = ""
+
+        use_checkpoint_model = _is_checkpoint_model_source(model_source, ckpt_name)
+        active_model_name = str(ckpt_name or "").strip() if use_checkpoint_model else str(unet_name or "").strip()
 
         lora_trigger_text = self._lora_trigger_text(lora_data, lora_chain_config)
         if lora_trigger_text:
@@ -2951,6 +3075,8 @@ class GJJ_LazyImageStudio:
                             keep_model_loaded=keep_model_loaded,
                             test_config="",
                             use_input_image_size=use_input_image_size,
+                            model_source=model_source,
+                            ckpt_name=ckpt_name,
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
@@ -3041,6 +3167,8 @@ class GJJ_LazyImageStudio:
                 "unet_dtype": str(unet_dtype or ""),
                 "clip_name1": str(clip_name1 or ""),
                 "vae_name": str(vae_name or ""),
+                "model_source": str(model_source or DEFAULT_MODEL_SOURCE),
+                "ckpt_name": str(ckpt_name or ""),
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),
@@ -3063,10 +3191,15 @@ class GJJ_LazyImageStudio:
 
         try:
             _send_status(unique_id, "1/6 解析模型配套...")
-            preset = match_model_family(unet_name)
-            preset = _apply_f2k_fallback_preset(preset, unet_name)
-            preset = _apply_zit_fallback_preset(preset, unet_name)
-            preset = _apply_krea2_fallback_preset(preset, unet_name)
+            if use_checkpoint_model:
+                if not active_model_name:
+                    raise RuntimeError("未选择底模 checkpoint，请先在 🧠 模型设置里选择底模模型。")
+                preset = match_model_family("")
+            else:
+                preset = match_model_family(unet_name)
+                preset = _apply_f2k_fallback_preset(preset, unet_name)
+                preset = _apply_zit_fallback_preset(preset, unet_name)
+                preset = _apply_krea2_fallback_preset(preset, unet_name)
             clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
@@ -3075,23 +3208,28 @@ class GJJ_LazyImageStudio:
                 lora_models = [str(f) for f in lora_files if str(f or "").strip()]
             except Exception:
                 lora_models = []
-            preset_driven_model = bool(unet_name_is_linked and not clip_name_is_linked)
-            exposed_clip_name = "" if preset_driven_model else clip_name1
-            legacy_clip_names = [] if preset_driven_model else [clip_name1]
-            resolved_clip_names = resolve_clip_names_for_preset(
-                preset,
-                clip_models,
-                exposed_clip_name=exposed_clip_name,
-                legacy_clip_names=legacy_clip_names,
-            )
-            if not resolved_clip_names:
-                resolved_clip_names.append(
-                    _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
+            if use_checkpoint_model:
+                resolved_clip_names = []
+                resolved_vae_name = ""
+                resolved_clip_type = "stable_diffusion"
+            else:
+                preset_driven_model = bool(unet_name_is_linked and not clip_name_is_linked)
+                exposed_clip_name = "" if preset_driven_model else clip_name1
+                legacy_clip_names = [] if preset_driven_model else [clip_name1]
+                resolved_clip_names = resolve_clip_names_for_preset(
+                    preset,
+                    clip_models,
+                    exposed_clip_name=exposed_clip_name,
+                    legacy_clip_names=legacy_clip_names,
                 )
+                if not resolved_clip_names:
+                    resolved_clip_names.append(
+                        _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
+                    )
 
             # 验证 CLIP 模型是否正确匹配 UNET 模型
             preset_clip_names = preset.get("clip_names", [])
-            if preset_clip_names and resolved_clip_names:
+            if (not use_checkpoint_model) and preset_clip_names and resolved_clip_names:
                 # 检查解析后的 CLIP 名称是否与预设中的推荐名称匹配
                 for i, (resolved, recommended) in enumerate(
                     zip(resolved_clip_names, preset_clip_names)
@@ -3105,19 +3243,20 @@ class GJJ_LazyImageStudio:
                         print(
                             f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。"
                         )
-            vae_fallback = (
-                DEFAULT_VAE_NAME
-                if unet_name_is_linked and not vae_name_is_linked
-                else vae_name
-            )
-            resolved_vae_name = _pick_available_name(
-                preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_fallback
-            )
-            resolved_clip_type = resolve_clip_type(
-                unet_name,
-                resolved_clip_names,
-                str(preset.get("clip_type", "stable_diffusion")),
-            )
+            if not use_checkpoint_model:
+                vae_fallback = (
+                    DEFAULT_VAE_NAME
+                    if unet_name_is_linked and not vae_name_is_linked
+                    else vae_name
+                )
+                resolved_vae_name = _pick_available_name(
+                    preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_fallback
+                )
+                resolved_clip_type = resolve_clip_type(
+                    unet_name,
+                    resolved_clip_names,
+                    str(preset.get("clip_type", "stable_diffusion")),
+                )
             if _is_krea2_family(unet_name, resolved_clip_type, preset):
                 resolved_clip_type = "krea2"
             is_flux2_runtime = _is_flux2_family(
@@ -3160,8 +3299,9 @@ class GJJ_LazyImageStudio:
                     height = input_height
             preset = dict(preset)
             preset["resolved_unet_name"] = str(unet_name or "")
+            preset["resolved_ckpt_name"] = str(ckpt_name or "")
             preset["resolved_clip_type"] = str(resolved_clip_type or "")
-            is_boogu_image_edit_turbo = _is_boogu_image_edit_turbo_family(preset, unet_name)
+            is_boogu_image_edit_turbo = False if use_checkpoint_model else _is_boogu_image_edit_turbo_family(preset, unet_name)
 
             normalized_lora_parts = [
                 normalize_lora_chain_data(value)
@@ -3171,6 +3311,8 @@ class GJJ_LazyImageStudio:
             runtime_key = _cache_digest(
                 {
                     "unet_name": str(unet_name or ""),
+                    "model_source": str(model_source or DEFAULT_MODEL_SOURCE),
+                    "ckpt_name": str(ckpt_name or ""),
                     "unet_dtype": str(unet_dtype or ""),
                     "clip_names": [str(item or "") for item in resolved_clip_names],
                     "clip_type": str(resolved_clip_type or ""),
@@ -3236,6 +3378,8 @@ class GJJ_LazyImageStudio:
                     resolved_clip_names,
                     resolved_clip_type,
                     resolved_vae_name,
+                    str(model_source or DEFAULT_MODEL_SOURCE),
+                    str(ckpt_name or ""),
                     unique_id=unique_id,
                 )
 
@@ -3246,6 +3390,7 @@ class GJJ_LazyImageStudio:
                     resolved_clip_type,
                     lora_chain_config,
                     lora_data,
+                    use_checkpoint_model,
                 )
                 if not is_boogu_image_edit_turbo:
                     model = _patch_model_sampling(
@@ -3532,6 +3677,8 @@ class GJJ_LazyImageStudio:
                 "unet_dtype": str(unet_dtype or ""),
                 "clip_name1": str(resolved_clip_names[0] if resolved_clip_names else clip_name1 or ""),
                 "vae_name": str(resolved_vae_name or vae_name or ""),
+                "model_source": str(model_source or DEFAULT_MODEL_SOURCE),
+                "ckpt_name": str(ckpt_name or ""),
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),

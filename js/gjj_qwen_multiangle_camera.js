@@ -33,6 +33,8 @@ import { api } from "/scripts/api.js";
     ];
 
     const STYLE_ID = "gjj-multiangle-camera-styles";
+    const THREE_SCRIPT_URL = "/extensions/ComfyUI_GJJ_Nodes/three.umd.js";
+    let threeLoadPromise = null;
 
     function injectStyles() {
         if (document.getElementById(STYLE_ID)) return;
@@ -1070,29 +1072,42 @@ import { api } from "/scripts/api.js";
     }
 
     function loadThreeJS() {
-        return new Promise((resolve) => {
+        if (window.THREE) return Promise.resolve(true);
+        if (window.__THREE__) {
+            console.warn("[GJJ][多角度相机] 检测到 ComfyUI 已加载 Three.js 模块但未暴露 window.THREE；为避免重复导入，3D 预览已降级。");
+            return Promise.resolve(false);
+        }
+        if (threeLoadPromise) return threeLoadPromise;
+
+        threeLoadPromise = new Promise((resolve) => {
             if (window.THREE) { resolve(true); return; }
-            const existing = document.querySelector('script[src*="three"]');
-            if (existing) {
+            if (window.__THREE__) { resolve(false); return; }
+
+            const existingGjjScript = document.querySelector(`script[src="${THREE_SCRIPT_URL}"]`);
+            if (existingGjjScript) {
                 const check = setInterval(() => {
                     if (window.THREE) { clearInterval(check); resolve(true); }
                 }, 100);
                 setTimeout(() => { clearInterval(check); resolve(!!window.THREE); }, 10000);
                 return;
             }
+
+            const existingThreeScript = document.querySelector('script[src*="three"]');
+            if (existingThreeScript && !window.THREE) {
+                console.warn("[GJJ][多角度相机] 检测到页面已有 Three.js 脚本，但未暴露 window.THREE；为避免重复导入，跳过 GJJ 内置 Three.js。");
+                resolve(false);
+                return;
+            }
+
             const s = document.createElement("script");
-            s.src = "/extensions/ComfyUI_GJJ_Nodes/three.umd.js";
+            s.src = THREE_SCRIPT_URL;
+            s.dataset.gjjThree = "true";
             s.onload = () => resolve(!!window.THREE);
-            s.onerror = () => {
-                console.warn("[GJJ][多角度相机] 内置 Three.js 加载失败，尝试 CDN...");
-                const fallback = document.createElement("script");
-                fallback.src = "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.min.js";
-                fallback.onload = () => resolve(!!window.THREE);
-                fallback.onerror = () => resolve(false);
-                document.head.appendChild(fallback);
-            };
+            s.onerror = () => resolve(false);
             document.head.appendChild(s);
         });
+
+        return threeLoadPromise;
     }
 
     app.registerExtension({

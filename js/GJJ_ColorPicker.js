@@ -365,5 +365,3 @@ if (typeof LiteGraph !== 'undefined') {
         computeSize: function(width) { return [width, 32]; }
     });
 }
-
-console.log('[GJJ_ColorPicker] 颜色选择器已加载');

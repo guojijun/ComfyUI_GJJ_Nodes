@@ -1,5 +1,4 @@
 import { app } from "../../../scripts/app.js";
-import { ComfyWidgets } from "../../../scripts/widgets.js";
 import { GJJ_STANDARDIZE_NODE } from "./gjj_common_node_standardizer.js";
 
 GJJ_STANDARDIZE_NODE({

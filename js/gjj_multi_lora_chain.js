@@ -1244,7 +1244,7 @@ function createStyleTag(container) {
 		.gjj-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
 		.gjj-lora-preview-copy strong { color:#eef8f4; font-size:12px; }
 		.gjj-lora-preview-copy code { color:#9fd4c3; white-space:normal; word-break:break-word; }
-		.gjj-lora-popup { display:none; flex-direction:column; gap:6px; position:absolute; top:calc(100% + 6px); left:0; min-width:max(100%, 420px); max-width:680px; width:max-content; padding:6px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-sizing:border-box; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.35); }
+		.gjj-lora-popup { display:none; flex-direction:column; gap:6px; position:absolute; top:calc(100% + 6px); left:0; min-width:280px; max-width:560px; width:420px; padding:6px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-sizing:border-box; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.35); }
 		.gjj-lora-popup.open { display:flex; }
 		.gjj-lora-popup-search { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 6px; box-sizing:border-box; }
 		.gjj-lora-popup-list { display:flex; flex-direction:column; gap:4px; max-height:300px; overflow:auto; }
@@ -1298,21 +1298,23 @@ function positionGlobalLoraPopup(panel, list, anchorEl) {
 	const viewportHeight = Math.max(240, window.innerHeight || 240);
 	const horizontalPadding = 12;
 	const verticalPadding = 12;
+	const maxPopupWidth = 560;
+	const minPopupWidth = Math.min(420, Math.max(280, viewportWidth - horizontalPadding * 2));
 	const targetWidth = Math.min(
-		Math.max(Math.ceil(rect?.width || 420), 420),
-		Math.max(320, viewportWidth - horizontalPadding * 2),
-		680,
+		Math.max(Math.min(Math.ceil(rect?.width || minPopupWidth), maxPopupWidth), minPopupWidth),
+		Math.max(280, viewportWidth - horizontalPadding * 2),
+		maxPopupWidth,
 	);
 	const spaceBelow = Math.max(120, viewportHeight - Math.ceil(rect?.bottom || 0) - verticalPadding - 6);
 	const spaceAbove = Math.max(120, Math.floor(rect?.top || 0) - verticalPadding - 6);
 	const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
-	const panelMaxHeight = Math.max(180, Math.min(420, openAbove ? spaceAbove : spaceBelow));
+	const panelMaxHeight = Math.max(160, Math.min(360, openAbove ? spaceAbove : spaceBelow));
 	const listMaxHeight = Math.max(96, panelMaxHeight - 52);
 	const rawLeft = Math.floor(rect?.left || horizontalPadding);
 	const left = Math.max(horizontalPadding, Math.min(rawLeft, viewportWidth - targetWidth - horizontalPadding));
 
 	panel.style.width = `${targetWidth}px`;
-	panel.style.maxWidth = `${Math.max(320, viewportWidth - horizontalPadding * 2)}px`;
+	panel.style.maxWidth = `${Math.min(maxPopupWidth, Math.max(280, viewportWidth - horizontalPadding * 2))}px`;
 	panel.style.maxHeight = `${panelMaxHeight}px`;
 	list.style.maxHeight = `${listMaxHeight}px`;
 	panel.style.left = `${left}px`;

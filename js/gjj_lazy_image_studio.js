@@ -5,7 +5,7 @@ import {
 	getModelFamilyPresets,
 } from "./gjj_model_family_preset_table.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
-import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
+import { closeTemplateSourcePicker, createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
 import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const TARGET_NODES = new Set(["GJJ_LazyImageStudio"]);
@@ -32,7 +32,11 @@ const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
 const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
 const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
+const MODEL_SOURCE_WIDGET_NAME = "model_source";
+const CHECKPOINT_WIDGET_NAME = "ckpt_name";
+const CHECKPOINT_MODEL_SOURCE_VALUE = "底模 checkpoint";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
+const MODEL_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_model_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
@@ -41,6 +45,7 @@ const TEST_SORT_PROPERTY = "gjj_lazy_image_studio_test_sorts";
 const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link_memory";
 const PREVIEW_LAYOUT_PROPERTY = "gjj_lazy_image_studio_preview_layout";
 const PREVIEW_PAGE_PROPERTY = "gjj_lazy_image_studio_preview_page";
+const LORA_GLOBAL_SEARCH_PROPERTY = "gjj_lazy_image_studio_lora_global_search";
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -86,8 +91,46 @@ const KEEP_MODEL_BUTTON_STYLES = {
 		title: "模型保持已开启：执行后保留当前模型、CLIP 和 VAE，适合连续生成。",
 	},
 };
+const MODEL_SETTINGS_BUTTON_STYLES = {
+	off: {
+		bg: "linear-gradient(135deg, #1f2933, #374151)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#55636f",
+		color: "#e5edf2",
+	},
+	on: {
+		bg: "linear-gradient(135deg, #7c3aed, #9333ea)",
+		hover: "linear-gradient(135deg, #9333ea, #a855f7)",
+		border: "#c084fc",
+		color: "#f5f3ff",
+	},
+};
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
+const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
+const MODEL_PANEL_WIDGETS = new Set([
+	MODEL_SOURCE_WIDGET_NAME,
+	CHECKPOINT_WIDGET_NAME,
+	"unet_name",
+	"unet_dtype",
+	"clip_name1",
+	"vae_name",
+	KEEP_MODEL_WIDGET_NAME,
+]);
+const OTHER_PANEL_WIDGETS = new Set([
+	"negative_prompt",
+	"main_image_index",
+	"width",
+	"height",
+	"batch_size",
+	"seed",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"grow_mask_by",
+]);
 const PROTECTED_WIDGET_NAMES = new Set([
 	EXECUTE_BUTTON_NAME,
 	IMAGE_PREVIEW_NAME,
@@ -115,6 +158,8 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	MODEL_SOURCE_WIDGET_NAME,
+	CHECKPOINT_WIDGET_NAME,
 ]);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
@@ -348,6 +393,8 @@ const PANEL_SYNC_WIDGETS = [
 	"grow_mask_by",
 	KEEP_MODEL_WIDGET_NAME,
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
+	MODEL_SOURCE_WIDGET_NAME,
+	CHECKPOINT_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -370,6 +417,8 @@ const RESTORE_WIDGET_TYPES = {
 	grow_mask_by: "number",
 	[KEEP_MODEL_WIDGET_NAME]: "toggle",
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: "toggle",
+	[MODEL_SOURCE_WIDGET_NAME]: "combo",
+	[CHECKPOINT_WIDGET_NAME]: "combo",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -414,6 +463,8 @@ const SERIALIZED_PARAM_WIDGETS = [
 	KEEP_MODEL_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
+	MODEL_SOURCE_WIDGET_NAME,
+	CHECKPOINT_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -438,6 +489,8 @@ const DEFAULT_PARAM_VALUES = {
 	[KEEP_MODEL_WIDGET_NAME]: false,
 	[TEST_CONFIG_WIDGET_NAME]: "",
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: true,
+	[MODEL_SOURCE_WIDGET_NAME]: "UNET 主模型",
+	[CHECKPOINT_WIDGET_NAME]: "",
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -703,6 +756,7 @@ function installModelHelpProvider(node) {
 	node.__gjjLazyModelHelpProviderInstalled = true;
 	node.__gjjHelpModelTreeEntries = function () {
 		const entries = [];
+		const useCheckpoint = widgetValue(this, MODEL_SOURCE_WIDGET_NAME) === CHECKPOINT_MODEL_SOURCE_VALUE;
 		const pushWidgetModel = (name, label, folder, kind, tooltip) => {
 			const value = widgetValue(this, name);
 			if (!value) {
@@ -710,27 +764,37 @@ function installModelHelpProvider(node) {
 			}
 			entries.push({ label, value, folder, kind, name, tooltip });
 		};
-		pushWidgetModel(
-			"unet_name",
-			"🟣 UNET 主模型",
-			"diffusion_models",
-			"diffusion",
-			"调用方法：节点内部按当前模型族加载 UNET，并自动匹配采样、编码器、VAE 与推荐 LoRA。"
-		);
-		pushWidgetModel(
-			"clip_name1",
-			"🟡 CLIP 编码器",
-			"text_encoders",
-			"clip",
-			"调用方法：作为当前模型族的文本编码器；固定配套模型族会由节点内部自动匹配。"
-		);
-		pushWidgetModel(
-			"vae_name",
-			"🔴 VAE 解码器",
-			"vae",
-			"vae",
-			"调用方法：节点内部加载 VAE，将采样 latent 解码为最终 IMAGE。"
-		);
+		if (useCheckpoint) {
+			pushWidgetModel(
+				CHECKPOINT_WIDGET_NAME,
+				"🎨 底模模型",
+				"checkpoints",
+				"checkpoint_model",
+				"调用方法：节点内部走 ComfyUI CheckpointLoaderSimple 加载底模，并拆出 MODEL / CLIP / VAE。"
+			);
+		} else {
+			pushWidgetModel(
+				"unet_name",
+				"🟣 UNET 主模型",
+				"diffusion_models",
+				"diffusion",
+				"调用方法：节点内部按当前模型族加载 UNET，并自动匹配采样、编码器、VAE 与推荐 LoRA。"
+			);
+			pushWidgetModel(
+				"clip_name1",
+				"🟡 CLIP 编码器",
+				"text_encoders",
+				"clip",
+				"调用方法：作为当前模型族的文本编码器；固定配套模型族会由节点内部自动匹配。"
+			);
+			pushWidgetModel(
+				"vae_name",
+				"🔴 VAE 解码器",
+				"vae",
+				"vae",
+				"调用方法：节点内部加载 VAE，将采样 latent 解码为最终 IMAGE。"
+			);
+		}
 		const rows = ensureLoraNodeState(this).rows || [];
 		rows.forEach((row, index) => {
 			const name = String(row?.name || "").trim();
@@ -972,6 +1036,10 @@ function settingsOpen(node) {
 	return Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
 }
 
+function modelSettingsOpen(node) {
+	return Boolean(node?.properties?.[MODEL_SETTINGS_OPEN_PROPERTY]);
+}
+
 function translationEnabled(node) {
 	return Boolean(node?.properties?.[TRANSLATE_ENABLED_PROPERTY]);
 }
@@ -1087,6 +1155,8 @@ function setKeepModelEnabled(node, enabled) {
 		try { widget.callback?.(value); } catch (_) {}
 	}
 	applyKeepModelButtonState(node);
+	updateModelSettingsButtonState(node);
+	updateSettingsButtonState(node);
 	node.graph?.change?.();
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -1096,7 +1166,7 @@ function applyKeepModelButtonState(node) {
 	if (!button) return;
 	const enabled = keepModelEnabled(node);
 	const style = enabled ? KEEP_MODEL_BUTTON_STYLES.on : KEEP_MODEL_BUTTON_STYLES.off;
-	button.textContent = "🧠";
+	button.textContent = "📌";
 	button.dataset.value = enabled ? "true" : "false";
 	button.setAttribute("aria-pressed", enabled ? "true" : "false");
 	button.title = style.title;
@@ -1204,7 +1274,10 @@ function setLazyWidgetHidden(widget, hidden) {
 	}
 
 	widget.hidden = Boolean(state.hidden);
-	widget.disabled = Boolean(state.disabled);
+	widget.disabled = PANEL_FORCED_VISIBLE_WIDGETS.has(widget.name) ? false : Boolean(state.disabled);
+	if (PANEL_FORCED_VISIBLE_WIDGETS.has(widget.name)) {
+		widget.hidden = false;
+	}
 	widget.type = state.type && state.type !== "hidden" ? state.type : (RESTORE_WIDGET_TYPES[widget.name] || state.type || "text");
 	if (state.computeSize) widget.computeSize = state.computeSize;
 	else delete widget.computeSize;
@@ -1216,13 +1289,24 @@ function setLazyWidgetHidden(widget, hidden) {
 	else delete widget.mouse;
 	widget.label = state.label ?? widget.label;
 	widget.localized_name = state.localized_name ?? widget.localized_name;
-	if (state.optionsHidden === undefined) delete widget.options.hidden;
-	else widget.options.hidden = state.optionsHidden;
-	if (state.optionsDisplay === undefined) delete widget.options.display;
-	else widget.options.display = state.optionsDisplay;
-	if (widget.element) widget.element.style.display = state.elementDisplay || "";
-	if (widget.inputEl) widget.inputEl.style.display = state.inputDisplay || "";
-	if (widget.widget) widget.widget.style.display = state.widgetDisplay || "";
+	if (PANEL_FORCED_VISIBLE_WIDGETS.has(widget.name)) {
+		delete widget.options.hidden;
+		delete widget.options.display;
+	} else {
+		if (state.optionsHidden === undefined) delete widget.options.hidden;
+		else widget.options.hidden = state.optionsHidden;
+		if (state.optionsDisplay === undefined) delete widget.options.display;
+		else widget.options.display = state.optionsDisplay;
+	}
+	if (PANEL_FORCED_VISIBLE_WIDGETS.has(widget.name)) {
+		if (widget.element) widget.element.style.display = "";
+		if (widget.inputEl) widget.inputEl.style.display = "";
+		if (widget.widget) widget.widget.style.display = "";
+	} else {
+		if (widget.element) widget.element.style.display = state.elementDisplay || "";
+		if (widget.inputEl) widget.inputEl.style.display = state.inputDisplay || "";
+		if (widget.widget) widget.widget.style.display = state.widgetDisplay || "";
+	}
 }
 
 function rememberDomWidgetState(widget) {
@@ -1263,18 +1347,50 @@ function setDomWidgetHidden(widget, element, hidden) {
 	if (element) element.style.display = "";
 }
 
+function checkpointModelSourceEnabled(node) {
+	return widgetValue(node, MODEL_SOURCE_WIDGET_NAME) === CHECKPOINT_MODEL_SOURCE_VALUE;
+}
+
+function modelSourceHiddenInPanel(node, name) {
+	const checkpointMode = checkpointModelSourceEnabled(node);
+	if (checkpointMode) {
+		return name === "unet_name" || name === "unet_dtype" || name === "clip_name1" || name === "vae_name";
+	}
+	return name === CHECKPOINT_WIDGET_NAME;
+}
+
+function updateModelSettingsButtonState(node) {
+	const button = node?.__gjjModelSettingsButton;
+	if (!button) {
+		return;
+	}
+	const open = modelSettingsOpen(node);
+	const keepEnabled = keepModelEnabled(node);
+	const style = keepEnabled ? MODEL_SETTINGS_BUTTON_STYLES.on : MODEL_SETTINGS_BUTTON_STYLES.off;
+	button.textContent = "🧠";
+	button.title = `${open ? "关闭" : "打开"}模型浮动窗口；保持模型${keepEnabled ? "已启用" : "已关闭"}。`;
+	button.classList.toggle("on", open);
+	button.style.background = style.bg;
+	button.style.borderColor = open ? "#94a3b8" : style.border;
+	button.style.color = style.color;
+	button.__gjjLazyDefaultBg = style.bg;
+	button.__gjjLazyHoverBg = style.hover;
+}
+
 function updateSettingsButtonState(node) {
 	const button = node?.__gjjSettingsButton;
 	if (!button) {
 		return;
 	}
 	const open = settingsOpen(node);
-	button.textContent = open ? "⚙️" : "⚙️";
-	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示反向提示词、模型、尺寸、采样和 LoRA。";
+	button.textContent = "⚙️";
+	button.title = open ? "关闭其它参数浮动窗口。" : "打开其它参数浮动窗口。";
 	button.classList.toggle("on", open);
 	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
 	button.style.borderColor = open ? "#94a3b8" : "#55636f";
 	button.style.color = open ? "#ffffff" : "#e5edf2";
+	button.__gjjLazyDefaultBg = button.style.background;
+	button.__gjjLazyHoverBg = open ? button.style.background : "linear-gradient(135deg, #374151, #4b5563)";
 }
 
 function orderLazyWidgets(node) {
@@ -1286,7 +1402,7 @@ function orderLazyWidgets(node) {
 		if (widget === node.__gjjExecuteButtonWidget || name === EXECUTE_BUTTON_NAME) return 0;
 		if (name === "prompt") return 10;
 		if (widget === node.__gjjImagePreviewWidget || name === IMAGE_PREVIEW_NAME) return 100;
-		if (widget === node.__gjjLoraWidget) return settingsOpen(node) ? 80 : 900;
+		if (widget === node.__gjjLoraWidget) return 900;
 		if (ALWAYS_HIDDEN_WIDGETS.has(name) || widget?.hidden) return 900;
 		return 50;
 	};
@@ -1301,15 +1417,16 @@ function applySettingsVisibility(node) {
 		return;
 	}
 	node.properties = node.properties || {};
-	const open = settingsOpen(node);
 	for (const name of PANEL_SYNC_WIDGETS) {
 		const widget = getWidget(node, name);
-		if (!widget || ALWAYS_HIDDEN_WIDGETS.has(name)) {
+		if (!widget || ALWAYS_HIDDEN_WIDGETS.has(name) || name === "prompt") {
 			continue;
 		}
-		setLazyWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+		setLazyWidgetHidden(widget, true);
 	}
-	setDomWidgetHidden(node.__gjjLoraWidget, node.__gjjLoraContainer, !open);
+	setDomWidgetHidden(node.__gjjLoraWidget, null, true);
+	syncFloatingPanels(node);
+	updateModelSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 	orderLazyWidgets(node);
@@ -1322,8 +1439,604 @@ function setSettingsOpen(node, open) {
 		return;
 	}
 	node.properties = node.properties || {};
-	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
+	const nextOpen = Boolean(open);
+	if (nextOpen) {
+		closeLazyFloatingSurfaces(node, "settings");
+	}
+	node.properties[SETTINGS_OPEN_PROPERTY] = nextOpen;
+	if (nextOpen) {
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+	}
 	applySettingsVisibility(node);
+}
+
+function setModelSettingsOpen(node, open) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const nextOpen = Boolean(open);
+	if (nextOpen) {
+		closeLazyFloatingSurfaces(node, "model");
+	}
+	node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = nextOpen;
+	if (nextOpen) {
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+	}
+	applySettingsVisibility(node);
+}
+
+function closeLazyFloatingSurfaces(node, except = "") {
+	if (!node) {
+		return;
+	}
+	closeTemplateSourcePicker();
+	node.properties = node.properties || {};
+	if (except !== "model") {
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+		if (node.__gjjLazyModelFloatingPanel?.panel) {
+			node.__gjjLazyModelFloatingPanel.panel.style.display = "none";
+		}
+	}
+	if (except !== "settings") {
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		if (node.__gjjLazyOtherFloatingPanel?.panel) {
+			node.__gjjLazyOtherFloatingPanel.panel.style.display = "none";
+		}
+	}
+	if (except !== "lora" && globalThis.__gjjLoraPopup?.state?.node === node) {
+		globalThis.__gjjLoraPopup.close();
+	}
+	if (except !== "unet") {
+		closeUnetModelPicker(node);
+	}
+	if (except !== "test" && node.__gjjLazyTestOverlay) {
+		node.__gjjLazyTestOverlay.remove();
+		node.__gjjLazyTestOverlay = null;
+	}
+}
+
+function floatingPanelBaseStyle() {
+	return [
+		"position:fixed",
+		"z-index:800",
+		"width:min(520px, calc(100vw - 28px))",
+		"max-height:min(680px, calc(100vh - 32px))",
+		"overflow:auto",
+		"display:none",
+		"flex-direction:column",
+		"gap:10px",
+		"padding:10px",
+		"box-sizing:border-box",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#dce7e2",
+		"box-shadow:0 16px 42px rgba(0,0,0,0.45)",
+		"pointer-events:auto",
+	].join(";");
+}
+
+function protectFloatingPanelEvents(element) {
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		element.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	element.addEventListener("wheel", stopCanvasWheelCapture, { passive: true });
+}
+
+function createFloatingPanel(node, kind, titleText) {
+	const panel = document.createElement("div");
+	panel.className = `gjj-lazy-floating-panel gjj-lazy-${kind}-panel`;
+	panel.style.cssText = floatingPanelBaseStyle();
+	protectFloatingPanelEvents(panel);
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;background:#10171b;padding-bottom:4px;z-index:1";
+	const title = document.createElement("div");
+	title.textContent = titleText;
+	title.style.cssText = "font-size:13px;font-weight:700;color:#f2faf7";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "×";
+	close.title = "关闭";
+	close.style.cssText = "width:26px;height:24px;border:1px solid #41535b;border-radius:6px;background:#1a2328;color:#dce7e2;cursor:pointer";
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (kind === "model") setModelSettingsOpen(node, false);
+		else setSettingsOpen(node, false);
+	});
+	panel.addEventListener("keydown", (event) => {
+		if (event.key !== "Escape") {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		if (kind === "model") setModelSettingsOpen(node, false);
+		else setSettingsOpen(node, false);
+	});
+	header.append(title, close);
+
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex-direction:column;gap:8px";
+	panel.append(header, body);
+	document.body.appendChild(panel);
+	return { panel, body };
+}
+
+function widgetDisplayLabel(widget, fallbackName) {
+	return String(widget?.options?.display_name || widget?.label || widget?.localized_name || widget?.name || fallbackName || "");
+}
+
+function closeUnetModelPicker(node) {
+	if (!node?.__gjjUnetModelPicker) {
+		return;
+	}
+	node.__gjjUnetModelPicker.__gjjCleanup?.();
+	node.__gjjUnetModelPicker.remove();
+	node.__gjjUnetModelPicker = null;
+}
+
+function positionUnetModelPicker(node, panel, anchor) {
+	const anchorRect = anchor?.getBoundingClientRect?.();
+	const hostRect = node.__gjjLazyModelFloatingPanel?.panel?.getBoundingClientRect?.();
+	const viewportWidth = Math.max(320, window.innerWidth || 320);
+	const viewportHeight = Math.max(240, window.innerHeight || 240);
+	const padding = 12;
+	const boundaryLeft = hostRect ? Math.max(padding, Math.floor(hostRect.left) + 8) : padding;
+	const boundaryRight = hostRect ? Math.min(viewportWidth - padding, Math.ceil(hostRect.right) - 8) : viewportWidth - padding;
+	const boundaryTop = hostRect ? Math.max(padding, Math.floor(hostRect.top) + 8) : padding;
+	const boundaryBottom = hostRect ? Math.min(viewportHeight - padding, Math.ceil(hostRect.bottom) - 8) : viewportHeight - padding;
+	const availableWidth = Math.max(280, boundaryRight - boundaryLeft);
+	const width = Math.min(availableWidth, Math.max(280, Math.ceil(anchorRect?.width || 360)));
+	const maxHeight = Math.max(160, Math.min(320, boundaryBottom - Math.ceil(anchorRect?.bottom || boundaryTop) - 6));
+	const left = Math.max(boundaryLeft, Math.min(Math.floor(anchorRect?.left || boundaryLeft), boundaryRight - width));
+	const top = Math.min(Math.ceil(anchorRect?.bottom || boundaryTop) + 6, boundaryBottom - maxHeight);
+	panel.style.width = `${width}px`;
+	panel.style.maxHeight = `${maxHeight}px`;
+	panel.style.left = `${left}px`;
+	panel.style.top = `${Math.max(boundaryTop, top)}px`;
+}
+
+function modelNameMatchesKeywordFilter(name, query) {
+	const groups = String(query || "")
+		.split("|")
+		.map((group) => group.trim().toLowerCase().split(/\s+/).filter(Boolean))
+		.filter((tokens) => tokens.length);
+	if (!groups.length) {
+		return true;
+	}
+	const haystack = String(name ?? "").toLowerCase();
+	return groups.some((tokens) => tokens.every((token) => haystack.includes(token)));
+}
+
+function openUnetModelPicker(node, anchor) {
+	const widget = getWidget(node, "unet_name");
+	const values = Array.isArray(widget?.options?.values) ? widget.options.values : [];
+	if (!widget || !values.length) {
+		return;
+	}
+	if (node.__gjjUnetModelPicker?.__gjjAnchor === anchor) {
+		closeUnetModelPicker(node);
+		return;
+	}
+	closeUnetModelPicker(node);
+	closeLazyFloatingSurfaces(node, "model");
+	const panel = document.createElement("div");
+	panel.__gjjAnchor = anchor;
+	panel.style.cssText = [
+		"position:fixed",
+		"z-index:100000",
+		"display:flex",
+		"flex-direction:column",
+		"gap:6px",
+		"padding:6px",
+		"box-sizing:border-box",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"box-shadow:0 10px 28px rgba(0,0,0,0.42)",
+		"overflow:hidden",
+		"pointer-events:auto",
+	].join(";");
+
+	const search = document.createElement("input");
+	search.type = "text";
+	search.placeholder = "关键词过滤 UNET 主模型";
+	search.title = "空格表示同时包含，| 表示任一组匹配。例如：qwen gguf|flux schnell";
+	search.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 7px;font-size:12px";
+
+	const list = document.createElement("div");
+	list.style.cssText = "display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:260px";
+	panel.append(search, list);
+	document.body.appendChild(panel);
+	node.__gjjUnetModelPicker = panel;
+
+	const render = () => {
+		const selected = String(widget.value ?? "");
+		const filtered = values.filter((value) => modelNameMatchesKeywordFilter(value, search.value));
+		const optionValues = [...filtered];
+		if (selected && !optionValues.some((value) => String(value ?? "") === selected)) {
+			optionValues.unshift(selected);
+		}
+		list.replaceChildren();
+		if (!optionValues.length) {
+			const empty = document.createElement("div");
+			empty.textContent = "没有匹配的模型";
+			empty.style.cssText = "color:#8da2ad;font-size:12px;padding:6px 4px";
+			list.appendChild(empty);
+			return;
+		}
+		for (const value of optionValues) {
+			const text = String(value ?? "");
+			const item = document.createElement("button");
+			item.type = "button";
+			item.textContent = `${text === selected ? "✓ " : ""}${text || "未选择"}`;
+			item.title = text;
+			item.style.cssText = [
+				"width:100%",
+				"border:1px solid " + (text === selected ? "#2f7d67" : "#33454c"),
+				"border-radius:6px",
+				"background:" + (text === selected ? "#18352f" : "#182127"),
+				"color:#dce7e2",
+				"padding:6px 8px",
+				"text-align:left",
+				"cursor:pointer",
+				"font-size:12px",
+				"line-height:1.3",
+				"white-space:normal",
+				"overflow-wrap:anywhere",
+			].join(";");
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setWidgetValue(widget, coerceParamValue("unet_name", text, node));
+				writeLiveParamSnapshot(node);
+				closeUnetModelPicker(node);
+				applySettingsVisibility(node);
+			});
+			list.appendChild(item);
+		}
+	};
+
+	const outsideHandler = (event) => {
+		if (panel.contains(event.target) || anchor.contains?.(event.target)) {
+			return;
+		}
+		closeUnetModelPicker(node);
+	};
+	panel.__gjjCleanup = () => document.removeEventListener("pointerdown", outsideHandler, true);
+	for (const eventName of ["pointerdown", "mousedown", "click", "keydown"]) {
+		panel.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	search.addEventListener("input", render);
+	search.addEventListener("keydown", (event) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			closeUnetModelPicker(node);
+		}
+	});
+	render();
+	positionUnetModelPicker(node, panel, anchor);
+	document.addEventListener("pointerdown", outsideHandler, true);
+	setTimeout(() => search.focus(), 0);
+}
+
+function createFloatingControl(node, name) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return null;
+	}
+	const row = document.createElement("div");
+	row.dataset.widgetName = name;
+	row.style.cssText = "display:grid;grid-template-columns:130px minmax(0,1fr);gap:8px;align-items:center;font-size:12px;color:#c7d5d8";
+	const label = document.createElement("span");
+	label.textContent = widgetDisplayLabel(widget, name);
+	label.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+
+	let input;
+	let valueInput = null;
+	const values = Array.isArray(widget.options?.values) ? widget.options.values : null;
+	if (name === MODEL_SOURCE_WIDGET_NAME && values) {
+		input = document.createElement("div");
+		input.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;min-width:0;width:100%";
+		for (const value of values) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.dataset.value = String(value ?? "");
+			button.textContent = String(value ?? "");
+			button.style.cssText = [
+				"height:30px",
+				"min-width:0",
+				"border:1px solid #41535b",
+				"border-radius:6px",
+				"background:#11181c",
+				"color:#dce7e2",
+				"cursor:pointer",
+				"font-size:12px",
+				"font-weight:700",
+				"overflow:hidden",
+				"text-overflow:ellipsis",
+				"white-space:nowrap",
+				"padding:0 8px",
+			].join(";");
+			button.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const current = getWidget(node, name);
+				if (!current) return;
+				setWidgetValue(current, coerceParamValue(name, button.dataset.value, node));
+				applySettingsVisibility(node);
+				writeLiveParamSnapshot(node);
+			});
+			input.appendChild(button);
+		}
+	} else if (name === "unet_name" && values) {
+		input = document.createElement("button");
+		input.type = "button";
+		input.title = "点击展开 UNET 主模型列表，可在弹出列表顶部输入关键词过滤。";
+		input.style.cssText = "min-width:0;width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 28px 5px 7px;font-size:12px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;position:relative";
+		input.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			openUnetModelPicker(node, input);
+		});
+	} else if (values) {
+		input = document.createElement("select");
+		for (const value of values) {
+			const option = document.createElement("option");
+			option.value = String(value ?? "");
+			option.textContent = String(value ?? "");
+			input.appendChild(option);
+		}
+	} else if (String(widget.type || "").toLowerCase().includes("toggle") || typeof widget.value === "boolean") {
+		input = document.createElement("input");
+		input.type = "checkbox";
+	} else {
+		input = document.createElement("input");
+		input.type = typeof widget.value === "number" ? "number" : "text";
+		if (input.type === "number") {
+			if (widget.options?.min != null) input.min = String(widget.options.min);
+			if (widget.options?.max != null) input.max = String(widget.options.max);
+			if (widget.options?.step != null) input.step = String(widget.options.step);
+		}
+	}
+	const valueElement = valueInput || input;
+	input.dataset.widgetName = name;
+	valueElement.dataset.widgetName = name;
+	if (name !== MODEL_SOURCE_WIDGET_NAME) {
+		valueElement.style.cssText = "min-width:0;width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 7px;font-size:12px";
+	}
+	if (name === "unet_name") {
+		valueElement.style.cssText = input.style.cssText;
+	}
+
+	const refresh = () => {
+		const current = getWidget(node, name);
+		if (!current) return;
+		if (name === MODEL_SOURCE_WIDGET_NAME) {
+			const currentValue = String(current.value ?? "");
+			for (const button of input.querySelectorAll("button[data-value]")) {
+				const active = String(button.dataset.value || "") === currentValue;
+				button.style.background = active ? "linear-gradient(135deg,#064e3b,#047857)" : "#11181c";
+				button.style.borderColor = active ? "#34d399" : "#41535b";
+				button.style.color = active ? "#ecfdf5" : "#dce7e2";
+			}
+		} else if (name === "unet_name") {
+			valueElement.textContent = String(current.value ?? "") || "未选择";
+		} else if (valueElement.type === "checkbox") valueElement.checked = boolValue(current.value);
+		else valueElement.value = String(current.value ?? "");
+	};
+	const commit = () => {
+		const current = getWidget(node, name);
+		if (!current) return;
+		const nextValue = valueElement.type === "checkbox" ? valueElement.checked : valueElement.value;
+		setWidgetValue(current, coerceParamValue(name, nextValue, node));
+		if (name === MODEL_SOURCE_WIDGET_NAME) {
+			applySettingsVisibility(node);
+		}
+		if (name === KEEP_MODEL_WIDGET_NAME) {
+			applyKeepModelButtonState(node);
+			updateModelSettingsButtonState(node);
+		}
+		writeLiveParamSnapshot(node);
+	};
+	if (name !== MODEL_SOURCE_WIDGET_NAME && name !== "unet_name") {
+		valueElement.addEventListener("change", commit);
+		if (valueElement.tagName !== "SELECT") {
+			valueElement.addEventListener("input", commit);
+		}
+	}
+	row.__gjjRefresh = refresh;
+	row.append(label, input);
+	refresh();
+	return row;
+}
+
+function ensureFloatingPanels(node) {
+	if (!node.__gjjLazyModelFloatingPanel) {
+		node.__gjjLazyModelFloatingPanel = createFloatingPanel(node, "model", "🧠 模型参数");
+	}
+	if (!node.__gjjLazyOtherFloatingPanel) {
+		node.__gjjLazyOtherFloatingPanel = createFloatingPanel(node, "settings", "⚙️ 其它参数");
+	}
+	return {
+		model: node.__gjjLazyModelFloatingPanel,
+		other: node.__gjjLazyOtherFloatingPanel,
+	};
+}
+
+function nodeScreenRect(node) {
+	const canvas = app.canvas?.canvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	const scale = Number(app.canvas?.ds?.scale || 1);
+	const offset = app.canvas?.ds?.offset || [0, 0];
+	const pos = node?.pos || [0, 0];
+	const size = node?.size || [260, 120];
+	if (!rect) {
+		return {
+			left: Number(pos[0] || 0),
+			top: Number(pos[1] || 0),
+			width: Number(size[0] || 260),
+			height: Number(size[1] || 120),
+			right: Number(pos[0] || 0) + Number(size[0] || 260),
+			bottom: Number(pos[1] || 0) + Number(size[1] || 120),
+		};
+	}
+	const left = rect.left + (Number(pos[0] || 0) + Number(offset[0] || 0)) * scale;
+	const top = rect.top + (Number(pos[1] || 0) + Number(offset[1] || 0)) * scale;
+	const width = Number(size[0] || 260) * scale;
+	const height = Number(size[1] || 120) * scale;
+	return {
+		left,
+		top,
+		width,
+		height,
+		right: left + width,
+		bottom: top + height,
+	};
+}
+
+function positionFloatingPanel(node, panel, anchor) {
+	if (!panel) return;
+	const rect = anchor?.getBoundingClientRect?.();
+	const width = Math.min(520, Math.max(360, window.innerWidth - 28));
+	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect?.left || 80));
+	const top = Math.min(window.innerHeight - 120, Math.max(14, (rect?.bottom || 80) + 6));
+	panel.style.width = `${width}px`;
+	panel.style.left = `${Math.round(left)}px`;
+	panel.style.top = `${Math.round(top)}px`;
+}
+
+function renderFloatingPanelControls(node, body, names) {
+	const existing = new Map();
+	for (const child of Array.from(body.children)) {
+		if (child.dataset?.widgetName) {
+			existing.set(child.dataset.widgetName, child);
+		}
+	}
+	body.replaceChildren();
+	for (const name of names) {
+		if (name !== KEEP_MODEL_WIDGET_NAME && modelSourceHiddenInPanel(node, name)) {
+			continue;
+		}
+		const control = existing.get(name) || createFloatingControl(node, name);
+		if (!control) {
+			continue;
+		}
+		control.__gjjRefresh?.();
+		body.appendChild(control);
+	}
+}
+
+function syncFloatingPanels(node) {
+	if (!node || typeof document === "undefined") {
+		return;
+	}
+	const { model, other } = ensureFloatingPanels(node);
+	if (modelSettingsOpen(node) && settingsOpen(node)) {
+		node.properties = node.properties || {};
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+	}
+	const modelOpen = modelSettingsOpen(node);
+	const otherOpen = settingsOpen(node);
+
+	renderFloatingPanelControls(node, model.body, Array.from(MODEL_PANEL_WIDGETS));
+	if (node.__gjjLoraContainer) {
+		if (!node.__gjjLoraFloatingTitle) {
+			const title = document.createElement("div");
+			title.textContent = "🧩 LoRA";
+			title.style.cssText = "margin-top:2px;padding-top:8px;border-top:1px solid #263842;color:#f2faf7;font-size:12px;font-weight:800";
+			node.__gjjLoraFloatingTitle = title;
+		}
+		if (node.__gjjLoraFloatingTitle.parentElement !== model.body) {
+			model.body.appendChild(node.__gjjLoraFloatingTitle);
+		}
+		if (node.__gjjLoraContainer.parentElement !== model.body) {
+			model.body.appendChild(node.__gjjLoraContainer);
+		}
+		if (modelOpen && node.__gjjLoraRows && !node.__gjjLoraRows.children.length) {
+			renderLoraUi(node);
+		}
+		node.__gjjLoraContainer.style.display = modelOpen ? "flex" : "none";
+	}
+	renderFloatingPanelControls(node, other.body, Array.from(OTHER_PANEL_WIDGETS));
+
+	model.panel.style.display = modelOpen ? "flex" : "none";
+	other.panel.style.display = otherOpen ? "flex" : "none";
+	if (modelOpen) {
+		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
+	}
+	if (otherOpen) {
+		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
+	}
+}
+
+function positionOpenFloatingPanels(node) {
+	if (!node) {
+		return;
+	}
+	if (app.graph?._nodes && !app.graph._nodes.includes(node)) {
+		if (node.__gjjLazyModelFloatingPanel?.panel) node.__gjjLazyModelFloatingPanel.panel.style.display = "none";
+		if (node.__gjjLazyOtherFloatingPanel?.panel) node.__gjjLazyOtherFloatingPanel.panel.style.display = "none";
+		return;
+	}
+	const model = node.__gjjLazyModelFloatingPanel;
+	const other = node.__gjjLazyOtherFloatingPanel;
+	if (modelSettingsOpen(node) && model?.panel?.style.display !== "none") {
+		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
+	}
+	if (settingsOpen(node) && other?.panel?.style.display !== "none") {
+		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
+	}
+	if (node.__gjjUnetModelPicker?.__gjjAnchor) {
+		positionUnetModelPicker(node, node.__gjjUnetModelPicker, node.__gjjUnetModelPicker.__gjjAnchor);
+	}
+}
+
+function positionAllOpenLazyFloatingPanels() {
+	for (const node of app.graph?._nodes || []) {
+		if (TARGET_NODES.has(node?.comfyClass || node?.type)) {
+			positionOpenFloatingPanels(node);
+		}
+	}
+}
+
+function lazyFloatingContains(node, target) {
+	if (!node || !target) {
+		return false;
+	}
+	const contains = (element) => Boolean(element && (element === target || element.contains?.(target)));
+	return (
+		contains(node.__gjjLazyModelFloatingPanel?.panel)
+		|| contains(node.__gjjLazyOtherFloatingPanel?.panel)
+		|| contains(node.__gjjModelSettingsButton)
+		|| contains(node.__gjjSettingsButton)
+		|| contains(node.__gjjLazyTestOverlay)
+		|| contains(node.__gjjUnetModelPicker)
+		|| (
+			globalThis.__gjjLoraPopup?.state?.node === node
+			&& (
+				contains(globalThis.__gjjLoraPopup.panel)
+				|| contains(globalThis.__gjjLoraPopup.state?.anchorEl)
+			)
+		)
+	);
+}
+
+function closeLazyFloatingPanelsFromOutside(event) {
+	const target = event?.target;
+	for (const node of app.graph?._nodes || []) {
+		if (!TARGET_NODES.has(node?.comfyClass || node?.type)) {
+			continue;
+		}
+		const hasOpenPanel = modelSettingsOpen(node) || settingsOpen(node) || Boolean(node.__gjjLazyTestOverlay) || globalThis.__gjjLoraPopup?.state?.node === node;
+		if (!hasOpenPanel || lazyFloatingContains(node, target)) {
+			continue;
+		}
+		closeLazyFloatingSurfaces(node);
+		applySettingsVisibility(node);
+	}
 }
 
 function textValue(value) {
@@ -1430,8 +2143,11 @@ function comboLikeValue(name, value, node) {
 	if (options.includes(text)) {
 		return true;
 	}
-	if (name === "unet_name" || name === "clip_name1" || name === "vae_name") {
+	if (name === "unet_name" || name === "clip_name1" || name === "vae_name" || name === CHECKPOINT_WIDGET_NAME) {
 		return text === "default" || /\.(safetensors|pt|pth|ckpt|bin|gguf)$/i.test(text);
+	}
+	if (name === MODEL_SOURCE_WIDGET_NAME) {
+		return text === DEFAULT_PARAM_VALUES[MODEL_SOURCE_WIDGET_NAME] || text === CHECKPOINT_MODEL_SOURCE_VALUE;
 	}
 	if (name === "unet_dtype") {
 		return ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp16", "bf16", "fp32"].includes(text.toLowerCase());
@@ -1454,6 +2170,7 @@ function coerceParamValue(name, value, node) {
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
+	if (name === MODEL_SOURCE_WIDGET_NAME) return comboLikeValue(name, value, node) ? textValue(value) : fallbackParamValue(node, name);
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
 
@@ -1487,7 +2204,9 @@ function currentParamValues(node) {
 function scoreSequentialParams(rawValues, offset, withSeedControl, node) {
 	const raw = Array.isArray(rawValues) ? rawValues : [];
 	const names = SERIALIZED_PARAM_WIDGETS.filter((name) => withSeedControl || name !== SEED_CONTROL_KEY);
-	if (offset < 0 || offset + names.length > raw.length + 1) {
+	const firstAppendedIndex = names.indexOf(MODEL_SOURCE_WIDGET_NAME);
+	const requiredLength = firstAppendedIndex >= 0 ? firstAppendedIndex : names.length;
+	if (offset < 0 || offset + requiredLength > raw.length + 1) {
 		return -1;
 	}
 	const valueAt = (name) => raw[offset + names.indexOf(name)];
@@ -1510,6 +2229,8 @@ function scoreSequentialParams(rawValues, offset, withSeedControl, node) {
 	if (comboLikeValue("scheduler", valueAt("scheduler"), node)) score += 5;
 	if (isNumericLike(valueAt("denoise"))) score += 4;
 	if (isIntLike(valueAt("grow_mask_by"))) score += 4;
+	if (comboLikeValue(MODEL_SOURCE_WIDGET_NAME, valueAt(MODEL_SOURCE_WIDGET_NAME), node)) score += 3;
+	if (comboLikeValue(CHECKPOINT_WIDGET_NAME, valueAt(CHECKPOINT_WIDGET_NAME), node)) score += 3;
 	if (offset === 0) score += 1;
 	return score;
 }
@@ -2355,6 +3076,7 @@ function escapeHtml(value) {
 }
 
 function openLazyTestDialog(node, testButton, generateButton) {
+	closeLazyFloatingSurfaces(node, "test");
 	const overlay = document.createElement("div");
 	overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.62);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:14px;box-sizing:border-box;";
 	const panel = document.createElement("div");
@@ -2382,6 +3104,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	`;
 	overlay.appendChild(panel);
 	document.body.appendChild(overlay);
+	node.__gjjLazyTestOverlay = overlay;
 
 	const savedFilters = lazyTestFilters(node);
 	const savedSorts = lazyTestSorts(node);
@@ -2495,6 +3218,9 @@ function openLazyTestDialog(node, testButton, generateButton) {
 		state.filters[state.kind] = filterInput.value;
 		saveLazyTestFilter(node, state.kind, filterInput.value);
 		overlay.remove();
+		if (node.__gjjLazyTestOverlay === overlay) {
+			node.__gjjLazyTestOverlay = null;
+		}
 	};
 	panel.querySelector("[data-close]").onclick = close;
 	panel.querySelector("[data-cancel]").onclick = close;
@@ -2651,7 +3377,7 @@ function createButtons(node) {
 
 	const keepModelButton = document.createElement("button");
 	keepModelButton.type = "button";
-	keepModelButton.textContent = "🧠";
+	keepModelButton.textContent = "📌";
 	keepModelButton.title = KEEP_MODEL_BUTTON_STYLES.off.title;
 	keepModelButton.setAttribute("aria-label", "保持模型开关");
 	keepModelButton.style.cssText = [
@@ -2686,12 +3412,24 @@ function createButtons(node) {
 		"color:#a7f3d0",
 	].join(";");
 
+	const modelSettingsButton = document.createElement("button");
+	modelSettingsButton.type = "button";
+	modelSettingsButton.textContent = "🧠";
+	modelSettingsButton.title = "打开模型浮动窗口";
+	modelSettingsButton.style.cssText = [
+		...emojiButtonStyle,
+		"border:1px solid #55636f",
+		"background:linear-gradient(135deg, #1f2933, #374151)",
+		"color:#e5edf2",
+	].join(";");
+	node.__gjjModelSettingsButton = modelSettingsButton;
+
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
-	settingsButton.textContent = "⚙️设置";
-	settingsButton.title = "展开更多设置";
+	settingsButton.textContent = "⚙️";
+	settingsButton.title = "打开其它参数浮动窗口";
 	settingsButton.style.cssText = [
-		...sharedButtonStyle,
+		...emojiButtonStyle,
 		"border:1px solid #55636f",
 		"background:linear-gradient(135deg, #1f2933, #374151)",
 		"color:#e5edf2",
@@ -2708,6 +3446,9 @@ function createButtons(node) {
 		btn.__gjjLazyDefaultBg = defaultBg;
 		btn.__gjjLazyHoverBg = hoverBg;
 		btn.addEventListener("mouseenter", () => {
+			if (btn === modelSettingsButton && modelSettingsOpen(node)) {
+				return;
+			}
 			if (btn === settingsButton && settingsOpen(node)) {
 				return;
 			}
@@ -2716,6 +3457,11 @@ function createButtons(node) {
 		});
 
 		btn.addEventListener("mouseleave", () => {
+			if (btn === modelSettingsButton && modelSettingsOpen(node)) {
+				btn.style.transform = "translateY(0)";
+				updateModelSettingsButtonState(node);
+				return;
+			}
 			if (btn === settingsButton && settingsOpen(node)) {
 				btn.style.transform = "translateY(0)";
 				updateSettingsButtonState(node);
@@ -2774,7 +3520,8 @@ function createButtons(node) {
 			node.properties = node.properties || {};
 			node.properties[LAST_PRESET_KEY] = "";
 			applyPreset(node, true);
-			node.properties[SETTINGS_OPEN_PROPERTY] = true;
+			closeLazyFloatingSurfaces(node, "model");
+			node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = true;
 			stabilizeNode(node, true);
 			applySettingsVisibility(node);
 			scheduleNativePreviewClear(node);
@@ -2886,6 +3633,11 @@ function createButtons(node) {
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
+	function handleModelSettings(event) {
+		protectEvent(event);
+		setModelSettingsOpen(node, !modelSettingsOpen(node));
+	}
+
 	function handleKeepModel(event) {
 		protectEvent(event);
 		setKeepModelEnabled(node, !keepModelEnabled(node));
@@ -2920,6 +3672,7 @@ function createButtons(node) {
 	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
 	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
+	setupButtonHover(modelSettingsButton, MODEL_SETTINGS_BUTTON_STYLES.off.bg, MODEL_SETTINGS_BUTTON_STYLES.off.hover);
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(batchLinkButton, handleBatchLink);
@@ -2929,11 +3682,13 @@ function createButtons(node) {
 	setupButtonEvents(keepModelButton, handleKeepModel);
 	setupButtonEvents(testButton, handleTest);
 	setupButtonEvents(generateButton, handleGenerate);
+	setupButtonEvents(modelSettingsButton, handleModelSettings);
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
 	applySeedRandomButtonState(node);
 	applyKeepModelButtonState(node);
 	applyInputSizeButtonState(node);
+	updateModelSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 
@@ -2942,10 +3697,10 @@ function createButtons(node) {
 	container.appendChild(inputSizeButton);
 	container.appendChild(seedRandomButton);
 	container.appendChild(translateButton);
-	container.appendChild(keepModelButton);
 	container.appendChild(testButton);
 	container.appendChild(generateButton);
 	container.appendChild(templateButton);
+	container.appendChild(modelSettingsButton);
 	container.appendChild(settingsButton);
 	return container;
 }
@@ -2956,7 +3711,7 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 68, 32, 58];
+	const buttonWidths = [32, 32, 32, 32, 32, 32, 68, 32, 32];
 	const gap = 0;
 	let rows = 1;
 	let rowWidth = 0;
@@ -3222,17 +3977,33 @@ function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 	overlay.addEventListener("click", closeOverlay);
 }
 
+function removeLazyPreviewItem(node, index) {
+	const preview = node?.__gjjLazyPreview;
+	if (!preview?.wrap || !Array.isArray(preview.items) || preview.items.length <= 1) {
+		return;
+	}
+	const safeIndex = Math.max(0, Math.min(preview.items.length - 1, Math.floor(Number(index || 0) || 0)));
+	const nextItems = preview.items.slice();
+	nextItems.splice(safeIndex, 1);
+	const currentPage = lazyPreviewPageIndex(node);
+	node.properties ||= {};
+	node.properties[PREVIEW_PAGE_PROPERTY] = Math.max(0, Math.min(currentPage, nextItems.length - 1));
+	updateImagePreview(node, nextItems);
+}
+
 function createLazyPreviewCard(node, item, index = 0) {
 	const card = document.createElement("button");
 	card.type = "button";
 	card.__gjjLazyPreviewItem = item;
+	card.title = "点击查看大图；多图时按住 Ctrl 点击可移除这张预览。";
 	card.style.cssText = [
 		"display:block",
 		"min-width:0",
 		"padding:0",
-		"border:1px solid #33434a",
-		"border-radius:8px",
-		"background:#0f1418",
+		"border:0",
+		"border-radius:0",
+		"background:transparent",
+		"box-sizing:border-box",
 		"overflow:hidden",
 		"cursor:pointer",
 		"pointer-events:auto",
@@ -3245,6 +4016,7 @@ function createLazyPreviewCard(node, item, index = 0) {
 		"height:100%",
 		"display:block",
 		"object-fit:cover",
+		"border-radius:0",
 		"transition:transform 0.2s ease",
 	].join(";");
 	image.addEventListener("mouseenter", () => {
@@ -3262,6 +4034,10 @@ function createLazyPreviewCard(node, item, index = 0) {
 	card.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		if (event.ctrlKey && (node.__gjjLazyPreview?.items?.length || 0) > 1) {
+			removeLazyPreviewItem(node, index);
+			return;
+		}
 		openLazyPreviewOverlay(image.src, node.__gjjLazyPreview?.items || [item], index);
 	});
 	card.appendChild(image);
@@ -3351,7 +4127,6 @@ function updateLazyPreviewLayout(node, width = null) {
 		node.__gjjLazyPreviewHeight = 0;
 		return;
 	}
-	wrap.style.display = "grid";
 	const mode = lazyPreviewLayoutMode(node);
 	const paged = mode === "page" && cards.length > 1;
 	const page = lazyPreviewPageIndex(node);
@@ -3367,15 +4142,45 @@ function updateLazyPreviewLayout(node, width = null) {
 	if (preview.prevButton) preview.prevButton.disabled = !paged || page <= 0;
 	if (preview.nextButton) preview.nextButton.disabled = !paged || page >= cards.length - 1;
 	const single = cards.length === 1 || paged;
-	wrap.style.gridTemplateColumns = single ? "minmax(0, 1fr)" : "repeat(auto-fill,minmax(86px,1fr))";
+	wrap.style.display = single ? "grid" : "flex";
+	const tileGap = 4;
+	wrap.style.gap = single ? "6px" : `${tileGap}px`;
+	wrap.style.flexWrap = single ? "" : "wrap";
+	wrap.style.alignItems = single ? "" : "flex-start";
+	wrap.style.gridTemplateColumns = single ? "minmax(0, 1fr)" : "";
+	const contentWidth = Math.max(0, Math.round(Number(width || node?.size?.[0] || 320) - 20));
+	const tileHeight = Math.max(86, Math.min(180, Math.round(contentWidth / 3)));
+	let rowWidth = 0;
+	let rowCount = 1;
 	for (const [index, card] of cards.entries()) {
 		card.style.display = !paged || index === page ? "block" : "none";
 		const item = card.__gjjLazyPreviewItem || {};
+		const itemWidth = Math.max(1, Number(item.width || 1));
+		const itemHeight = Math.max(1, Number(item.height || 1));
+		const tileWidth = Math.max(56, Math.round(tileHeight * itemWidth / itemHeight));
 		card.style.aspectRatio = single ? lazyPreviewAspectRatio(item) : "1 / 1";
+		card.style.padding = "0";
+		card.style.border = single ? "1px solid #33434a" : "0";
+		card.style.borderRadius = single ? "8px" : "0";
+		card.style.background = single ? "#0f1418" : "transparent";
+		card.style.height = single ? "" : `${tileHeight}px`;
+		card.style.width = single ? "" : `${tileWidth}px`;
+		card.style.flex = single ? "" : "0 0 auto";
 		const image = card.querySelector("img");
-		if (image) image.style.objectFit = single ? "contain" : "cover";
+		if (image) {
+			image.style.objectFit = "contain";
+			image.style.borderRadius = single ? "7px" : "0";
+		}
+		if (!single) {
+			const nextWidth = rowWidth ? rowWidth + tileGap + tileWidth : tileWidth;
+			if (nextWidth > contentWidth && rowWidth) {
+				rowCount += 1;
+				rowWidth = tileWidth;
+			} else {
+				rowWidth = nextWidth;
+			}
+		}
 	}
-	const contentWidth = Math.max(0, Math.round(Number(width || node?.size?.[0] || 320) - 20));
 	const controlHeight = cards.length > 1 ? 24 + 6 : 0;
 	if (single) {
 		const item = cards[page]?.__gjjLazyPreviewItem || cards[0]?.__gjjLazyPreviewItem || {};
@@ -3385,11 +4190,8 @@ function updateLazyPreviewLayout(node, width = null) {
 		if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 		return;
 	}
-	const columns = Math.max(1, Math.floor((contentWidth + 6) / (86 + 6)));
-	const rows = Math.max(1, Math.ceil(cards.length / columns));
-	const cellWidth = Math.max(1, Math.floor((contentWidth - (columns - 1) * 6) / columns));
-	const gap = Math.max(0, rows - 1) * 6;
-	node.__gjjLazyPreviewHeight = Math.max(96, rows * cellWidth + gap + controlHeight + 10);
+	const gap = Math.max(0, rowCount - 1) * tileGap;
+	node.__gjjLazyPreviewHeight = Math.max(96, rowCount * tileHeight + gap + controlHeight + 10);
 	if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 }
 
@@ -3647,6 +4449,38 @@ function hookUnetWidget(node) {
 	};
 }
 
+function hookModelSourceWidget(node) {
+	const widget = getWidget(node, MODEL_SOURCE_WIDGET_NAME);
+	if (!widget || widget.__gjjLazyModelSourceHooked) {
+		return;
+	}
+	widget.__gjjLazyModelSourceHooked = true;
+	const original = widget.callback;
+	widget.callback = function (value, ...args) {
+		const result = original?.call(this, value, ...args);
+		applySettingsVisibility(node);
+		writeLiveParamSnapshot(node);
+		GJJ_Utils.refreshNode(node);
+		return result;
+	};
+}
+
+function hookKeepModelWidget(node) {
+	const widget = getWidget(node, KEEP_MODEL_WIDGET_NAME);
+	if (!widget || widget.__gjjLazyKeepModelHooked) {
+		return;
+	}
+	widget.__gjjLazyKeepModelHooked = true;
+	const original = widget.callback;
+	widget.callback = function (value, ...args) {
+		const result = original?.call(this, value, ...args);
+		applyKeepModelButtonState(node);
+		updateModelSettingsButtonState(node);
+		writeLiveParamSnapshot(node);
+		return result;
+	};
+}
+
 function normalizeStrength(value, fallback = 1.0) {
 	const parsed = Number.parseFloat(value);
 	if (Number.isNaN(parsed)) {
@@ -3714,6 +4548,27 @@ function loraSearchHaystack(option, metadata) {
 	].map((item) => normalizeLoraKeyword(item)).filter(Boolean).join(" ");
 }
 
+function parseLoraSearchExpression(value) {
+	const normalized = normalizeLoraKeyword(value).replace(/\s+/g, "&");
+	if (!normalized) {
+		return [];
+	}
+	return normalized
+		.split(/[&+＋]+/)
+		.map((group) => group
+			.split(/[,\uFF0C\u3001;\uFF1B|]+/)
+			.map((item) => normalizeLoraKeyword(item))
+			.filter(Boolean))
+		.filter((group) => group.length > 0);
+}
+
+function matchesLoraSearchExpression(text, expressionGroups) {
+	if (!expressionGroups.length) {
+		return true;
+	}
+	return expressionGroups.every((group) => group.some((keyword) => text.includes(keyword)));
+}
+
 function normalizeRows(value) {
 	let parsed = [];
 	try {
@@ -3745,7 +4600,8 @@ function serializeRows(rows) {
 			enabled: item.enabled !== false,
 			name: String(item.name || ""),
 			strength: normalizeStrength(item.strength, 1.0),
-		}));
+		}))
+		.filter((item) => item.name);
 	return JSON.stringify(cleaned);
 }
 
@@ -3892,6 +4748,7 @@ function ensureLoraNodeState(node) {
 		options: [{ ...DEFAULT_EMPTY_OPTION }],
 		metadata: [],
 		previews: {},
+		globalSearch: String(node.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || ""),
 	};
 	return node.__gjjLoraState;
 }
@@ -3921,19 +4778,33 @@ function updateLoraDataWidget(node) {
 function ensureTrailingEmptyRow(node) {
 	const state = ensureLoraNodeState(node);
 	const rows = state.rows.filter((item) => item && typeof item === "object");
-	const normalized = rows.filter((item, index) => item.name || index < rows.length - 1);
-	if (normalized.length === 0 || normalized[normalized.length - 1].name) {
-		normalized.push({ ...DEFAULT_ROW });
-	}
-	state.rows = normalized.map((item) => ({
-		enabled: item.enabled !== false,
-		name: String(item.name || ""),
-		strength: normalizeStrength(item.strength, 1.0),
-	}));
+	const normalized = rows
+		.filter((item) => String(item.name || "").trim())
+		.map((item) => ({
+			enabled: item.enabled !== false,
+			name: String(item.name || ""),
+			strength: normalizeStrength(item.strength, 1.0),
+		}));
+	normalized.push({ ...DEFAULT_ROW });
+	state.rows = normalized;
 }
 
 function getDefaultSearchValue(index) {
 	return index === 0 ? DEFAULT_FIRST_SEARCH_TERMS : "";
+}
+
+function setLoraGlobalSearch(node, value) {
+	const state = ensureLoraNodeState(node);
+	state.globalSearch = String(value || "");
+	node.properties = node.properties || {};
+	node.properties[LORA_GLOBAL_SEARCH_PROPERTY] = state.globalSearch;
+	if (node.__gjjLoraGlobalSearchInput && node.__gjjLoraGlobalSearchInput.value !== state.globalSearch) {
+		node.__gjjLoraGlobalSearchInput.value = state.globalSearch;
+	}
+	if (globalThis.__gjjLoraPopup?.state?.node === node) {
+		globalThis.__gjjLoraPopup.search.value = state.globalSearch;
+		globalThis.__gjjLoraPopup.render();
+	}
 }
 
 function stopCanvasPointerCapture(event) {
@@ -3959,9 +4830,9 @@ function ensureGlobalLoraPopup() {
 		position: fixed;
 		left: 12px;
 		top: 12px;
-		min-width: max(100%, 420px);
-		max-width: 680px;
-		width: max-content;
+		min-width: 280px;
+		max-width: 560px;
+		width: 420px;
 		padding: 6px;
 		border: 1px solid #41535b;
 		border-radius: 8px;
@@ -4035,32 +4906,48 @@ function ensureGlobalLoraPopup() {
 			const viewportHeight = Math.max(240, window.innerHeight || 240);
 			const horizontalPadding = 12;
 			const verticalPadding = 12;
+			const maxPopupWidth = 560;
+			const hostPanel = this.state.node?.__gjjLazyModelFloatingPanel?.panel;
+			const hostRect = hostPanel?.contains?.(this.state.anchorEl)
+				? hostPanel.getBoundingClientRect()
+				: null;
+			const boundaryLeft = hostRect
+				? Math.max(horizontalPadding, Math.floor(hostRect.left) + 8)
+				: horizontalPadding;
+			const boundaryRight = hostRect
+				? Math.min(viewportWidth - horizontalPadding, Math.ceil(hostRect.right) - 8)
+				: viewportWidth - horizontalPadding;
+			const boundaryTop = hostRect
+				? Math.max(verticalPadding, Math.floor(hostRect.top) + 8)
+				: verticalPadding;
+			const boundaryBottom = hostRect
+				? Math.min(viewportHeight - verticalPadding, Math.ceil(hostRect.bottom) - 8)
+				: viewportHeight - verticalPadding;
+			const availableWidth = Math.max(280, boundaryRight - boundaryLeft);
+			const minPopupWidth = Math.min(420, Math.max(280, availableWidth));
 			const targetWidth = Math.min(
-				Math.max(Math.ceil(rect?.width || 420), 420),
-				Math.max(320, viewportWidth - horizontalPadding * 2),
-				680,
+				Math.max(Math.min(Math.ceil(rect?.width || minPopupWidth), maxPopupWidth), minPopupWidth),
+				availableWidth,
+				maxPopupWidth,
 			);
-			const spaceBelow = Math.max(120, viewportHeight - Math.ceil(rect?.bottom || 0) - verticalPadding - 6);
-			const spaceAbove = Math.max(120, Math.floor(rect?.top || 0) - verticalPadding - 6);
+			const spaceBelow = Math.max(96, boundaryBottom - Math.ceil(rect?.bottom || boundaryTop) - 6);
+			const spaceAbove = Math.max(96, Math.floor(rect?.top || boundaryBottom) - boundaryTop - 6);
 			const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
-			const panelMaxHeight = Math.max(180, Math.min(420, openAbove ? spaceAbove : spaceBelow));
+			const panelMaxHeight = Math.max(140, Math.min(320, openAbove ? spaceAbove : spaceBelow));
 			const listMaxHeight = Math.max(96, panelMaxHeight - 52);
-			const rawLeft = Math.floor(rect?.left || horizontalPadding);
-			const left = Math.max(horizontalPadding, Math.min(rawLeft, viewportWidth - targetWidth - horizontalPadding));
+			const rawLeft = Math.floor(rect?.left || boundaryLeft);
+			const left = Math.max(boundaryLeft, Math.min(rawLeft, boundaryRight - targetWidth));
+			const top = openAbove
+				? Math.max(boundaryTop, Math.floor(rect?.top || boundaryTop) - panelMaxHeight - 6)
+				: Math.min(Math.ceil(rect?.bottom || boundaryTop) + 6, boundaryBottom - panelMaxHeight);
 
 			panel.style.width = `${targetWidth}px`;
-			panel.style.maxWidth = `${Math.max(320, viewportWidth - horizontalPadding * 2)}px`;
+			panel.style.maxWidth = `${Math.min(maxPopupWidth, availableWidth)}px`;
 			panel.style.maxHeight = `${panelMaxHeight}px`;
 			list.style.maxHeight = `${listMaxHeight}px`;
 			panel.style.left = `${left}px`;
-
-			if (openAbove) {
-				panel.style.top = "auto";
-				panel.style.bottom = `${Math.max(verticalPadding, viewportHeight - Math.floor(rect?.top || 0) + 6)}px`;
-			} else {
-				panel.style.bottom = "auto";
-				panel.style.top = `${Math.max(verticalPadding, Math.ceil(rect?.bottom || verticalPadding) + 6)}px`;
-			}
+			panel.style.bottom = "auto";
+			panel.style.top = `${Math.max(boundaryTop, top)}px`;
 		},
 		render() {
 			if (!this.state) {
@@ -4315,14 +5202,15 @@ function buildLoraRow(node, row, index, rowsContainer) {
 			popup.close();
 			return;
 		}
+		closeLazyFloatingSurfaces(node, modelSettingsOpen(node) ? "model" : "lora");
 		popup.open({
 			node,
 			anchorEl: picker,
-			searchValue: getDefaultSearchValue(index),
-			placeholder: index === 0 ? "首槽默认加速关键词" : "搜索",
-			searchTitle: "输入关键词筛选当前这一行可选的 LoRA 文件名；不区分大小写。语法：& 表示与，, 或 | 表示或。示例：flux & turbo,lightning,hyper",
+			searchValue: state.globalSearch || getDefaultSearchValue(index),
+			placeholder: "全局过滤 LoRA",
+			searchTitle: "输入关键词筛选当前节点所有 LoRA 下拉选项；不区分大小写。语法：& 表示与，, 或 | 表示或。示例：flux & turbo,lightning,hyper",
 			onSearchChange(searchValue) {
-				// 不保存每行搜索，避免与原来的实现冲突
+				setLoraGlobalSearch(node, searchValue);
 			},
 			getSelectedValue() {
 				return String(state.rows[index]?.name || "");
@@ -4341,14 +5229,15 @@ function buildLoraRow(node, row, index, rowsContainer) {
 				if (state.rows[index]?.name && !options.some((option) => option.value === state.rows[index].name)) {
 					options = [...options, { value: state.rows[index].name, label: state.rows[index].name }];
 				}
-				if (!searchText) {
+				const activeSearch = String(searchText || state.globalSearch || "");
+				if (!activeSearch) {
 					return options;
 				}
-				const terms = searchText.toLowerCase().split(/[,\s]+/).filter(Boolean);
+				const expressionGroups = parseLoraSearchExpression(activeSearch);
 				return options.filter((opt) => {
 					if (!opt.value) return true;
 					const haystack = loraSearchHaystack(opt, getLoraMetadata(state, opt.value));
-					return terms.every((term) => haystack.includes(term));
+					return matchesLoraSearchExpression(haystack, expressionGroups);
 				});
 			},
 			onSelect(value) {
@@ -4515,6 +5404,9 @@ function renderLoraUi(node) {
 		globalThis.__gjjLoraPopup.close();
 	}
 
+	if (node.__gjjLoraGlobalSearchInput) {
+		node.__gjjLoraGlobalSearchInput.value = String(state.globalSearch || "");
+	}
 	ensureTrailingEmptyRow(node);
 	rowsContainer.replaceChildren();
 	state.rows.forEach((row, index) => buildLoraRow(node, row, index, rowsContainer));
@@ -4545,7 +5437,9 @@ function setupLoraUi(node) {
 	}
 
 	// 初始化 state
-	ensureLoraNodeState(node).rows = normalizeRows(readStoredLoraData(node));
+	const state = ensureLoraNodeState(node);
+	state.rows = normalizeRows(readStoredLoraData(node));
+	state.globalSearch = String(node.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || "");
 
 	const container = document.createElement("div");
 	container.className = "gjj-lora-wrap";
@@ -4564,6 +5458,8 @@ function setupLoraUi(node) {
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-lora-toolbar { display:flex; flex-direction:row; gap:6px; align-items:center; }
+		.gjj-lora-global-search { flex:1; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:5px 8px; box-sizing:border-box; font-size:12px; }
+		.gjj-lora-global-search:focus { outline:none; border-color:#6aa6b8; box-shadow:0 0 0 1px rgba(106,166,184,0.35); }
 		.gjj-lora-refresh { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; }
 		.gjj-lora-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-lora-row { display:flex; align-items:flex-start; gap:6px; padding:6px; border:1px solid #3c4c54; border-radius:8px; background:#172026; }
@@ -4583,7 +5479,7 @@ function setupLoraUi(node) {
 		.gjj-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
 		.gjj-lora-preview-copy strong { color:#eef8f4; font-size:12px; }
 		.gjj-lora-preview-copy code { color:#9fd4c3; white-space:normal; word-break:break-word; }
-		.gjj-lora-popup { display:none; flex-direction:column; gap:6px; position:absolute; top:calc(100% + 6px); left:0; min-width:max(100%, 420px); max-width:680px; width:max-content; padding:6px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-sizing:border-box; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.35); }
+		.gjj-lora-popup { display:none; flex-direction:column; gap:6px; position:absolute; top:calc(100% + 6px); left:0; min-width:280px; max-width:560px; width:420px; padding:6px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-sizing:border-box; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.35); }
 		.gjj-lora-popup.open { display:flex; }
 		.gjj-lora-popup-search { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 6px; box-sizing:border-box; pointer-events:auto; }
 		.gjj-lora-popup-list { display:flex; flex-direction:column; gap:4px; max-height:300px; overflow:auto; }
@@ -4610,7 +5506,27 @@ function setupLoraUi(node) {
 	`;
 	container.appendChild(style);
 
-	// 刷新按钮已移到按钮区域，这里不需要 toolbar
+	const toolbar = document.createElement("div");
+	toolbar.className = "gjj-lora-toolbar";
+
+	const globalSearch = document.createElement("input");
+	globalSearch.type = "text";
+	globalSearch.className = "gjj-lora-global-search";
+	globalSearch.placeholder = "全局过滤 LoRA";
+	globalSearch.title = "按关键词过滤当前节点所有 LoRA 下拉选项；支持 & 与，, 或 | 表示或。";
+	globalSearch.value = ensureLoraNodeState(node).globalSearch;
+	globalSearch.addEventListener("input", () => {
+		setLoraGlobalSearch(node, globalSearch.value);
+	});
+	globalSearch.addEventListener("keydown", (event) => {
+		event.stopPropagation();
+		if (event.key === "Escape") {
+			globalSearch.blur();
+		}
+	});
+
+	toolbar.appendChild(globalSearch);
+	container.appendChild(toolbar);
 
 	const rowsContainer = document.createElement("div");
 	rowsContainer.className = "gjj-lora-rows";
@@ -4641,6 +5557,7 @@ function setupLoraUi(node) {
 
 	node.__gjjLoraContainer = container;
 	node.__gjjLoraRows = rowsContainer;
+	node.__gjjLoraGlobalSearchInput = globalSearch;
 
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
@@ -4649,6 +5566,8 @@ function setupLoraUi(node) {
 		}
 		if (serializedNode) {
 			persistLoraRows(this, ensureLoraNodeState(this).rows, serializedNode);
+			serializedNode.properties = serializedNode.properties || {};
+			serializedNode.properties[LORA_GLOBAL_SEARCH_PROPERTY] = String(ensureLoraNodeState(this).globalSearch || "");
 		}
 	};
 
@@ -4689,6 +5608,8 @@ function stabilizeNode(node, forcePreset = false) {
 	ensureTrailingImageInput(node);
 	renameImageInputs(node);
 	hookUnetWidget(node);
+	hookModelSourceWidget(node);
+	hookKeepModelWidget(node);
 	syncSeedControlWidget(node);
 
 	removeInternalInputs(node);
@@ -4863,6 +5784,7 @@ app.registerExtension({
 					? storedLoraData
 					: readStoredLoraData(this, serializedNode);
 				state.rows = normalizeRows(loraData);
+				state.globalSearch = String(this.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || serializedNode?.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || "");
 				persistLoraRows(this, state.rows);
 				if (this.__gjjLoraContainer) {
 					renderLoraUi(this);
@@ -4883,6 +5805,10 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
 			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
 			writeSerializedWidgetValues(this, serializedNode);
+			if (serializedNode) {
+				serializedNode.properties = serializedNode.properties || {};
+				serializedNode.properties[LORA_GLOBAL_SEARCH_PROPERTY] = String(ensureLoraNodeState(this).globalSearch || "");
+			}
 			return result;
 		};
 
@@ -4902,6 +5828,7 @@ app.registerExtension({
 
 		nodeType.prototype.onDrawBackground = function (...args) {
 			clearNativePreview(this);
+			positionOpenFloatingPanels(this);
 			const signature = externalPanelSignature(this);
 			if (signature !== this.__gjjLazyExternalPanelSignature) {
 				this.__gjjLazyExternalPanelSignature = signature;
@@ -4912,6 +5839,7 @@ app.registerExtension({
 
 		nodeType.prototype.onDrawForeground = function (...args) {
 			clearNativePreview(this);
+			positionOpenFloatingPanels(this);
 			return undefined;
 		};
 
@@ -4958,6 +5886,19 @@ app.registerExtension({
 
 	setup() {
 		installLazySeedPromptPatch();
+		if (!globalThis.__gjjLazyImageStudioFloatingResizeInstalled) {
+			globalThis.__gjjLazyImageStudioFloatingResizeInstalled = true;
+			window.addEventListener("resize", positionAllOpenLazyFloatingPanels);
+			window.addEventListener("scroll", positionAllOpenLazyFloatingPanels, true);
+			window.addEventListener("pointerdown", closeLazyFloatingPanelsFromOutside, true);
+			window.addEventListener("gjj-template-source-picker-opening", (event) => {
+				const node = event?.detail?.node;
+				if (TARGET_NODES.has(node?.comfyClass || node?.type)) {
+					closeLazyFloatingSurfaces(node, "template");
+					applySettingsVisibility(node);
+				}
+			});
+		}
 		void ensureModelPresetsLoaded().then(() => {
 			for (const node of app.graph?._nodes || []) {
 				if (!TARGET_NODES.has(node?.comfyClass)) {

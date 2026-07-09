@@ -723,6 +723,5 @@ app.registerExtension({
 			}
 		}
 		startOverlayUpdater();
-		console.log("[GJJ] ✅ 帮助按钮管理器已加载 - 所有 GJJ 节点的 ? 按钮将显示在标题栏右上角");
 	},
 });

@@ -45,6 +45,11 @@ function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name);
 }
 
+function legacyInputElement(widget) {
+	const descriptor = widget ? Object.getOwnPropertyDescriptor(widget, "inputEl") : null;
+	return descriptor?.value instanceof HTMLElement ? descriptor.value : null;
+}
+
 function hideDataWidget(widget) {
 	if (!widget) {
 		return;
@@ -53,8 +58,9 @@ function hideDataWidget(widget) {
 	if (widget.__gjjHidden) {
 		widget.computeSize = () => [0, 0];
 		widget.draw = () => {};
-		if (widget.inputEl) {
-			widget.inputEl.style.display = "none";
+		const inputEl = legacyInputElement(widget);
+		if (inputEl) {
+			inputEl.style.display = "none";
 		}
 		if (widget.element) {
 			widget.element.style.display = "none";
@@ -71,8 +77,9 @@ function hideDataWidget(widget) {
 	widget.hidden = true;
 	widget.computeSize = () => [0, 0];
 	widget.draw = () => {};
-	if (widget.inputEl) {
-		widget.inputEl.style.display = "none";
+	const inputEl = legacyInputElement(widget);
+	if (inputEl) {
+		inputEl.style.display = "none";
 	}
 	if (widget.element) {
 		widget.element.style.display = "none";
@@ -920,7 +927,10 @@ function getSequenceRange(node) {
 function getSequenceRangeWidget(node) {
 	let widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
 	if (!widget && typeof node?.addWidget === "function") {
-		widget = node.addWidget("text", SEQUENCE_RANGE_WIDGET_NAME, String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] || ""), null, {
+		widget = node.addWidget("text", SEQUENCE_RANGE_WIDGET_NAME, String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] || ""), (value) => {
+			node.properties = node.properties || {};
+			node.properties[SEQUENCE_RANGE_WIDGET_NAME] = String(value || "");
+		}, {
 			display_name: SEQUENCE_RANGE_INPUT_LABEL,
 			tooltip: "留空输出全部；[1,3,5] 输出指定序号；[1:8] 输出闭区间。",
 		});

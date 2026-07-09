@@ -15,6 +15,7 @@ import { app } from "/scripts/app.js";
 
 const NODE_NAME = "GJJ_NodeArranger";
 const SETTING_CONTEXT_MENU_ENABLED = "GJJ.NodeArranger.Menu.Enabled";
+const LEGACY_CONTEXT_MENU_SETTING = "GJJ.NodeArranger.LegacyCanvasMenu.Enabled";
 
 const MOVE_UNIT = 1;
 
@@ -5642,6 +5643,7 @@ function createMenuCallback(mode) {
 
 function addContextMenuItems() {
 	if (!app.canvas || app.canvas.__gjjNodeArrangerMenuPatched) return;
+	if (!gjjSettingEnabled(LEGACY_CONTEXT_MENU_SETTING, false)) return;
 
 	const originalGetCanvasMenuOptions = app.canvas.getCanvasMenuOptions;
 
@@ -5869,7 +5871,6 @@ function addTopBarButtons() {
 
 		toolbar.appendChild(group);
 
-		console.log("[GJJ_NodeArranger] Top bar buttons added");
 	}, 1000);
 }
 
@@ -6177,23 +6178,10 @@ app.registerExtension({
 		addTopBarButtons();
 		registerKeyboardShortcuts();
 		patchGraphSerializeIntegerPosition();
-
-		console.log("[GJJ_NodeArranger] Extension loaded successfully");
-		console.log("[GJJ_NodeArranger] Shortcuts:");
-		console.log("  Ctrl+Shift+A: 循环切换排列模式");
-		console.log("  Ctrl+Alt+A: 全部折叠 / 全部打开（智能范围：部分选择时只折叠/打开所选）");
-		console.log("  Ctrl+Shift+T: 拓扑主链路");
-		console.log("  Ctrl+Shift+H: 水平排列");
-		console.log("  Ctrl+Shift+V: 垂直排列");
-		console.log("  Ctrl+Shift+G: 正方形预览排版");
-		console.log("  Alt+←/→: 减少/增加列宽和横向间距");
-		console.log("  Alt+↑/↓: 减少/增加行高和纵向间距");
-		console.log("  Ctrl+Alt+A: 全部折叠 / 全部打开");
 	},
 
 	async nodeCreated(node) {
 		if (node?.comfyClass === NODE_NAME || node?.type === NODE_NAME) {
-			console.log("[GJJ_NodeArranger] Node created");
 			addButtonToArrangerNode(node);
 		}
 	},

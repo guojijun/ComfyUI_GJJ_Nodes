@@ -55,6 +55,7 @@ const PARAM_DEFS = [
 	{ name: "filter_directory", label: "过滤目录", kind: "text", default: "", tip: "只显示 input 下相对目录包含该文本的视频；留空不过滤。" },
 	{ name: "refresh_interval", label: "刷新时间", kind: "number", step: "0.5", min: "1", max: "3600", default: 5.0, tip: "定时刷新开启时，每隔多少秒重新扫描视频列表。" },
 ];
+const SERIALIZED_PARAM_WIDGET_ORDER = [...PARAM_DEFS.map((def) => def.name), "auto_refresh", SELECTED_WIDGET_NAME];
 const AUTO_MEDIA_INFO_PARAM_NAMES = ["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames"];
 const AUTO_MEDIA_INFO_DEFAULTS = new Map([
 	["frame_rate", [0, 1, 24]],
@@ -533,6 +534,102 @@ function findWidgetQuiet(node, name) {
 	return null;
 }
 
+function activeSerializedParamWidgetNames(node) {
+	const names = [];
+	for (const widget of node?.widgets || []) {
+		if (!widget || widget.name === DOM_WIDGET_NAME || widget.serialize === false) continue;
+		if (!isNativeParamWidget(widget)) continue;
+		const normalized = normalizeParamWidgetName(widget.name);
+		if (SERIALIZED_PARAM_WIDGET_ORDER.includes(normalized) && !names.includes(normalized)) {
+			names.push(normalized);
+		}
+	}
+	return names;
+}
+
+function normalizeSerializedWidgetValuesForActiveWidgets(node, serializedNode) {
+	if (!serializedNode || !Array.isArray(serializedNode.widgets_values)) return serializedNode;
+	const activeNames = activeSerializedParamWidgetNames(node);
+	const values = serializedNode.widgets_values;
+	if (!activeNames.length || values.length !== SERIALIZED_PARAM_WIDGET_ORDER.length) return serializedNode;
+	if (activeNames.length === values.length) return serializedNode;
+
+	const byName = new Map(SERIALIZED_PARAM_WIDGET_ORDER.map((name, index) => [name, values[index]]));
+	const normalizedValues = activeNames.map((name) => byName.get(name));
+	serializedNode.widgets_values = normalizedValues;
+	console.info("[GJJ] Normalized MultiVideoLoader widget values after converted inputs:", activeNames);
+	return serializedNode;
+}
+
+function writeSerializedWidgetValuesForActiveWidgets(node, serializedNode) {
+	if (!serializedNode) return;
+	const activeNames = activeSerializedParamWidgetNames(node);
+	if (!activeNames.length) return;
+	const values = [];
+	for (const name of activeNames) {
+		const value = getWidgetValue(node, name);
+		values.push(value === undefined ? "" : value);
+	}
+	serializedNode.widgets_values = values;
+}
+
+function restoreParamWidgetValuesFromFullOrder(node, rawValues) {
+	if (!Array.isArray(rawValues) || rawValues.length !== SERIALIZED_PARAM_WIDGET_ORDER.length) return false;
+	const activeNames = activeSerializedParamWidgetNames(node);
+	if (!activeNames.length || activeNames.length === rawValues.length) return false;
+	const byName = new Map(SERIALIZED_PARAM_WIDGET_ORDER.map((name, index) => [name, rawValues[index]]));
+	let changed = false;
+	for (const name of activeNames) {
+		const widget = findWidgetQuiet(node, name);
+		if (!widget || !byName.has(name)) continue;
+		const value = byName.get(name);
+		if (widget.value === value) continue;
+		widget.value = value;
+		changed = true;
+	}
+	if (changed) {
+		console.info("[GJJ] Restored MultiVideoLoader widget values by name after configure:", activeNames);
+	}
+	return changed;
+}
+
+function defaultParamWidgetValue(name) {
+	if (name === "auto_refresh") return false;
+	if (name === SELECTED_WIDGET_NAME) return "[]";
+	const def = PARAM_DEFS.find((item) => item.name === name);
+	return def?.default ?? "";
+}
+
+function isKnownVideoFormatValue(node, value) {
+	const text = String(value ?? "");
+	if (!text) return false;
+	return getParamOptions(node, "video_format").includes(text) || FALLBACK_FORMATS.includes(text);
+}
+
+function repairLeadingMissingParamWidgetShift(node) {
+	if (findWidgetQuiet(node, "frame_rate")) return false;
+	const activeNames = activeSerializedParamWidgetNames(node);
+	if (!activeNames.length || activeNames[0] !== "width") return false;
+	const shiftedVideoFormat = getWidgetValue(node, "start_frame");
+	if (!isKnownVideoFormatValue(node, shiftedVideoFormat)) return false;
+
+	const currentValues = activeNames.map((name) => getWidgetValue(node, name));
+	let changed = false;
+	for (let index = 0; index < activeNames.length; index++) {
+		const name = activeNames[index];
+		const widget = findWidgetQuiet(node, name);
+		if (!widget) continue;
+		const nextValue = index + 1 < currentValues.length ? currentValues[index + 1] : defaultParamWidgetValue(name);
+		if (widget.value === nextValue) continue;
+		widget.value = nextValue;
+		changed = true;
+	}
+	if (changed) {
+		console.info("[GJJ] Repaired MultiVideoLoader shifted widget values after frame_rate conversion.");
+	}
+	return changed;
+}
+
 function syncSelectedVideosWidget(node, serializedSelection) {
 	const widget = findWidgetQuiet(node, SELECTED_WIDGET_NAME);
 	if (!widget) return;
@@ -545,12 +642,16 @@ function hasLinkedInput(node, name) {
 	return (node.inputs || []).some((input) => input?.name === name && input.link != null);
 }
 
+function hasInputSlot(node, name) {
+	return (node.inputs || []).some((input) => inputSlotKey(input) === name || input?.name === name);
+}
+
 function setWidgetValue(node, name, value, force = false) {
 	if (!force && hasLinkedInput(node, name)) return;
 
-	const widget = findWidget(node, name);
+	const widget = findWidgetQuiet(node, name);
 	if (!widget) {
-		console.warn(`[GJJ] Widget not found for ${name}`);
+		if (!hasInputSlot(node, name)) console.warn(`[GJJ] Widget not found for ${name}`);
 		return;
 	}
 
@@ -1002,7 +1103,7 @@ function getParamOptions(node, name) {
 }
 
 function getWidgetValue(node, name) {
-	return findWidget(node, name)?.value;
+	return findWidgetQuiet(node, name)?.value;
 }
 
 function asBoolean(value) {
@@ -1160,6 +1261,7 @@ function renderParamControls(node) {
 		box.__built = true;
 	}
 
+	repairLeadingMissingParamWidgetShift(node);
 	fixParameterMismatch(node);
 
 	for (const def of PARAM_DEFS) {
@@ -2820,7 +2922,13 @@ app.registerExtension({
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
+			const rawWidgetValues = Array.isArray(args[0]?.widgets_values) ? [...args[0].widgets_values] : null;
+			if (args[0] && typeof args[0] === "object") {
+				args[0] = normalizeSerializedWidgetValuesForActiveWidgets(this, { ...args[0] });
+			}
 			const result = originalOnConfigure?.apply(this, args);
+			restoreParamWidgetValuesFromFullOrder(this, rawWidgetValues);
+			repairLeadingMissingParamWidgetShift(this);
 			scheduleNativePreviewClear(this);
 			this.properties = this.properties || {};
 			const serializedProps = args[0]?.properties || {};
@@ -2866,6 +2974,7 @@ app.registerExtension({
 				serializedNode.properties.filter_directory = String(getWidgetValue(this, "filter_directory") ?? "");
 				writeSerializedInputSlots(serializedNode, inputDefs);
 				writeSerializedOutputSlots(serializedNode, defs);
+				writeSerializedWidgetValuesForActiveWidgets(this, serializedNode);
 			}
 			return result;
 		};

@@ -1007,7 +1007,6 @@ import { app } from "/scripts/app.js";
 			exposeSummonModelApi();
 			const registry = globalThis.LiteGraph?.registered_node_types || {};
 			for (const nodeType of Object.values(registry)) patchNodeType(nodeType);
-			console.log("[GJJ] 召唤模型右键菜单已启用");
 		},
 	});
 })();
