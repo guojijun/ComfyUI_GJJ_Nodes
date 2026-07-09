@@ -3235,6 +3235,7 @@ function appendImagePreviewCards(node, parent, images) {
 		].join(";");
 		image.onload = () => scheduleLayout(node);
 		image.onerror = () => scheduleLayout(node);
+		bindAnyPreviewImageContextMenu(image, item);
 
 		const badge = document.createElement("div");
 		badge.textContent = `${index + 1}`;
@@ -3279,6 +3280,7 @@ function appendImagePreviewCards(node, parent, images) {
 				"object-fit:contain",
 				"border-radius:8px",
 			].join(";");
+			bindAnyPreviewImageContextMenu(previewImg, item);
 
 			overlay.appendChild(previewImg);
 			const hint = document.createElement("div");
@@ -3461,6 +3463,7 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 	].join(";");
 	image.onload = () => scheduleLayout(node);
 	image.onerror = () => scheduleLayout(node);
+	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, currentItem()));
 	parent.appendChild(image);
 
 	const badge = document.createElement("div");
@@ -3530,6 +3533,9 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 			"object-fit:contain",
 			"border-radius:8px",
 		].join(";");
+		previewImg.addEventListener("contextmenu", (contextEvent) => {
+			showAnyPreviewImageMenu(contextEvent, pageItems[overlayIndex] || currentItem());
+		});
 		const hint = document.createElement("div");
 		hint.style.cssText = [
 			"position:absolute",
@@ -3910,6 +3916,7 @@ function appendAnimatedSequenceImage(node, parent, item, description = "") {
 	].join(";");
 	image.onload = () => scheduleLayout(node);
 	image.onerror = () => scheduleLayout(node);
+	bindAnyPreviewImageContextMenu(image, item);
 
 	stage.appendChild(image);
 	mediaCard.appendChild(stage);
@@ -3953,6 +3960,7 @@ function appendImageSequencePlayer(node, parent, images, description = "") {
 		"display:block",
 	].join(";");
 	image.onload = () => scheduleLayout(node);
+	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, frames[frameIndex % frames.length]));
 
 	const badge = document.createElement("div");
 	badge.textContent = `1/${frames.length}`;
@@ -4376,6 +4384,7 @@ function applyPreviewContent(node) {
 				}
 				scheduleLayout(node);
 			};
+			bindAnyPreviewImageContextMenu(image, item);
 
 			// 左上角：图片序号
 			const indexBadge = document.createElement("div");
@@ -4450,6 +4459,7 @@ function applyPreviewContent(node) {
 					"transition:transform 0.1s ease",
 					"cursor:grab",
 				].join(";");
+				bindAnyPreviewImageContextMenu(previewImg, item);
 
 				// 提示文字
 				const hint = document.createElement("div");

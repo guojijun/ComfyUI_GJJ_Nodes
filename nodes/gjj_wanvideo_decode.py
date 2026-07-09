@@ -23,6 +23,7 @@ class _ComfyWanVAEAdapter:
         self._vae = vae
         self.dtype = getattr(vae, "vae_dtype", torch.float32)
         self.upsampling_factor = getattr(vae, "spacial_compression_decode", lambda: 8)()
+        self.outputs_normalized = True
 
     def to(self, *_args, **_kwargs):
         return self
@@ -200,7 +201,8 @@ class GJJ_WanVideoDecode:
 
         images = images.cpu().float()
 
-        if normalization != "none":
+        already_normalized = bool(getattr(vae, "outputs_normalized", False))
+        if normalization != "none" and not already_normalized:
             if normalization == "minmax":
                 images.sub_(images.min()).div_(images.max() - images.min())
             else:

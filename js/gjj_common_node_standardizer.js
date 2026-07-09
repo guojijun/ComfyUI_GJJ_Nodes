@@ -387,6 +387,154 @@ function shieldDomWidgetEvents(element) {
 	}
 }
 
+const NATIVE_MEDIA_CONTROL_EVENTS = [
+	"pointerdown",
+	"pointermove",
+	"pointerup",
+	"mousedown",
+	"mousemove",
+	"mouseup",
+	"click",
+	"dblclick",
+	"wheel",
+	"contextmenu",
+	"touchstart",
+	"touchmove",
+	"touchend",
+];
+const NATIVE_MEDIA_CONTROL_GUARD_VERSION = 2;
+
+function protectNativeMediaControl(element) {
+	if (!element) {
+		return;
+	}
+	element.style.setProperty("cursor", "auto", "important");
+	element.style.setProperty("pointer-events", "auto", "important");
+	element.style.setProperty("touch-action", "auto", "important");
+	if (element.__gjjNativeMediaControlGuardVersion === NATIVE_MEDIA_CONTROL_GUARD_VERSION) {
+		return;
+	}
+	element.__gjjNativeMediaControlGuardVersion = NATIVE_MEDIA_CONTROL_GUARD_VERSION;
+	const stopCanvasDrag = (event) => {
+		event.stopPropagation();
+	};
+	for (const eventName of NATIVE_MEDIA_CONTROL_EVENTS) {
+		const options = eventName === "wheel" || eventName.startsWith("touch")
+			? { capture: true, passive: true }
+			: { capture: true };
+		element.addEventListener(eventName, stopCanvasDrag, options);
+		element.addEventListener(eventName, stopCanvasDrag);
+	}
+}
+
+function protectNativeMediaControls(root = document) {
+	if (!root) {
+		return;
+	}
+	if (root.matches?.("video,audio")) {
+		protectNativeMediaControl(root);
+	}
+	for (const element of root.querySelectorAll?.("video,audio") || []) {
+		protectNativeMediaControl(element);
+	}
+}
+
+function isNativeMediaDomWidget(widget) {
+	const elements = [widget?.element, widget?.inputEl, widget?.container, widget?.dom, widget?.root];
+	return elements.some((element) => {
+		if (!element) return false;
+		if (element.matches?.("video,audio")) return true;
+		return Boolean(element.querySelector?.("video,audio"));
+	});
+}
+
+function protectNativeMediaWidget(widget) {
+	if (!widget || widget.__gjjNativeMediaWidgetGuard) {
+		return;
+	}
+	if (!isNativeMediaDomWidget(widget)) {
+		return;
+	}
+	widget.__gjjNativeMediaWidgetGuard = true;
+	const originalMouse = typeof widget.mouse === "function" ? widget.mouse : null;
+	widget.mouse = function (event, pos, nodeRef) {
+		const eventType = String(event?.type || "");
+		if (
+			[
+				"pointerdown",
+				"pointermove",
+				"pointerup",
+				"mousedown",
+				"mousemove",
+				"mouseup",
+				"click",
+				"dblclick",
+				"wheel",
+				"contextmenu",
+			].includes(eventType)
+		) {
+			event?.stopPropagation?.();
+			return true;
+		}
+		return originalMouse ? originalMouse.apply(this, arguments) : false;
+	};
+}
+
+function protectNativeMediaWidgets(node) {
+	for (const widget of node?.widgets || []) {
+		protectNativeMediaWidget(widget);
+	}
+}
+
+function patchNativeMediaDomWidgets(nodeType) {
+	if (!nodeType?.prototype || nodeType.prototype.__gjjNativeMediaDomWidgetPatched) {
+		return;
+	}
+	const proto = nodeType.prototype;
+	if (typeof proto.addDOMWidget !== "function") {
+		return;
+	}
+	proto.__gjjNativeMediaDomWidgetPatched = true;
+	const originalAddDOMWidget = proto.addDOMWidget;
+	proto.addDOMWidget = function (...args) {
+		const widget = originalAddDOMWidget.apply(this, args);
+		const refresh = () => {
+			protectNativeMediaControls(widget?.element || widget?.inputEl || widget?.container || widget?.dom || widget?.root || document);
+			protectNativeMediaWidget(widget);
+		};
+		refresh();
+		requestAnimationFrame(refresh);
+		setTimeout(refresh, 80);
+		return widget;
+	};
+}
+
+function installNativeMediaControlGuard() {
+	if (window.__gjjNativeMediaControlGuardVersion === NATIVE_MEDIA_CONTROL_GUARD_VERSION) {
+		return;
+	}
+	window.__gjjNativeMediaControlGuardVersion = NATIVE_MEDIA_CONTROL_GUARD_VERSION;
+	const install = () => {
+		protectNativeMediaControls(document);
+		const target = document.documentElement || document.body;
+		if (!target) {
+			setTimeout(install, 50);
+			return;
+		}
+		const observer = new MutationObserver((mutations) => {
+			for (const mutation of mutations) {
+				for (const node of mutation.addedNodes || []) {
+					if (node?.nodeType === Node.ELEMENT_NODE) {
+						protectNativeMediaControls(node);
+					}
+				}
+			}
+		});
+		observer.observe(target, { childList: true, subtree: true });
+	};
+	install();
+}
+
 function protectDomWidgets(node) {
 	for (const widget of node?.widgets || []) {
 		const element = widget?.element || widget?.inputEl;
@@ -404,6 +552,7 @@ function protectDomWidgets(node) {
 			shieldDomWidgetEvents(element);
 		}
 	}
+	protectNativeMediaControls(node?.__container || node?.domElement || document);
 }
 
 function protectDomWidget(widget) {
@@ -2324,6 +2473,7 @@ app.registerExtension({
 
 	setup() {
 			loadGjjSettings();
+			installNativeMediaControlGuard();
 			loadBackendHelpMetadata().then(() => refreshGjjNodesAfterHelpLoad());
 
 		api.addEventListener("executing", ({ detail }) => {
@@ -2392,6 +2542,27 @@ app.registerExtension({
 			if (isGjjNode(node)) {
 				patchNode(node);
 			}
+		}
+	},
+});
+
+app.registerExtension({
+	name: "Comfy.GJJ.NativeMediaDomWidgetGuard",
+
+	beforeRegisterNodeDef(nodeType) {
+		patchNativeMediaDomWidgets(nodeType);
+	},
+
+	nodeCreated(node) {
+		protectNativeMediaWidgets(node);
+		requestAnimationFrame(() => protectNativeMediaWidgets(node));
+		setTimeout(() => protectNativeMediaWidgets(node), 120);
+	},
+
+	setup() {
+		installNativeMediaControlGuard();
+		for (const node of app.graph?._nodes || []) {
+			protectNativeMediaWidgets(node);
 		}
 	},
 });
