@@ -264,6 +264,109 @@ function imageDataToUrl(data) {
 	);
 }
 
+function closeAnyPreviewImageMenu() {
+	document.querySelectorAll(".gjj-any-preview-image-menu").forEach((menu) => menu.remove());
+}
+
+function downloadAnyPreviewImage(item) {
+	const url = imageDataToUrl(item);
+	if (!url) return;
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = String(item?.filename || "gjj-preview-image.png").split(/[\\/]/).pop() || "gjj-preview-image.png";
+	link.rel = "noopener";
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+}
+
+function addImageMenuItem(menu, label, callback) {
+	const item = document.createElement("button");
+	item.type = "button";
+	item.textContent = label;
+	item.style.cssText = [
+		"display:block",
+		"width:100%",
+		"border:0",
+		"background:transparent",
+		"color:#e7f3ef",
+		"padding:7px 12px",
+		"text-align:left",
+		"font:12px/1.35 system-ui,\"Microsoft YaHei\",sans-serif",
+		"cursor:pointer",
+	].join(";");
+	item.addEventListener("mouseenter", () => {
+		item.style.background = "#23323a";
+	});
+	item.addEventListener("mouseleave", () => {
+		item.style.background = "transparent";
+	});
+	item.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeAnyPreviewImageMenu();
+		callback?.();
+	});
+	menu.appendChild(item);
+}
+
+function showAnyPreviewImageMenu(event, item) {
+	const url = imageDataToUrl(item);
+	if (!url) return;
+	event.preventDefault();
+	event.stopPropagation();
+	closeAnyPreviewImageMenu();
+
+	const menu = document.createElement("div");
+	menu.className = "gjj-any-preview-image-menu";
+	menu.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"min-width:148px",
+		"padding:4px",
+		"border:1px solid #3a4d56",
+		"border-radius:7px",
+		"background:#10191e",
+		"box-shadow:0 8px 26px rgba(0,0,0,.36)",
+		"box-sizing:border-box",
+	].join(";");
+
+	addImageMenuItem(menu, "保存图片", () => downloadAnyPreviewImage(item));
+	addImageMenuItem(menu, "新标签打开", () => window.open(url, "_blank", "noopener"));
+	addImageMenuItem(menu, "打开所在目录", () => openMediaFolder(item || {}));
+	document.body.appendChild(menu);
+
+	const rect = menu.getBoundingClientRect();
+	const left = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+	const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
+	menu.style.left = `${Math.max(8, left)}px`;
+	menu.style.top = `${Math.max(8, top)}px`;
+
+	const dismiss = (dismissEvent) => {
+		if (!menu.contains(dismissEvent.target)) {
+			closeAnyPreviewImageMenu();
+			document.removeEventListener("pointerdown", dismiss, true);
+			document.removeEventListener("keydown", dismissKey, true);
+		}
+	};
+	const dismissKey = (keyEvent) => {
+		if (keyEvent.key === "Escape") {
+			closeAnyPreviewImageMenu();
+			document.removeEventListener("pointerdown", dismiss, true);
+			document.removeEventListener("keydown", dismissKey, true);
+		}
+	};
+	setTimeout(() => {
+		document.addEventListener("pointerdown", dismiss, true);
+		document.addEventListener("keydown", dismissKey, true);
+	}, 0);
+}
+
+function bindAnyPreviewImageContextMenu(image, item) {
+	if (!image?.addEventListener || !item) return;
+	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, item));
+}
+
 function withoutNativeImagePreview(message = {}) {
 	return { ...(message || {}) };
 }
