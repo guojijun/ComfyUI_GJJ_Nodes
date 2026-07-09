@@ -128,7 +128,7 @@ const DEFAULT_VALUES = {
 	extra_instruction: "",
 	negative_prompt: "bad video",
 	mode: "auto",
-	width: 832,
+	width: 480,
 	height: 480,
 	length: 81,
 	batch_size: 1,
@@ -146,7 +146,7 @@ const DEFAULT_VALUES = {
 	frame_rate: 8,
 	filename_prefix: "video/Bernini_Studio",
 	format_name: "video/h264-mp4",
-	vae_tiling: false,
+	vae_tiling: true,
 	tile_x: 272,
 	tile_y: 272,
 	high_model: "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors",
@@ -157,7 +157,7 @@ const DEFAULT_VALUES = {
 	low_lora: "Bernini-R_LightX2V_low_noise.safetensors",
 	translation_enabled: false,
 	segment_frames: 81,
-	keep_model: true,
+	keep_model: false,
 	prev_segment_ref_frames: 1,
 	randomize_seed: false,
 	resize_to_panel: true,
@@ -230,7 +230,9 @@ function setValue(node, name, nextValue) {
 	target.callback?.(nextValue, app.canvas, node, undefined, target);
 	const panelControl = node.__gjjBerniniPanel?.controls?.get?.(name);
 	if (panelControl) {
-		if (panelControl.dataset?.booleanControl === "true") {
+		if (panelControl.dataset?.resizeModeControl === "true") {
+			setResizeModeControlState(panelControl, Boolean(nextValue));
+		} else if (panelControl.dataset?.booleanControl === "true") {
 			setBooleanButtonState(panelControl, Boolean(nextValue));
 		} else if (document.activeElement !== panelControl) {
 			if (panelControl.type === "checkbox") panelControl.checked = Boolean(nextValue);
@@ -860,12 +862,39 @@ function setBooleanButtonState(control, enabled) {
 	control.title = `${label || "开关"}：${enabled ? "开启" : "关闭"}`;
 }
 
+function setResizeModeControlState(control, usePanelSize) {
+	if (!control) return;
+	for (const button of control.querySelectorAll("button[data-resize-mode]")) {
+		const active = button.dataset.resizeMode === (usePanelSize ? "panel" : "source");
+		button.classList.toggle("active", active);
+		button.setAttribute("aria-pressed", active ? "true" : "false");
+	}
+	control.title = usePanelSize ? "当前使用面板宽高输出。" : "当前沿用外接源媒体尺寸输出。";
+}
+
 function makeControl(node, name) {
 	const target = widget(node, name);
 	if (!target) return null;
 	const choices = widgetChoices(target);
 	let control;
-	if (typeof target.value === "boolean") {
+	if (name === "resize_to_panel") {
+		control = document.createElement("div");
+		control.dataset.resizeModeControl = "true";
+		control.classList.add("gjj-bs-segment-control");
+		for (const [mode, label, nextValue] of [
+			["source", "按源媒体尺寸", false],
+			["panel", "按面板尺寸", true],
+		]) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.dataset.resizeMode = mode;
+			button.textContent = label;
+			button.title = label;
+			bindButton(button, () => setValue(node, name, nextValue));
+			control.appendChild(button);
+		}
+		setResizeModeControlState(control, Boolean(target.value));
+	} else if (typeof target.value === "boolean") {
 		control = document.createElement("button");
 		control.type = "button";
 		control.dataset.booleanControl = "true";
@@ -907,7 +936,7 @@ function makeControl(node, name) {
 	}
 	control.classList.add("gjj-bs-control");
 	control.title = target.options?.tooltip || target.tooltip || name;
-	protect(control);
+	if (control.dataset?.resizeModeControl !== "true") protect(control);
 	return control;
 }
 
@@ -938,7 +967,7 @@ function buildSettings(node, groups, title, popupName) {
 			const control = makeControl(node, name);
 			if (!control) continue;
 			controls.set(name, control);
-			const labelText = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
+			const labelText = name === "resize_to_panel" ? "尺寸模式" : (widget(node, name)?.options?.display_name || widget(node, name)?.label || name);
 			if (control.dataset?.booleanControl === "true") {
 				control.dataset.label = labelText;
 				setBooleanButtonState(control, Boolean(value(node, name, DEFAULT_VALUES[name])));
@@ -996,6 +1025,7 @@ function ensurePanelStyle() {
 		.gjj-bs-heading{font-weight:800;color:#9ed6df;margin-bottom:5px}.gjj-bs-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}.gjj-bs-field{display:flex;align-items:center;gap:8px;min-width:0}.gjj-bs-field.wide{align-items:flex-start;flex-direction:column}.gjj-bs-field>span{flex:0 0 92px;color:#aebbc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 		.gjj-bs-control{flex:1;min-width:0;width:100%;border:1px solid #40515a;border-radius:5px;background:#0e1519;color:#eaf2f3;padding:5px 7px}.gjj-bs-control:is(textarea){min-height:64px;resize:vertical}
 		select.gjj-bs-control{border-color:#3c7f91;background:#122932;color:#f0fbff;font-weight:650;box-shadow:0 0 0 1px rgba(77,171,193,.18) inset;cursor:pointer}select.gjj-bs-control:hover{border-color:#62b9cb;background:#15323d}select.gjj-bs-control:focus{outline:none;border-color:#8bd8e8;box-shadow:0 0 0 1px rgba(139,216,232,.6),0 0 0 3px rgba(35,130,154,.28)}select.gjj-bs-control option{background:#102229;color:#f0fbff}
+		.gjj-bs-segment-control{display:flex;align-items:center;gap:6px;padding:0;border:0;background:transparent}.gjj-bs-segment-control>button{flex:1 1 0;min-width:0;min-height:32px;border:1px solid #40515a;border-radius:6px;background:#152026;color:#b9c8cc;font-weight:750;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.gjj-bs-segment-control>button.active{border-color:#24c68b;background:#164d3c;color:#eafff7}.gjj-bs-segment-control>button:disabled{cursor:not-allowed;opacity:.52}
 		.gjj-bs-boolean-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}.gjj-bs-boolean-row>.gjj-bs-control{flex:1 1 0;min-width:0;width:auto;min-height:28px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#152026;color:#b9c8cc}.gjj-bs-boolean-row>.gjj-bs-control.active{border-color:#24c68b;background:#164d3c;color:#eafff7}
 		.gjj-bs-preview-wrap{display:flex;flex-direction:column;gap:5px;width:100%}.gjj-bs-preview-status{color:#92a7ad;font-size:11px}.gjj-bs-preview{display:none;width:100%;height:auto;object-fit:contain;border:1px solid #334850;border-radius:8px;background:#0b1114}
 	`;
@@ -1226,7 +1256,9 @@ function syncPanel(node) {
 		if (!control) continue;
 		const current = value(node, name, DEFAULT_VALUES[name]);
 		const focused = document.activeElement === control;
-		if (control.dataset?.booleanControl === "true") {
+		if (control.dataset?.resizeModeControl === "true") {
+			setResizeModeControlState(control, Boolean(current));
+		} else if (control.dataset?.booleanControl === "true") {
 			setBooleanButtonState(control, Boolean(current));
 		} else if (!focused) {
 			if (control.type === "checkbox") control.checked = Boolean(current);
@@ -1236,6 +1268,9 @@ function syncPanel(node) {
 		const sizeControlled = sourceControlsSize && (name === "width" || name === "height");
 		const controlled = templateControlled || sizeControlled;
 		control.disabled = controlled;
+		if (control.dataset?.resizeModeControl === "true") {
+			for (const button of control.querySelectorAll("button[data-resize-mode]")) button.disabled = controlled;
+		}
 		control.style.opacity = controlled ? "0.52" : "";
 		control.title = templateControlled
 			? `参数已由变量 ${sources[name]} 接管`

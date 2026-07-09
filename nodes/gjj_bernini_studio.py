@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import random
 import os
 import tempfile
@@ -268,6 +269,41 @@ def _first_value(value: Any, default: Any = None) -> Any:
 
 def _as_text(value: Any, default: str = "") -> str:
     return str(_first_value(value, default) or default)
+
+
+def _memory_cleanup(unique_id=None, label: str = "清理显存和内存", clear_video_cache: bool = False) -> None:
+    try:
+        _send_status(unique_id, label, 0.01)
+    except Exception:
+        pass
+    if clear_video_cache:
+        try:
+            _VIDEO_DECODE_CACHE.clear()
+        except Exception:
+            pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import comfy.model_management as mm
+
+        try:
+            mm.cleanup_models()
+        except Exception:
+            pass
+        try:
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
 
 def _has_media(value: Any) -> bool:
@@ -991,6 +1027,20 @@ def _video_combine_result(value: Any) -> tuple[Any, str, str]:
 
 
 def _decode_bernini_frames(vae: Any, samples: dict[str, Any], kwargs: dict[str, Any]) -> torch.Tensor:
+    if _as_bool(kwargs.get("vae_tiling"), False):
+        try:
+            return GJJ_WanVideoDecode().decode(
+                vae=vae,
+                samples=samples,
+                enable_vae_tiling=True,
+                tile_x=_as_int(kwargs.get("tile_x"), 272, 40, 2048),
+                tile_y=_as_int(kwargs.get("tile_y"), 272, 40, 2048),
+                tile_stride_x=144,
+                tile_stride_y=128,
+                normalization="default",
+            )[0]
+        except Exception as tiled_exc:
+            print(f"[GJJ BerniniStudio] GJJ_WanVideoDecode 分块解码失败，回退原生 VAEDecode：{tiled_exc}")
     try:
         from nodes import VAEDecode
 
@@ -1005,7 +1055,7 @@ def _decode_bernini_frames(vae: Any, samples: dict[str, Any], kwargs: dict[str, 
         return GJJ_WanVideoDecode().decode(
             vae=vae,
             samples=samples,
-            enable_vae_tiling=_as_bool(kwargs.get("vae_tiling"), False),
+            enable_vae_tiling=_as_bool(kwargs.get("vae_tiling"), True),
             tile_x=_as_int(kwargs.get("tile_x"), 272, 40, 2048),
             tile_y=_as_int(kwargs.get("tile_y"), 272, 40, 2048),
             tile_stride_x=144,
@@ -1346,7 +1396,7 @@ class GJJ_BerniniStudio:
                 "extra_instruction": ("STRING", {"default": "", "multiline": True, "display_name": "附加指令", "tooltip": "可选。追加在提示词后，适合写局部要求、风格、镜头或约束。"}),
                 "negative_prompt": ("STRING", {"default": DEFAULT_NEGATIVE, "multiline": True, "display_name": "负面提示词", "tooltip": "不想要的内容。默认沿用 BERNINI.json 的 bad video。"}),
                 "mode": (MODE_CHOICES, {"default": "auto", "display_name": "模式", "tooltip": "auto 会根据接入内容智能选择；也可手动固定 T2I/T2V/I2I/R2V/MV2V 等模式。"}),
-                "width": ("INT", {"default": 832, "min": 16, "max": 8192, "step": 16, "display_name": "宽度", "tooltip": "输出宽度。"}),
+                "width": ("INT", {"default": 480, "min": 16, "max": 8192, "step": 16, "display_name": "宽度", "tooltip": "输出宽度。"}),
                 "height": ("INT", {"default": 480, "min": 16, "max": 8192, "step": 16, "display_name": "高度", "tooltip": "输出高度。"}),
                 "length": ("INT", {"default": 81, "min": 1, "max": 8192, "step": 4, "display_name": "帧数", "tooltip": "视频帧数。"}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "step": 1, "display_name": "批次数", "tooltip": "latent 批次数。"}),
@@ -1364,7 +1414,7 @@ class GJJ_BerniniStudio:
                 "frame_rate": ("FLOAT", {"default": 16.0, "min": 1.0, "max": 240.0, "step": 1.0, "display_name": "帧率", "tooltip": "视频输出帧率。"}),
                 "filename_prefix": ("STRING", {"default": "video/Bernini_Studio", "display_name": "文件名前缀", "tooltip": "保存视频的文件名前缀。"}),
                 "format_name": ("STRING", {"default": "video/h264-mp4", "display_name": "输出格式", "tooltip": "GJJ 视频合成器格式名。"}),
-                "vae_tiling": ("BOOLEAN", {"default": False, "display_name": "VAE分块", "tooltip": "解码时启用 VAE 分块，省显存但可能更慢。"}),
+                "vae_tiling": ("BOOLEAN", {"default": True, "display_name": "VAE分块", "tooltip": "解码时启用 VAE 分块，省显存但可能更慢。"}),
                 "tile_x": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "display_name": "分块宽", "tooltip": "VAE 分块宽度。"}),
                 "tile_y": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "display_name": "分块高", "tooltip": "VAE 分块高度。"}),
                 "high_model": (high_models, {"default": high_models[0], "display_name": "High模型", "tooltip": "使用 GJJ 公共模型搜索函数在 diffusion_models 中搜索 Bernini High 模型，并返回可选列表。"}),
@@ -1375,7 +1425,7 @@ class GJJ_BerniniStudio:
                 "low_lora": (low_loras, {"default": low_loras[0], "display_name": "Low LoRA", "tooltip": "使用 GJJ 公共模型搜索函数在 loras 中搜索 Low 加速 LoRA，并返回可选列表。"}),
                 "translation_enabled": ("BOOLEAN", {"default": False, "display_name": "翻译提示词", "tooltip": "开启后复用 GJJ CLIP 面板翻译。"}),
                 "segment_frames": ("INT", {"default": 21, "min": 5, "max": 225, "step": 4, "display_name": "每段帧数", "tooltip": "长视频每段生成帧数，自动规范为 4n+1。推荐 25、49、81、121、169、225。"}),
-                "keep_model": ("BOOLEAN", {"default": True, "display_name": "保持模型", "tooltip": "开启后相同模型配置会复用已加载的 High/Low/VAE/CLIP，避免每次生成都重新加载。"}),
+                "keep_model": ("BOOLEAN", {"default": False, "display_name": "保持模型", "tooltip": "低显存默认关闭；开启后相同模型配置会复用已加载的 High/Low/VAE/CLIP，速度更快但占用更多显存。"}),
                 "prev_segment_ref_frames": ("INT", {"default": 1, "min": 0, "max": 32, "step": 1, "display_name": "上一段尾帧参考", "tooltip": "长视频分段时，从上一段生成结果取最后 N 帧，作为下一段的额外参考图。0 表示关闭。"}),
                 "randomize_seed": ("BOOLEAN", {"default": False, "display_name": "随机种子", "tooltip": "开启后每次执行自动生成新种子；关闭时保持当前种子，输入不变可复用缓存结果。"}),
                 "resize_to_panel": ("BOOLEAN", {"default": True, "display_name": "按面板尺寸", "tooltip": "开启时按面板宽高缩放裁剪；关闭时优先沿用源媒体尺寸。"}),
@@ -1400,7 +1450,7 @@ class GJJ_BerniniStudio:
             "segment_frames", "keep_model", "prev_segment_ref_frames", "randomize_seed", "resize_to_panel",
             "translation_enabled", "batch_size", "use_prev_segment_latent", "lora_chain_config",
         ]
-        parts = ["bernini_studio_cache_v2"]
+        parts = ["bernini_studio_cache_v3"]
         for key in keys:
             if key in {"source_media", "reference_media_1", "reference_media_2"}:
                 parts.append(_media_cache_signature(kwargs.get(key)))
@@ -1426,7 +1476,7 @@ class GJJ_BerniniStudio:
         )
 
     def _load_models(self, kwargs: dict[str, Any], unique_id=None):
-        keep_model = _as_bool(kwargs.get("keep_model"), True)
+        keep_model = _as_bool(kwargs.get("keep_model"), False)
         cache_key = self._model_cache_key(kwargs)
         if keep_model and cache_key in self._MODEL_CACHE:
             _send_status(unique_id, "1/5 复用 Bernini 模型缓存...", 0.03)
@@ -1496,6 +1546,10 @@ class GJJ_BerniniStudio:
             if cached_result is not None:
                 _send_status(unique_id, "使用固定种子缓存结果", 1.0)
                 return cached_result
+        if not _as_bool(kwargs.get("keep_model"), False):
+            self._MODEL_CACHE.clear()
+        self._RESULT_CACHE.clear()
+        _memory_cleanup(unique_id, "运行前清理显存和内存...", clear_video_cache=True)
         source_media = kwargs.get("source_media")
         source_is_video = _is_video_media(source_media)
         source_frames, source_audio, source_fps = _media_components(source_media)
@@ -1533,7 +1587,7 @@ class GJJ_BerniniStudio:
                 for index in range(int(reference_image_batch.shape[0]))
             ]
 
-        width = _as_int(kwargs.get("width"), 832, 16, 8192)
+        width = _as_int(kwargs.get("width"), 480, 16, 8192)
         height = _as_int(kwargs.get("height"), 480, 16, 8192)
         if not _as_bool(kwargs.get("resize_to_panel"), True):
             media_size = _first_media_size(source_media)
@@ -1611,10 +1665,11 @@ class GJJ_BerniniStudio:
             negative_text=_as_text(kwargs.get("negative_prompt"), DEFAULT_NEGATIVE),
             zero_conditioning=False,
             translation_device="gpu",
-            translation_unload_after_use=False,
+            translation_unload_after_use=True,
             translation_enabled=_as_bool(kwargs.get("translation_enabled"), False),
             unique_id=unique_id,
         )
+        _memory_cleanup(unique_id, "文本编码后清理临时显存...", clear_video_cache=False)
 
         batch_size = 1 if mode_output_kind == "image" else _as_int(kwargs.get("batch_size"), 1, 1, 4096)
         steps = _as_int(kwargs.get("steps"), 6, 1, 1000)
@@ -1710,6 +1765,7 @@ class GJJ_BerniniStudio:
                     latent[:, :, :count, :, :] = tail[:, :, -count:, :, :]
 
             context = []
+            context_parts = None
             if source_segment is not None or segment_reference_video is not None or segment_reference_images:
                 context_parts = _build_bernini_context(
                     vae,
@@ -1757,7 +1813,8 @@ class GJJ_BerniniStudio:
             latest_preview = gjjutils_write_temp_tensor_images(frames[-1:])
             _send_segment_preview(unique_id, latest_preview, segment_index + 1, segment_count, "tail_frame")
             try:
-                del latent, latent_dict, high_latent, final_latent, positive, negative, context
+                del latent, latent_dict, high_latent, final_latent, positive, negative, context, context_parts
+                del source_segment, segment_reference_video, segment_reference_images
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception:
@@ -1767,6 +1824,7 @@ class GJJ_BerniniStudio:
         all_frames = torch.cat(generated_segments, dim=0)
         if mode_output_kind == "image":
             all_frames = all_frames[:1].contiguous()
+        frame_count_value = int(all_frames.shape[0])
         source_is_video_object = callable(getattr(source_media, "get_components", None))
         effective_fps = source_fps or (source_media if source_is_video_object else _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0))
         audio_input = source_media if source_is_video_object else (_coerce_audio_input(source_audio) or _coerce_audio_input(source_media))
@@ -1797,17 +1855,23 @@ class GJJ_BerniniStudio:
                 )
             )
             result_value = video
-        _send_status(unique_id, f"5/5 完成：{int(all_frames.shape[0])} 帧 / {segment_count} 段", 1.0)
+            try:
+                del all_frames, generated_segments
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        _send_status(unique_id, f"5/5 完成：{frame_count_value} 帧 / {segment_count} 段", 1.0)
         result_payload = {
             "ui": {
                 "gjj_images": latest_preview,
                 "segment_count": [segment_count],
-                "frame_count": [int(all_frames.shape[0])],
+                "frame_count": [frame_count_value],
                 "output_path": [str(output_path or "")],
             },
             "result": (result_value,),
         }
-        if result_cache_key:
+        if result_cache_key and mode_output_kind == "image":
             self._RESULT_CACHE[result_cache_key] = result_payload
             while len(self._RESULT_CACHE) > 3:
                 try:

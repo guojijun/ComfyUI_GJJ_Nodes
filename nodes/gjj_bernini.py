@@ -166,6 +166,10 @@ def _encode_context_latent(vae, image: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _cpu_context_latent(latent: torch.Tensor) -> torch.Tensor:
+    return latent.detach().to(device=torch.device("cpu")).contiguous()
+
+
 def _build_bernini_context(
     vae,
     length: int,
@@ -186,7 +190,7 @@ def _build_bernini_context(
             "area",
             "center",
         ).movedim(1, -1)
-        context["video"] = _encode_context_latent(vae, vid[:, :, :, :3])
+        context["video"] = _cpu_context_latent(_encode_context_latent(vae, vid[:, :, :, :3]))
 
     ref_video = _validate_connected_frame_input("参考视频帧", reference_video)
     if ref_video is not None:
@@ -197,7 +201,7 @@ def _build_bernini_context(
             "area",
             "center",
         ).movedim(1, -1)
-        context["refs"].append(_encode_context_latent(vae, ref_vid[:, :, :, :3]))
+        context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_vid[:, :, :, :3])))
 
     for img in reference_images or []:
         ref_img = comfy.utils.common_upscale(
@@ -207,7 +211,7 @@ def _build_bernini_context(
             "area",
             "center",
         ).movedim(1, -1)
-        context["refs"].append(_encode_context_latent(vae, ref_img[:, :, :, :3]))
+        context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_img[:, :, :, :3])))
 
     return context
 
