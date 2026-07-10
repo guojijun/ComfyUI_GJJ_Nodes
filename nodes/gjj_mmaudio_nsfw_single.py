@@ -639,6 +639,82 @@ def _load_feature_utils(vae_model: str, synchformer_model: str, clip_model: str,
     return feature_utils
 
 
+def _align_sequence_tensor(tensor: torch.Tensor, target_len: int) -> torch.Tensor:
+    target_len = max(0, int(target_len))
+    if tensor.ndim < 2 or target_len <= 0 or int(tensor.shape[1]) == target_len:
+        return tensor
+    current_len = int(tensor.shape[1])
+    if current_len > target_len:
+        return tensor[:, :target_len].contiguous()
+    pad_shape = list(tensor.shape)
+    pad_shape[1] = target_len - current_len
+    padding = torch.zeros(pad_shape, device=tensor.device, dtype=tensor.dtype)
+    return torch.cat([tensor, padding], dim=1).contiguous()
+
+
+def _generate_mmaudio_aligned(
+    clip_video: torch.Tensor | None,
+    sync_video: torch.Tensor | None,
+    text: list[str],
+    *,
+    negative_text: list[str] | None,
+    feature_utils,
+    net,
+    fm,
+    rng: torch.Generator,
+    cfg_strength: float,
+) -> torch.Tensor:
+    device = feature_utils.device
+    dtype = feature_utils.dtype
+    bs = len(text)
+
+    if clip_video is not None and feature_utils.clip_model is not None:
+        clip_video = clip_video.to(device, dtype, non_blocking=True)
+        clip_features = feature_utils.encode_video_with_clip(clip_video, batch_size=bs)
+    else:
+        clip_features = net.get_empty_clip_sequence(bs)
+    clip_features = _align_sequence_tensor(clip_features, int(net.clip_seq_len))
+
+    if sync_video is not None:
+        sync_video = sync_video.to(device, dtype, non_blocking=True)
+        sync_features = feature_utils.encode_video_with_sync(sync_video, batch_size=bs)
+    else:
+        sync_features = net.get_empty_sync_sequence(bs)
+    sync_features = _align_sequence_tensor(sync_features, int(net.sync_seq_len))
+
+    if text is not None and feature_utils.clip_model is not None and feature_utils.tokenizer is not None:
+        text_features = feature_utils.encode_text(text)
+    else:
+        text_features = net.get_empty_string_sequence(bs)
+    text_features = _align_sequence_tensor(text_features, int(getattr(net, "_text_seq_len", text_features.shape[1])))
+
+    if negative_text is not None and feature_utils.clip_model is not None and feature_utils.tokenizer is not None:
+        if len(negative_text) != bs:
+            raise RuntimeError("MMAudio 反向提示词数量与批次不一致。")
+        negative_text_features = feature_utils.encode_text(negative_text)
+    else:
+        negative_text_features = net.get_empty_string_sequence(bs)
+    negative_text_features = _align_sequence_tensor(negative_text_features, int(getattr(net, "_text_seq_len", negative_text_features.shape[1])))
+
+    x0 = torch.randn(
+        bs,
+        net.latent_seq_len,
+        net.latent_dim,
+        device=device,
+        dtype=dtype,
+        generator=rng,
+    )
+    preprocessed_conditions = net.preprocess_conditions(clip_features, sync_features, text_features)
+    empty_conditions = net.get_empty_conditions(
+        bs,
+        negative_text_features=negative_text_features if negative_text is not None else None,
+    )
+    x1 = fm.to_data(lambda t, x: net.ode_wrapper(t, x, preprocessed_conditions, empty_conditions, cfg_strength), x0)
+    x1 = net.unnormalize(x1)
+    spec = feature_utils.decode(x1)
+    return feature_utils.vocode(spec)
+
+
 def _sample_mmaudio(
     frames: torch.Tensor,
     duration: float,
@@ -658,7 +734,6 @@ def _sample_mmaudio(
     unique_id: Any = None,
 ) -> dict[str, Any]:
     try:
-        from ..vendor.mmaudio.eval_utils import generate
         from ..vendor.mmaudio.model.flow_matching import FlowMatching
     except (ModuleNotFoundError, ImportError) as error:
         _raise_runtime_import_error(error, unique_id=unique_id)
@@ -681,7 +756,7 @@ def _sample_mmaudio(
     scheduler = FlowMatching(min_sigma=0, inference_mode="euler", num_steps=int(steps))
     feature_utils.to(device)
     model.to(device)
-    audio = generate(
+    audio = _generate_mmaudio_aligned(
         clip_frames,
         sync_frames,
         [str(prompt or "")],
@@ -949,4 +1024,4 @@ class GJJ_MMAudioNSFWSingle:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MMAudioNSFWSingle}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · MMAudio 视频配音单节点"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·📢MMAudio 视频配音单节点"}

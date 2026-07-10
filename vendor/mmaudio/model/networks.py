@@ -226,6 +226,21 @@ class MMAudio(nn.Module):
         cache computations that do not depend on the latent/time step
         i.e., the features are reused over steps during inference
         """
+        def _align_sequence(tensor: torch.Tensor, target_len: int) -> torch.Tensor:
+            target_len = int(target_len)
+            if tensor.shape[1] == target_len:
+                return tensor
+            if tensor.shape[1] > target_len:
+                return tensor[:, :target_len].contiguous()
+            pad_shape = list(tensor.shape)
+            pad_shape[1] = target_len - tensor.shape[1]
+            padding = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
+            return torch.cat([tensor, padding], dim=1).contiguous()
+
+        clip_f = _align_sequence(clip_f, self._clip_seq_len)
+        sync_f = _align_sequence(sync_f, self._sync_seq_len)
+        text_f = _align_sequence(text_f, self._text_seq_len)
+
         assert clip_f.shape[1] == self._clip_seq_len, f'{clip_f.shape=} {self._clip_seq_len=}'
         assert sync_f.shape[1] == self._sync_seq_len, f'{sync_f.shape=} {self._sync_seq_len=}'
         assert text_f.shape[1] == self._text_seq_len, f'{text_f.shape=} {self._text_seq_len=}'

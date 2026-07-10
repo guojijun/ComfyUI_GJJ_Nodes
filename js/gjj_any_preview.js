@@ -1176,6 +1176,7 @@ function applyLivePreviewItems(node, input, inputOrder, items) {
 	clearNativeImagePreviewState(node);
 	ensurePreviewWidget(node);
 	applyPreviewContent(node);
+	rememberCurrentPreviewAsHeld(node, false);
 	updateLayout(node);
 	scheduleLayout(node);
 	setDirty(node);
@@ -2727,6 +2728,35 @@ function applyHeldPreview(node) {
 	return applyHeldImagePreview(node) || applyHeldMediaPreview(node) || applyHeldTextPreview(node);
 }
 
+function restoreHeldPreviewForNode(node) {
+	if (!isTargetNode(node) || !hasHeldPreviewProperties(node)) {
+		return false;
+	}
+	return applyHeldPreview(node);
+}
+
+function restoreHeldPreviews() {
+	for (const node of app.graph?._nodes || []) {
+		restoreHeldPreviewForNode(node);
+	}
+}
+
+function installHeldPreviewRestoreEvents() {
+	if (globalThis.__gjjAnyPreviewHeldRestoreEventsInstalled) {
+		return;
+	}
+	globalThis.__gjjAnyPreviewHeldRestoreEventsInstalled = true;
+	const restoreSoon = () => {
+		requestAnimationFrame(() => restoreHeldPreviews());
+		setTimeout(() => restoreHeldPreviews(), 120);
+	};
+	globalThis.addEventListener?.("focus", restoreSoon);
+	globalThis.addEventListener?.("pageshow", restoreSoon);
+	document?.addEventListener?.("visibilitychange", () => {
+		if (!document.hidden) restoreSoon();
+	});
+}
+
 function disconnectLinkedInputs(node) {
 	if (!Array.isArray(node?.inputs)) {
 		return 0;
@@ -2902,7 +2932,7 @@ function rememberCurrentMediaPreview(node) {
 	return true;
 }
 
-function rememberCurrentPreviewAsHeld(node) {
+function rememberCurrentPreviewAsHeld(node, markDirty = true) {
 	if (!node) {
 		return false;
 	}
@@ -2912,7 +2942,7 @@ function rememberCurrentPreviewAsHeld(node) {
 		node.properties[HELD_IMAGES_PROPERTY] = images.map((item) => ({ ...item }));
 		delete node.properties[HELD_TEXT_PROPERTY];
 		delete node.properties[HELD_MEDIA_PROPERTY];
-		setDirty(node);
+		if (markDirty) setDirty(node);
 		return true;
 	}
 	const { kind, items } = currentPreviewMedia(node);
@@ -2925,7 +2955,7 @@ function rememberCurrentPreviewAsHeld(node) {
 		};
 		delete node.properties[HELD_TEXT_PROPERTY];
 		delete node.properties[HELD_IMAGES_PROPERTY];
-		setDirty(node);
+		if (markDirty) setDirty(node);
 		return true;
 	}
 	const text = String(node.__gjjAnyPreviewText || "").trim();
@@ -2934,7 +2964,7 @@ function rememberCurrentPreviewAsHeld(node) {
 		node.properties[HELD_TEXT_PROPERTY] = text;
 		delete node.properties[HELD_IMAGES_PROPERTY];
 		delete node.properties[HELD_MEDIA_PROPERTY];
-		setDirty(node);
+		if (markDirty) setDirty(node);
 		return true;
 	}
 	return false;
@@ -5394,12 +5424,12 @@ app.registerExtension({
 			}
 			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
-			if (!hasLinkedInputs(this)) {
+			if (hasHeldPreviewProperties(this)) {
 				applyHeldPreview(this);
 			}
 			setTimeout(() => {
 				restoreConfiguredWidth(this);
-				if (!hasLinkedInputs(this)) {
+				if (hasHeldPreviewProperties(this)) {
 					applyHeldPreview(this);
 				}
 				stabilizeNode(this);
@@ -5561,6 +5591,7 @@ app.registerExtension({
 			requestAnimationFrame(() => {
 				clearNativeImagePreviewState(this);
 				applyPreviewContent(this);
+				rememberCurrentPreviewAsHeld(this, false);
 				clearNativeImagePreviewState(this);
 				updateLayout(this);
 				scheduleNativePreviewCleanup(this);
@@ -5583,9 +5614,11 @@ app.registerExtension({
 		installConnectionPreviewMenu();
 		installCanvasMotionGuard();
 		installLiveVirtualPreviewPromptPatch();
+		installHeldPreviewRestoreEvents();
 		for (const node of app.graph?._nodes || []) {
 			if (isTargetNode(node)) {
 				resetLivePreviewState(node);
+				restoreHeldPreviewForNode(node);
 				stabilizeNode(node);
 			}
 		}

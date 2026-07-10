@@ -51,7 +51,7 @@ from .gjj_longcat_audiodit_loader import (
 
 
 NODE_NAME = "GJJ_UniversalTTS"
-NODE_DISPLAY_NAME = "📢 多功能文字转语音TTS"
+NODE_DISPLAY_NAME = "📢 多功能文字转语音TTS（语音克隆）"
 MAX_REFERENCES = 10
 AUDIO_PREFIX = "reference_"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".webm", ".mp4", ".mov", ".mkv"}
@@ -2960,7 +2960,7 @@ def _coerce_optional_prompt(value: Any) -> str:
 
 
 class GJJ_UniversalTTS:
-    CATEGORY = "GJJ/Audio"
+    CATEGORY = "GJJ/音频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "零本地节点依赖的多功能 TTS：统一文本解析、参考音频、队列合成、时间轴输出和依赖提示。"

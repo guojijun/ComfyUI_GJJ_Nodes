@@ -787,7 +787,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_i2v_infinitetalk": {
         "label": "Wan2.1 I2V InfiniteTalk / MultiTalk",
         "slots": [
-            WM("model", "I2V 14B GGUF底模", ["wan2.1", "i2v", "14b", "gguf"], preferred_name="wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "I2V 14B GGUF底模", ["wan2.1", "i2v", "14b"], preferred_name="wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
             WAN_T5,
             MT("multitalk_model", "InfiniteTalk模型", ["infinitetalk"], preferred_name="Wan2_1-InfiniteTalk_Single_Q8.gguf"),

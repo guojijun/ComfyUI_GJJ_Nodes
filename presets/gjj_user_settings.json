@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "sc",
     "page_size": 12,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -98,7 +98,7 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "IndexTTS-v1.0",
+      "branch": "IndexTTS-v2",
       "local_audio_sort_mode": "name_asc"
     }
   },
