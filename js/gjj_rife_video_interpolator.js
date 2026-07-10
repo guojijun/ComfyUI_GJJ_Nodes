@@ -5,6 +5,11 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set(["GJJ_RifeVideoInterpolator"]);
 const STATUS_WIDGET_NAME = "gjj_rife_vfi_status";
 const SCALE_FACTOR_WIDGET = "scale_factor";
+const TOOLBAR_WIDGET_NAME = "gjj_rife_vfi_toolbar";
+const MODEL_WIDGETS = ["model_name"];
+const CLASSIC_WIDGETS = ["multiplier", "clear_cache_after_n_frames", "fast_mode", "ensemble", "scale_factor"];
+const HDV3_WIDGETS = ["source_fps", "target_fps", "batch_size", "use_fp16", "scale_factor"];
+const PARAM_WIDGETS = [...new Set([...MODEL_WIDGETS, ...CLASSIC_WIDGETS, ...HDV3_WIDGETS])];
 const MEDIA_INPUT = {
 	name: "media",
 	type: "GJJ_BATCH_IMAGE,IMAGE,VIDEO",
@@ -14,6 +19,60 @@ const MEDIA_INPUT = {
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
+}
+
+function getWidget(node, name) {
+	return node?.widgets?.find((item) => item?.name === name);
+}
+
+function isHdv3Model(node) {
+	const value = String(getWidget(node, "model_name")?.value || "").toLowerCase();
+	return value.endsWith("flownet.pkl") || value.includes("v4.26");
+}
+
+function saveWidgetState(widget) {
+	if (!widget || widget.__gjjRifeSavedState) return;
+	widget.__gjjRifeSavedState = {
+		type: widget.type,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		label: widget.label,
+		hidden: widget.hidden,
+	};
+}
+
+function setWidgetVisible(node, widget, visible) {
+	if (!widget) return;
+	saveWidgetState(widget);
+	if (visible) {
+		const saved = widget.__gjjRifeSavedState || {};
+		widget.hidden = saved.hidden ?? false;
+		widget.type = saved.type || widget.type;
+		if (saved.computeSize) widget.computeSize = saved.computeSize;
+		else delete widget.computeSize;
+		if (saved.getHeight) widget.getHeight = saved.getHeight;
+		else delete widget.getHeight;
+		if (saved.draw) widget.draw = saved.draw;
+		else delete widget.draw;
+		widget.label = saved.label ?? widget.label;
+		if (widget.element) widget.element.style.display = "";
+		if (widget.inputEl) widget.inputEl.style.display = "";
+	} else {
+		widget.hidden = true;
+		widget.type = `converted-widget:${widget.name || "hidden"}`;
+		widget.computeSize = () => [0, 0];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		widget.label = "";
+		widget.last_y = 0;
+		widget.computedHeight = 0;
+		widget.margin_top = 0;
+		widget.size = [0, 0];
+		if (widget.element) widget.element.style.display = "none";
+		if (widget.inputEl) widget.inputEl.style.display = "none";
+	}
+	refreshNode(node);
 }
 
 function getLink(node, linkId) {
@@ -111,7 +170,11 @@ function ensureStatusWidget(node) {
 		hideOnZoom: false,
 		getHeight: () => 42,
 	});
+	if (widget) {
+		widget.computeSize = (width) => [Math.max(260, Number(width || node.size?.[0] || 260)), node.__gjjRifeStatusOpen ? 42 : 0];
+	}
 	node.__gjjRifeVfiStatus = { widget, box };
+	box.style.display = "none";
 	return node.__gjjRifeVfiStatus;
 }
 
@@ -135,15 +198,129 @@ function normalizeScaleFactorWidget(node) {
 	if (widget.inputEl) widget.inputEl.value = String(widget.value);
 }
 
+function activeParamGroup(node) {
+	return String(node?.properties?.gjj_rife_vfi_panel || "");
+}
+
+function setActiveParamGroup(node, group) {
+	node.properties ||= {};
+	node.properties.gjj_rife_vfi_panel = activeParamGroup(node) === group ? "" : group;
+	applyPanelState(node);
+}
+
+function button(label, title, onClick) {
+	const item = document.createElement("button");
+	item.type = "button";
+	item.textContent = label;
+	item.title = title;
+	item.style.cssText = [
+		"height:28px",
+		"min-width:34px",
+		"padding:0 8px",
+		"border:1px solid #3b5560",
+		"border-radius:7px",
+		"background:#18252b",
+		"color:#edf6fa",
+		"font-size:15px",
+		"line-height:1",
+		"cursor:pointer",
+		"user-select:none",
+	].join(";");
+	item.addEventListener("pointerdown", (event) => event.stopPropagation());
+	item.addEventListener("mousedown", (event) => event.stopPropagation());
+	item.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onClick?.();
+	});
+	return item;
+}
+
+function ensureToolbar(node) {
+	if (node.__gjjRifeToolbar || typeof node.addDOMWidget !== "function") return node.__gjjRifeToolbar;
+	const row = document.createElement("div");
+	row.style.cssText = [
+		"display:flex",
+		"align-items:center",
+		"gap:6px",
+		"padding:4px 0",
+		"box-sizing:border-box",
+		"width:100%",
+	].join(";");
+	const buttons = {
+		model: button("🎞️", "模型", () => setActiveParamGroup(node, "model")),
+		classic: button("⚙️", "倍率参数", () => setActiveParamGroup(node, "classic")),
+		hdv3: button("🧪", "RIFEInterpolation 参数", () => setActiveParamGroup(node, "hdv3")),
+		status: button("📊", "执行状态", () => setActiveParamGroup(node, "status")),
+	};
+	row.append(buttons.model, buttons.classic, buttons.hdv3, buttons.status);
+	const widget = node.addDOMWidget(TOOLBAR_WIDGET_NAME, "HTML", row, { serialize: false, hideOnZoom: false });
+	widget.computeSize = (width) => [Math.max(260, Number(width || node.size?.[0] || 260)), 36];
+	node.__gjjRifeToolbar = { row, buttons, widget };
+	return node.__gjjRifeToolbar;
+}
+
+function setButtonActive(button, active, disabled = false) {
+	if (!button) return;
+	button.disabled = disabled;
+	button.style.opacity = disabled ? "0.42" : "1";
+	button.style.background = active ? "#1f6b43" : "#18252b";
+	button.style.borderColor = active ? "#48ad73" : "#3b5560";
+}
+
+function applyPanelState(node) {
+	const group = activeParamGroup(node);
+	const hdv3 = isHdv3Model(node);
+	for (const name of PARAM_WIDGETS) {
+		let visible = false;
+		if (group === "model") visible = MODEL_WIDGETS.includes(name);
+		else if (group === "classic") visible = !hdv3 && CLASSIC_WIDGETS.includes(name);
+		else if (group === "hdv3") visible = hdv3 && HDV3_WIDGETS.includes(name);
+		setWidgetVisible(node, getWidget(node, name), visible);
+	}
+	const toolbar = ensureToolbar(node);
+	setButtonActive(toolbar?.buttons?.model, group === "model");
+	setButtonActive(toolbar?.buttons?.classic, group === "classic" && !hdv3, hdv3);
+	setButtonActive(toolbar?.buttons?.hdv3, group === "hdv3" && hdv3, !hdv3);
+	setButtonActive(toolbar?.buttons?.status, group === "status");
+	const status = ensureStatusWidget(node);
+	node.__gjjRifeStatusOpen = group === "status";
+	if (status?.box) status.box.style.display = node.__gjjRifeStatusOpen ? "block" : "none";
+	refreshNode(node);
+}
+
+function patchModelWidget(node) {
+	const widget = getWidget(node, "model_name");
+	if (!widget || widget.__gjjRifeModelPatched) return;
+	widget.__gjjRifeModelPatched = true;
+	const originalCallback = widget.callback;
+	widget.callback = function (...args) {
+		const result = originalCallback?.apply(this, args);
+		if (isHdv3Model(node) && activeParamGroup(node) === "classic") {
+			node.properties.gjj_rife_vfi_panel = "hdv3";
+		}
+		if (!isHdv3Model(node) && activeParamGroup(node) === "hdv3") {
+			node.properties.gjj_rife_vfi_panel = "classic";
+		}
+		applyPanelState(node);
+		return result;
+	};
+}
+
 function patchNode(node) {
-	if (!node || node.__gjjRifeVfiPatched) {
+	if (!node) {
 		return;
 	}
-	node.__gjjRifeVfiPatched = true;
+	if (!node.__gjjRifeVfiPatched) {
+		node.__gjjRifeVfiPatched = true;
+		ensureToolbar(node);
+		ensureStatusWidget(node);
+		setStatus(node, "等待执行");
+	}
 	stabilizeMediaInput(node);
 	normalizeScaleFactorWidget(node);
-	ensureStatusWidget(node);
-	setStatus(node, "等待执行");
+	patchModelWidget(node);
+	applyPanelState(node);
 }
 
 api.addEventListener("gjj_node_progress", (event) => {

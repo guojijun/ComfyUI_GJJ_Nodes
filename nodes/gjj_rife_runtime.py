@@ -7,7 +7,6 @@ import comfy.model_management
 import comfy.utils
 import folder_paths
 import torch
-from torch.hub import download_url_to_file
 
 
 CKPT_NAME_VER_DICT: dict[str, str] = {
@@ -23,13 +22,12 @@ CKPT_NAME_VER_DICT: dict[str, str] = {
     "rife49.pth": "4.7",
     "sudo_rife4_269.662_testV1_scale1.pth": "4.0",
 }
+HDV3_MODEL_NAMES = {
+    "flownet.pkl",
+    "rife_v4.26_heavy.safetensors",
+}
 DEFAULT_CKPT = "rife47.pth"
 MODEL_CATEGORY = "rife_models"
-BASE_MODEL_DOWNLOAD_URLS = [
-    "https://github.com/styler00dollar/VSGAN-tensorrt-docker/releases/download/models/",
-    "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation/releases/download/models/",
-    "https://github.com/dajes/frame-interpolation-pytorch/releases/download/v1.0.0/",
-]
 
 
 def _normalize_text(value: str | None) -> str:
@@ -39,6 +37,9 @@ def _normalize_text(value: str | None) -> str:
 def _with_pth_extension(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
+        return text
+    lowered = text.lower()
+    if lowered.endswith((".pkl", ".safetensors")):
         return text
     parts = text.replace("\\", "/").split("/")
     base = parts[-1]
@@ -52,10 +53,6 @@ def _candidate_model_dirs() -> list[Path]:
     models_dir = Path(folder_paths.models_dir)
     candidates = [
         models_dir / "frame_interpolatiom",
-        models_dir / "frame_interpolation",
-        models_dir / "rife",
-        models_dir / "vfi",
-        models_dir / "ckpts",
     ]
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -68,14 +65,9 @@ def _candidate_model_dirs() -> list[Path]:
     return deduped
 
 
-def _default_download_dir() -> Path:
-    return Path(folder_paths.models_dir) / "frame_interpolatiom" / "rife"
-
-
 def ensure_rife_model_paths() -> None:
-    download_dir = _default_download_dir()
-    paths = [str(path) for path in [download_dir, *_candidate_model_dirs()]]
-    extensions = folder_paths.supported_pt_extensions
+    paths = [str(path) for path in _candidate_model_dirs()]
+    extensions = tuple(dict.fromkeys([*folder_paths.supported_pt_extensions, ".pkl"]))
     if MODEL_CATEGORY not in folder_paths.folder_names_and_paths:
         folder_paths.folder_names_and_paths[MODEL_CATEGORY] = (paths, extensions)
         return
@@ -90,20 +82,23 @@ def ensure_rife_model_paths() -> None:
 def list_rife_models() -> list[str]:
     ensure_rife_model_paths()
     discovered: list[str] = []
-    try:
-        for name in folder_paths.get_filename_list(MODEL_CATEGORY):
-            base = str(name).replace("\\", "/").split("/")[-1]
-            if base in CKPT_NAME_VER_DICT and name not in discovered:
-                discovered.append(name)
-    except Exception:
-        pass
-    for fallback_name in CKPT_NAME_VER_DICT.keys():
-        if fallback_name not in discovered:
-            discovered.append(fallback_name)
+    supported_names = {name.lower() for name in CKPT_NAME_VER_DICT} | {name.lower() for name in HDV3_MODEL_NAMES}
+    for root in _candidate_model_dirs():
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*"), key=lambda item: str(item).lower()):
+            if not path.is_file():
+                continue
+            base = path.name.lower()
+            if base not in supported_names:
+                continue
+            rel = str(path.relative_to(root)).replace("/", "\\")
+            if rel not in discovered:
+                discovered.append(rel)
     return discovered
 
 
-def resolve_rife_model_path(preferred: str) -> tuple[str, str]:
+def resolve_rife_model_path(preferred: str) -> tuple[str, str, str]:
     ensure_rife_model_paths()
     available = list_rife_models()
     preferred = _with_pth_extension(preferred) or DEFAULT_CKPT
@@ -126,7 +121,7 @@ def resolve_rife_model_path(preferred: str) -> tuple[str, str]:
                     break
 
     if not chosen:
-        chosen = DEFAULT_CKPT
+        chosen = available[0] if available else DEFAULT_CKPT
 
     full_path = None
     try:
@@ -148,32 +143,16 @@ def resolve_rife_model_path(preferred: str) -> tuple[str, str]:
                 break
 
     if not full_path:
-        download_target = _default_download_dir()
-        download_target.mkdir(parents=True, exist_ok=True)
-        chosen_base = chosen.replace("\\", "/").split("/")[-1]
-        download_errors: list[str] = []
-        for base_url in BASE_MODEL_DOWNLOAD_URLS:
-            try:
-                target_path = download_target / chosen_base
-                download_url_to_file(base_url + chosen_base, str(target_path), hash_prefix=None, progress=True)
-                if target_path.exists():
-                    full_path = str(target_path.resolve())
-                    break
-            except Exception as exc:
-                download_errors.append(f"{base_url + chosen_base} -> {exc}")
-
-    if not full_path:
         roots_text = "\n".join(str(path) for path in _candidate_model_dirs())
-        extra = ""
-        if "download_errors" in locals() and download_errors:
-            extra = "\n下载尝试失败：\n" + "\n".join(download_errors)
-        raise RuntimeError(f"未找到 RIFE 模型：{preferred}\n已搜索目录：\n{roots_text}{extra}")
+        raise RuntimeError(f"未找到 RIFE 模型：{preferred}\n已搜索目录：\n{roots_text}")
 
     base_name = Path(full_path).name
+    if base_name.lower() in {name.lower() for name in HDV3_MODEL_NAMES}:
+        return str(full_path), "4.26", "hdv3"
     arch_ver = CKPT_NAME_VER_DICT.get(base_name)
     if not arch_ver:
         raise RuntimeError(f"RIFE 模型不受支持：{base_name}")
-    return str(full_path), arch_ver
+    return str(full_path), arch_ver, "ifnet"
 
 
 def preprocess_frames(frames: torch.Tensor) -> torch.Tensor:
@@ -198,6 +177,27 @@ def soft_empty_cache() -> None:
 
 def get_torch_device() -> torch.device:
     return comfy.model_management.get_torch_device()
+
+
+def load_state_dict_file(model_path: str) -> dict:
+    if str(model_path).lower().endswith(".safetensors"):
+        try:
+            from safetensors.torch import load_file
+        except Exception as exc:
+            raise RuntimeError("加载 safetensors 模型需要安装 safetensors。") from exc
+        state_dict = load_file(model_path, device="cpu")
+    else:
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
+    if isinstance(state_dict, dict) and "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+        state_dict = state_dict["state_dict"]
+    normalized = {}
+    for key, value in state_dict.items():
+        name = str(key)
+        for prefix in ("module.", "flownet."):
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+        normalized[name] = value
+    return normalized
 
 
 @torch.inference_mode()
@@ -254,3 +254,83 @@ def interpolate_frames(
     out_len += 1
     soft_empty_cache()
     return output_frames[:out_len]
+
+
+def _calculate_target_positions(source_fps: float, target_fps: float, total_source_frames: int) -> list[tuple[int, int, float]]:
+    duration = total_source_frames / source_fps
+    total_target_frames = max(1, int(duration * target_fps))
+    positions: list[tuple[int, int, float]] = []
+    for target_index in range(total_target_frames):
+        source_position = (target_index / target_fps) * source_fps
+        source_index_0 = min(int(source_position), total_source_frames - 1)
+        source_index_1 = min(source_index_0 + 1, total_source_frames - 1)
+        factor = 0.0 if source_index_0 == source_index_1 else source_position - source_index_0
+        positions.append((source_index_0, source_index_1, factor))
+    return positions
+
+
+@torch.inference_mode()
+def interpolate_frames_hdv3(
+    frames: torch.Tensor,
+    source_fps: float,
+    target_fps: float,
+    model,
+    scale: float,
+    batch_size: int,
+    use_fp16: bool,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> torch.Tensor:
+    assert_batch_size(frames, minimum=2)
+    source_fps = max(0.001, float(source_fps))
+    target_fps = max(0.001, float(target_fps))
+    if abs(source_fps - target_fps) < 0.001:
+        return frames
+
+    device = get_torch_device()
+    batch_size = max(1, int(batch_size))
+    scale = max(0.25, float(scale))
+    use_half = bool(use_fp16) and device.type == "cuda"
+    gpu_dtype = torch.float16 if use_half else torch.float32
+    if use_half:
+        model.half()
+    model.eval().to(device)
+
+    _, _, height, width = frames.shape
+    pad_base = max(128, int(128 / scale))
+    padded_h = ((height - 1) // pad_base + 1) * pad_base
+    padded_w = ((width - 1) // pad_base + 1) * pad_base
+    padding = (0, padded_w - width, 0, padded_h - height)
+    scale_list = [16 / scale, 8 / scale, 4 / scale, 2 / scale, 1 / scale]
+
+    output_frames: list[torch.Tensor | None] = []
+    jobs: list[tuple[int, int, float, int]] = []
+    for output_index, (index_0, index_1, factor) in enumerate(
+        _calculate_target_positions(source_fps, target_fps, int(frames.shape[0]))
+    ):
+        if factor == 0.0 or index_0 == index_1:
+            output_frames.append(frames[index_0].cpu().to(torch.float32))
+        else:
+            output_frames.append(None)
+            jobs.append((index_0, index_1, factor, output_index))
+
+    for batch_start in range(0, len(jobs), batch_size):
+        batch = jobs[batch_start : batch_start + batch_size]
+        batch_i0 = torch.empty((len(batch), 3, padded_h, padded_w), dtype=gpu_dtype, device=device)
+        batch_i1 = torch.empty((len(batch), 3, padded_h, padded_w), dtype=gpu_dtype, device=device)
+        timesteps: list[float] = []
+        for index, (index_0, index_1, factor, _) in enumerate(batch):
+            batch_i0[index] = torch.nn.functional.pad(frames[index_0 : index_0 + 1].to(device=device, dtype=gpu_dtype), padding)[0]
+            batch_i1[index] = torch.nn.functional.pad(frames[index_1 : index_1 + 1].to(device=device, dtype=gpu_dtype), padding)[0]
+            timesteps.append(factor)
+
+        for index, (_, _, factor, output_index) in enumerate(batch):
+            timestep = torch.tensor(factor, device=device, dtype=gpu_dtype)
+            result = model(batch_i0[index : index + 1], batch_i1[index : index + 1], timestep, scale_list)
+            output_frames[output_index] = result[0, :, :height, :width].detach().cpu().to(torch.float32)
+
+        if progress_callback is not None:
+            progress_callback(min(batch_start + len(batch), len(jobs)), max(1, len(jobs)))
+        del batch_i0, batch_i1
+        soft_empty_cache()
+
+    return torch.stack([frame for frame in output_frames if frame is not None], dim=0)

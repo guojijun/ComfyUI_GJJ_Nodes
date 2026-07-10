@@ -98,7 +98,7 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "VoxCPM2",
+      "branch": "EdgeTTS",
       "local_audio_sort_mode": "name_asc"
     }
   },

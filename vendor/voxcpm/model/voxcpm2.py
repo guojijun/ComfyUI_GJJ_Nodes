@@ -25,7 +25,6 @@ from typing import Tuple, Union, Generator, List, Optional
 import torch
 import torch.nn as nn
 import warnings
-import librosa
 import numpy as np
 from einops import rearrange
 from pydantic import BaseModel
@@ -54,6 +53,56 @@ from .utils import (
     pick_runtime_dtype,
     resolve_runtime_device,
 )
+
+
+def _load_audio_mono_resampled(wav_path: str, target_sample_rate: int) -> torch.Tensor:
+    """Load audio without importing librosa/numba, returning [1, samples] float32."""
+    errors = []
+    try:
+        import soundfile as sf
+
+        audio_np, sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=True)
+        if audio_np.size == 0:
+            raise RuntimeError("empty audio")
+        audio = torch.from_numpy(audio_np).float().mean(dim=1, keepdim=False).unsqueeze(0)
+    except Exception as exc:
+        errors.append(f"soundfile: {exc}")
+        try:
+            import wave
+
+            with wave.open(str(wav_path), "rb") as reader:
+                channels = int(reader.getnchannels())
+                sample_width = int(reader.getsampwidth())
+                sample_rate = int(reader.getframerate())
+                raw = reader.readframes(int(reader.getnframes()))
+            if sample_width == 1:
+                data = (torch.frombuffer(bytearray(raw), dtype=torch.uint8).float() - 128.0) / 128.0
+            elif sample_width == 2:
+                data = torch.frombuffer(bytearray(raw), dtype=torch.int16).float() / 32768.0
+            elif sample_width == 4:
+                data = torch.frombuffer(bytearray(raw), dtype=torch.int32).float() / 2147483648.0
+            else:
+                raise RuntimeError(f"unsupported PCM sample width: {sample_width}")
+            if channels > 1:
+                data = data.reshape(-1, channels).mean(dim=1)
+            audio = data.unsqueeze(0)
+        except Exception as wave_exc:
+            errors.append(f"wave: {wave_exc}")
+            raise RuntimeError(
+                "VoxCPM 读取参考音频失败。已避免使用 librosa/numba；请确认 soundfile 可读取该音频，"
+                f"或换成 WAV/FLAC 文件。详细：{'; '.join(errors)}"
+            ) from wave_exc
+
+    target_sample_rate = int(target_sample_rate)
+    sample_rate = int(sample_rate)
+    if sample_rate > 0 and sample_rate != target_sample_rate and audio.numel() > 0:
+        audio = torch.nn.functional.interpolate(
+            audio.unsqueeze(1),
+            size=max(1, int(round(audio.shape[-1] * target_sample_rate / sample_rate))),
+            mode="linear",
+            align_corners=False,
+        ).squeeze(1)
+    return audio.contiguous()
 
 
 # A simple function to trim audio silence using VAD, not used default
@@ -414,8 +463,7 @@ class VoxCPM2Model(nn.Module):
         Returns:
             audio_feat: (T, P, D) tensor of latent patches.
         """
-        audio, _ = librosa.load(wav_path, sr=self._encode_sample_rate, mono=True)
-        audio = torch.from_numpy(audio).unsqueeze(0)
+        audio = _load_audio_mono_resampled(wav_path, self._encode_sample_rate)
         if trim_silence_vad:
             audio = _trim_audio_silence_vad(audio, self._encode_sample_rate, max_silence_ms=200.0)
         patch_len = self.patch_size * self.chunk_size

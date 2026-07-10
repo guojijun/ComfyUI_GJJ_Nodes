@@ -1133,7 +1133,12 @@ def _valid_audio(value: Any) -> bool:
     return isinstance(value, dict) and value.get("waveform") is not None and value.get("sample_rate") is not None
 
 
-def _collect_references(kwargs: dict[str, Any], local_audio_name: str, local_audio_order: Any = None) -> list[dict[str, Any]]:
+def _collect_references(
+    kwargs: dict[str, Any],
+    local_audio_name: str,
+    local_audio_order: Any = None,
+    speaker_voice_map: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for index in range(1, MAX_REFERENCES + 1):
         audio = kwargs.get(_speaker_audio_name(index))
@@ -1147,6 +1152,20 @@ def _collect_references(kwargs: dict[str, Any], local_audio_name: str, local_aud
             "text_is_explicit": False,
         })
     if not refs:
+        used_names: set[str] = set()
+        if speaker_voice_map:
+            for speaker, name in sorted(speaker_voice_map.items(), key=lambda item: int(item[0])):
+                selected = str(name or "").strip()
+                if not selected:
+                    continue
+                refs.append({
+                    "speaker": max(0, int(speaker or 0)),
+                    "source": "local",
+                    "audio": _audio_from_file(_resolve_local_audio(selected)),
+                    "text": "",
+                    "text_is_explicit": False,
+                })
+                used_names.add(selected)
         ordered_names: list[str] = []
         if isinstance(local_audio_order, list):
             ordered_names = [str(item or "").strip() for item in local_audio_order if str(item or "").strip()]
@@ -1155,14 +1174,22 @@ def _collect_references(kwargs: dict[str, Any], local_audio_name: str, local_aud
             ordered_names.append(fallback_name)
         if not ordered_names:
             ordered_names = _list_models_mp3()
-        for index, name in enumerate(list(dict.fromkeys(ordered_names))):
+        next_speaker = 0
+        used_speakers = {max(0, int(ref.get("speaker") or 0)) for ref in refs}
+        for name in list(dict.fromkeys(ordered_names)):
+            if name in used_names:
+                continue
+            while next_speaker in used_speakers:
+                next_speaker += 1
             refs.append({
-                "speaker": index,
+                "speaker": next_speaker,
                 "source": "local",
                 "audio": _audio_from_file(_resolve_local_audio(name)),
                 "text": "",
                 "text_is_explicit": False,
             })
+            used_speakers.add(next_speaker)
+            next_speaker += 1
     return refs
 
 
@@ -1180,6 +1207,13 @@ def _recognize_reference_texts(references: list[dict[str, Any]], unique_id: Any 
 def _reference_for_speaker(references: list[dict[str, Any]], speaker: int) -> dict[str, Any] | None:
     if not references:
         return None
+    target = max(0, int(speaker or 0))
+    for reference in references:
+        try:
+            if max(0, int(reference.get("speaker") or 0)) == target:
+                return reference
+        except Exception:
+            continue
     index = max(0, int(speaker or 0)) % len(references)
     return references[index]
 
@@ -1246,13 +1280,31 @@ def _split_sentences(text: str, min_chars: int = 12, max_chars: int = 80) -> lis
 
 def _speaker_index_from_label(label: str, speaker_map: dict[str, int]) -> int:
     raw = _strip_stage_directions(label).strip().strip("[]【】（）() ")
-    numeric = re.search(r"(?:speaker|spk|角色|说话人)?[_\s-]*(\d+)$", raw, re.I)
+    numeric = re.match(r"^(?:speaker|spk|角色|说话人)[_\s-]*(\d+)$|^(\d+)$", raw, re.I)
     if numeric:
-        return max(0, int(numeric.group(1)) - 1)
-    key = raw.lower()
+        number = numeric.group(1) or numeric.group(2) or "1"
+        return max(0, int(number) - 1)
+    key = _canonical_speaker_key(raw)
     if key not in speaker_map:
         speaker_map[key] = len(speaker_map)
     return speaker_map[key]
+
+
+def _canonical_speaker_key(label: str) -> str:
+    text = re.sub(r"\s+", "", str(label or "").strip().lower())
+    number_map = {"一": "1", "二": "2", "两": "2", "三": "3", "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
+    number_chars = "123456789一二两三四五六七八九"
+    position = re.match(rf"^(左边?|left|l[_-]?)([{number_chars}]?)$", text)
+    if position:
+        number = position.group(2) or "1"
+        return f"left{number_map.get(number, number)}"
+    position = re.match(rf"^(右边?|right|r[_-]?)([{number_chars}]?)$", text)
+    if position:
+        number = position.group(2) or "1"
+        return f"right{number_map.get(number, number)}"
+    if text in {"中", "中间", "center", "middle"}:
+        return "center1"
+    return text
 
 
 def _clean_speaker_label(label: str) -> str:
@@ -1278,6 +1330,148 @@ def _extract_stage_directions(text: str) -> tuple[str, list[str]]:
 
 def _strip_stage_directions(text: str) -> str:
     return _extract_stage_directions(text)[0]
+
+
+_TIMELINE_TIME_RE = re.compile(
+    r"(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})(?P<ms>[,.]\d{1,3})?"
+    r"|(?P<m2>\d{1,3}):(?P<s2>\d{2})(?P<ms2>[,.]\d{1,3})?"
+)
+
+
+def _parse_timeline_time(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _TIMELINE_TIME_RE.search(text)
+    if not match:
+        try:
+            return max(0.0, float(text))
+        except Exception:
+            return None
+    if match.group("h") is not None:
+        hours = int(match.group("h"))
+        minutes = int(match.group("m"))
+        seconds = int(match.group("s"))
+        ms = match.group("ms") or ""
+    else:
+        hours = 0
+        minutes = int(match.group("m2"))
+        seconds = int(match.group("s2"))
+        ms = match.group("ms2") or ""
+    frac = float(f"0.{ms[1:]}") if ms else 0.0
+    return max(0.0, hours * 3600.0 + minutes * 60.0 + seconds + frac)
+
+
+def _split_timeline_speaker_text(text: str) -> tuple[str, str]:
+    raw = str(text or "").strip()
+    match = re.match(r"^\s*\[([^\]\n\r]{1,60})\]\s*(.*)$", raw)
+    if match:
+        body = re.sub(r"^[:：]\s*", "", str(match.group(2) or "").strip())
+        return _clean_speaker_label(match.group(1)), body
+    if ":" in raw or "：" in raw:
+        sep = ":" if ":" in raw else "："
+        left, right = raw.split(sep, 1)
+        if left.strip():
+            return _clean_speaker_label(left), right.strip()
+    return "", raw
+
+
+def _turn_from_timeline_item(item: dict[str, Any], speaker_map: dict[str, int]) -> dict[str, Any] | None:
+    start = _parse_timeline_time(item.get("start", item.get("from", item.get("begin", item.get("start_time", item.get("startTime"))))))
+    end = _parse_timeline_time(item.get("end", item.get("to", item.get("stop", item.get("end_time", item.get("endTime"))))))
+    duration = _parse_timeline_time(item.get("duration", item.get("dur")))
+    if start is None:
+        return None
+    if end is None and duration is not None:
+        end = start + duration
+    if end is None or end <= start:
+        return None
+    raw_text = str(item.get("text", item.get("content", item.get("line", item.get("caption", "")))) or "").strip()
+    label = str(item.get("speaker_label", item.get("speakerLabel", item.get("label", ""))) or "").strip()
+    raw_speaker = item.get("speaker", item.get("spk", item.get("name", item.get("role", ""))))
+    if not label and raw_speaker not in (None, ""):
+        label = f"说话人{max(1, int(raw_speaker))}" if isinstance(raw_speaker, (int, float)) and float(raw_speaker).is_integer() else str(raw_speaker).strip()
+    if not label:
+        parsed_label, raw_text = _split_timeline_speaker_text(raw_text)
+        label = parsed_label
+    clean_label = _clean_speaker_label(label) or "说话人1"
+    return {
+        "speaker": _speaker_index_from_label(clean_label, speaker_map),
+        "speaker_label": clean_label,
+        "text": raw_text,
+        "emotion_prompt": "",
+        "start": float(start),
+        "end": float(end),
+        "explicit_timing": True,
+    }
+
+
+def _flatten_timeline_json(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("segments", "items", "subtitles", "captions", "lines", "entries", "result"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _parse_json_timeline_turns(text: str, speaker_map: dict[str, int]) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(str(text or "").strip())
+    except Exception:
+        return []
+    turns: list[dict[str, Any]] = []
+    for item in _flatten_timeline_json(data):
+        if isinstance(item, dict):
+            turn = _turn_from_timeline_item(item, speaker_map)
+            if turn is not None:
+                turns.append(turn)
+    return sorted(turns, key=lambda item: (float(item["start"]), float(item["end"])))
+
+
+def _parse_srt_vtt_timeline_turns(text: str, speaker_map: dict[str, int]) -> list[dict[str, Any]]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    blocks = re.split(r"\n\s*\n+", normalized)
+    turns: list[dict[str, Any]] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        time_line_index = next((index for index, line in enumerate(lines) if "-->" in line), -1)
+        if time_line_index < 0:
+            continue
+        left, right = lines[time_line_index].split("-->", 1)
+        start = _parse_timeline_time(left)
+        end = _parse_timeline_time(right)
+        if start is None or end is None or end <= start:
+            continue
+        body = " ".join(lines[time_line_index + 1:]).strip()
+        label, clean = _split_timeline_speaker_text(body)
+        clean_label = _clean_speaker_label(label) or "说话人1"
+        turns.append({
+            "speaker": _speaker_index_from_label(clean_label, speaker_map),
+            "speaker_label": clean_label,
+            "text": clean,
+            "emotion_prompt": "",
+            "start": float(start),
+            "end": float(end),
+            "explicit_timing": True,
+        })
+    return sorted(turns, key=lambda item: (float(item["start"]), float(item["end"])))
+
+
+def _parse_explicit_timeline_turns(text: str) -> list[dict[str, Any]]:
+    speaker_map: dict[str, int] = {}
+    turns = _parse_json_timeline_turns(text, speaker_map)
+    if not turns:
+        turns = _parse_srt_vtt_timeline_turns(text, speaker_map)
+    return turns
 
 
 def _merge_emotion_prompts(*values: str) -> str:
@@ -1315,8 +1509,12 @@ def _split_text_with_stage_emotions(text: str, base_emotion_prompt: str, min_cha
 
 
 def _parse_turns(text: str, min_chars: int = 12, max_chars: int = 80) -> list[dict[str, Any]]:
+    explicit_turns = _parse_explicit_timeline_turns(text)
+    if explicit_turns:
+        return explicit_turns
+
     tag_re = re.compile(r"^\s*((?:\[?speaker[_\s-]*(\d+)\]?|spk[_\s-]*(\d+)|角色\s*(\d+)|说话人\s*(\d+)))\s*[:：]\s*(.*)$", re.I)
-    named_tag_re = re.compile(r"^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*(?:[（(][^（）()]*[）)]\s*)*[:：]\s*(.*)$")
+    named_tag_re = re.compile(r"^\s*\[?\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*\]?\s*(?:[（(][^（）()]*[）)]\s*)*[:：]\s*(.*)$")
     turns: list[dict[str, Any]] = []
     current_speaker = 0
     current_speakers = [0]
@@ -1849,6 +2047,20 @@ def _parse_tts_speaker_voices(value: Any, branch: str, legacy_value: Any = None)
     return parsed or _parse_edge_speaker_voices(legacy_value)
 
 
+def _parse_tts_explicit_speaker_voices(value: Any, branch: str, legacy_value: Any = None) -> dict[int, str]:
+    try:
+        data = value if isinstance(value, dict) else json.loads(str(value or "{}"))
+    except Exception:
+        data = {}
+    if isinstance(data, dict):
+        maps = data.get("__speaker_maps__")
+        if isinstance(maps, dict):
+            parsed = _parse_edge_speaker_voices(maps.get(str(branch or "")))
+            if parsed:
+                return parsed
+    return _parse_tts_speaker_voices(value, branch, legacy_value)
+
+
 def _qwen_clone_reference_audio(reference: dict[str, Any]) -> tuple[np.ndarray, int]:
     wav, sr = _audio_to_tensor(reference["audio"])
     ref_waveform = wav.squeeze(0).detach().cpu().numpy().copy()
@@ -2147,6 +2359,18 @@ def _patch_indextts_audio_cache_manager():
     manager_cls._cache_audio_tensor = _cache_audio_tensor
 
 
+def _patch_transformers_offloaded_cache_compat():
+    try:
+        import transformers.cache_utils as cache_utils
+    except Exception:
+        return
+    if hasattr(cache_utils, "OffloadedCache"):
+        return
+    dynamic_cache = getattr(cache_utils, "DynamicCache", None)
+    if dynamic_cache is not None:
+        cache_utils.OffloadedCache = dynamic_cache
+
+
 def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None):
     root = _indextts_root()
     if not root.is_dir():
@@ -2172,6 +2396,7 @@ def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None)
     except Exception:
         pass
     _install_indextts_audio_compat()
+    _patch_transformers_offloaded_cache_compat()
     try:
         from indexttsnode import AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir
         _patch_indextts_deepspeed_fallback()
@@ -2956,6 +3181,35 @@ def _register_universal_tts_api() -> None:
     async def audio_library(request):
         return web.json_response({"ok": True, "root": str(_models_mp3_root()), "items": _models_mp3_items()})
 
+    @server.routes.get("/gjj/universal_tts/audio_preview")
+    async def audio_preview(request):
+        try:
+            path = _resolve_local_audio(str(request.query.get("name") or ""))
+            content_type = {
+                ".mp3": "audio/mpeg",
+                ".wav": "audio/wav",
+                ".flac": "audio/flac",
+                ".m4a": "audio/mp4",
+                ".aac": "audio/aac",
+                ".ogg": "audio/ogg",
+                ".webm": "audio/webm",
+            }.get(path.suffix.lower(), "application/octet-stream")
+            return web.FileResponse(path, headers={"Content-Type": content_type})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+
+    @server.routes.get("/gjj/universal_tts/edge_voice_preview")
+    async def edge_voice_preview(request):
+        try:
+            voice = _edge_voice_id(str(request.query.get("voice") or ""), "[中文] zh-CN Xiaoxiao 女声")
+            text = str(request.query.get("text") or "这是一段音色试听。").strip() or "这是一段音色试听。"
+            speed = _coerce_float(request.query.get("speed"), 1.0, 0.5, 2.0)
+            pitch = _coerce_int(request.query.get("pitch"), 0, -20, 20)
+            audio = _edge_tts(text[:80], voice, speed, pitch, 20.0)
+            return web.Response(body=_audio_bytes_from_comfy(audio), content_type="audio/wav")
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
     @server.routes.get("/gjj/universal_tts/terms")
     async def terms_get(request):
         return web.json_response({"ok": True, "path": str(_terms_path()), "text": _read_terms_text()})
@@ -3338,7 +3592,7 @@ class GJJ_UniversalTTS:
         text = str(text if text is not None else "").strip()
         text = _apply_terms(text)
         edge_voice = _coerce_choice(edge_voice, list(VOICE_IDS.keys()), "[中文] zh-CN Xiaoxiao 女声")
-        edge_speaker_voices = _parse_tts_speaker_voices(tts_voice_orders_json, selected_branch, edge_speaker_voices_json)
+        edge_speaker_voices = _parse_tts_explicit_speaker_voices(tts_voice_orders_json, selected_branch, edge_speaker_voices_json)
         language = _coerce_choice(language, ["auto", "zh", "en", "ja", "ko"], "auto")
         device = _coerce_choice(device, ["auto", "cuda", "cpu", "mps"], "auto")
         precision = _coerce_choice(precision, ["auto", "fp32", "fp16", "bf16"], "auto")
@@ -3399,7 +3653,11 @@ class GJJ_UniversalTTS:
             turns = _parse_turns(text, segment_min_chars, segment_max_chars)
             if not turns:
                 raise RuntimeError("合成文本不能为空。")
-            references = _collect_references(kwargs, local_audio_name, local_audio_order) if selected_branch in REFERENCE_REQUIRED_BRANCHES or selected_branch == "VoxCPM2" else []
+            references = (
+                _collect_references(kwargs, local_audio_name, local_audio_order, edge_speaker_voices)
+                if selected_branch in REFERENCE_REQUIRED_BRANCHES or selected_branch == "VoxCPM2"
+                else []
+            )
             if selected_branch in REFERENCE_REQUIRED_BRANCHES and not references:
                 raise RuntimeError(f"当前分支需要参考音频，但没有找到可用音频。请连接参考音频，或把音频放到：{_models_mp3_root()}")
             if selected_branch in REFERENCE_TEXT_ASR_BRANCHES:
@@ -3455,9 +3713,13 @@ class GJJ_UniversalTTS:
             audio_items: list[dict[str, Any]] = []
             timeline: list[dict[str, Any]] = []
             cursor = 0.0
+            speaker_random_seeds: dict[int, int] = {}
             for index, turn in enumerate(turns):
-                actual_seed = random.randint(0, 2**31 - 1) if random_seed else int(seed) + index
                 speaker = int(turn.get("speaker") or 0)
+                if random_seed:
+                    actual_seed = speaker_random_seeds.setdefault(max(0, speaker), random.randint(0, 2**31 - 1))
+                else:
+                    actual_seed = int(seed) + max(0, speaker)
                 line = str(turn.get("text") or "").strip()
                 turn_emotion_prompt = _merge_emotion_prompts(emotion_prompt, str(turn.get("emotion_prompt") or ""))
                 ref = _reference_for_speaker(references, speaker)
@@ -3467,7 +3729,8 @@ class GJJ_UniversalTTS:
                     turn_custom_voice = ""
                 elif selected_branch in {"Qwen3-CustomVoice", "Qwen3-VoiceDesign"} and edge_speaker_voices:
                     turn_custom_voice = _edge_voice_for_speaker(speaker, custom_voice, edge_speaker_voices)
-                _send_status(unique_id, f"正在合成 {index + 1}/{len(turns)}：speaker_{speaker + 1}", 0.08 + 0.82 * ((index + 1) / len(turns)))
+                speaker_label_text = str(turn.get("speaker_label") or f"说话人{speaker + 1}").strip()
+                _send_status(unique_id, f"正在合成 {index + 1}/{len(turns)}：{speaker_label_text} / seed {actual_seed}", 0.08 + 0.82 * ((index + 1) / len(turns)))
                 audio = self._synthesize_one(
                     selected_branch,
                     model_name,
@@ -3505,15 +3768,21 @@ class GJJ_UniversalTTS:
                         _send_audio_preview(
                             unique_id,
                             preview_ui,
-                            f"已生成片段 {index + 1}/{len(turns)}：speaker_{speaker + 1}",
+                            f"已生成片段 {index + 1}/{len(turns)}：{speaker_label_text} / seed {actual_seed}",
                             True,
                         )
                     except Exception as preview_exc:
                         _send_status(unique_id, f"片段 {index + 1} 预览保存失败：{preview_exc}", 0.08 + 0.82 * ((index + 1) / len(turns)))
                 wav, sr = _audio_to_tensor(audio)
                 duration = float(wav.shape[-1]) / float(sr)
-                start = cursor
-                end = cursor + duration
+                explicit_start = turn.get("start") if bool(turn.get("explicit_timing")) else None
+                explicit_end = turn.get("end") if bool(turn.get("explicit_timing")) else None
+                if explicit_start is not None and explicit_end is not None and float(explicit_end) > float(explicit_start):
+                    start = float(explicit_start)
+                    end = float(explicit_end)
+                else:
+                    start = cursor
+                    end = cursor + duration
                 timeline.append({
                     "index": index + 1,
                     "speaker": speaker + 1,
@@ -3522,11 +3791,13 @@ class GJJ_UniversalTTS:
                     "end": end,
                     "text": line,
                 })
-                cursor = end + (float(pause_after_speaker) if index < len(turns) - 1 else 0.0)
+                if explicit_start is not None and explicit_end is not None:
+                    cursor = max(cursor, end)
+                else:
+                    cursor = end + (float(pause_after_speaker) if index < len(turns) - 1 else 0.0)
                 if pbar:
                     pbar.update_absolute(index + 1, len(turns))
 
-            timeline_text = _format_timeline(timeline, timeline_format)
             if audio_output_mode == "单个队列":
                 _send_status(unique_id, f"正在保存 {len(audio_items)} 段 {audio_format}", 0.97)
                 result_audio = audio_items
@@ -3549,6 +3820,7 @@ class GJJ_UniversalTTS:
                 result_audio = [merged]
                 _send_status(unique_id, f"正在保存 {audio_format} 预览", 0.97)
                 audio_ui = _save_audio_ui(merged, mp3_filename_prefix, audio_format, mp3_quality)
+            timeline_text = _format_timeline(timeline, timeline_format)
             _send_audio_preview(unique_id, audio_ui, "完成，音频已保存", False)
             elapsed = time.perf_counter() - started
             _send_status(unique_id, f"完成：{len(turns)} 段，耗时 {elapsed:.2f} 秒", 1.0)

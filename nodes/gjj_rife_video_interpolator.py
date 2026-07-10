@@ -11,11 +11,13 @@ from .gjj_rife_runtime import (
     DEFAULT_CKPT,
     get_torch_device,
     list_rife_models,
+    load_state_dict_file,
     postprocess_frames,
     preprocess_frames,
     resolve_rife_model_path,
     soft_empty_cache,
     interpolate_frames,
+    interpolate_frames_hdv3,
 )
 
 
@@ -46,14 +48,19 @@ def _send_status(unique_id: Any, text: str) -> None:
 
 
 def _load_rife_model(model_name: str):
-    from ..vendor.rife.rife_arch import IFNet
+    model_path, arch_ver, model_kind = resolve_rife_model_path(model_name)
+    if model_kind == "hdv3":
+        from ..vendor.rife.rife_hdv3_arch import IFNetHDv3
 
-    model_path, arch_ver = resolve_rife_model_path(model_name)
-    model = IFNet(arch_ver=arch_ver)
-    state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(state_dict)
+        model = IFNetHDv3()
+        model.load_state_dict(load_state_dict_file(model_path), strict=False)
+    else:
+        from ..vendor.rife.rife_arch import IFNet
+
+        model = IFNet(arch_ver=arch_ver)
+        model.load_state_dict(load_state_dict_file(model_path))
     model.eval().to(get_torch_device())
-    return model, arch_ver
+    return model, arch_ver, model_kind
 
 
 def _component_value(value: Any, key: str) -> Any:
@@ -223,6 +230,47 @@ class GJJ_RifeVideoInterpolator:
                         "tooltip": "按原插件逻辑传给 RIFE 的 scale 参数；通常保持 1.0 即可。兼容旧工作流里保存的字符串 1。",
                     },
                 ),
+                "source_fps": (
+                    "FLOAT",
+                    {
+                        "default": 24.0,
+                        "min": 0.1,
+                        "max": 240.0,
+                        "step": 0.1,
+                        "display_name": "源帧率",
+                        "tooltip": "仅 RIFEInterpolation / flownet.pkl 使用；输入 VIDEO 时优先使用视频自带帧率。",
+                    },
+                ),
+                "target_fps": (
+                    "FLOAT",
+                    {
+                        "default": 60.0,
+                        "min": 0.1,
+                        "max": 480.0,
+                        "step": 0.1,
+                        "display_name": "目标帧率",
+                        "tooltip": "仅 RIFEInterpolation / flownet.pkl 使用；按源帧率到目标帧率重采样插帧。",
+                    },
+                ),
+                "batch_size": (
+                    "INT",
+                    {
+                        "default": 8,
+                        "min": 1,
+                        "max": 32,
+                        "step": 1,
+                        "display_name": "批量大小",
+                        "tooltip": "仅 RIFEInterpolation / flownet.pkl 使用；越大越快但更占显存。",
+                    },
+                ),
+                "use_fp16": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "FP16",
+                        "tooltip": "仅 RIFEInterpolation / flownet.pkl 使用；CUDA 环境可降低显存并加速。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -238,19 +286,23 @@ class GJJ_RifeVideoInterpolator:
         fast_mode=True,
         ensemble=True,
         scale_factor=1.0,
+        source_fps=24.0,
+        target_fps=60.0,
+        batch_size=8,
+        use_fp16=True,
         input_video=None,
         input_frames=None,
         unique_id=None,
     ):
         media = media if media is not None else (input_video if input_video is not None else input_frames)
         _send_status(unique_id, "1/4 解析输入媒体...")
-        input_frames, source_audio, source_fps, is_video_input = _coerce_media_to_frames(media)
+        input_frames, source_audio, media_source_fps, is_video_input = _coerce_media_to_frames(media)
         if int(input_frames.shape[0]) < 2:
             raise RuntimeError("RIFE 插帧至少需要 2 帧输入。")
 
         try:
             _send_status(unique_id, "2/4 加载 RIFE 模型...")
-            model, arch_ver = _load_rife_model(model_name)
+            model, arch_ver, model_kind = _load_rife_model(model_name)
         except Exception as exc:
             raise RuntimeError(
                 "RIFE 视频插帧节点加载模型失败。\n"
@@ -267,17 +319,30 @@ class GJJ_RifeVideoInterpolator:
                 _send_status(unique_id, f"3/4 插帧处理中：{current}/{total}")
 
             _send_status(unique_id, f"3/4 开始插帧：{frames.shape[0]} 帧，模型 {arch_ver}...")
-            scale_list = [8 / float(scale_factor), 4 / float(scale_factor), 2 / float(scale_factor), 1 / float(scale_factor)]
-            out = interpolate_frames(
-                frames=frames,
-                multiplier=int(multiplier),
-                clear_cache_after_n_frames=int(clear_cache_after_n_frames),
-                model=model,
-                scale_list=scale_list,
-                fast_mode=bool(fast_mode),
-                ensemble=bool(ensemble),
-                progress_callback=progress_callback,
-            )
+            if model_kind == "hdv3":
+                source_rate = float(media_source_fps or source_fps or 24.0)
+                out = interpolate_frames_hdv3(
+                    frames=frames,
+                    source_fps=source_rate,
+                    target_fps=float(target_fps or 60.0),
+                    model=model,
+                    scale=float(scale_factor),
+                    batch_size=int(batch_size),
+                    use_fp16=bool(use_fp16),
+                    progress_callback=progress_callback,
+                )
+            else:
+                scale_list = [8 / float(scale_factor), 4 / float(scale_factor), 2 / float(scale_factor), 1 / float(scale_factor)]
+                out = interpolate_frames(
+                    frames=frames,
+                    multiplier=int(multiplier),
+                    clear_cache_after_n_frames=int(clear_cache_after_n_frames),
+                    model=model,
+                    scale_list=scale_list,
+                    fast_mode=bool(fast_mode),
+                    ensemble=bool(ensemble),
+                    progress_callback=progress_callback,
+                )
             result_frames = postprocess_frames(out)
         except Exception as exc:
             raise RuntimeError(f"RIFE 视频插帧节点执行失败。\n详细错误：{exc}") from exc
@@ -290,7 +355,7 @@ class GJJ_RifeVideoInterpolator:
 
         if is_video_input:
             _send_status(unique_id, "4/4 创建视频...")
-            new_fps = (source_fps or 24.0) * max(1, int(multiplier))
+            new_fps = float(target_fps or 60.0) if model_kind == "hdv3" else (media_source_fps or 24.0) * max(1, int(multiplier))
             try:
                 video_output = InputImpl.VideoFromComponents(
                     Types.VideoComponents(

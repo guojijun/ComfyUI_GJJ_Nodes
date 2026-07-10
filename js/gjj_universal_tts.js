@@ -11,6 +11,8 @@ const SETTINGS_ENDPOINT = "/gjj/user_settings";
 const IMPORT_MEDIA_ENDPOINT = "/gjj/universal_tts/import_media";
 const CHECK_ENDPOINT = "/gjj/universal_tts/check";
 const AUDIO_LIBRARY_ENDPOINT = "/gjj/universal_tts/audio_library";
+const AUDIO_PREVIEW_ENDPOINT = "/gjj/universal_tts/audio_preview";
+const EDGE_VOICE_PREVIEW_ENDPOINT = "/gjj/universal_tts/edge_voice_preview";
 const TERMS_ENDPOINT = "/gjj/universal_tts/terms";
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
 const STATUS_WIDGET = "gjj_universal_tts_panel";
@@ -553,6 +555,7 @@ function button(label, title = "") {
 		"border:1px solid #46606a", "border-radius:6px",
 		"background:#1f3037", "color:#f2fbff", "cursor:pointer",
 		"display:inline-flex", "align-items:center", "justify-content:center",
+		"flex:0 0 27px",
 		"font:700 14px/1 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
 	].join(";");
 	btn.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -579,18 +582,62 @@ function compactTextWidget(node) {
 	}
 }
 
-function textValueFromNode(node) {
+function unwrapLabeledTextPayload(value) {
+	const raw = String(value || "").trim();
+	if (!raw) return "";
+	const triple = raw.match(/^[^\r\n:：]{1,50}(?:[（(][^（）()\r\n]{1,80}[）)])?\s*[:：]\s*("""|''')([\s\S]*?)\1\s*$/);
+	if (triple) return triple[2].trim();
+	const quoted = raw.match(/^[^\r\n:：]{1,50}(?:[（(][^（）()\r\n]{1,80}[）)])?\s*[:：]\s*["']([\s\S]*?)["']\s*$/);
+	return quoted ? quoted[1].trim() : raw;
+}
+
+function textValueFromNode(node, outputSlot = null) {
+	const output = Number.isInteger(outputSlot) && outputSlot >= 0 ? node?.outputs?.[outputSlot] : null;
+	const outputNames = new Set([
+		output?.name,
+		output?.label,
+		output?.localized_name,
+	].map((item) => String(item || "").trim().toLowerCase()).filter(Boolean));
 	const candidates = [];
 	for (const w of node?.widgets || []) {
 		if (typeof w?.value !== "string") continue;
-		const value = w.value.trim();
+		const value = unwrapLabeledTextPayload(w.value);
 		if (!value) continue;
 		const name = String(w.name || "").toLowerCase();
-		const score = (["text", "prompt", "markdown", "content"].includes(name) ? 100000 : 0) + value.length;
+		const label = String(w.label || w.localized_name || "").trim().toLowerCase();
+		const exactOutputMatch = outputNames.has(name) || (label && outputNames.has(label));
+		const semanticTextMatch = ["text", "prompt", "markdown", "content", "台词", "提示词", "文本", "合成文本"].includes(name)
+			|| ["台词", "提示词", "文本", "合成文本"].includes(label);
+		const speakerLikeText = /(?:^|\n)\s*\[?\s*(?:左|右|中间|说话人|speaker|spk|角色)[^\n]{0,20}[:：]/i.test(value);
+		const score =
+			(exactOutputMatch ? 1000000 : 0)
+			+ (semanticTextMatch ? 200000 : 0)
+			+ (speakerLikeText ? 100000 : 0)
+			+ value.length;
 		candidates.push({ value, score });
 	}
 	candidates.sort((a, b) => b.score - a.score);
 	return candidates[0]?.value || "";
+}
+
+function bestLinkedTextFromNode(node, outputSlot = null, visited = new Set()) {
+	if (!node || visited.has(node.id)) return "";
+	visited.add(node.id);
+	const candidates = [];
+	const direct = textValueFromNode(node, outputSlot);
+	if (direct) candidates.push(direct);
+	for (const input of node.inputs || []) {
+		if (!input?.link) continue;
+		const link = app.graph?.links?.[input.link];
+		const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+		const upstream = bestLinkedTextFromNode(origin, link?.origin_slot, visited);
+		if (upstream) candidates.push(upstream);
+	}
+	candidates.sort((a, b) => {
+		const scoreDiff = speakerTextScore(b) - speakerTextScore(a);
+		return scoreDiff || String(b || "").length - String(a || "").length;
+	});
+	return candidates[0] || "";
 }
 
 function widgetNameForInput(input) {
@@ -609,29 +656,45 @@ function linkedSynthesisTextValue(node) {
 	if (!input?.link) return { linked: false, text: "" };
 	const link = app.graph?.links?.[input.link];
 	const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
-	return { linked: true, text: textValueFromNode(origin) };
+	return { linked: true, text: bestLinkedTextFromNode(origin, link?.origin_slot) };
 }
 
 function syncLinkedSynthesisText(node) {
 	const linked = linkedSynthesisTextValue(node);
 	if (!linked.linked) return false;
-	const text = linked.text;
+	const text = unwrapLabeledTextPayload(linked.text);
 	const textWidget = widget(node, "text");
 	if (!textWidget || String(textWidget.value || "") === text) return true;
+	const local = unwrapLabeledTextPayload(textWidget.value);
+	if (speakerTextScore(local) > speakerTextScore(text)) return false;
 	setWidgetValue(node, "text", text);
 	return true;
 }
 
 function synthesisTextForSpeakerParsing(node) {
 	const linked = linkedSynthesisTextValue(node);
-	return linked.linked ? linked.text : String(widget(node, "text")?.value || "");
+	const local = unwrapLabeledTextPayload(widget(node, "text")?.value);
+	if (!linked.linked) return local;
+	const linkedText = unwrapLabeledTextPayload(linked.text);
+	return speakerTextScore(linkedText) >= speakerTextScore(local) ? linkedText : local;
+}
+
+function speakerTextScore(text) {
+	const raw = unwrapLabeledTextPayload(text);
+	const entries = parseSpeakerEntriesFromText(raw);
+	const positionHits = (raw.match(/(?:^|\n)\s*\[?\s*(?:左边?|右边?|中间|中|left|right|center|middle)\s*[1-9一二两三四五六七八九]?\s*\]?\s*[:：]/gi) || []).length;
+	const explicitHits = (raw.match(/(?:^|\n)\s*\[?\s*(?:speaker|spk|角色|说话人)[_\s-]*\d+\s*\]?\s*[:：]/gi) || []).length;
+	return entries.length * 100 + positionHits * 20 + explicitHits * 10;
 }
 
 function parseSpeakerEntriesFromText(text) {
+	text = unwrapLabeledTextPayload(text);
 	const entries = new Map();
 	const named = new Map();
 	const tagRe = /^\s*((?:\[?speaker[_\s-]*(\d+)\]?|spk[_\s-]*(\d+)|角色\s*(\d+)|说话人\s*(\d+)))\s*[:：]/i;
-	const namedTagRe = /^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*(?:[（(][^（）()]*[）)]\s*)*[:：]/;
+	const positionTagRe = /^\s*\[?\s*((?:左边?|右边?|中间|中|left|right|center|middle)\s*[1-9一二两三四五六七八九]?)\s*\]?\s*[:：]/i;
+	const namedTagRe = /^\s*\[?\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*\]?\s*(?:[（(][^（）()]*[）)]\s*)*[:：]/;
+	const reservedLabels = new Set(["台词", "提示词", "文本", "合成文本", "参考视频", "参考图片", "参考音频", "视频", "图片", "宽度", "高度"]);
 	const stripStageDirections = (value) => {
 		let result = String(value || "");
 		let previous = null;
@@ -642,20 +705,72 @@ function parseSpeakerEntriesFromText(text) {
 		return result.replace(/\s+/g, " ").trim();
 	};
 	const cleanLabel = (label) => stripStageDirections(label).replace(/^[\[\]【】（）()\s]+|[\[\]【】（）()\s]+$/g, "");
+	const isReservedLabel = (label) => reservedLabels.has(cleanLabel(label));
 	const addEntry = (index, label) => {
 		const clean = cleanLabel(label);
-		if (!clean) return;
+		if (!clean || isReservedLabel(clean)) return;
 		if (!entries.has(index)) entries.set(index, clean);
 	};
 	const speakerIndexFromLabel = (label) => {
 		const raw = cleanLabel(label);
-		const numeric = raw.match(/(?:speaker|spk|角色|说话人)?[_\s-]*(\d+)$/i);
-		if (numeric) return Math.max(0, Number.parseInt(numeric[1], 10) - 1);
-		const key = raw.toLowerCase();
+		const numeric = raw.match(/^(?:speaker|spk|角色|说话人)[_\s-]*(\d+)$|^(\d+)$/i);
+		if (numeric) return Math.max(0, Number.parseInt(numeric[1] || numeric[2] || "1", 10) - 1);
+		const canonicalSpeakerKey = (value) => {
+			const text = String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+			const numberMap = { 一: "1", 二: "2", 两: "2", 三: "3", 四: "4", 五: "5", 六: "6", 七: "7", 八: "8", 九: "9" };
+			const left = text.match(/^(左边?|left|l)([1-9一二两三四五六七八九]?)$/);
+			if (left) return `left${numberMap[left[2]] || left[2] || "1"}`;
+			const right = text.match(/^(右边?|right|r)([1-9一二两三四五六七八九]?)$/);
+			if (right) return `right${numberMap[right[2]] || right[2] || "1"}`;
+			if (["中", "中间", "center", "middle"].includes(text)) return "center1";
+			return text;
+		};
+		const key = canonicalSpeakerKey(raw);
 		if (!named.has(key)) named.set(key, named.size);
 		return named.get(key);
 	};
+	const labelFromLine = (line) => {
+		const match = tagRe.exec(line);
+		if (match) return match[1] || "";
+		const positionMatch = positionTagRe.exec(line);
+		if (positionMatch) return positionMatch[1] || "";
+		const namedMatch = namedTagRe.exec(line);
+		return namedMatch ? String(namedMatch[1] || "") : "";
+	};
+	const flattenJsonItems = (value) => {
+		if (Array.isArray(value)) return value;
+		if (!value || typeof value !== "object") return [];
+		for (const key of ["segments", "items", "subtitles", "captions", "lines", "entries", "result"]) {
+			if (Array.isArray(value[key])) return value[key];
+		}
+		return [];
+	};
+	try {
+		const data = JSON.parse(String(text || "").trim());
+		for (const item of flattenJsonItems(data)) {
+			if (!item || typeof item !== "object") continue;
+			let label = String(item.speaker_label ?? item.speakerLabel ?? item.label ?? "").trim();
+			const rawSpeaker = item.speaker ?? item.spk ?? item.name ?? item.role;
+			if (!label && rawSpeaker !== undefined && rawSpeaker !== null && rawSpeaker !== "") label = String(rawSpeaker).trim();
+			const body = String(item.text ?? item.content ?? item.line ?? item.caption ?? "").trim();
+			if (!label) label = labelFromLine(body);
+			const clean = cleanLabel(label);
+			if (clean) addEntry(speakerIndexFromLabel(clean), clean);
+		}
+		if (entries.size) {
+			return [...entries.entries()]
+				.sort((a, b) => a[0] - b[0])
+				.slice(0, MAX_REFERENCES)
+				.map(([index, label]) => ({ index, label }));
+		}
+	} catch (_) {}
 	for (const line of String(text || "").split(/\r?\n/)) {
+		const positionMatch = positionTagRe.exec(line);
+		if (positionMatch) {
+			const label = cleanLabel(positionMatch[1] || "");
+			addEntry(speakerIndexFromLabel(label), label);
+			continue;
+		}
 		const match = tagRe.exec(line);
 		if (match) {
 			const number = match.slice(2, 6).find(Boolean) || "1";
@@ -718,6 +833,25 @@ function writeEdgeVoiceOrder(node, branch, order) {
 	if (String(branch || "") === "EdgeTTS") setWidgetValue(node, "edge_speaker_voices_json", JSON.stringify(cleaned));
 }
 
+function writeSpeakerVoiceMap(node, branch, selected) {
+	const voices = (selected || []).map((item) => String(item || "").trim());
+	const orders = readTTSVoiceOrders(node);
+	const maps = orders.__speaker_maps__ && typeof orders.__speaker_maps__ === "object" && !Array.isArray(orders.__speaker_maps__)
+		? orders.__speaker_maps__
+		: {};
+	const map = {};
+	const entries = speakerEntriesForLibrary(node);
+	for (const entry of entries) {
+		const index = Math.max(0, Number(entry.index) || 0);
+		const voice = voices.length ? voices[index % voices.length] : "";
+		if (voice) map[`speaker_${index + 1}`] = voice;
+	}
+	maps[String(branch || "EdgeTTS")] = map;
+	orders.__speaker_maps__ = maps;
+	setWidgetValue(node, "tts_voice_orders_json", JSON.stringify(orders));
+	if (String(branch || "") === "EdgeTTS") setWidgetValue(node, "edge_speaker_voices_json", JSON.stringify(map));
+}
+
 function writeEdgeSpeakerVoiceMap(node, value) {
 	const cleaned = {};
 	for (const [key, voice] of Object.entries(value || {})) {
@@ -730,6 +864,32 @@ function writeEdgeSpeakerVoiceMap(node, value) {
 function speakerEntriesForLibrary(node) {
 	const entries = parseSpeakerEntriesFromText(synthesisTextForSpeakerParsing(node));
 	return entries.length ? entries : [{ index: 0, label: "说话人1" }];
+}
+
+function syncSpeakerVoiceMapFromCurrentSelection(node) {
+	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
+	const isEdge = branch === "EdgeTTS";
+	const isTtsLibrary = isTtsVoiceLibraryBranch(branch);
+	let selected = [];
+	if (isTtsLibrary) {
+		selected = readEdgeVoiceOrder(node, branch);
+		const primaryName = isEdge ? "edge_voice" : "custom_voice";
+		const primary = String(widget(node, primaryName)?.value || "").trim();
+		if (primary && !selected.includes(primary)) selected = [primary, ...selected];
+	} else {
+		selected = Array.isArray(node.properties?.local_audio_order)
+			? node.properties.local_audio_order.map((item) => String(item || "").trim()).filter(Boolean)
+			: [];
+		if (!selected.length) {
+			try {
+				const parsed = JSON.parse(String(widget(node, "local_audio_order_json")?.value || "[]"));
+				if (Array.isArray(parsed)) selected = parsed.map((item) => String(item || "").trim()).filter(Boolean);
+			} catch (_) {}
+		}
+		const primary = String(widget(node, "local_audio_name")?.value || "").trim();
+		if (primary && !selected.includes(primary)) selected = [primary, ...selected];
+	}
+	writeSpeakerVoiceMap(node, branch, selected);
 }
 
 async function loadCharacterLibraryForTTS() {
@@ -904,7 +1064,7 @@ function ensurePanel(node) {
 	if (node.__gjjUniversalTTS) return node.__gjjUniversalTTS;
 	ensureProperties(node);
 	const toolbar = document.createElement("div");
-	toolbar.style.cssText = "display:flex;gap:4px;align-items:center;flex-wrap:nowrap;width:100%;box-sizing:border-box;overflow:visible";
+	toolbar.style.cssText = "display:flex;gap:4px;row-gap:5px;align-items:center;align-content:flex-start;flex-wrap:wrap;width:100%;box-sizing:border-box;overflow:visible";
 	const open = button("📂", "打开文本、音频或视频文件");
 	const keep = button("🧠", "切换是否保留模型");
 	const branch = button("💱", "选择生成分支");
@@ -1226,6 +1386,7 @@ function wirePanel(node, state) {
 		try {
 			syncLinkedSynthesisText(node);
 			normalizeRuntimeWidgetValues(node);
+			syncSpeakerVoiceMapFromCurrentSelection(node);
 			applyWidgetVisibility(node);
 			await queueOnlyCurrentNode(node);
 		} finally {
@@ -1248,7 +1409,7 @@ function copyLinkedInputValue(node, input, link) {
 	const targetName = widgetNameForInput(input);
 	if (!targetName) return "";
 	const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
-	const value = textValueFromNode(origin);
+	const value = bestLinkedTextFromNode(origin, link?.origin_slot);
 	if (!value) return "";
 	setWidgetValue(node, targetName, value);
 	return targetName;
@@ -1331,6 +1492,64 @@ function buildViewUrl(item) {
 	if (item.subfolder) params.set("subfolder", item.subfolder);
 	params.set("rand", String(Date.now()));
 	return `/view?${params.toString()}`;
+}
+
+function localAudioPreviewUrl(name) {
+	const params = new URLSearchParams();
+	params.set("name", String(name || ""));
+	params.set("rand", String(Date.now()));
+	return `${AUDIO_PREVIEW_ENDPOINT}?${params.toString()}`;
+}
+
+function edgeVoicePreviewUrl(node, voice) {
+	const params = new URLSearchParams();
+	params.set("voice", String(voice || ""));
+	params.set("text", "这是一段音色试听。");
+	params.set("speed", String(widget(node, "speed")?.value || "1.0"));
+	params.set("pitch", String(widget(node, "pitch")?.value || "0"));
+	params.set("rand", String(Date.now()));
+	return `${EDGE_VOICE_PREVIEW_ENDPOINT}?${params.toString()}`;
+}
+
+function ensureLibraryPreviewAudio(node) {
+	if (node.__gjjUniversalTTSLibraryPreviewAudio) return node.__gjjUniversalTTSLibraryPreviewAudio;
+	const audio = document.createElement("audio");
+	audio.preload = "none";
+	audio.style.display = "none";
+	document.body.appendChild(audio);
+	node.__gjjUniversalTTSLibraryPreviewAudio = { audio, name: "", buttons: new Set() };
+	const resetButtons = () => {
+		for (const button of node.__gjjUniversalTTSLibraryPreviewAudio.buttons) {
+			button.textContent = "▶";
+			button.title = "试听";
+		}
+	};
+	audio.addEventListener("ended", resetButtons);
+	audio.addEventListener("pause", resetButtons);
+	audio.addEventListener("error", resetButtons);
+	return node.__gjjUniversalTTSLibraryPreviewAudio;
+}
+
+function toggleLibraryAudioPreview(node, name, button, url) {
+	const state = ensureLibraryPreviewAudio(node);
+	state.buttons.add(button);
+	if (state.name === name && !state.audio.paused) {
+		state.audio.pause();
+		return;
+	}
+	for (const item of state.buttons) {
+		item.textContent = "▶";
+		item.title = "试听";
+	}
+	state.name = name;
+	state.audio.src = url || localAudioPreviewUrl(name);
+	button.textContent = "❚❚";
+	button.title = "暂停试听";
+	state.audio.currentTime = 0;
+	state.audio.play?.().catch?.(() => {
+		button.textContent = "▶";
+		button.title = "试听";
+	});
 }
 
 function ensureAudio(node) {
@@ -2033,14 +2252,24 @@ function toggleMp3List(node) {
 	};
 	const saveOrder = (order) => {
 		const cleaned = [...new Set(order.filter(Boolean))];
+		s.__gjjKeepMp3PopupOnWidgetCallback = true;
 		if (isTtsLibrary) {
-			writeEdgeVoiceOrder(node, branch, cleaned);
-			if (cleaned[0]) setWidgetValue(node, primaryWidgetName, cleaned[0]);
+			try {
+				writeEdgeVoiceOrder(node, branch, cleaned);
+				if (cleaned[0]) setWidgetValue(node, primaryWidgetName, cleaned[0]);
+			} finally {
+				s.__gjjKeepMp3PopupOnWidgetCallback = false;
+			}
 		} else {
-			node.properties.local_audio_order = cleaned;
-			syncLocalAudioOrderStorage(node);
-			setWidgetValue(node, "local_audio_name", node.properties.local_audio_order[0] || "");
+			try {
+				node.properties.local_audio_order = cleaned;
+				syncLocalAudioOrderStorage(node);
+				setWidgetValue(node, "local_audio_name", node.properties.local_audio_order[0] || "");
+			} finally {
+				s.__gjjKeepMp3PopupOnWidgetCallback = false;
+			}
 		}
+		writeSpeakerVoiceMap(node, branch, cleaned);
 		node.graph?.change?.();
 	};
 	const popup = document.createElement("div");
@@ -2180,6 +2409,21 @@ function toggleMp3List(node) {
 				syncButtons(node);
 			});
 			row.append(main);
+			if ((!isTtsLibrary && audioMeta.has(item)) || isEdge) {
+				const previewBtn = document.createElement("button");
+				previewBtn.type = "button";
+				previewBtn.textContent = "▶";
+				previewBtn.title = "试听";
+				previewBtn.style.cssText = "width:26px;height:24px;border:0;border-left:1px solid rgba(255,255,255,.16);background:transparent;color:inherit;cursor:pointer;font:700 12px/1 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif";
+				previewBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
+				previewBtn.addEventListener("mousedown", (event) => event.stopPropagation());
+				previewBtn.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					toggleLibraryAudioPreview(node, item, previewBtn, isEdge ? edgeVoicePreviewUrl(node, item) : localAudioPreviewUrl(item));
+				});
+				row.append(previewBtn);
+			}
 			if (active) {
 				const move = (delta) => {
 					const next = selectedOrder();
@@ -2323,9 +2567,10 @@ function patchNode(node) {
 		w.callback = function (...args) {
 			const result = original?.apply(this, args);
 			renderEdgeSpeakerVoicePanel(node);
-			if (node.__gjjUniversalTTS?.mp3Popup) {
-				node.__gjjUniversalTTS.mp3Popup.remove();
-				node.__gjjUniversalTTS.mp3Popup = null;
+			const state = node.__gjjUniversalTTS;
+			if (state?.mp3Popup && !state.__gjjKeepMp3PopupOnWidgetCallback) {
+				state.mp3Popup.remove();
+				state.mp3Popup = null;
 				syncButtons(node);
 			}
 			return result;
