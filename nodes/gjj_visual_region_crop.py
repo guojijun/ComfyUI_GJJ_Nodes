@@ -607,14 +607,6 @@ class GJJ_VisualRegionCrop:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "preview_width": ("INT", {
-                    "default": 360,
-                    "min": 180,
-                    "max": 960,
-                    "step": 16,
-                    "display_name": "预览宽度",
-                    "tooltip": "节点内预览按此宽度等比缩放；不影响最终输出尺寸。",
-                }),
                 "crop_data": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -650,6 +642,14 @@ class GJJ_VisualRegionCrop:
                 "media": (INPUT_MEDIA_TYPE, {
                     "display_name": "图片/视频帧",
                     "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；连接后优先使用上游。",
+                }),
+                "preview_width": ("INT", {
+                    "default": 360,
+                    "min": 180,
+                    "max": 960,
+                    "step": 16,
+                    "display_name": "预览宽度",
+                    "tooltip": "节点内预览按此宽度等比缩放；不影响最终输出尺寸。",
                 }),
             },
             "hidden": {

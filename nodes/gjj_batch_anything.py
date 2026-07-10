@@ -60,11 +60,11 @@ def _display_name_for_input(name: str) -> str:
 class GJJBatchAnything:
     CATEGORY = "GJJ/逻辑"
     FUNCTION = "batch"
-    DESCRIPTION = "零依赖复刻 easy batchAnything：合并任意对象，支持 IMAGE 张量、LATENT、列表、元组、数字和文本。"
+    DESCRIPTION = "零依赖复刻 easy batchAnything：把多路输入合成一个批量/拼接结果；IMAGE 和 LATENT 会拼 batch，普通对象按原类型逻辑合并。"
     SEARCH_ALIASES = ["easy batchAnything", "batch anything", "batch any", "任意合并", "任意批量"]
     RETURN_TYPES = (any_type,)
-    RETURN_NAMES = ("批量结果",)
-    OUTPUT_TOOLTIPS = ("合并后的任意对象。图片会按第一路尺寸对齐后拼接 batch；latent 会对齐 samples 后拼接。",)
+    RETURN_NAMES = ("批量/拼接结果（单对象）",)
+    OUTPUT_TOOLTIPS = ("合并后的单个对象输出；图片会按第一路尺寸对齐后拼接 batch，latent 会对齐 samples 后拼接，不是 ComfyUI 列表口。",)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -179,4 +179,4 @@ class GJJBatchAnything:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJBatchAnything}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📦 任意批量合并"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📦 任意批量合并（输出单对象）"}

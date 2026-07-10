@@ -11,6 +11,11 @@ import struct
 
 from .taehv import TAEHV
 
+try:
+    import server
+except Exception:
+    server = None
+
 MAX_PREVIEW_RESOLUTION = args.preview_size
 
 def preview_to_image(latent_image):
@@ -126,11 +131,13 @@ from importlib.util import find_spec
 serv = None
 
 def _get_prompt_server():
-    global serv
+    global serv, server
     if serv is not None:
         return serv
     try:
-        import server
+        if server is None:
+            import server as comfy_server
+            server = comfy_server
         serv = getattr(server.PromptServer, "instance", None)
     except Exception:
         serv = None

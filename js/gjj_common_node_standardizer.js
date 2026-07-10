@@ -109,6 +109,7 @@ const FULLY_BYPASS_CLASSES = new Set([
 	"GJJ_AdvancedPassthroughRouter",
 	"GJJ_AnyPreview",
 	"GJJ_CLIPPromptEncodePanel",
+	"GJJ_WanVideoSamplerV2",
 	"GJJ_WorkflowTitle",
 ]);
 // Nodes migrated from individual execution bars to the shared status panel.
@@ -141,7 +142,6 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
 	"GJJ_WanSCAILInfinity",
-	"GJJ_WanVideoSamplerV2",
 	"GJJ_WanVideoVAELoader",
 ]);
 const STATUS_DISABLED_CLASSES = new Set([
@@ -153,7 +153,6 @@ const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
 ]);
 const CORE_PROGRESS_STATUS_CLASSES = new Set([
 	"GJJ_WanSCAILInfinity",
-	"GJJ_WanVideoSamplerV2",
 ]);
 const LEGACY_STATUS_WIDGET_POLICIES = new Map([
 	["batch_text_status", "hide"],

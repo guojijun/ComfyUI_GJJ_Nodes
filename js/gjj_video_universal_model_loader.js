@@ -2450,13 +2450,13 @@ function applyConfig(node, opts = {}) {
 		const allowAny = String(slot.kind || "") === "name_any";
 		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || [], slot.file_extension || "");
 		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
-		const missingModel = missingModelForSlot(slot, values);
 		const fileName = `file_${i}`;
 		const secondaryFileName = `secondary_file_${i}`;
 		const dtypeName = `dtype_${i}`;
 		setComboOptions(getWidget(node, fileName), values);
 		const preferredName = preferredNamesForSlot(slot);
 		selectFirstIfInvalid(node, fileName, values, preferredName, resetSlotValues);
+		const missingModel = missingModelForSlot(slot, values);
 		if (isDualClipSlot(slot)) {
 			setComboOptions(getWidget(node, secondaryFileName), secondaryValues);
 			const preferredSecondary = preferredNamesForSlot(slot, true);

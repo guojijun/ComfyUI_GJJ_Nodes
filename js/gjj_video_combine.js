@@ -12,6 +12,7 @@ const BASIC_SETTINGS_PROPERTY = "gjj_video_combine_show_basic_settings";
 const FRAME_RATE_VARIABLE_PROPERTY = "gjj_video_combine_frame_rate_variable";
 const AUTO_FILENAME_PREFIX_PROPERTY = "gjj_video_combine_auto_filename_prefix";
 const FILENAME_VARIABLES_PROPERTY = "gjj_video_combine_filename_prefix_variables";
+const LAST_PREVIEW_PROPERTY = "gjj_video_combine_last_preview";
 const UNIVERSAL_LOADER_METADATA_PROPERTY = "gjj_video_universal_loader_metadata";
 const TEMPLATE_PARAMS_VALUES_PROPERTY = "gjj_template_params_values";
 const TEMPLATE_PARAMS_SCHEMA_PROPERTY = "gjj_template_params_schema";
@@ -1600,6 +1601,61 @@ function isVideoPreview(item, detail = {}) {
 	return VIDEO_EXTENSIONS.has(ext);
 }
 
+function firstPreviewValue(value) {
+	return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizePreviewDetail(detail = {}) {
+	const item = Array.isArray(detail?.preview_media) ? detail.preview_media[0] : null;
+	if (!item?.filename) {
+		return null;
+	}
+	return {
+		preview_media: [{
+			filename: String(item.filename || ""),
+			subfolder: String(item.subfolder || ""),
+			type: String(item.type || "temp"),
+			format: item.format != null ? String(item.format) : undefined,
+			frame_rate: item.frame_rate,
+			width: Number(item.width ?? firstPreviewValue(detail?.preview_width) ?? 0) || undefined,
+			height: Number(item.height ?? firstPreviewValue(detail?.preview_height) ?? 0) || undefined,
+			frame_count: item.frame_count,
+		}],
+		preview_is_video: [Boolean(isVideoPreview(item, detail))],
+		preview_width: [Number(item.width ?? firstPreviewValue(detail?.preview_width) ?? 0) || 0],
+		preview_height: [Number(item.height ?? firstPreviewValue(detail?.preview_height) ?? 0) || 0],
+		preview_format: detail?.preview_format,
+	};
+}
+
+function rememberPreviewDetail(node, detail = {}) {
+	const stored = normalizePreviewDetail(detail);
+	if (!node) {
+		return stored;
+	}
+	node.properties ||= {};
+	if (stored) {
+		node.properties[LAST_PREVIEW_PROPERTY] = stored;
+	} else {
+		delete node.properties[LAST_PREVIEW_PROPERTY];
+	}
+	return stored;
+}
+
+function restoreStoredPreview(node) {
+	const stored = node?.properties?.[LAST_PREVIEW_PROPERTY];
+	if (!stored || node?.__gjjVideoCombinePreviewRestoring) {
+		return false;
+	}
+	node.__gjjVideoCombinePreviewRestoring = true;
+	try {
+		setPreview(node, stored, { remember: false });
+	} finally {
+		node.__gjjVideoCombinePreviewRestoring = false;
+	}
+	return true;
+}
+
 function clearNativePreview(node) {
 	if (!node) {
 		return;
@@ -1629,16 +1685,19 @@ function clearNativePreview(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 	refreshNode(node);
 }
-function setPreview(node, detail = {}) {
+function setPreview(node, detail = {}, options = {}) {
 	const state = node?.__gjjVideoCombineStatus;
 	if (!state) {
 		return;
 	}
+	if (options.remember !== false) {
+		rememberPreviewDetail(node, detail);
+	}
 	const item = Array.isArray(detail?.preview_media) ? detail.preview_media[0] : null;
 	const url = buildViewUrl(item);
 	const shouldUseVideo = !!url && isVideoPreview(item, detail);
-	const detailWidth = Array.isArray(detail?.preview_width) ? detail.preview_width[0] : detail?.preview_width;
-	const detailHeight = Array.isArray(detail?.preview_height) ? detail.preview_height[0] : detail?.preview_height;
+	const detailWidth = firstPreviewValue(detail?.preview_width);
+	const detailHeight = firstPreviewValue(detail?.preview_height);
 
 	state.video.pause?.();
 	state.video.removeAttribute("src");
@@ -1705,6 +1764,7 @@ function patchNode(node) {
 	applySlotVisibility(node);
 	updateFrameRateControlState(node);
 	clearNativePreview(node);
+	restoreStoredPreview(node);
 	updatePreviewLayout(node);
 	if (!Array.isArray(node.size) || node.size.length < 2) {
 		setNodeHeightPreservingUserWidth(node, Math.max(80, getPanelHeight(node) + getToolbarHeight(node) + 8));
@@ -2052,6 +2112,11 @@ app.registerExtension({
 					serializedNode.properties[FILENAME_VARIABLES_PROPERTY] = filenameVariables;
 				} else {
 					delete serializedNode.properties[FILENAME_VARIABLES_PROPERTY];
+				}
+				if (this.properties?.[LAST_PREVIEW_PROPERTY]) {
+					serializedNode.properties[LAST_PREVIEW_PROPERTY] = this.properties[LAST_PREVIEW_PROPERTY];
+				} else {
+					delete serializedNode.properties[LAST_PREVIEW_PROPERTY];
 				}
 			}
 			return result;

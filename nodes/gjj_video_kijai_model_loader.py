@@ -28,6 +28,17 @@ from .gjj_video_universal_model_loader import (
     _unwrap_loader_output,
 )
 
+try:
+    from .common_utils.dependency_checker import (
+        build_dependency_model_report,
+        make_missing_model_spec,
+        send_dependency_model_notice,
+    )
+except Exception:  # pragma: no cover - keeps standalone syntax checks lightweight
+    build_dependency_model_report = None
+    make_missing_model_spec = None
+    send_dependency_model_notice = None
+
 
 NODE_NAME = "GJJ_VideoKijaiModelLoader"
 LIST_API = "/gjj/video_kijai_loader_lists"
@@ -404,6 +415,55 @@ def _send_kijai_optional_notice(
             "notice_level": "optional" if warning_message or panel_message else "",
             "optional_dependencies": ["sageattention"] if warning_message or panel_message else [],
         })
+    except Exception:
+        pass
+
+
+def _slot_expected_model_name(slot: dict[str, Any], selected_name: str = "") -> str:
+    for value in (
+        slot.get("required_name", ""),
+        slot.get("preferred_name", ""),
+        selected_name,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    keywords = slot.get("keywords", [])
+    if isinstance(keywords, list):
+        return " ".join(str(item or "").strip() for item in keywords if str(item or "").strip())
+    return str(keywords or "").strip()
+
+
+def _send_kijai_missing_model_notice(
+    unique_id: Any,
+    cfg_label: str,
+    slot: dict[str, Any],
+    *,
+    selected_name: str = "",
+    original_error: Exception | str = "",
+) -> None:
+    if unique_id is None or not callable(build_dependency_model_report) or not callable(send_dependency_model_notice):
+        return
+    filename = _slot_expected_model_name(slot, selected_name)
+    label = str(slot.get("label", "") or slot.get("id", "") or "模型").strip() or "模型"
+    folder = str(slot.get("folder", "") or "").strip()
+    description = f"[{cfg_label}] {label} 未找到本地模型文件。"
+    if selected_name and selected_name != filename:
+        description += f"\n当前选择：{selected_name}"
+    try:
+        missing_model = (
+            make_missing_model_spec(label=label, subdir=folder, filename=filename, description=description)
+            if callable(make_missing_model_spec)
+            else {"label": label, "subdir": folder, "filename": filename, "description": description}
+        )
+        report = build_dependency_model_report(
+            node_name=NODE_NAME,
+            missing_models=[missing_model],
+            description=description,
+            original_error=str(original_error or ""),
+            model_download_url=MODEL_DOWNLOAD_URL,
+        )
+        send_dependency_model_notice(report, unique_id=unique_id)
     except Exception:
         pass
 
@@ -792,6 +852,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             WAN_T5,
             MT("multitalk_model", "InfiniteTalk模型", ["infinitetalk"], preferred_name="Wan2_1-InfiniteTalk_Single_Q8.gguf"),
             LIGHTX_I2V_14B,
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name="clip_vision_h.safetensors", required_name="clip_vision_h.safetensors"),
         ],
     },
     "wan21_i2v_fantasyportrait": {
@@ -1166,10 +1227,37 @@ def _load_fantasytalking_model(model_name: str, base_precision: str):
 
 def _load_multitalk_model(model_name: str):
     try:
-        from ..vendor.wanvideo_wrapper.multitalk import nodes as multitalk_nodes
+        from accelerate import init_empty_weights
+        from ..vendor.wanvideo_wrapper.multitalk.multitalk import AudioProjModel
     except Exception as error:
         raise RuntimeError(f"GJJ 内置 MultiTalk runtime 加载失败：{error}") from error
-    return _unwrap_loader_output(multitalk_nodes.MultiTalkModelLoader().loadmodel(model=model_name))
+
+    model_path = _get_full_path_any(("diffusion_models", "unet_gguf"), model_name)
+    audio_window = 5
+    vae_scale = 4
+    intermediate_dim = 512
+    output_dim = 768
+    context_tokens = 32
+    norm_output_audio = True
+
+    with init_empty_weights():
+        proj_model = AudioProjModel(
+            seq_len=audio_window,
+            seq_len_vf=audio_window + vae_scale - 1,
+            intermediate_dim=intermediate_dim,
+            output_dim=output_dim,
+            context_tokens=context_tokens,
+            norm_output_audio=norm_output_audio,
+        )
+
+    payload = {
+        "proj_model": proj_model,
+        "model_path": model_path,
+        "model_type": "InfiniteTalk" if "infinite" in model_name.lower() else "MultiTalk",
+    }
+    if "scaled" in _quantization_from_model_name(model_name):
+        payload["scaled"] = True
+    return payload
 
 
 def _load_fantasyportrait_model(model_name: str, base_precision: str):
@@ -1277,10 +1365,6 @@ def _load_wanvideo_model(
         for item in branch_loras:
             item["merge_loras"] = False
             item["low_mem_load"] = False
-    # Kijai 示例流里大多数 distill LoRA 是 WanVideoLoraSelect -> WanVideoSetLoRAs：
-    # merge_loras=False 时要在模型加载后走 SetLoRAs 的 WanVideo 专用 patch 逻辑，不能塞进 ModelLoader。
-    loader_loras = [item for item in branch_loras if bool(item.get("merge_loras", False))]
-    set_loras = [item for item in branch_loras if not bool(item.get("merge_loras", False))]
     attention_mode = str(slot.get("attention_mode", "sdpa") or "sdpa")
     load_kwargs = {
         "model": model_name,
@@ -1292,7 +1376,7 @@ def _load_wanvideo_model(
         "compile_args": compile_args,
         "block_swap_args": block_swap_args,
         "vram_management_args": vram_management_args,
-        "lora": loader_loras or None,
+        "lora": branch_loras or None,
         **_extra_kwargs_for_branch(extra_items, model_target),
     }
     try:
@@ -1313,8 +1397,6 @@ def _load_wanvideo_model(
             "说明：SDPA 是 ComfyUI/PyTorch 可用的稳定注意力实现，速度可能比 SageAttention 慢一点，但不会打断当前工作流。",
         ])
         _send_kijai_optional_notice(unique_id, warning_message=warning, panel_message=panel)
-    if set_loras:
-        model = _unwrap_loader_output(runtime["model_loading"].WanVideoSetLoRAs().setlora(model, set_loras))
     return model
 
 
@@ -1640,10 +1722,18 @@ class GJJ_VideoKijaiModelLoader:
             if not name:
                 if _is_lora_slot(slot):
                     continue
+                missing_error = RuntimeError("未找到匹配的本地模型文件。")
+                _send_kijai_missing_model_notice(
+                    unique_id,
+                    str(cfg.get("label", config_key) or config_key),
+                    slot,
+                    selected_name=selected,
+                    original_error=missing_error,
+                )
                 raise _format_slot_runtime_error(
                     cfg.get("label", config_key),
                     slot,
-                    RuntimeError("未找到匹配的本地模型文件。"),
+                    missing_error,
                     selected_name=selected,
                 )
 
@@ -1669,6 +1759,14 @@ class GJJ_VideoKijaiModelLoader:
                     if cache_key not in extra_cache:
                         extra_cache[cache_key] = _load_extra_value(extra_kind, name, precision)
                 except Exception as exc:
+                    if "not found" in str(exc).lower() or "no such file" in str(exc).lower() or "未找到" in str(exc):
+                        _send_kijai_missing_model_notice(
+                            unique_id,
+                            str(cfg.get("label", config_key) or config_key),
+                            slot,
+                            selected_name=name,
+                            original_error=exc,
+                        )
                     raise _format_slot_runtime_error(cfg.get("label", config_key), slot, exc, selected_name=name) from exc
                 extra_items.append({
                     "extra_kind": extra_kind,
@@ -1734,6 +1832,14 @@ class GJJ_VideoKijaiModelLoader:
                 else:
                     value = name
             except Exception as exc:
+                if "not found" in str(exc).lower() or "no such file" in str(exc).lower() or "未找到" in str(exc):
+                    _send_kijai_missing_model_notice(
+                        unique_id,
+                        str(cfg.get("label", config_key) or config_key),
+                        slot,
+                        selected_name=name,
+                        original_error=exc,
+                    )
                 raise _format_slot_runtime_error(cfg.get("label", config_key), slot, exc, selected_name=name) from exc
             values[output_index] = value
 

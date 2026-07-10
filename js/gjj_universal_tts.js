@@ -631,8 +631,17 @@ function parseSpeakerEntriesFromText(text) {
 	const entries = new Map();
 	const named = new Map();
 	const tagRe = /^\s*((?:\[?speaker[_\s-]*(\d+)\]?|spk[_\s-]*(\d+)|角色\s*(\d+)|说话人\s*(\d+)))\s*[:：]/i;
-	const namedTagRe = /^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*[:：]/;
-	const cleanLabel = (label) => String(label || "").trim().replace(/^[\[\]【】（）()\s]+|[\[\]【】（）()\s]+$/g, "");
+	const namedTagRe = /^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*(?:[（(][^（）()]*[）)]\s*)*[:：]/;
+	const stripStageDirections = (value) => {
+		let result = String(value || "");
+		let previous = null;
+		while (previous !== result) {
+			previous = result;
+			result = result.replace(/\s*[（(][^（）()]*[）)]\s*/g, "");
+		}
+		return result.replace(/\s+/g, " ").trim();
+	};
+	const cleanLabel = (label) => stripStageDirections(label).replace(/^[\[\]【】（）()\s]+|[\[\]【】（）()\s]+$/g, "");
 	const addEntry = (index, label) => {
 		const clean = cleanLabel(label);
 		if (!clean) return;
@@ -1454,6 +1463,50 @@ function makeSelectRow(node, labelText, widgetName) {
 	return row;
 }
 
+function makeSegmentedChoiceRow(node, labelText, widgetName) {
+	const row = document.createElement("div");
+	row.style.cssText = "display:flex;align-items:center;gap:8px;margin:4px 0";
+	const label = document.createElement("span");
+	label.textContent = labelText;
+	label.style.cssText = "width:70px;color:#c9d6dc;white-space:nowrap";
+	const group = document.createElement("div");
+	group.style.cssText = "flex:1;min-width:0;display:flex;gap:5px;flex-wrap:wrap";
+	const w = widget(node, widgetName);
+	const values = optionValues(w);
+	const buttons = [];
+	const applyState = () => {
+		const current = String(w?.value ?? "");
+		for (const button of buttons) {
+			const active = button.dataset.value === current;
+			button.style.background = active ? "#245477" : "#2b3035";
+			button.style.borderColor = active ? "#6ea6cf" : "#465862";
+			button.style.color = active ? "#f4fbff" : "#c9d6dc";
+			button.style.fontWeight = active ? "700" : "500";
+		}
+	};
+	for (const value of values.length ? values : [w?.value ?? ""]) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.dataset.value = String(value);
+		button.textContent = String(value);
+		button.style.cssText = "min-width:74px;flex:1 1 74px;padding:5px 8px;border:1px solid #465862;border-radius:6px;background:#2b3035;color:#c9d6dc;cursor:pointer;white-space:nowrap";
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		button.addEventListener("click", (event) => {
+			event.stopPropagation();
+			setWidgetValue(node, widgetName, button.dataset.value);
+			applyState();
+			syncButtons(node);
+			refresh(node);
+		});
+		buttons.push(button);
+		group.append(button);
+	}
+	applyState();
+	row.append(label, group);
+	return row;
+}
+
 const SETTING_LABELS = {
 	model_name: "模型",
 	edge_voice: "Edge音色",
@@ -1693,10 +1746,10 @@ function toggleOutputPanel(node) {
 	}
 	const { popup, close } = createToolbarPopup("输出口内容", 300);
 	const body = document.createElement("div");
-	body.style.cssText = "display:flex;flex-direction:column;gap:4px";
+	body.style.cssText = "display:flex;flex-direction:column;gap:6px";
 	body.append(
-		makeSelectRow(node, "音频输出", "audio_output_mode"),
-		makeSelectRow(node, "文本输出", "timeline_format"),
+		makeSegmentedChoiceRow(node, "音频输出", "audio_output_mode"),
+		makeSegmentedChoiceRow(node, "文本输出", "timeline_format"),
 	);
 	popup.append(body);
 	close.addEventListener("click", () => {

@@ -23,6 +23,39 @@ def _any_input(index: int):
     )
 
 
+class FlexibleOptionalInputType(dict):
+    """允许节点接收动态数量与动态类型的可选输入。"""
+
+    def __init__(self, input_type):
+        super().__init__()
+        self.input_type = input_type
+
+    def __getitem__(self, key):
+        index = _input_index(key)
+        display_index = index if index != 999999 else 1
+        return (
+            self.input_type,
+            {
+                "display_name": f"任意输入 {display_index}",
+                "tooltip": "动态任意输入；连接最后一个输入口后会自动新增下一路。",
+            },
+        )
+
+    def __contains__(self, key):
+        return True
+
+
+def _input_index(name: str) -> int:
+    text = str(name or "")
+    if not text.startswith("any_"):
+        return 999999
+    digits = text[4:]
+    try:
+        return int(digits)
+    except Exception:
+        return 999999
+
+
 def _as_list(value: Any, flatten: bool) -> list[Any]:
     if value is None:
         return []
@@ -34,27 +67,47 @@ def _as_list(value: Any, flatten: bool) -> list[Any]:
 class GJJ_AnyListMerge:
     CATEGORY = "GJJ/列表工具"
     FUNCTION = "merge"
-    DESCRIPTION = "把多路任意输入合并成 ComfyUI 列表输出，适合批量参数、批量提示词和批量对象整理。"
+    DESCRIPTION = "把多路任意输入合并成 ComfyUI 列表口输出，适合批量参数、批量提示词和批量对象整理。"
     SEARCH_ALIASES = ["any list", "merge list", "列表合并", "任意列表"]
     RETURN_TYPES = (any_type,)
-    RETURN_NAMES = ("任意列表",)
-    OUTPUT_TOOLTIPS = ("合并后的任意对象列表。",)
+    RETURN_NAMES = ("列表输出（逐项列表口）",)
+    OUTPUT_TOOLTIPS = ("合并后的 ComfyUI 列表口输出；下游会按列表逐项接收。",)
     OUTPUT_IS_LIST = (True,)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "flatten": ("BOOLEAN", {"default": True, "display_name": "展开列表输入", "tooltip": "开启后，输入本身是列表时会展开后再合并。"}),
-                "skip_empty": ("BOOLEAN", {"default": True, "display_name": "跳过空值", "tooltip": "开启后会跳过未连接或为空的输入。"}),
+                "flatten": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "展开列表输入",
+                        "tooltip": "开启后，输入本身是列表时会展开后再合并。",
+                    },
+                ),
+                "skip_empty": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "跳过空值",
+                        "tooltip": "开启后会跳过未连接或为空的输入。",
+                    },
+                ),
             },
-            "optional": {f"any_{i}": _any_input(i) for i in range(1, 13)},
+            "optional": FlexibleOptionalInputType(any_type),
         }
 
     def merge(self, flatten: bool, skip_empty: bool, **kwargs):
         values: list[Any] = []
-        for i in range(1, 13):
-            value = kwargs.get(f"any_{i}")
+        for key in sorted(kwargs.keys(), key=_input_index):
+            if not str(key).startswith("any_"):
+                continue
+            value = kwargs.get(key)
             if value is None and skip_empty:
                 continue
             values.extend(_as_list(value, bool(flatten)))
@@ -163,7 +216,7 @@ NODE_CLASS_MAPPINGS = {
     "GJJ_AnyListFilter": GJJ_AnyListFilter,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_AnyListMerge": "GJJ · 📚 任意列表合并",
+    "GJJ_AnyListMerge": "GJJ · 📚 任意列表合并（输出列表口）",
     "guojijun_AnyListRepeat": "guojijun · 任意列表重复（内部引用）",
     "GJJ_AnyListPick": "GJJ · 👆 任意列表取项",
     "GJJ_AnyListFilter": "GJJ · 🧹 任意列表筛选",

@@ -16,13 +16,14 @@ const INTERFACES_PROPERTY = "gjj_audio_silence_trim_interfaces";
 const OUTPUT_ORDER_PROPERTY = "gjj_audio_silence_trim_output_order";
 const OUTPUT_STORAGE_NAME = "output_order_json";
 const COMPACT_MIN_WIDTH = 360;
-const COMPACT_MIN_HEIGHT = 120;
-const COMPACT_BOTTOM_PADDING = 18;
+const COMPACT_MIN_HEIGHT = 104;
+const COMPACT_BOTTOM_PADDING = 6;
 const OUTPUT_DEFS = [
 	{ key: "segment_audio", name: "分段音频", type: "AUDIO" },
 	{ key: "segment_count", name: "分段总数", type: "INT" },
 	{ key: "segment_index", name: "当前分段序号", type: "INT" },
 	{ key: "background_audio", name: "分段背景声", type: "AUDIO" },
+	{ key: "current_audio_duration", name: "当前音频时长", type: "FLOAT" },
 ];
 const INPUT_DEFS = [
 	{ key: "current_segment", name: "当前分段", type: "INT", tooltip: "可外接滑动序号；未外接时由面板数字框或自动队列控制。" },
@@ -160,24 +161,23 @@ function reorderOptionalInputs(node) {
 }
 
 function toolbarWidgetTop(node) {
-	const widget = node?.__gjjSilenceTrimToolbar;
-	const candidates = [
-		Number(widget?.last_y),
-		Number(widget?.y),
-		Number(node?.__gjjSilenceTrimToolbarTop),
-	];
-	for (const value of candidates) {
-		if (Number.isFinite(value) && value > 0) {
-			node.__gjjSilenceTrimToolbarTop = value;
-			return value;
-		}
-	}
 	const visibleRows = Math.max(
 		1,
 		(node?.inputs || []).filter((input) => input && !input.hidden && !String(input.type || "").startsWith("converted-widget:")).length,
 		(node?.outputs || []).filter((output) => output && !output.hidden).length,
 	);
 	const fallback = 32 + visibleRows * 20 + 10;
+	const widget = node?.__gjjSilenceTrimToolbar;
+	const candidates = [
+		Number(widget?.last_y),
+		Number(widget?.y),
+		Number(node?.__gjjSilenceTrimToolbarTop),
+	].filter((value) => Number.isFinite(value) && value > 0 && value <= fallback + 80);
+	if (candidates.length) {
+		const top = Math.min(...candidates, fallback);
+		node.__gjjSilenceTrimToolbarTop = top;
+		return top;
+	}
 	if (node) node.__gjjSilenceTrimToolbarTop = fallback;
 	return fallback;
 }
@@ -205,7 +205,10 @@ function refreshNodeSize(node) {
 		if (!node.__gjjSilenceTrimSizing && Math.abs(currentHeight - desired) > 2) {
 			const nextSize = [Math.max(currentWidth, COMPACT_MIN_WIDTH), desired];
 			node.__gjjSilenceTrimSizing = true;
-			try { node.setSize?.(nextSize); }
+			try {
+				node.setSize?.(nextSize);
+				node.size = nextSize;
+			}
 			finally { requestAnimationFrame(() => { node.__gjjSilenceTrimSizing = false; }); }
 			node?.setDirtyCanvas?.(true, true);
 			app.graph?.setDirtyCanvas?.(true, true);
@@ -263,6 +266,7 @@ function readOutputOrder(node, serialized = null) {
 		const byName = {
 			"分段总数": "segment_count", "当前分段音频": "segment_audio", "分段音频": "segment_audio",
 			"当前分段序号": "segment_index", "当前分段背景声": "background_audio", "分段背景声": "background_audio",
+			"当前音频时长": "current_audio_duration",
 		};
 		const restored = serialized.outputs.map((output) => byName[output?.name]).filter(Boolean);
 		if (restored.length) order = restored;
@@ -433,12 +437,12 @@ function hideWidget(widget, hidden) {
 		widget.options.hidden = true;
 		widget.options.display = "hidden";
 		widget.options.advanced = false;
-		widget.computeSize = () => [0, 0];
-		widget.getHeight = () => 0;
+		widget.computeSize = () => [0, -4];
+		widget.getHeight = () => -4;
 		widget.draw = () => {};
 		widget.mouse = () => false;
-		widget.y = 0;
-		widget.last_y = 0;
+		widget.y = -10000;
+		widget.last_y = -10000;
 		widget.computedHeight = 0;
 		widget.size = [0, 0];
 		for (const el of [widget.element, widget.inputEl, widget.widget]) {
@@ -586,6 +590,7 @@ function updateToolbar(node) {
 	}
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+	scheduleRefreshNodeSize(node);
 }
 
 function stopAuto(node, reason = "自动队列已停止") {
@@ -991,6 +996,13 @@ app.registerExtension({
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(String(nodeData?.name || ""))) return;
 		suppressAdvancedMetadata(nodeData);
+
+		const originalComputeSize = nodeType.prototype.computeSize;
+		nodeType.prototype.computeSize = function (...args) {
+			const computed = originalComputeSize?.apply(this, args) || this.size || [COMPACT_MIN_WIDTH, COMPACT_MIN_HEIGHT];
+			const width = Math.max(Number(this.size?.[0] || computed?.[0] || COMPACT_MIN_WIDTH), COMPACT_MIN_WIDTH);
+			return [width, desiredCompactHeight(this)];
+		};
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {

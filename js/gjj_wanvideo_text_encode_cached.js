@@ -29,6 +29,11 @@ const HIDDEN_FIELDS = [
 	FIELD.translationUnload,
 	FIELD.translationEnabled,
 ];
+const PERSISTED_FIELDS = [
+	FIELD.positive,
+	FIELD.negative,
+	...HIDDEN_FIELDS,
+];
 
 function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name);
@@ -75,6 +80,15 @@ function setValue(node, name, value) {
 	node.properties[`gjj_wan_text_value_${name}`] = next;
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function persistWidgetValues(node, targetProperties = null) {
+	const props = targetProperties || (node.properties = node.properties || {});
+	for (const name of PERSISTED_FIELDS) {
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		props[`gjj_wan_text_value_${name}`] = normalizedValue(name, widget.value);
+	}
 }
 
 function variableProperty(field) {
@@ -614,7 +628,7 @@ function ensureDom(node) {
 
 function restoreValues(node, serializedNode = null) {
 	const props = serializedNode?.properties || node.properties || {};
-	for (const name of HIDDEN_FIELDS) {
+	for (const name of PERSISTED_FIELDS) {
 		const value = props[`gjj_wan_text_value_${name}`];
 		if (value !== undefined) setValue(node, name, normalizedValue(name, value));
 	}
@@ -632,6 +646,7 @@ function stabilize(node) {
 	if (!node) return;
 	restoreValues(node);
 	normalizeHiddenWidgetValues(node);
+	persistWidgetValues(node);
 	ensureDom(node);
 	hideControlWidgets(node);
 	updateNegativeVisibility(node);
@@ -737,9 +752,7 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			normalizeHiddenWidgetValues(this);
 			serializedNode.properties = serializedNode.properties || {};
-			for (const name of HIDDEN_FIELDS) {
-				serializedNode.properties[`gjj_wan_text_value_${name}`] = normalizedValue(name, getValue(this, name, ""));
-			}
+			persistWidgetValues(this, serializedNode.properties);
 			for (const key of [POSITIVE_VARIABLE_PROPERTY]) {
 				const value = String(this.properties?.[key] || "").trim();
 				if (value) serializedNode.properties[key] = value;
@@ -748,9 +761,7 @@ app.registerExtension({
 			originalOnSerialize?.apply(this, [serializedNode]);
 			normalizeHiddenWidgetValues(this);
 			serializedNode.properties = serializedNode.properties || {};
-			for (const name of HIDDEN_FIELDS) {
-				serializedNode.properties[`gjj_wan_text_value_${name}`] = normalizedValue(name, getValue(this, name, ""));
-			}
+			persistWidgetValues(this, serializedNode.properties);
 			for (const key of [POSITIVE_VARIABLE_PROPERTY]) {
 				const value = String(this.properties?.[key] || "").trim();
 				if (value) serializedNode.properties[key] = value;

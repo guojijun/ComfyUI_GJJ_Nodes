@@ -4,9 +4,9 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set(["GJJ_batchAnything"]);
 const INPUT_PREFIX = "any_";
 const MIN_VISIBLE_INPUTS = 1;
-const OUTPUT_NAME = "批量结果";
+const OUTPUT_NAME = "批量/拼接结果（单对象）";
 const INPUT_TOOLTIP = "动态任意输入；连接最后一个输入口后会自动新增下一路，未连接的尾部输入不会参与执行。";
-const OUTPUT_TOOLTIP = "按输入顺序合并所有已连接对象。图片和 latent 会自动对齐尺寸后拼接 batch。";
+const OUTPUT_TOOLTIP = "按输入顺序合成一个单对象输出。图片和 latent 会自动对齐尺寸后拼接 batch，不是 ComfyUI 列表口。";
 const GRAPH_PROMPT_PATCH_FLAG = "__gjjBatchAnythingGraphToPromptPatched";
 
 function formatInputName(index) {
@@ -225,7 +225,7 @@ function applyOutputMeta(node, info) {
 	const target = linkedTargetInfo(output);
 	const source = firstSourceInfo(node);
 	const type = target?.type || source?.type || info?.type || "*";
-	const label = target?.label || (source?.label ? `${source.label}批量` : "") || OUTPUT_NAME;
+	const label = target?.label || (source?.label ? `${source.label}批量/拼接` : "") || OUTPUT_NAME;
 	output.name = OUTPUT_NAME;
 	output.type = type;
 	output.label = label;

@@ -776,6 +776,15 @@ def _save_audio_ui(
         raise RuntimeError(f"保存 {audio_format} 失败：{exc}") from exc
 
 
+def _merge_audio_ui_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    audio_items: list[Any] = []
+    for item in items:
+        values = item.get("audio") if isinstance(item, dict) else None
+        if isinstance(values, list):
+            audio_items.extend(values)
+    return {"audio": audio_items}
+
+
 def _audio_to_tensor(audio: dict[str, Any]) -> tuple[torch.Tensor, int]:
     if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
         raise RuntimeError("输入不是有效的 ComfyUI AUDIO。")
@@ -1236,7 +1245,7 @@ def _split_sentences(text: str, min_chars: int = 12, max_chars: int = 80) -> lis
 
 
 def _speaker_index_from_label(label: str, speaker_map: dict[str, int]) -> int:
-    raw = str(label or "").strip().strip("[]【】（）() ")
+    raw = _strip_stage_directions(label).strip().strip("[]【】（）() ")
     numeric = re.search(r"(?:speaker|spk|角色|说话人)?[_\s-]*(\d+)$", raw, re.I)
     if numeric:
         return max(0, int(numeric.group(1)) - 1)
@@ -1247,29 +1256,85 @@ def _speaker_index_from_label(label: str, speaker_map: dict[str, int]) -> int:
 
 
 def _clean_speaker_label(label: str) -> str:
-    return str(label or "").strip().strip("[]【】（）() ")
+    return _strip_stage_directions(label).strip().strip("[]【】（）() ")
+
+
+def _extract_stage_directions(text: str) -> tuple[str, list[str]]:
+    value = str(text or "")
+    if not value:
+        return "", []
+    directions: list[str] = []
+    previous = None
+    while previous != value:
+        previous = value
+        def replace(match: re.Match) -> str:
+            content = str(match.group(1) or "").strip()
+            if content:
+                directions.append(content)
+            return ""
+        value = re.sub(r"\s*[（(]([^（）()]*)[）)]\s*", replace, value)
+    return re.sub(r"\s+", " ", value).strip(), directions
+
+
+def _strip_stage_directions(text: str) -> str:
+    return _extract_stage_directions(text)[0]
+
+
+def _merge_emotion_prompts(*values: str) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for part in re.split(r"\s*[；;]\s*", str(value or "")):
+            text = part.strip()
+            if text and text not in seen:
+                seen.add(text)
+                parts.append(text)
+    return "；".join(parts)
+
+
+def _split_text_with_stage_emotions(text: str, base_emotion_prompt: str, min_chars: int, max_chars: int) -> list[tuple[str, str]]:
+    value = str(text or "")
+    if not value.strip():
+        return []
+    result: list[tuple[str, str]] = []
+    active_emotion_prompt = ""
+    position = 0
+    for match in re.finditer(r"\s*[（(]([^（）()]*)[）)]\s*", value):
+        prefix = value[position:match.start()]
+        clean_prefix = re.sub(r"\s+", " ", prefix).strip()
+        if clean_prefix:
+            prompt = _merge_emotion_prompts(base_emotion_prompt, active_emotion_prompt)
+            result.extend((sentence, prompt) for sentence in _split_sentences(clean_prefix, min_chars, max_chars))
+        active_emotion_prompt = str(match.group(1) or "").strip()
+        position = match.end()
+    suffix = re.sub(r"\s+", " ", value[position:]).strip()
+    if suffix:
+        prompt = _merge_emotion_prompts(base_emotion_prompt, active_emotion_prompt)
+        result.extend((sentence, prompt) for sentence in _split_sentences(suffix, min_chars, max_chars))
+    return result
 
 
 def _parse_turns(text: str, min_chars: int = 12, max_chars: int = 80) -> list[dict[str, Any]]:
     tag_re = re.compile(r"^\s*((?:\[?speaker[_\s-]*(\d+)\]?|spk[_\s-]*(\d+)|角色\s*(\d+)|说话人\s*(\d+)))\s*[:：]\s*(.*)$", re.I)
-    named_tag_re = re.compile(r"^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*[:：]\s*(.*)$")
+    named_tag_re = re.compile(r"^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*(?:[（(][^（）()]*[）)]\s*)*[:：]\s*(.*)$")
     turns: list[dict[str, Any]] = []
     current_speaker = 0
     current_speakers = [0]
     current_label = "说话人1"
+    current_emotion_prompt = ""
     speaker_map: dict[str, int] = {}
     buffer: list[str] = []
 
     def flush() -> None:
         nonlocal buffer
         joined = " ".join(part.strip() for part in buffer if part.strip()).strip()
-        if joined:
-            for sentence in _split_sentences(joined, min_chars, max_chars):
-                turns.append({
-                    "speaker": current_speakers[0] if current_speakers else 0,
-                    "speaker_label": current_label,
-                    "text": sentence,
-                })
+        for sentence, turn_emotion_prompt in _split_text_with_stage_emotions(joined, current_emotion_prompt, min_chars, max_chars):
+            turns.append({
+                "speaker": current_speakers[0] if current_speakers else 0,
+                "speaker_label": current_label,
+                "text": sentence,
+                "emotion_prompt": turn_emotion_prompt,
+            })
         buffer = []
 
     def labels_to_speaker_info(value: str) -> tuple[list[int], str]:
@@ -1286,6 +1351,7 @@ def _parse_turns(text: str, min_chars: int = 12, max_chars: int = 80) -> list[di
             current_speaker = max(0, int(number) - 1)
             current_speakers = [current_speaker]
             current_label = _clean_speaker_label(match.group(1)) or f"说话人{current_speaker + 1}"
+            current_emotion_prompt = ""
             buffer = [match.group(6)] if match.group(6).strip() else []
             continue
         named_match = named_tag_re.match(raw)
@@ -1293,13 +1359,18 @@ def _parse_turns(text: str, min_chars: int = 12, max_chars: int = 80) -> list[di
             flush()
             current_speakers, current_label = labels_to_speaker_info(named_match.group(1))
             current_speaker = current_speakers[0]
+            _, prefix_directions = _extract_stage_directions(raw[:named_match.start(2)])
+            current_emotion_prompt = "；".join(prefix_directions)
             buffer = [named_match.group(2)] if named_match.group(2).strip() else []
         else:
             stripped = raw.strip()
             if stripped:
                 buffer.append(stripped)
     flush()
-    return turns or [{"speaker": 0, "speaker_label": "说话人1", "text": sentence} for sentence in _split_sentences(text, min_chars, max_chars)]
+    return turns or [
+        {"speaker": 0, "speaker_label": "说话人1", "text": sentence, "emotion_prompt": fallback_emotion_prompt}
+        for sentence, fallback_emotion_prompt in _split_text_with_stage_emotions(text, "", min_chars, max_chars)
+    ]
 
 
 def _fmt_time_srt(seconds: float, comma: bool = True) -> str:
@@ -2968,6 +3039,7 @@ class GJJ_UniversalTTS:
     RETURN_TYPES = ("AUDIO", "STRING")
     RETURN_NAMES = ("合成音频", "时间轴文本")
     OUTPUT_TOOLTIPS = ("合成后的 ComfyUI AUDIO。", "按输出设置生成的 SRT/VTT/LRC/JSON 时间轴文本。")
+    OUTPUT_IS_LIST = (True, False)
     GJJ_HELP = build_node_help_payload(
         description=DESCRIPTION,
         dependencies=[
@@ -3387,6 +3459,7 @@ class GJJ_UniversalTTS:
                 actual_seed = random.randint(0, 2**31 - 1) if random_seed else int(seed) + index
                 speaker = int(turn.get("speaker") or 0)
                 line = str(turn.get("text") or "").strip()
+                turn_emotion_prompt = _merge_emotion_prompts(emotion_prompt, str(turn.get("emotion_prompt") or ""))
                 ref = _reference_for_speaker(references, speaker)
                 turn_edge_voice = _edge_voice_for_speaker(speaker, edge_voice, edge_speaker_voices) if selected_branch == "EdgeTTS" else edge_voice
                 turn_custom_voice = custom_voice
@@ -3415,7 +3488,7 @@ class GJJ_UniversalTTS:
                     qwen_temperature,
                     qwen_repetition_penalty,
                     qwen_x_vector_only,
-                    emotion_prompt,
+                    turn_emotion_prompt,
                     qwen_instruct,
                     actual_seed,
                     unique_id,
@@ -3453,21 +3526,35 @@ class GJJ_UniversalTTS:
                 if pbar:
                     pbar.update_absolute(index + 1, len(turns))
 
-            if len(audio_items) == 1:
-                _send_status(unique_id, "单段语音直接输出", 0.94)
-                merged = audio_items[0]
-            else:
-                _send_status(unique_id, f"正在拼接 {len(audio_items)} 段语音", 0.94)
-                merged = _concat_audio(audio_items, float(pause_after_speaker))
             timeline_text = _format_timeline(timeline, timeline_format)
-            _send_status(unique_id, f"正在保存 {audio_format} 预览", 0.97)
-            audio_ui = _save_audio_ui(merged, mp3_filename_prefix, audio_format, mp3_quality)
+            if audio_output_mode == "单个队列":
+                _send_status(unique_id, f"正在保存 {len(audio_items)} 段 {audio_format}", 0.97)
+                result_audio = audio_items
+                audio_ui = _merge_audio_ui_items([
+                    _save_audio_ui(
+                        item,
+                        f"{mp3_filename_prefix}_segment_{index + 1:03d}",
+                        audio_format,
+                        mp3_quality,
+                    )
+                    for index, item in enumerate(audio_items)
+                ])
+            else:
+                if len(audio_items) == 1:
+                    _send_status(unique_id, "单段语音直接输出", 0.94)
+                    merged = audio_items[0]
+                else:
+                    _send_status(unique_id, f"正在拼接 {len(audio_items)} 段语音", 0.94)
+                    merged = _concat_audio(audio_items, float(pause_after_speaker))
+                result_audio = [merged]
+                _send_status(unique_id, f"正在保存 {audio_format} 预览", 0.97)
+                audio_ui = _save_audio_ui(merged, mp3_filename_prefix, audio_format, mp3_quality)
             _send_audio_preview(unique_id, audio_ui, "完成，音频已保存", False)
             elapsed = time.perf_counter() - started
             _send_status(unique_id, f"完成：{len(turns)} 段，耗时 {elapsed:.2f} 秒", 1.0)
             if not keep_model:
                 _MODEL_CACHE.clear()
-            return {"ui": audio_ui, "result": (merged, timeline_text)}
+            return {"ui": audio_ui, "result": (result_audio, timeline_text)}
         except Exception as exc:
             report = get_report_from_exception(exc)
             if not report:

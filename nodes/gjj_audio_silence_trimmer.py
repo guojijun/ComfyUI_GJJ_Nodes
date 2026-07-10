@@ -22,6 +22,13 @@ QUEUE_MODE_AUTO = "自动"
 QUEUE_MODE_INITIAL = "初始"
 QUEUE_MODE_BLANK = "空行"
 QUEUE_MODES = [QUEUE_MODE_AUTO, QUEUE_MODE_INITIAL, QUEUE_MODE_BLANK]
+OUTPUT_KEYS = (
+    "segment_audio",
+    "segment_count",
+    "segment_index",
+    "background_audio",
+    "current_audio_duration",
+)
 _GJJ_HELP = build_node_help_payload(
     description="从 SoundFlow_SilenceTrimmer 迁移来的 GJJ 零依赖版，只使用 torch 和 ComfyUI AUDIO 数据，不依赖 SoundFlow 原包。",
     dependencies=[
@@ -463,11 +470,19 @@ def _return_payload(
     output_order_json: str = '["segment_audio"]',
     unique_id=None,
 ):
+    current_waveform = current_audio.get("waveform") if isinstance(current_audio, dict) else None
+    current_sample_rate = int(current_audio.get("sample_rate") or 0) if isinstance(current_audio, dict) else 0
+    current_audio_duration = (
+        float(current_waveform.shape[-1]) / float(current_sample_rate)
+        if isinstance(current_waveform, torch.Tensor) and current_sample_rate > 0
+        else 0.0
+    )
     values = {
         "segment_audio": current_audio,
         "segment_count": int(segment_count),
         "segment_index": int(current_index),
         "background_audio": current_background_audio if current_background_audio is not None else current_audio,
+        "current_audio_duration": float(current_audio_duration),
     }
     try:
         requested = json.loads(str(output_order_json or "[]"))
@@ -481,8 +496,15 @@ def _return_payload(
             register_runtime_variable_source(unique_id, order.index("segment_count"), int(segment_count))
         if "segment_index" in order:
             register_runtime_variable_source(unique_id, order.index("segment_index"), int(current_index))
+        if "current_audio_duration" in order:
+            register_runtime_variable_source(unique_id, order.index("current_audio_duration"), float(current_audio_duration))
     result = [values[key] for key in dict.fromkeys(order)]
-    result.extend(0 for _ in range(4 - len(result)))
+    for key in OUTPUT_KEYS:
+        if len(result) >= len(OUTPUT_KEYS):
+            break
+        if key in order:
+            continue
+        result.append(values[key])
     return {
         "ui": {
             "gjj_audio_silence_trimmer": [
@@ -490,13 +512,15 @@ def _return_payload(
                     "segment_count": int(segment_count),
                     "segment_index": int(current_index),
                     "queue_mode": str(queue_mode or QUEUE_MODE_AUTO),
+                    "current_audio_duration": float(current_audio_duration),
                 }
             ],
             "segment_count": (int(segment_count),),
             "segment_index": (int(current_index),),
             "queue_mode": (str(queue_mode or QUEUE_MODE_AUTO),),
+            "current_audio_duration": (float(current_audio_duration),),
         },
-        "result": tuple(result[:4]),
+        "result": tuple(result[:len(OUTPUT_KEYS)]),
     }
 
 
@@ -520,15 +544,16 @@ class GJJ_AudioSilenceTrimmer:
         "音频去静音",
     ]
     # 输出槽由前端 🔌 动态排序；后端使用通配类型，具体槽类型由前端 OUTPUT_DEFS 约束。
-    RETURN_TYPES = ("*", "*", "*", "*")
-    RETURN_NAMES = ("分段总数", "当前分段音频", "当前分段序号", "当前分段背景声")
+    RETURN_TYPES = ("*", "*", "*", "*", "*")
+    RETURN_NAMES = ("分段音频", "分段总数", "当前分段序号", "分段背景声", "当前音频时长")
     OUTPUT_TOOLTIPS = (
-        "分段队列中的音频片段总数。",
         "按当前分段序号选中的当前 AUDIO 分段。",
+        "分段队列中的音频片段总数。",
         "当前实际输出的 1 基分段序号；可接到其它队列节点保持同步。",
         "按同一分段边界、同一 8n+1 时长处理后的背景声；未接背景声时输出等长静音。",
+        "当前实际输出音频的时长，单位秒。",
     )
-    OUTPUT_IS_LIST = (False, False, False, False)
+    OUTPUT_IS_LIST = (False, False, False, False, False)
     GJJ_HELP = {"title": NODE_DISPLAY_NAME, **_GJJ_HELP}
     GJJ_UI = {
         "toolbar": ["🧹", "░", "▶", "🔌", "⚙️"],

@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "sc",
+    "search_text": "",
     "page_size": 12,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -98,7 +98,7 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "IndexTTS-v2",
+      "branch": "VoxCPM2",
       "local_audio_sort_mode": "name_asc"
     }
   },
@@ -119,5 +119,9 @@
     "output_mode": "绝对路径",
     "file_output_mode": "按文件类型",
     "favorites": []
+  },
+  "region_crop": {
+    "total_pixels": 30,
+    "align_multiple": 8
   }
 }
