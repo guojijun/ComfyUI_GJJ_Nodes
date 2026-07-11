@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import random
 import os
 import tempfile
@@ -23,6 +24,7 @@ from .gjj_bernini import (
 from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
 from .gjj_image_batch_multi import GJJ_ImageBatchMulti
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle
+from .gjj_multi_image_loader import load_image_tensor, parse_selected_images, resolve_selected_image_path
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data, parse_lora_data
 from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
@@ -48,6 +50,12 @@ class AnyMediaType(str):
 MIXED_IMAGE_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO")
 MAX_REFERENCE_IMAGES = 2
 _VIDEO_DECODE_CACHE: dict[tuple[str, float, int], tuple[torch.Tensor, float | None]] = {}
+IMAGE_BATCH_SOURCE_CLASSES = {
+    "GJJ_MultiImageLoader",
+    "GJJ_ImageBatchMulti",
+    "GJJ_ImageRangeFromBatch",
+    "GJJ_ImageSplitter",
+}
 
 
 def _comfyui_root() -> Path:
@@ -75,11 +83,16 @@ MODE_SYSTEM_PROMPTS = {
     "ADS2V": "You are a helpful assistant specialized in ads insertion.",
     "VRC2V": "You are a helpful assistant for editing. You may need to adjust the subject's action or position.",
     "MV2V": "You are a helpful assistant for editing. You might need to adjust the video's style, lighting, colors, textures, and the subject's pose or action.",
+    "FLF2V": "You are a helpful assistant specialized in image-to-video generation. Generate a video based on the first and last frames.",
 }
 
 MODE_CHOICES = ["auto"] + list(MODE_SYSTEM_PROMPTS.keys())
+RESIZE_MODE_CHOICES = ["拉伸", "补边", "留边", "裁剪"]
+RESIZE_ALIGN_CHOICES = ["上", "下", "左", "右", "中"]
 DEFAULT_PROMPT = "Remove subtitles and watermarks while preserving the original scene, motion, lighting, and identity."
 DEFAULT_NEGATIVE = "bad video"
+DEFAULT_FLF2V_SEGMENT_PROMPT = "从图1到图2自然过渡，保持画面主体、构图、视角和光影稳定，让画面自然、平滑、连续地过渡到最后一帧。中间运动速度缓慢，变化均匀，无明显跳帧，无闪烁，无物体漂移，无角色变形，无视角突然切换，保持真实连续的视频质感。"
+REMOVE_SUBTITLE_PROMPT = "将视频中字幕、背景、logo删除，其它地方保持原视频的所有特征"
 DEFAULT_HIGH_MODEL = "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors"
 DEFAULT_LOW_MODEL = "wan2.2_bernini_r_low_noise_fp8_scaled.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
@@ -428,6 +441,8 @@ def _media_original_frame_sizes(value: Any) -> list[tuple[int, int]]:
 def _multiframe_source_looks_like_video(value: Any, frame_count: int) -> bool:
     if int(frame_count) <= 1:
         return False
+    if isinstance(value, (list, tuple)) and len(value) > 1:
+        return False
     if _is_video_media(value):
         return True
     if int(frame_count) > 10:
@@ -738,6 +753,24 @@ def _prompt_link(prompt: Any, node_id: Any, input_name: str) -> tuple[str, int] 
         return None
 
 
+def _prompt_linked_source_class(prompt: Any, node_id: Any, input_name: str) -> str:
+    link = _prompt_link(prompt, node_id, input_name)
+    if link is None:
+        return ""
+    source_node = _prompt_node(prompt, link[0])
+    if not isinstance(source_node, dict):
+        return ""
+    return str(source_node.get("class_type") or source_node.get("type") or "")
+
+
+def _prompt_linked_image_batch(prompt: Any, node_id: Any, input_name: str) -> bool:
+    class_type = _prompt_linked_source_class(prompt, node_id, input_name)
+    if class_type in IMAGE_BATCH_SOURCE_CLASSES:
+        return True
+    lowered = class_type.lower()
+    return "multiimageloader" in lowered or "imagebatch" in lowered or "image_batch" in lowered
+
+
 def _decode_prompt_linked_video(prompt: Any, node_id: Any, input_name: str) -> tuple[torch.Tensor | None, Any, float | None]:
     link = _prompt_link(prompt, node_id, input_name)
     if link is None:
@@ -760,7 +793,7 @@ def _decode_prompt_linked_video(prompt: Any, node_id: Any, input_name: str) -> t
     frames, fps = _decode_video_media_frames(path)
     if frames is not None:
         print(f"[GJJ BerniniStudio] 已从工作流上游 {class_type or source_id} 的文件参数自动抽帧：{path}，帧数={int(frames.shape[0])}")
-    return frames, None, fps
+    return frames, _load_audio_from_video_path(path, node_id), fps
 
 
 def _media_components(value: Any) -> tuple[torch.Tensor | None, Any, float | None]:
@@ -811,6 +844,8 @@ def _media_components(value: Any) -> tuple[torch.Tensor | None, Any, float | Non
             frames = decoded_frames
             if fps is None:
                 fps = decoded_fps
+            if audio is None:
+                audio = _load_audio_from_video_path(_materialize_video_stream(_video_stream_source(value)), None)
     return frames, audio, fps
 
 
@@ -875,6 +910,19 @@ def _coerce_audio_input(value: Any) -> dict[str, Any] | None:
         if waveform is not None:
             return {"waveform": waveform, "sample_rate": sample_rate}
     return None
+
+
+def _load_audio_from_video_path(path: str | os.PathLike[str] | None, unique_id: Any = None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    try:
+        from .gjj_zero_dependency_file_browser import _load_audio_file
+
+        return _coerce_audio_input(_load_audio_file(os.fspath(path)))
+    except Exception as exc:
+        print(f"[GJJ BerniniStudio] 源视频音频读取失败，已按无声处理：{exc}")
+        _send_status(unique_id, "源视频没有可用音轨，按无声视频输出。", 0.04)
+        return None
 
 
 def _first_media_size(*values: Any) -> tuple[int, int] | None:
@@ -1152,6 +1200,35 @@ def _legal_segment_length(value: Any) -> int:
     return max(5, ((length - 1 + 3) // 4) * 4 + 1)
 
 
+def _parse_segment_timeline_config(value: Any) -> list[dict[str, Any]]:
+    value = _first_value(value, "[]")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except Exception:
+            return []
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        config: dict[str, Any] = {
+            "frames": _legal_segment_length(item.get("frames", item.get("length", item.get("frame_count", 81)))),
+            "prompt": str(item.get("prompt", DEFAULT_FLF2V_SEGMENT_PROMPT) or "").strip(),
+        }
+        try:
+            config["start_index"] = int(item.get("start_index", item.get("startIndex")))
+            config["end_index"] = int(item.get("end_index", item.get("endIndex")))
+        except Exception:
+            pass
+        result.append(config)
+    return result
+
+
 def _pad_frames(frames: torch.Tensor | None, length: int) -> torch.Tensor | None:
     if frames is None or int(frames.shape[0]) >= int(length):
         return frames
@@ -1195,6 +1272,16 @@ def _collect_reference_image_frames(value: Any) -> list[torch.Tensor]:
     return []
 
 
+def _extract_local_image_frames(local_image_files: Any) -> list[torch.Tensor]:
+    frames: list[torch.Tensor] = []
+    for entry in parse_selected_images(local_image_files):
+        try:
+            frames.extend(_collect_reference_image_frames(load_image_tensor(resolve_selected_image_path(entry))))
+        except Exception as exc:
+            print(f"[GJJ BerniniStudio] 本地时间线图片读取失败：{exc}")
+    return frames
+
+
 def _resize_reference_frame(frame: torch.Tensor, max_size: int) -> torch.Tensor:
     tensor = _tensor_to_bhwc(frame)
     if tensor is None:
@@ -1216,6 +1303,86 @@ def _resize_reference_frame(frame: torch.Tensor, max_size: int) -> torch.Tensor:
         "area",
         "center",
     ).movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+
+def _axis_offset(extra: int, align: str, axis: str) -> int:
+    align = str(align or "中")
+    if axis == "x":
+        if align == "左":
+            return 0
+        if align == "右":
+            return max(0, int(extra))
+    else:
+        if align == "上":
+            return 0
+        if align == "下":
+            return max(0, int(extra))
+    return max(0, int(extra) // 2)
+
+
+def _fit_frames_to_size(frames: torch.Tensor | None, width: int, height: int, mode: str, align: str) -> torch.Tensor | None:
+    tensor = _tensor_to_bhwc(frames)
+    if tensor is None:
+        return None
+    width = max(16, int(width))
+    height = max(16, int(height))
+    source_h = int(tensor.shape[1])
+    source_w = int(tensor.shape[2])
+    if source_h <= 0 or source_w <= 0:
+        return tensor
+    mode = str(mode or "裁剪")
+    align = str(align or "中")
+    import comfy.utils
+
+    if mode == "拉伸":
+        return comfy.utils.common_upscale(
+            tensor[:, :, :, :3].movedim(-1, 1),
+            width,
+            height,
+            "area",
+            "disabled",
+        ).movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+    if mode == "裁剪":
+        scale = max(float(width) / float(source_w), float(height) / float(source_h))
+    elif mode == "补边":
+        scale = min(1.0, float(width) / float(source_w), float(height) / float(source_h))
+    else:
+        scale = min(float(width) / float(source_w), float(height) / float(source_h))
+
+    if mode == "裁剪":
+        resized_w = max(width, int(source_w * scale + 0.999999))
+        resized_h = max(height, int(source_h * scale + 0.999999))
+    else:
+        resized_w = max(1, int(round(source_w * scale)))
+        resized_h = max(1, int(round(source_h * scale)))
+    method = "area" if scale <= 1.0 else "bicubic"
+    resized = comfy.utils.common_upscale(
+        tensor[:, :, :, :3].movedim(-1, 1),
+        resized_w,
+        resized_h,
+        method,
+        "disabled",
+    ).movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+    if mode == "裁剪":
+        extra_x = max(0, resized_w - width)
+        extra_y = max(0, resized_h - height)
+        x = _axis_offset(extra_x, align, "x")
+        y = _axis_offset(extra_y, align, "y")
+        return resized[:, y : y + height, x : x + width, :3].contiguous()
+
+    canvas = torch.zeros(
+        (int(resized.shape[0]), height, width, 3),
+        dtype=resized.dtype,
+        device=resized.device,
+    )
+    extra_x = max(0, width - resized_w)
+    extra_y = max(0, height - resized_h)
+    x = _axis_offset(extra_x, align, "x")
+    y = _axis_offset(extra_y, align, "y")
+    canvas[:, y : y + resized_h, x : x + resized_w, :] = resized[:, :, :, :3]
+    return canvas.contiguous()
 
 
 def _pack_reference_image_batch(values: list[Any], ref_max_size: int) -> torch.Tensor | None:
@@ -1431,6 +1598,10 @@ class GJJ_BerniniStudio:
                 "resize_to_panel": ("BOOLEAN", {"default": True, "display_name": "按面板尺寸", "tooltip": "开启时按面板宽高缩放裁剪；关闭时优先沿用源媒体尺寸。"}),
                 "use_prev_segment_latent": ("BOOLEAN", {"default": False, "display_name": "上一段Latent", "tooltip": "长视频分段时，把上一段最终 latent 的尾部写入下一段初始 latent 开头，用于增强段落衔接。"}),
                 "lora_chain_config": ("LORA_CHAIN_CONFIG", {"forceInput": True, "display_name": "LoRA串联配置", "tooltip": "对齐 GJJ_LoraChainConfig 输出；额外 LoRA 会按配置顺序叠加到 Bernini High/Low 模型与 CLIP。"}),
+                "image_resize_mode": (RESIZE_MODE_CHOICES, {"default": "裁剪", "display_name": "画面适配", "tooltip": "参考帧/源帧写入 Bernini 条件前的尺寸适配方式：拉伸、补边、留边或裁剪。"}),
+                "image_resize_align": (RESIZE_ALIGN_CHOICES, {"default": "中", "display_name": "画面对齐", "tooltip": "补边、留边或裁剪时的对齐位置。"}),
+                "segment_timeline_config": ("STRING", {"default": "[]", "multiline": True, "display_name": "素材时间线配置", "tooltip": "由前端素材时间线写入：每段帧数、素材顺序和可选提示词。", "hidden": True}),
+                "local_image_files": ("STRING", {"default": "[]", "multiline": True, "display_name": "拖入素材", "tooltip": "由前端素材时间线写入：拖入到本节点的临时图片。", "hidden": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1449,6 +1620,7 @@ class GJJ_BerniniStudio:
             "format_name", "vae_tiling", "high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora",
             "segment_frames", "keep_model", "prev_segment_ref_frames", "randomize_seed", "resize_to_panel",
             "translation_enabled", "batch_size", "use_prev_segment_latent", "lora_chain_config",
+            "image_resize_mode", "image_resize_align", "segment_timeline_config", "local_image_files",
         ]
         parts = ["bernini_studio_cache_v3"]
         for key in keys:
@@ -1551,7 +1723,8 @@ class GJJ_BerniniStudio:
         self._RESULT_CACHE.clear()
         _memory_cleanup(unique_id, "运行前清理显存和内存...", clear_video_cache=True)
         source_media = kwargs.get("source_media")
-        source_is_video = _is_video_media(source_media)
+        source_is_image_batch = _prompt_linked_image_batch(prompt_info, unique_id, "source_media")
+        source_is_video = (not source_is_image_batch) and _is_video_media(source_media)
         source_frames, source_audio, source_fps = _media_components(source_media)
         if source_frames is None:
             prompt_frames, prompt_audio, prompt_fps = _decode_prompt_linked_video(prompt_info, unique_id, "source_media")
@@ -1563,11 +1736,12 @@ class GJJ_BerniniStudio:
         reference_values = [kwargs.get("reference_media_1"), kwargs.get("reference_media_2")]
         ref_max_size_value = _as_int(kwargs.get("ref_max_size"), 848, 16, 8192)
         reference_entries = []
-        for value in reference_values:
-            is_video = _is_video_media(value)
+        for index, value in enumerate(reference_values, start=1):
+            is_image_batch = _prompt_linked_image_batch(prompt_info, unique_id, f"reference_media_{index}")
+            is_video = (not is_image_batch) and _is_video_media(value)
             frames, _audio, _fps = _media_components(value)
             frame_count = int(frames.shape[0]) if frames is not None else 0
-            looks_like_video = is_video or _multiframe_source_looks_like_video(value, frame_count)
+            looks_like_video = (not is_image_batch) and (is_video or _multiframe_source_looks_like_video(value, frame_count))
             reference_entries.append(
                 {
                     "value": value,
@@ -1605,7 +1779,7 @@ class GJJ_BerniniStudio:
         }
         requested_length = _as_int(kwargs.get("length"), 81, 1, 8192)
         source_count = int(source_frames.shape[0]) if source_frames is not None else 0
-        source_looks_like_video = _multiframe_source_looks_like_video(source_media, source_count)
+        source_looks_like_video = (not source_is_image_batch) and _multiframe_source_looks_like_video(source_media, source_count)
         mode_kwargs["source_looks_like_video"] = source_looks_like_video
         source_image_batch_count = source_count if source_frames is not None and not source_is_video and source_count > 1 else 0
         initial_total_frames = source_count if source_looks_like_video and source_count > 1 else requested_length
@@ -1641,18 +1815,61 @@ class GJJ_BerniniStudio:
         segment_frames = _legal_segment_length(kwargs.get("segment_frames"))
         prev_segment_ref_frames = _as_int(kwargs.get("prev_segment_ref_frames"), 1, 0, 32)
         use_prev_segment_latent = _as_bool(kwargs.get("use_prev_segment_latent"), False)
+        image_resize_mode = _as_text(kwargs.get("image_resize_mode"), "裁剪")
+        if image_resize_mode not in RESIZE_MODE_CHOICES:
+            image_resize_mode = "裁剪"
+        image_resize_align = _as_text(kwargs.get("image_resize_align"), "中")
+        if image_resize_align not in RESIZE_ALIGN_CHOICES:
+            image_resize_align = "中"
+        flf_keyframe_images: list[torch.Tensor] = []
+        flf_timeline_config: list[dict[str, Any]] = []
+        flf_segment_pairs: list[tuple[int, int]] = []
+        if mode == "FLF2V":
+            if source_frames is not None and not source_is_video and not source_sequence_is_video:
+                source_keyframes = _collect_reference_image_frames(source_media)
+                if not source_keyframes and source_frames is not None:
+                    source_keyframes = [
+                        source_frames[index : index + 1].contiguous()
+                        for index in range(int(source_frames.shape[0]))
+                    ]
+            flf_keyframe_images.extend(
+                _resize_reference_frame(frame, ref_max_size_value)
+                for frame in source_keyframes
+            )
+            flf_keyframe_images.extend(reference_image_inputs)
+            flf_keyframe_images.extend(
+                _resize_reference_frame(frame, ref_max_size_value)
+                for frame in _extract_local_image_frames(kwargs.get("local_image_files"))
+            )
+            if len(flf_keyframe_images) < 2:
+                raise RuntimeError("Bernini Studio 当前为 FLF2V（首尾帧），需要输入 2 张或以上图片。")
+            raw_timeline_config = _parse_segment_timeline_config(kwargs.get("segment_timeline_config"))
+            for item in raw_timeline_config:
+                start_index = item.get("start_index")
+                end_index = item.get("end_index")
+                if isinstance(start_index, int) and isinstance(end_index, int) and 0 <= start_index < len(flf_keyframe_images) and 0 <= end_index < len(flf_keyframe_images) and start_index != end_index:
+                    flf_timeline_config.append(item)
+                    flf_segment_pairs.append((start_index, end_index))
+            if not flf_segment_pairs:
+                flf_segment_pairs = [(index, index + 1) for index in range(len(flf_keyframe_images) - 1)]
         source_image_batches = mode == "I2I" and source_image_batch_count > 1
         source_image_transitions = mode == "I2V" and source_image_batch_count > 1
-        total_output_frames = (
-            requested_length * max(1, source_image_batch_count - 1)
-            if source_image_transitions
-            else (1 if mode_output_kind == "image" else initial_total_frames)
-        )
+        flf_keyframe_count = len(flf_keyframe_images)
+        source_image_flf_transitions = mode == "FLF2V" and flf_keyframe_count > 1
+        if source_image_flf_transitions:
+            total_output_frames = sum(
+                _legal_segment_length(flf_timeline_config[index].get("frames") if index < len(flf_timeline_config) else requested_length)
+                for index in range(len(flf_segment_pairs))
+            )
+        elif source_image_transitions:
+            total_output_frames = requested_length * max(1, source_image_batch_count - 1)
+        else:
+            total_output_frames = 1 if mode_output_kind == "image" else initial_total_frames
         segmented = (not source_image_batches) and total_output_frames > segment_frames
         segment_count = source_image_batch_count if source_image_batches else (
-            max(1, source_image_batch_count - 1) if source_image_transitions else (
+            len(flf_segment_pairs) if source_image_flf_transitions else (max(1, source_image_batch_count - 1) if source_image_transitions else (
                 max(1, (total_output_frames + segment_frames - 1) // segment_frames) if segmented else 1
-            )
+            ))
         )
         final_prompt = _merge_prompt(mode, _as_text(kwargs.get("prompt"), DEFAULT_PROMPT), _as_text(kwargs.get("extra_instruction"), ""))
 
@@ -1689,9 +1906,12 @@ class GJJ_BerniniStudio:
 
         for segment_index in range(segment_count):
             start = segment_index * segment_frames
+            segment_timeline_item = flf_timeline_config[segment_index] if source_image_flf_transitions and segment_index < len(flf_timeline_config) else {}
             if source_image_batches:
                 desired_length = 1
-            elif source_image_transitions:
+            elif source_image_flf_transitions:
+                desired_length = _legal_segment_length(segment_timeline_item.get("frames", requested_length))
+            elif source_image_transitions or source_image_flf_transitions:
                 desired_length = requested_length
             else:
                 desired_length = (
@@ -1717,11 +1937,17 @@ class GJJ_BerniniStudio:
 
             segment_reference_video = None
             segment_reference_images: list[torch.Tensor] = list(reference_image_inputs)
+            if source_image_flf_transitions:
+                pair = flf_segment_pairs[segment_index] if segment_index < len(flf_segment_pairs) else (segment_index, segment_index + 1)
+                segment_reference_images = [
+                    flf_keyframe_images[pair[0]],
+                    flf_keyframe_images[pair[1]],
+                ]
             if source_image_transitions:
                 segment_reference_images.append(
                     _resize_reference_frame(source_frames[segment_index + 1 : segment_index + 2], ref_max_size_value)
                 )
-            if (not source_image_transitions) and segmented and mode_output_kind == "video" and prev_segment_ref_frames > 0 and generated_segments:
+            if (not source_image_transitions) and (not source_image_flf_transitions) and segmented and mode_output_kind == "video" and prev_segment_ref_frames > 0 and generated_segments:
                 tail = generated_segments[-1][-prev_segment_ref_frames:].contiguous()
                 segment_reference_images.extend(
                     tail[index : index + 1].contiguous()
@@ -1755,6 +1981,7 @@ class GJJ_BerniniStudio:
             if (
                 use_prev_segment_latent
                 and segmented
+                and not source_image_flf_transitions
                 and mode_output_kind == "video"
                 and previous_segment_latent is not None
                 and previous_segment_latent.ndim == latent.ndim
@@ -1767,6 +1994,16 @@ class GJJ_BerniniStudio:
             context = []
             context_parts = None
             if source_segment is not None or segment_reference_video is not None or segment_reference_images:
+                source_segment = _fit_frames_to_size(source_segment, width, height, image_resize_mode, image_resize_align)
+                segment_reference_video = _fit_frames_to_size(segment_reference_video, width, height, image_resize_mode, image_resize_align)
+                segment_reference_images = [
+                    fitted
+                    for fitted in (
+                        _fit_frames_to_size(frame, width, height, image_resize_mode, image_resize_align)
+                        for frame in segment_reference_images
+                    )
+                    if fitted is not None
+                ]
                 context_parts = _build_bernini_context(
                     vae,
                     generation_length,
@@ -1785,10 +2022,27 @@ class GJJ_BerniniStudio:
                 else:
                     context.extend(source_context)
                     context.extend(refs)
-            positive, negative = base_positive, base_negative
+            segment_prompt = str(
+                segment_timeline_item.get("prompt", DEFAULT_FLF2V_SEGMENT_PROMPT if source_image_flf_transitions else "")
+                or ""
+            ).strip()
+            if segment_prompt:
+                segment_positive, segment_negative = GJJ_CLIPPromptEncodePanel().encode(
+                    clip=clip,
+                    positive_text=_merge_prompt(mode, segment_prompt, _as_text(kwargs.get("extra_instruction"), "")),
+                    negative_text=_as_text(kwargs.get("negative_prompt"), DEFAULT_NEGATIVE),
+                    zero_conditioning=False,
+                    translation_device="gpu",
+                    translation_unload_after_use=True,
+                    translation_enabled=_as_bool(kwargs.get("translation_enabled"), False),
+                    unique_id=unique_id,
+                )
+                positive, negative = segment_positive, segment_negative
+            else:
+                positive, negative = base_positive, base_negative
             if context:
-                positive = _conditioning_set_values(base_positive, {"context_latents": context})
-                negative = _conditioning_set_values(base_negative, {"context_latents": context})
+                positive = _conditioning_set_values(positive, {"context_latents": context})
+                negative = _conditioning_set_values(negative, {"context_latents": context})
 
             latent_dict = {"samples": latent}
             high_latent = _sample(

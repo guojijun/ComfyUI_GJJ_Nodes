@@ -10,12 +10,18 @@ const LORA_CHAIN_CONFIG_TYPE = "LORA_CHAIN_CONFIG";
 const PANEL_STYLE_ID = "gjj-bernini-studio-panel-style";
 const PANEL_WIDGET = "__gjj_bernini_panel";
 const PREVIEW_WIDGET = "__gjj_bernini_preview";
+const MATERIAL_TIMELINE_WIDGET = "__gjj_bernini_material_timeline";
+const LOCAL_IMAGES_WIDGET = "local_image_files";
+const TEMP_UPLOAD_API_PATH = "/upload/image";
 const SETTINGS_PROPERTY = "gjj_bernini_settings_open";
 const ACTIVE_POPUP_PROPERTY = "gjj_bernini_active_popup";
 const TRANSLATE_PROPERTY = "gjj_bernini_translate_enabled";
 const VALUES_PROPERTY = "gjj_bernini_values";
 const LINK_MEMORY_PROPERTY = "gjj_bernini_link_memory";
+const MATERIAL_ORDER_PROPERTY = "gjj_bernini_material_order";
 const TEMPLATE_SOURCE_PROPERTY = "gjj_generation_template_sources";
+const DEFAULT_FLF2V_SEGMENT_PROMPT = "从图1到图2自然过渡，保持画面主体、构图、视角和光影稳定，让画面自然、平滑、连续地过渡到最后一帧。中间运动速度缓慢，变化均匀，无明显跳帧，无闪烁，无物体漂移，无角色变形，无视角突然切换，保持真实连续的视频质感。";
+const REMOVE_SUBTITLE_PROMPT = "将视频中字幕、背景、logo删除，其它地方保持原视频的所有特征";
 const TOP_INPUTS = [
 	["source_media", "🎞️ 源媒体"],
 	["reference_media_1", "🖼️ 参考媒体 1"],
@@ -41,6 +47,7 @@ const MODEL_SETTINGS_GROUPS = [
 ];
 const SIZE_SETTINGS_GROUPS = [
 	["画面尺寸", ["width", "height", "length", "segment_frames", "batch_size", "ref_max_size", "resize_to_panel"]],
+	["画面适配", ["image_resize_mode", "image_resize_align"]],
 	["输出参数", ["frame_rate", "filename_prefix", "format_name", "vae_tiling", "tile_x", "tile_y"]],
 ];
 const ALL_SETTINGS_GROUPS = SETTINGS_GROUPS.concat(MODEL_SETTINGS_GROUPS, SIZE_SETTINGS_GROUPS);
@@ -79,8 +86,12 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "low_lora", label: "Low LoRA", type: "STRING", aliases: ["low_lora"] },
 	{ name: "prev_segment_ref_frames", label: "上一段尾帧参考", type: "INT", aliases: ["prev_segment", "tail_frames", "上一段", "尾帧", "参考帧"] },
 	{ name: "use_prev_segment_latent", label: "上一段Latent", type: "BOOLEAN", aliases: ["prev_latent", "latent", "上一段latent"] },
+	{ name: "image_resize_mode", label: "画面适配", type: "STRING", aliases: ["resize_mode", "适配", "拉伸", "补边", "留边", "裁剪"] },
+	{ name: "image_resize_align", label: "画面对齐", type: "STRING", aliases: ["resize_align", "对齐", "上", "下", "左", "右", "中"] },
+	{ name: "segment_timeline_config", label: "素材时间线", type: "STRING", aliases: ["timeline", "素材时间线", "分段"] },
+	{ name: LOCAL_IMAGES_WIDGET, label: "拖入素材", type: "STRING", aliases: ["local_images", "拖入素材"] },
 ];
-const HIDDEN_WIDGETS = new Set(ALL_SETTINGS_GROUPS.flatMap(([, names]) => names).concat(["prompt", "translation_enabled", "randomize_seed"]));
+const HIDDEN_WIDGETS = new Set(ALL_SETTINGS_GROUPS.flatMap(([, names]) => names).concat(["prompt", "translation_enabled", "randomize_seed", "segment_timeline_config", LOCAL_IMAGES_WIDGET]));
 const BACKEND_WIDGETS = [
 	"prompt",
 	"extra_instruction",
@@ -120,9 +131,13 @@ const BACKEND_WIDGETS = [
 	"randomize_seed",
 	"resize_to_panel",
 	"use_prev_segment_latent",
+	"image_resize_mode",
+	"image_resize_align",
+	"segment_timeline_config",
+	LOCAL_IMAGES_WIDGET,
 ];
-const LEGACY_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -1);
-const OLDER_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -2);
+const LEGACY_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -4);
+const OLDER_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -5);
 const DEFAULT_VALUES = {
 	prompt: "Remove subtitles and watermarks while preserving the original scene, motion, lighting, and identity.",
 	extra_instruction: "",
@@ -162,6 +177,10 @@ const DEFAULT_VALUES = {
 	randomize_seed: false,
 	resize_to_panel: true,
 	use_prev_segment_latent: false,
+	image_resize_mode: "裁剪",
+	image_resize_align: "中",
+	segment_timeline_config: "[]",
+	local_image_files: "[]",
 };
 const NUMBER_RULES = {
 	width: [16, 8192, true],
@@ -192,7 +211,24 @@ const BOOLEAN_WIDGETS = new Set([
 	"use_prev_segment_latent",
 ]);
 const FIXED_CHOICES = {
-	mode: new Set(["auto", "T2I", "T2V", "I2I", "R2I", "I2V", "V2V", "R2V", "VI2V", "RV2V", "ADS2V", "VRC2V", "MV2V"]),
+	mode: new Set(["auto", "T2I", "T2V", "I2I", "R2I", "I2V", "V2V", "R2V", "VI2V", "RV2V", "ADS2V", "VRC2V", "MV2V", "FLF2V"]),
+	image_resize_mode: new Set(["拉伸", "补边", "留边", "裁剪"]),
+	image_resize_align: new Set(["上", "下", "左", "右", "中"]),
+};
+const BUTTON_CHOICE_GROUPS = {
+	image_resize_mode: [
+		["拉伸", "拉伸"],
+		["补边", "补边"],
+		["留边", "留边"],
+		["裁剪", "裁剪"],
+	],
+	image_resize_align: [
+		["上", "上"],
+		["下", "下"],
+		["左", "左"],
+		["右", "右"],
+		["中", "中"],
+	],
 };
 const MODE_BUTTON_LABELS = {
 	T2I: "T2I",
@@ -207,6 +243,7 @@ const MODE_BUTTON_LABELS = {
 	ADS2V: "ADS2V",
 	VRC2V: "VRC2V",
 	MV2V: "MV2V",
+	FLF2V: "FLF2V",
 };
 const MODE_DEFAULT_VALUES = {
 	T2I: { steps: 20, high_steps: 10 },
@@ -218,10 +255,88 @@ function widget(node, name) {
 }
 
 function value(node, name, fallback = "") {
-	return widget(node, name)?.value ?? fallback;
+	return widget(node, name)?.value ?? node?.properties?.[name] ?? fallback;
+}
+
+function normalizedModelName(name) {
+	return String(name || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
+}
+
+function lowModelCandidatesFromHigh(highModel) {
+	const text = String(highModel || "");
+	const replacements = [
+		[/high_noise/gi, "low_noise"],
+		[/high-noise/gi, "low-noise"],
+		[/high noise/gi, "low noise"],
+		[/_high_/gi, "_low_"],
+		[/-high-/gi, "-low-"],
+		[/ high /gi, " low "],
+		[/\bhigh\b/gi, "low"],
+	];
+	const candidates = [];
+	for (const [pattern, replacement] of replacements) {
+		const next = text.replace(pattern, replacement);
+		if (next !== text) candidates.push(next);
+	}
+	return candidates;
+}
+
+function scoreLowModelPair(highModel, lowChoice) {
+	const high = normalizedModelName(highModel);
+	const low = normalizedModelName(lowChoice);
+	if (!high || !low) return 0;
+	let score = 0;
+	for (const candidate of lowModelCandidatesFromHigh(high)) {
+		if (normalizedModelName(candidate) === low) score += 1000;
+	}
+	for (const token of ["bernini", "14b", "fp8", "q4", "q5", "q6", "q8", "gguf", "safetensors", "scaled"]) {
+		if (high.includes(token) && low.includes(token)) score += 10;
+	}
+	const highNoise = high.replace(/high[_\-\s]?noise/g, "").replace(/\bhigh\b/g, "");
+	const lowNoise = low.replace(/low[_\-\s]?noise/g, "").replace(/\blow\b/g, "");
+	if (highNoise && lowNoise && highNoise === lowNoise) score += 250;
+	const highParts = new Set(high.split(/[^a-z0-9]+/).filter((part) => part.length > 1 && part !== "high" && part !== "noise"));
+	for (const part of low.split(/[^a-z0-9]+/)) {
+		if (part.length > 1 && part !== "low" && part !== "noise" && highParts.has(part)) score += 2;
+	}
+	return score;
+}
+
+function pairedLowModelForHigh(node, highModel) {
+	const lowWidget = widget(node, "low_model");
+	const choices = widgetChoices(lowWidget);
+	if (!choices.length) return "";
+	const exactCandidates = lowModelCandidatesFromHigh(highModel).map(normalizedModelName);
+	for (const choice of choices) {
+		if (exactCandidates.includes(normalizedModelName(choice))) return choice;
+	}
+	let best = "";
+	let bestScore = 0;
+	for (const choice of choices) {
+		const score = scoreLowModelPair(highModel, choice);
+		if (score > bestScore) {
+			best = choice;
+			bestScore = score;
+		}
+	}
+	return bestScore >= 30 ? best : "";
+}
+
+function syncLowModelFromHigh(node, highModel) {
+	if (node.__gjjBerniniPairingLowModel) return;
+	const paired = pairedLowModelForHigh(node, highModel);
+	if (!paired || paired === value(node, "low_model", "")) return;
+	node.__gjjBerniniPairingLowModel = true;
+	try {
+		setValue(node, "low_model", paired);
+	} finally {
+		node.__gjjBerniniPairingLowModel = false;
+	}
 }
 
 function setValue(node, name, nextValue) {
+	node.properties ||= {};
+	node.properties[name] = nextValue;
 	const target = widget(node, name);
 	if (!target) return;
 	target.value = nextValue;
@@ -232,6 +347,8 @@ function setValue(node, name, nextValue) {
 	if (panelControl) {
 		if (panelControl.dataset?.resizeModeControl === "true") {
 			setResizeModeControlState(panelControl, Boolean(nextValue));
+		} else if (panelControl.dataset?.choiceButtonControl === "true") {
+			setChoiceButtonControlState(panelControl, String(nextValue ?? ""));
 		} else if (panelControl.dataset?.booleanControl === "true") {
 			setBooleanButtonState(panelControl, Boolean(nextValue));
 		} else if (document.activeElement !== panelControl) {
@@ -244,10 +361,16 @@ function setValue(node, name, nextValue) {
 	if (name === "mode" || name === "length") {
 		updateGenerateButton(node);
 		updateModeButtons(node);
+		refreshMaterialTimeline(node, true);
 	}
 	if (name === "mode" || name === "use_accel_lora" || name === "steps" || name === "high_steps") {
 		applyModeDefaults(node, value(node, "mode", "auto"));
 	}
+	if (name === "mode" && String(nextValue || "").toUpperCase() === "FLF2V") {
+		if (Number(value(node, "length", DEFAULT_VALUES.length)) !== 81) setValue(node, "length", 81);
+		if (Number(value(node, "segment_frames", DEFAULT_VALUES.segment_frames)) !== 81) setValue(node, "segment_frames", 81);
+	}
+	if (name === "high_model") syncLowModelFromHigh(node, nextValue);
 	if (name === "keep_model") updateKeepModelButton(node);
 	if (name === "randomize_seed") updateRandomizeSeedButton(node);
 	if (name === "resize_to_panel") {
@@ -410,6 +533,7 @@ function protect(element) {
 	for (const eventName of ["pointerdown", "mousedown", "dblclick", "contextmenu", "wheel"]) {
 		element.addEventListener(eventName, (event) => {
 			if (element.classList?.contains("gjj-bs-popover") && event.target !== element) return;
+			if (event.target?.closest?.(".gjj-bs-material-line,.gjj-bs-material-frame-label,.gjj-bs-material-prompt-badge,.gjj-bs-material-editor")) return;
 			event.stopPropagation();
 		}, true);
 	}
@@ -609,6 +733,232 @@ function linkedInputKind(node, name) {
 	return "";
 }
 
+function parseSelection(rawValue) {
+	try {
+		const parsed = JSON.parse(String(rawValue || "[]"));
+		return Array.isArray(parsed) ? parsed : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function uploadUrl(path) {
+	return api?.apiURL ? api.apiURL(path) : path;
+}
+
+function normalizeUploadItem(data, file, subfolder = "GJJ_BerniniStudio") {
+	const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	const cleanSubfolder = String(data?.subfolder ?? subfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	if (!filename) return null;
+	const base = filename.includes("/") ? filename.split("/").pop() : filename;
+	const rawType = String(data?.type || "input").trim().toLowerCase();
+	const itemType = ["input", "temp", "output"].includes(rawType) ? rawType : "input";
+	return { filename: base, subfolder: cleanSubfolder, type: itemType };
+}
+
+async function uploadImageFile(file) {
+	const form = new FormData();
+	form.append("image", file, file.name);
+	const response = api?.fetchApi
+		? await api.fetchApi(TEMP_UPLOAD_API_PATH, { method: "POST", body: form })
+		: await fetch(uploadUrl(TEMP_UPLOAD_API_PATH), { method: "POST", body: form });
+	if (!response?.ok) throw new Error(`上传失败：HTTP ${response?.status || "?"}`);
+	const data = await response.json().catch(() => ({}));
+	const item = Array.isArray(data?.items) ? data.items[0] : (Array.isArray(data?.images) ? data.images[0] : data);
+	return normalizeUploadItem(item, file, "GJJ_BerniniStudio");
+}
+
+function imageFilesFromDataTransfer(dataTransfer) {
+	return Array.from(dataTransfer?.files || []).filter((file) => String(file?.type || "").startsWith("image/"));
+}
+
+function isExternalFileDrag(dataTransfer) {
+	return Array.from(dataTransfer?.types || []).includes("Files");
+}
+
+function sourceSelectedImagesFromInput(node, inputName) {
+	const link = mediaInputLink(node, inputName).link;
+	const source = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+	if (!source) return [];
+	const state = source.__gjjMultiImageState || source.__gjjMultiImageLoaderState || {};
+	const candidates = [
+		state.selection,
+		state.executedImages,
+		parseSelection(widget(source, "selected_images")?.value || source.properties?.selected_images || "[]"),
+	];
+	for (const items of candidates) {
+		if (!Array.isArray(items) || !items.length) continue;
+		const originSlot = Number(link?.origin_slot);
+		const output = Number.isInteger(originSlot) ? source.outputs?.[originSlot] : null;
+		const outputName = String(output?.name || output?.label || "").trim();
+		const individualMatch = outputName.match(/(?:图片|导出图片|image)\s*0*(\d+)/i);
+		if (individualMatch) {
+			const index = Math.max(0, Number.parseInt(individualMatch[1], 10) - 1);
+			return items[index] ? [items[index]] : [];
+		}
+		if (Number.isInteger(originSlot) && originSlot > 0 && String(output?.type || "").toUpperCase() === "IMAGE") {
+			const index = originSlot - 1;
+			return items[index] ? [items[index]] : [];
+		}
+		return items;
+	}
+	return [];
+}
+
+function localSelectedImages(node) {
+	return parseSelection(value(node, LOCAL_IMAGES_WIDGET, "[]") || node?.properties?.[LOCAL_IMAGES_WIDGET] || "[]")
+		.map((item) => normalizeUploadItem(item, null, item?.subfolder || ""))
+		.filter(Boolean);
+}
+
+function setLocalSelectedImages(node, items) {
+	const clean = (Array.isArray(items) ? items : []).map((item) => normalizeUploadItem(item, null, item?.subfolder || "")).filter(Boolean);
+	const text = JSON.stringify(clean);
+	setValue(node, LOCAL_IMAGES_WIDGET, text);
+	node.properties ||= {};
+	node.properties[LOCAL_IMAGES_WIDGET] = text;
+}
+
+function rawMaterialTimelineItems(node) {
+	const items = [];
+	for (const [name] of TOP_INPUTS) {
+		for (const item of sourceSelectedImagesFromInput(node, name)) {
+			if (!item) continue;
+			items.push({ ...item, __sourceInput: name, __sourceIndex: items.length });
+		}
+	}
+	for (const item of localSelectedImages(node)) {
+		items.push({ ...item, __sourceInput: "local", __sourceIndex: items.length });
+	}
+	return items;
+}
+
+function materialOrder(node, count) {
+	const raw = Array.isArray(node?.properties?.[MATERIAL_ORDER_PROPERTY]) ? node.properties[MATERIAL_ORDER_PROPERTY] : [];
+	const used = new Set();
+	const order = [];
+	for (const value of raw) {
+		const index = Number(value);
+		if (Number.isInteger(index) && index >= 0 && index < count && !used.has(index)) {
+			order.push(index);
+			used.add(index);
+		}
+	}
+	for (let index = 0; index < count; index += 1) {
+		if (!used.has(index)) order.push(index);
+	}
+	return order;
+}
+
+function materialTimelineItems(node) {
+	const raw = rawMaterialTimelineItems(node);
+	const order = materialOrder(node, raw.length);
+	return order.map((index) => ({ ...raw[index], __sourceIndex: index })).filter(Boolean);
+}
+
+function normalizeSegmentTimelineConfig(value) {
+	const parsed = parseSelection(value);
+	if (!Array.isArray(parsed)) return [];
+	return parsed.map((item) => {
+		const hasPrompt = item && Object.prototype.hasOwnProperty.call(item, "prompt");
+		return {
+			frames: Math.max(5, Math.min(8192, Number.parseInt(item?.frames ?? item?.length ?? DEFAULT_VALUES.length, 10) || DEFAULT_VALUES.length)),
+			prompt: hasPrompt ? String(item.prompt || "") : DEFAULT_FLF2V_SEGMENT_PROMPT,
+			start_index: Number.isInteger(Number(item?.start_index)) ? Number(item.start_index) : undefined,
+			end_index: Number.isInteger(Number(item?.end_index)) ? Number(item.end_index) : undefined,
+		};
+	});
+}
+
+function segmentTimelineConfig(node) {
+	return normalizeSegmentTimelineConfig(value(node, "segment_timeline_config", "[]"));
+}
+
+function setSegmentTimelineConfig(node, config) {
+	const clean = Array.isArray(config) ? config : [];
+	setValue(node, "segment_timeline_config", JSON.stringify(clean));
+}
+
+function syncMaterialTimelineConfig(node, force = false) {
+	const items = materialTimelineItems(node);
+	const segmentCount = Math.max(0, items.length - 1);
+	const current = segmentTimelineConfig(node);
+	const defaultFrames = Math.max(5, Number.parseInt(value(node, "length", DEFAULT_VALUES.length), 10) || DEFAULT_VALUES.length);
+	const next = [];
+	let changed = force || current.length !== segmentCount;
+	for (let index = 0; index < segmentCount; index += 1) {
+		const item = current[index] || {};
+		const frames = Math.max(5, Number.parseInt(item.frames ?? defaultFrames, 10) || defaultFrames);
+		const startIndex = Number(items[index]?.__sourceIndex ?? index);
+		const endIndex = Number(items[index + 1]?.__sourceIndex ?? (index + 1));
+		const prompt = current[index] ? String(item.prompt || "") : DEFAULT_FLF2V_SEGMENT_PROMPT;
+		const clean = {
+			frames,
+			prompt,
+			start_index: startIndex,
+			end_index: endIndex,
+		};
+		if (item.start_index !== startIndex || item.end_index !== endIndex || item.frames !== frames || item.prompt !== prompt) changed = true;
+		next.push(clean);
+	}
+	if (changed) setSegmentTimelineConfig(node, next);
+	return next;
+}
+
+function reorderMaterialTimeline(node, fromIndex, toIndex) {
+	const items = materialTimelineItems(node);
+	if (!items.length) return;
+	const from = Number(fromIndex);
+	const to = Number(toIndex);
+	if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= items.length || to >= items.length || from === to) return;
+	const next = items.map((item) => item.__sourceIndex);
+	const [moved] = next.splice(from, 1);
+	next.splice(to, 0, moved);
+	node.properties ||= {};
+	node.properties[MATERIAL_ORDER_PROPERTY] = next;
+	syncMaterialTimelineConfig(node, true);
+	refreshMaterialTimeline(node, true);
+	node.graph?.change?.();
+	GJJ_Utils.dirtyCanvas(node);
+}
+
+async function appendDroppedImageFiles(node, files, insertIndex = null) {
+	const imageFiles = imageFilesFromDataTransfer({ files });
+	if (!imageFiles.length) return;
+	try {
+		const uploaded = [];
+		for (const file of imageFiles) {
+			const item = await uploadImageFile(file);
+			if (item) uploaded.push(item);
+		}
+		if (!uploaded.length) return;
+		const rawBefore = rawMaterialTimelineItems(node);
+		const oldOrder = materialOrder(node, rawBefore.length);
+		const uploadedRawIndexes = uploaded.map((_item, index) => rawBefore.length + index);
+		const at = Number.isInteger(insertIndex) ? Math.max(0, Math.min(oldOrder.length, insertIndex)) : oldOrder.length;
+		const nextOrder = Array.from(oldOrder);
+		nextOrder.splice(at, 0, ...uploadedRawIndexes);
+		setLocalSelectedImages(node, localSelectedImages(node).concat(uploaded));
+		node.properties ||= {};
+		node.properties[MATERIAL_ORDER_PROPERTY] = nextOrder;
+		syncMaterialTimelineConfig(node, true);
+		refreshMaterialTimeline(node, true);
+		node.graph?.change?.();
+		GJJ_Utils.dirtyCanvas(node);
+	} catch (error) {
+		console.warn("[GJJ BerniniStudio] 拖入图片失败", error);
+	}
+}
+
+function materialLabel(item, index) {
+	const name = String(item?.filename || item?.name || item?.file || `图片 ${index + 1}`).replaceAll("\\", "/").split("/").pop();
+	return name || `图片 ${index + 1}`;
+}
+
+function shouldShowMaterialTimeline(node) {
+	return String(value(node, "mode", "auto") || "").toUpperCase() === "FLF2V" && mediaInputState(node).canFLF2V;
+}
+
 function sourceSizeComesFromInput(node) {
 	const sourceInput = node?.inputs?.find?.((item) => String(item?.name || "") === "source_media");
 	return inputLinked(sourceInput) && !Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel));
@@ -620,6 +970,12 @@ function mediaInputState(node) {
 		linkedInputKind(node, "reference_media_1"),
 		linkedInputKind(node, "reference_media_2"),
 	].filter(Boolean);
+	const sourceImageCount = sourceKind === "image" ? Math.max(1, sourceSelectedImagesFromInput(node, "source_media").length || 1) : 0;
+	const referenceImageCount = ["reference_media_1", "reference_media_2"].reduce((count, name) => {
+		if (linkedInputKind(node, name) !== "image") return count;
+		return count + Math.max(1, sourceSelectedImagesFromInput(node, name).length || 1);
+	}, 0);
+	const flfImageCount = sourceImageCount + referenceImageCount + localSelectedImages(node).length;
 	return {
 		sourceKind,
 		refKinds,
@@ -627,16 +983,18 @@ function mediaInputState(node) {
 		hasImageRefs: refKinds.includes("image"),
 		hasVideoRefs: refKinds.includes("video"),
 		hasRefs: refKinds.length > 0,
+		flfImageCount,
+		canFLF2V: flfImageCount >= 2,
 	};
 }
 
 function modeButtonsForInputs(node) {
 	const state = mediaInputState(node);
 	if (!state.hasSource && !state.hasRefs) return ["T2I", "T2V"];
-	if (!state.hasSource) return state.hasImageRefs ? ["R2I", "R2V"] : ["R2V"];
+	if (!state.hasSource) return state.hasImageRefs ? ["R2I", "R2V", ...(state.canFLF2V ? ["FLF2V"] : [])] : ["R2V"];
 	if (state.sourceKind === "image") {
-		if (state.hasRefs) return ["R2I", "R2V"];
-		return ["I2I", "I2V"];
+		if (state.hasRefs) return ["R2I", "R2V", ...(state.canFLF2V ? ["FLF2V"] : [])];
+		return ["I2I", "I2V", ...(state.canFLF2V ? ["FLF2V"] : [])];
 	}
 	if (state.sourceKind === "video") {
 		if (!state.hasRefs) return ["V2V"];
@@ -672,6 +1030,13 @@ function updateModeButtons(node) {
 		button.classList.toggle("active", current === mode);
 		row.appendChild(button);
 	}
+}
+
+function updateRemoveSubtitleButton(node) {
+	const button = node?.__gjjBerniniPanel?.removeSubtitle;
+	if (!button) return;
+	const isV2V = String(value(node, "mode", "auto") || "").toUpperCase() === "V2V";
+	button.style.display = isV2V ? "" : "none";
 }
 
 function resolvePanelOutputKind(node) {
@@ -720,6 +1085,265 @@ function updateResizeButton(node) {
 	button.textContent = "📐";
 	button.title = enabled ? "尺寸参数；按面板尺寸已开启，按宽高缩放裁剪" : "尺寸参数；按面板尺寸已关闭，优先沿用源媒体尺寸";
 	button.classList.toggle("active", enabled);
+}
+
+function createMaterialTimeline(node) {
+	if (node.__gjjBerniniMaterialTimeline) return node.__gjjBerniniMaterialTimeline;
+	const root = document.createElement("div");
+	root.className = "gjj-bs-material-timeline";
+	root.style.display = "none";
+	protect(root);
+	const header = document.createElement("div");
+	header.className = "gjj-bs-material-head";
+	const title = document.createElement("span");
+	title.textContent = "素材时间线";
+	const hint = document.createElement("span");
+	hint.className = "gjj-bs-material-hint";
+	header.append(title, hint);
+	const strip = document.createElement("div");
+	strip.className = "gjj-bs-material-strip";
+	strip.addEventListener("dragover", (event) => {
+		const types = Array.from(event.dataTransfer?.types || []);
+		if (isExternalFileDrag(event.dataTransfer) || types.includes("application/x-gjj-bernini-material-index")) {
+			event.preventDefault();
+		}
+	});
+	strip.addEventListener("drop", (event) => {
+		const files = imageFilesFromDataTransfer(event.dataTransfer);
+		if (!files.length) return;
+		event.preventDefault();
+		event.stopPropagation();
+		appendDroppedImageFiles(node, files);
+	});
+	root.append(header, strip);
+	const state = { root, hint, strip, signature: "" };
+	node.__gjjBerniniMaterialTimeline = state;
+	return state;
+}
+
+function closeMaterialPromptEditor(node) {
+	const editor = node?.__gjjBerniniMaterialPromptEditor;
+	if (editor?.parentNode) editor.parentNode.removeChild(editor);
+	if (node) node.__gjjBerniniMaterialPromptEditor = null;
+}
+
+function showSegmentPromptEditor(node, segmentIndex, anchor, writePrompt) {
+	closeMaterialPromptEditor(node);
+	const editor = document.createElement("div");
+	editor.className = "gjj-bs-material-editor";
+	const title = document.createElement("div");
+	title.className = "gjj-bs-material-editor-title";
+	title.textContent = `第 ${segmentIndex + 1} 段提示词`;
+	const textarea = document.createElement("textarea");
+	textarea.value = String(segmentTimelineConfig(node)[segmentIndex]?.prompt || "");
+	textarea.placeholder = "留空则使用全局提示词";
+	const buttons = document.createElement("div");
+	buttons.className = "gjj-bs-material-editor-buttons";
+	const clearButton = document.createElement("button");
+	clearButton.type = "button";
+	clearButton.textContent = "清空";
+	const saveButton = document.createElement("button");
+	saveButton.type = "button";
+	saveButton.textContent = "确定";
+	const close = () => closeMaterialPromptEditor(node);
+	const clearPrompt = (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		writePrompt("");
+		close();
+	};
+	const savePrompt = (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		writePrompt(textarea.value);
+		close();
+	};
+	clearButton.addEventListener("pointerup", clearPrompt);
+	clearButton.addEventListener("click", clearPrompt);
+	saveButton.addEventListener("pointerup", savePrompt);
+	saveButton.addEventListener("click", savePrompt);
+	textarea.addEventListener("keydown", (event) => {
+		event.stopPropagation();
+		if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+			event.preventDefault();
+			writePrompt(textarea.value);
+			close();
+		}
+		if (event.key === "Escape") {
+			event.preventDefault();
+			close();
+		}
+	});
+	buttons.append(clearButton, saveButton);
+	editor.append(title, textarea, buttons);
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "click", "wheel"]) {
+		editor.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	document.body.appendChild(editor);
+	node.__gjjBerniniMaterialPromptEditor = editor;
+	const rect = anchor?.getBoundingClientRect?.() || { left: 40, top: 80, bottom: 110, width: 240 };
+	const width = Math.min(420, Math.max(260, rect.width || 260));
+	editor.style.width = `${width}px`;
+	const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.left));
+	const top = Math.max(8, Math.min(window.innerHeight - 178, rect.bottom + 6));
+	editor.style.left = `${left}px`;
+	editor.style.top = `${top}px`;
+	setTimeout(() => {
+		textarea.focus();
+		textarea.select();
+	}, 0);
+}
+
+function refreshMaterialTimeline(node, force = false) {
+	const state = node.__gjjBerniniMaterialTimeline;
+	if (!state) return;
+	const visible = shouldShowMaterialTimeline(node);
+	state.root.style.display = visible ? "flex" : "none";
+	if (!visible) return;
+	const items = materialTimelineItems(node);
+	const config = syncMaterialTimelineConfig(node, false);
+	const signature = JSON.stringify({
+		items: items.map((item) => [item?.filename || "", item?.subfolder || "", item?.type || "", item?.__sourceIndex]),
+		config,
+	});
+	if (!force && state.signature === signature) return;
+	state.signature = signature;
+	state.hint.textContent = items.length ? `${items.length} 张素材 / ${Math.max(0, items.length - 1)} 段` : "连接批量图片后显示";
+	state.strip.replaceChildren();
+	if (!items.length) {
+		const empty = document.createElement("div");
+		empty.className = "gjj-bs-material-empty";
+		empty.textContent = "暂无素材，可连接批量图片或拖入图片";
+		state.strip.appendChild(empty);
+		return;
+	}
+	const row = document.createElement("div");
+	row.className = "gjj-bs-material-row";
+	state.strip.appendChild(row);
+	for (const [index, item] of items.entries()) {
+		const frame = document.createElement("div");
+		frame.className = "gjj-bs-material-frame";
+		frame.draggable = true;
+		frame.dataset.materialIndex = String(index);
+		frame.addEventListener("dragstart", (event) => {
+			event.dataTransfer?.setData("application/x-gjj-bernini-material-index", String(index));
+			event.dataTransfer?.setData("text/plain", String(index));
+			if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+			frame.classList.add("dragging");
+		});
+		frame.addEventListener("dragend", () => {
+			frame.classList.remove("dragging");
+			for (const child of row.children) child.classList?.remove?.("drop-target");
+		});
+		frame.addEventListener("dragover", (event) => {
+			const types = Array.from(event.dataTransfer?.types || []);
+			if (!types.includes("application/x-gjj-bernini-material-index") && !isExternalFileDrag(event.dataTransfer)) return;
+			event.preventDefault();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = types.includes("application/x-gjj-bernini-material-index") ? "move" : "copy";
+			frame.classList.add("drop-target");
+		});
+		frame.addEventListener("dragleave", () => frame.classList.remove("drop-target"));
+		frame.addEventListener("drop", (event) => {
+			const files = imageFilesFromDataTransfer(event.dataTransfer);
+			const rect = frame.getBoundingClientRect();
+			const insertAfter = event.clientX > rect.left + rect.width / 2;
+			const insertIndex = index + (insertAfter ? 1 : 0);
+			if (files.length) {
+				event.preventDefault();
+				event.stopPropagation();
+				frame.classList.remove("drop-target");
+				appendDroppedImageFiles(node, files, insertIndex);
+				return;
+			}
+			const fromRaw = event.dataTransfer?.getData("application/x-gjj-bernini-material-index") || event.dataTransfer?.getData("text/plain");
+			const fromIndex = Number(fromRaw);
+			if (!Number.isInteger(fromIndex)) return;
+			event.preventDefault();
+			event.stopPropagation();
+			frame.classList.remove("drop-target");
+			let targetIndex = insertIndex;
+			if (fromIndex < targetIndex) targetIndex -= 1;
+			reorderMaterialTimeline(node, fromIndex, targetIndex);
+		});
+		const img = document.createElement("img");
+		img.draggable = false;
+		img.loading = "lazy";
+		img.src = imageUrl(item);
+		img.title = `${index + 1}. ${materialLabel(item, index)}`;
+		const badge = document.createElement("div");
+		badge.className = "gjj-bs-material-badge";
+		badge.textContent = "↔";
+		frame.append(img, badge);
+		if (index < items.length - 1) {
+			const currentConfig = config[index] || {};
+			const writeSegment = (patch, refresh = true) => {
+				const next = segmentTimelineConfig(node);
+				next[index] = {
+					...(next[index] || {}),
+					...patch,
+					start_index: Number(items[index]?.__sourceIndex ?? index),
+					end_index: Number(items[index + 1]?.__sourceIndex ?? (index + 1)),
+				};
+				setSegmentTimelineConfig(node, next);
+				if (refresh) refreshMaterialTimeline(node, true);
+			};
+			const editPrompt = () => {
+				showSegmentPromptEditor(node, index, promptBadge, (nextPrompt) => {
+					writeSegment({ prompt: String(nextPrompt || "").trim() });
+				});
+			};
+			const segment = document.createElement("div");
+			segment.className = "gjj-bs-material-splitter";
+			const line = document.createElement("div");
+			line.className = "gjj-bs-material-line";
+			const frameLabel = document.createElement("div");
+			frameLabel.className = "gjj-bs-material-frame-label";
+			frameLabel.textContent = `${Math.max(5, Number.parseInt(currentConfig.frames || value(node, "length", DEFAULT_VALUES.length), 10) || DEFAULT_VALUES.length)}f`;
+			const startFrameDrag = (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const startX = event.clientX;
+				const startFrames = Math.max(5, Number.parseInt(segmentTimelineConfig(node)[index]?.frames || currentConfig.frames || value(node, "length", DEFAULT_VALUES.length), 10) || DEFAULT_VALUES.length);
+				let latest = startFrames;
+				let moved = false;
+				const move = (moveEvent) => {
+					const delta = Math.round((moveEvent.clientX - startX) / 7) * 4;
+					moved = moved || Math.abs(moveEvent.clientX - startX) > 2;
+					latest = Math.max(5, Math.min(8192, startFrames + delta));
+					frameLabel.textContent = `${latest}f`;
+					writeSegment({ frames: latest }, false);
+				};
+				const up = () => {
+					window.removeEventListener("pointermove", move, true);
+					window.removeEventListener("pointerup", up, true);
+					if (moved) refreshMaterialTimeline(node, true);
+				};
+				window.addEventListener("pointermove", move, true);
+				window.addEventListener("pointerup", up, true);
+			};
+			line.title = "拖动调整这一段帧数";
+			frameLabel.title = "左右拖动调整帧数";
+			protect(line);
+			protect(frameLabel);
+			line.addEventListener("pointerdown", startFrameDrag);
+			frameLabel.addEventListener("pointerdown", startFrameDrag);
+			segment.append(line, frameLabel);
+			frame.appendChild(segment);
+			const promptBadge = document.createElement("div");
+			promptBadge.className = "gjj-bs-material-prompt-badge";
+			const promptText = String(currentConfig.prompt || "").trim();
+			promptBadge.textContent = promptText || "双击编辑提示词";
+			promptBadge.title = promptText || `双击编辑第 ${index + 1} 段提示词`;
+			promptBadge.addEventListener("dblclick", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				editPrompt();
+			});
+			protect(promptBadge);
+			frame.appendChild(promptBadge);
+		}
+		row.appendChild(frame);
+	}
 }
 
 function updateMediaLinkButton(node) {
@@ -872,6 +1496,16 @@ function setResizeModeControlState(control, usePanelSize) {
 	control.title = usePanelSize ? "当前使用面板宽高输出。" : "当前沿用外接源媒体尺寸输出。";
 }
 
+function setChoiceButtonControlState(control, currentValue) {
+	if (!control) return;
+	const current = String(currentValue ?? "");
+	for (const button of control.querySelectorAll("button[data-choice-value]")) {
+		const active = button.dataset.choiceValue === current;
+		button.classList.toggle("active", active);
+		button.setAttribute("aria-pressed", active ? "true" : "false");
+	}
+}
+
 function makeControl(node, name) {
 	const target = widget(node, name);
 	if (!target) return null;
@@ -894,6 +1528,20 @@ function makeControl(node, name) {
 			control.appendChild(button);
 		}
 		setResizeModeControlState(control, Boolean(target.value));
+	} else if (BUTTON_CHOICE_GROUPS[name]) {
+		control = document.createElement("div");
+		control.dataset.choiceButtonControl = "true";
+		control.classList.add("gjj-bs-segment-control", "gjj-bs-choice-control");
+		for (const [choice, label] of BUTTON_CHOICE_GROUPS[name]) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.dataset.choiceValue = choice;
+			button.textContent = label;
+			button.title = label;
+			bindButton(button, () => setValue(node, name, choice));
+			control.appendChild(button);
+		}
+		setChoiceButtonControlState(control, String(target.value ?? DEFAULT_VALUES[name] ?? ""));
 	} else if (typeof target.value === "boolean") {
 		control = document.createElement("button");
 		control.type = "button";
@@ -1019,14 +1667,15 @@ function ensurePanelStyle() {
 		.gjj-bs-toolbar{display:flex;flex-wrap:wrap;gap:6px;width:100%;align-items:center}.gjj-bs-button{min-height:32px;border-radius:6px;border:1px solid #50616a;color:#e8f0f2;font-weight:700;cursor:pointer;padding:0 10px;white-space:normal;line-height:1.15}
 		.gjj-bs-generate{flex:0 0 auto;min-width:116px;padding:0 12px;background:linear-gradient(135deg,#075a45,#0b9b70);border-color:#24c68b}.gjj-bs-translate,.gjj-bs-seed,.gjj-bs-cache,.gjj-bs-vars,.gjj-bs-settings-button,.gjj-bs-link,.gjj-bs-resize{flex:0 0 38px;padding:0;background:linear-gradient(135deg,#28323a,#3e4b55)}
 		.gjj-bs-vars{border-color:#d6a642;color:#ffe8a3}.gjj-bs-settings-button{border-color:#24c68b}.gjj-bs-button:hover{filter:brightness(1.18);transform:translateY(-1px)}.gjj-bs-button.active{background:linear-gradient(135deg,#164d3c,#287b59);border-color:#61c994}.gjj-bs-button.popup-open{box-shadow:0 0 0 1px #9ed6df inset}
-		.gjj-bs-prompt-field{display:flex;flex-direction:column;gap:4px;color:#b9c8cc}.gjj-bs-prompt-head{display:flex;align-items:center;gap:6px;width:100%;min-width:0}.gjj-bs-prompt-title{flex:0 0 auto;white-space:nowrap}.gjj-bs-prompt{min-height:58px;resize:vertical}
+		.gjj-bs-prompt-field{display:flex;flex-direction:column;gap:4px;color:#b9c8cc}.gjj-bs-prompt-head{display:flex;align-items:center;gap:6px;width:100%;min-width:0}.gjj-bs-prompt-title{flex:0 0 auto;white-space:nowrap}.gjj-bs-quick-tag{flex:0 0 auto;min-height:20px;padding:0 7px;border-radius:5px;border-color:#24c68b;background:#164d3c;color:#eafff7;font-size:11px;font-weight:800}.gjj-bs-quick-tag:hover{background:#1b674f;color:#fff}.gjj-bs-prompt{min-height:58px;resize:vertical}
 		.gjj-bs-mode-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.gjj-bs-mode-button{flex:0 0 auto;min-height:20px;padding:0 7px;border-radius:5px;font-size:11px;background:#18242a;border-color:#3c5058;color:#d7e4e7}
 		.gjj-bs-popover{position:fixed;z-index:100000;display:none;flex-direction:column;gap:9px;padding:9px;border:1px solid #45606a;border-radius:8px;background:#10191e;color:#dce7e9;box-shadow:0 12px 32px rgba(0,0,0,.45);font:12px/1.4 system-ui,'Microsoft YaHei',sans-serif;box-sizing:border-box;overflow:auto}.gjj-bs-popover.open{display:flex}.gjj-bs-pop-head{position:sticky;top:-9px;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px;margin:-9px -9px 0;padding:8px 9px 6px;border-bottom:1px solid #263842;background:#10191e}.gjj-bs-pop-title{font-weight:800;color:#d8f5f3}.gjj-bs-confirm{flex:0 0 auto;min-height:24px;padding:0 10px;background:#1d3d34;border-color:#24c68b}
 		.gjj-bs-heading{font-weight:800;color:#9ed6df;margin-bottom:5px}.gjj-bs-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}.gjj-bs-field{display:flex;align-items:center;gap:8px;min-width:0}.gjj-bs-field.wide{align-items:flex-start;flex-direction:column}.gjj-bs-field>span{flex:0 0 92px;color:#aebbc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 		.gjj-bs-control{flex:1;min-width:0;width:100%;border:1px solid #40515a;border-radius:5px;background:#0e1519;color:#eaf2f3;padding:5px 7px}.gjj-bs-control:is(textarea){min-height:64px;resize:vertical}
 		select.gjj-bs-control{border-color:#3c7f91;background:#122932;color:#f0fbff;font-weight:650;box-shadow:0 0 0 1px rgba(77,171,193,.18) inset;cursor:pointer}select.gjj-bs-control:hover{border-color:#62b9cb;background:#15323d}select.gjj-bs-control:focus{outline:none;border-color:#8bd8e8;box-shadow:0 0 0 1px rgba(139,216,232,.6),0 0 0 3px rgba(35,130,154,.28)}select.gjj-bs-control option{background:#102229;color:#f0fbff}
-		.gjj-bs-segment-control{display:flex;align-items:center;gap:6px;padding:0;border:0;background:transparent}.gjj-bs-segment-control>button{flex:1 1 0;min-width:0;min-height:32px;border:1px solid #40515a;border-radius:6px;background:#152026;color:#b9c8cc;font-weight:750;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.gjj-bs-segment-control>button.active{border-color:#24c68b;background:#164d3c;color:#eafff7}.gjj-bs-segment-control>button:disabled{cursor:not-allowed;opacity:.52}
+		.gjj-bs-segment-control{display:flex;align-items:center;gap:6px;padding:0;border:0;background:transparent}.gjj-bs-segment-control>button{flex:1 1 0;min-width:0;min-height:32px;border:1px solid #40515a;border-radius:6px;background:#152026;color:#b9c8cc;font-weight:750;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.gjj-bs-choice-control>button{flex:0 1 auto;min-width:44px;padding:0 10px}.gjj-bs-segment-control>button.active{border-color:#24c68b;background:#164d3c;color:#eafff7}.gjj-bs-segment-control>button:disabled{cursor:not-allowed;opacity:.52}
 		.gjj-bs-boolean-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}.gjj-bs-boolean-row>.gjj-bs-control{flex:1 1 0;min-width:0;width:auto;min-height:28px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#152026;color:#b9c8cc}.gjj-bs-boolean-row>.gjj-bs-control.active{border-color:#24c68b;background:#164d3c;color:#eafff7}
+		.gjj-bs-material-timeline{display:flex;flex-direction:column;gap:6px;width:100%;padding:8px 10px;border:1px solid #3c515a;border-radius:6px;background:#0d151a;pointer-events:auto}.gjj-bs-material-head{display:flex;align-items:center;justify-content:space-between;color:#dce7e2;font-size:14px;line-height:18px}.gjj-bs-material-hint{color:#8fa4ac;font-size:13px}.gjj-bs-material-strip{position:relative;height:154px;overflow-x:auto;overflow-y:hidden;border:1px solid #253841;border-radius:4px;background:#05090c;scrollbar-gutter:stable}.gjj-bs-material-row{position:relative;display:inline-flex;align-items:stretch;min-width:max-content;height:132px;padding:3px 3px 19px 3px}.gjj-bs-material-frame{position:relative;width:168px;height:132px;flex:0 0 168px;border:1px solid #283d46;background:#071015;display:flex;align-items:center;justify-content:center;overflow:visible}.gjj-bs-material-frame:first-child{border-radius:3px 0 0 3px}.gjj-bs-material-frame:last-child{border-radius:0 3px 3px 0}.gjj-bs-material-frame.dragging{opacity:.55}.gjj-bs-material-frame.drop-target{outline:2px solid #7ed6a7;outline-offset:-2px}.gjj-bs-material-frame>img{display:block;width:100%;height:100%;object-fit:cover;background:#05090c}.gjj-bs-material-badge{position:absolute;right:7px;top:7px;width:20px;height:20px;border-radius:5px;border:1px solid rgba(255,255,255,.42);background:#4c8eea;color:#fff;font-size:14px;line-height:18px;text-align:center;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:4}.gjj-bs-material-splitter{position:absolute;top:0;bottom:0;right:0;width:62px;transform:translateX(31px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:5;pointer-events:none}.gjj-bs-material-line{position:absolute;top:0;bottom:0;left:50%;width:4px;transform:translateX(-2px);background:rgba(126,214,167,.9);box-shadow:0 0 8px rgba(126,214,167,.75);cursor:ew-resize;pointer-events:auto}.gjj-bs-material-frame-label{position:relative;z-index:6;padding:2px 6px;border-radius:999px;background:rgba(5,9,12,.78);color:#dce7e2;font-size:12px;line-height:16px;box-shadow:0 1px 5px rgba(0,0,0,.45);user-select:none;cursor:ew-resize;pointer-events:auto}.gjj-bs-material-prompt-badge{position:absolute;left:0;right:0;bottom:0;padding:4px 8px;box-sizing:border-box;background:rgba(5,9,12,.45);color:#aebfc3;font-size:14px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;pointer-events:auto;z-index:3}.gjj-bs-material-prompt-badge:hover{color:#f3fff9;background:rgba(5,9,12,.62)}.gjj-bs-material-editor{position:fixed;z-index:100002;display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid #45606a;border-radius:8px;background:#10191e;color:#dce7e9;box-shadow:0 12px 32px rgba(0,0,0,.45);font:12px/1.4 system-ui,'Microsoft YaHei',sans-serif;box-sizing:border-box}.gjj-bs-material-editor-title{font-weight:800;color:#d8f5f3}.gjj-bs-material-editor textarea{width:100%;height:88px;box-sizing:border-box;border:1px solid #42606c;border-radius:7px;background:#071015;color:#e7f3f3;font-size:13px;line-height:1.45;padding:7px;resize:vertical}.gjj-bs-material-editor-buttons{display:flex;justify-content:flex-end;gap:6px}.gjj-bs-material-editor button{min-height:24px;padding:0 10px;border:1px solid #45606a;border-radius:6px;background:#15242b;color:#dce7e9;cursor:pointer}.gjj-bs-material-editor button:hover{border-color:#24c68b;color:#fff}.gjj-bs-material-empty{color:#8fa4ac;font-size:12px;padding:56px 10px}
 		.gjj-bs-preview-wrap{display:flex;flex-direction:column;gap:5px;width:100%}.gjj-bs-preview-status{color:#92a7ad;font-size:11px}.gjj-bs-preview{display:none;width:100%;height:auto;object-fit:contain;border:1px solid #334850;border-radius:8px;background:#0b1114}
 	`;
 	(document.head || document.body || document.documentElement).appendChild(style);
@@ -1143,13 +1792,19 @@ function createPanel(node) {
 	const modeButtons = document.createElement("div");
 	modeButtons.className = "gjj-bs-mode-row";
 	protect(modeButtons);
-	promptHead.append(promptLabel, modeButtons);
+	const removeSubtitle = makeButton("去字幕", "写入去字幕提示词", "gjj-bs-quick-tag", () => {
+		setValue(node, "prompt", REMOVE_SUBTITLE_PROMPT);
+		prompt.value = REMOVE_SUBTITLE_PROMPT;
+	});
+	removeSubtitle.style.display = "none";
+	promptHead.append(promptLabel, modeButtons, removeSubtitle);
 	promptField.append(promptHead, prompt);
+	const materialTimeline = createMaterialTimeline(node);
 	const settingsState = buildSettings(node, SETTINGS_GROUPS, "生成参数", "settings");
 	const modelSettingsState = buildSettings(node, MODEL_SETTINGS_GROUPS, "模型参数", "model");
 	const sizeSettingsState = buildSettings(node, SIZE_SETTINGS_GROUPS, "尺寸参数", "size");
 	const controls = new Map([...settingsState.controls, ...modelSettingsState.controls, ...sizeSettingsState.controls]);
-	root.append(toolbar, promptField);
+	root.append(toolbar, promptField, materialTimeline.root);
 	(document.body || document.documentElement).append(settingsState.settings, modelSettingsState.settings, sizeSettingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
 	domWidget.computeSize = (width) => [Math.max(430, Number(width || 430)), Math.max(38, root.scrollHeight + 4)];
@@ -1166,6 +1821,8 @@ function createPanel(node) {
 		settingsButton,
 		prompt,
 		modeButtons,
+		removeSubtitle,
+		materialTimeline,
 		settings: settingsState.settings,
 		modelSettings: modelSettingsState.settings,
 		sizeSettings: sizeSettingsState.settings,
@@ -1232,10 +1889,12 @@ function syncPanel(node) {
 	}
 	updateGenerateButton(node);
 	updateModeButtons(node);
+	updateRemoveSubtitleButton(node);
 	updateKeepModelButton(node);
 	updateRandomizeSeedButton(node);
 	updateResizeButton(node);
 	updateMediaLinkButton(node);
+	refreshMaterialTimeline(node);
 	const popup = activePopup(node);
 	state.settings.classList.toggle("open", popup === "settings");
 	state.modelSettings?.classList.toggle("open", popup === "model");
@@ -1258,6 +1917,8 @@ function syncPanel(node) {
 		const focused = document.activeElement === control;
 		if (control.dataset?.resizeModeControl === "true") {
 			setResizeModeControlState(control, Boolean(current));
+		} else if (control.dataset?.choiceButtonControl === "true") {
+			setChoiceButtonControlState(control, String(current ?? ""));
 		} else if (control.dataset?.booleanControl === "true") {
 			setBooleanButtonState(control, Boolean(current));
 		} else if (!focused) {
@@ -1270,6 +1931,9 @@ function syncPanel(node) {
 		control.disabled = controlled;
 		if (control.dataset?.resizeModeControl === "true") {
 			for (const button of control.querySelectorAll("button[data-resize-mode]")) button.disabled = controlled;
+		}
+		if (control.dataset?.choiceButtonControl === "true") {
+			for (const button of control.querySelectorAll("button[data-choice-value]")) button.disabled = controlled;
 		}
 		control.style.opacity = controlled ? "0.52" : "";
 		control.title = templateControlled

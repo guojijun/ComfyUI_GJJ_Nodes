@@ -334,15 +334,18 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		return ["1", "true", "yes", "on", "enable", "enabled", "开", "是", "真"].includes(text);
 	}
 
-	function compactOptionalNoticeForNode(node, data, options = {}) {
-		if (nodeKey(node) !== "GJJ_ModelPatchBundle" || options?.detailed) return null;
+	function compactOptionalNoticeForNode(node, data, _options = {}) {
+		if (String(data?.notice_level || "") !== "optional") return null;
 		const sageEnabled = truthyWidgetValue(widgetValue(node, ["启用SageAttention", "enable_sage_attention"]));
-		if (sageEnabled) return null;
 		const warning = String(data?.warning_message || "");
 		const panel = String(data?.panel_message || "");
 		if (!warning && !panel) return null;
+		const text = `${warning}\n${panel}`.toLowerCase();
+		const isSageNotice = text.includes("sageattention") || text.includes("sagetrt");
 		return {
-			warning_message: "⚠️ 可选依赖缺失，基础功能可用；启用 SageAttention 时再按需安装。",
+			warning_message: isSageNotice && !sageEnabled
+				? "⚠️ 可选依赖缺失，基础功能可用；开启 SageAttention 时再安装。"
+				: "⚠️ 可选依赖缺失，基础功能可用；需要相关增强功能时再安装。",
 			panel_message: "",
 			copy_text: "",
 			copy_label: "",
