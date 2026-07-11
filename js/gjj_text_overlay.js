@@ -45,6 +45,10 @@ const HIDDEN_WIDGETS = new Set([
 	"watermark_objects_json",
 	"background_image_ref_json",
 	"fusion_unet_name",
+	"fusion_clip_name",
+	"fusion_vae_name",
+	"fusion_lightning_lora_name",
+	"fusion_scene_lora_name",
 	"has_watermark_input",
 ]);
 const TEXT_WIDGETS = [
@@ -76,6 +80,10 @@ const WATERMARK_WIDGETS = [
 	"watermark_objects_json",
 	"background_image_ref_json",
 	"fusion_unet_name",
+	"fusion_clip_name",
+	"fusion_vae_name",
+	"fusion_lightning_lora_name",
+	"fusion_scene_lora_name",
 ];
 const PERSISTED_WIDGETS = new Set([
 	"font_size",
@@ -86,6 +94,11 @@ const PERSISTED_WIDGETS = new Set([
 	"watermark_width",
 	"watermark_upload_name",
 	"logo_default_url",
+	"fusion_unet_name",
+	"fusion_clip_name",
+	"fusion_vae_name",
+	"fusion_lightning_lora_name",
+	"fusion_scene_lora_name",
 ]);
 const SIZE_PROPERTIES = {
 	bgWidth: "gjj_text_overlay_bg_width",
@@ -97,10 +110,59 @@ const RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview";
 const FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url";
 const WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image";
 const FUSION_UNET_MODELS_API = "/gjj/text_overlay/fusion_unets";
+const FUSION_MODELS_API = "/gjj/text_overlay/fusion_models";
 const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const DEFAULT_LOGO_URL = "https://mintcdn.com/dripart/QzWbjSCBG7w61rR3/logo/dark.svg";
 const DEFAULT_FUSION_UNET = "qwen_image_edit_2511_fp8mixed.safetensors";
-const FUSION_UNET_FILTER = "2511";
+const FUSION_UNET_FILTERS = ["2511", "firered"];
+const TEXT_OVERLAY_MODEL_ITEMS = [
+	{
+		label: "RMBG1.4 模型",
+		folder: "models/RMBG",
+		filename: "rmbg1.4.safetensors",
+		when: "开启 RMBG1.4 抠图时使用",
+	},
+	{
+		label: "Qwen Image Edit 2511 主模型",
+		folder: "models/diffusion_models",
+		filename: DEFAULT_FUSION_UNET,
+		widget: "fusion_unet_name",
+		defaultValue: DEFAULT_FUSION_UNET,
+		when: "连接【融合后图像】输出时使用",
+	},
+	{
+		label: "Qwen Image CLIP",
+		folder: "models/text_encoders",
+		filename: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+		widget: "fusion_clip_name",
+		defaultValue: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+		when: "融合后图像编码使用",
+	},
+	{
+		label: "Qwen Image VAE",
+		folder: "models/vae",
+		filename: "qwen_image_vae.safetensors",
+		widget: "fusion_vae_name",
+		defaultValue: "qwen_image_vae.safetensors",
+		when: "融合后图像解码使用",
+	},
+	{
+		label: "Qwen 2511 Lightning LoRA",
+		folder: "models/loras",
+		filename: "QWEN\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		widget: "fusion_lightning_lora_name",
+		defaultValue: "QWEN\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		when: "融合输出默认 4 步加速",
+	},
+	{
+		label: "人景融合 LoRA",
+		folder: "models/loras",
+		filename: "QWEN\\edit_2511人景融合20.safetensors",
+		widget: "fusion_scene_lora_name",
+		defaultValue: "QWEN\\edit_2511人景融合20.safetensors",
+		when: "融合输出默认风格 LoRA",
+	},
+];
 const ZOOM_IN_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.3 959.1H208.9c-79.7 0-144.4-64.6-144.4-144.4V208.3c0-79.7 64.6-144.4 144.4-144.4h606.5c79.7 0 144.4 64.6 144.4 144.4v606.5c-0.1 79.7-64.7 144.3-144.5 144.3zM266.6 540.4c0-23.9-19.4-43.3-43.3-43.3S180 516.5 180 540.4v259.9c0 23.9 19.4 43.3 43.3 43.3h259.9c23.9 0 43.3-19.4 43.3-43.3S507.1 757 483.2 757H266.6V540.4z m577.6-317.7c0-23.9-19.4-43.3-43.3-43.3H541c-23.9 0-43.3 19.4-43.3 43.3S517.1 266 541 266h216.6v216.6c0 23.9 19.4 43.3 43.3 43.3s43.3-19.4 43.3-43.3V222.7z" fill="#1296db"></path></svg>`;
 const ZOOM_OUT_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.5 63.9H208.7c-79.8 0-144.5 64.7-144.5 144.5V815c0 79.8 64.7 144.5 144.5 144.5h606.7c79.8 0 144.5-64.7 144.5-144.5V208.3c0-79.8-64.7-144.4-144.4-144.4z m-289 736.7c0 23.9-19.4 43.3-43.3 43.3s-43.3-19.4-43.3-43.3V583.9H223.2c-23.9 0-43.3-19.4-43.3-43.3s19.4-43.3 43.3-43.3h260c23.9 0 43.3 19.4 43.3 43.3v260z m303.4-303.4h-260c-23.9 0-43.3-19.4-43.3-43.3v-260c0-23.9 19.4-43.3 43.3-43.3s43.3 19.4 43.3 43.3v216.7h216.7c23.9 0 43.3 19.4 43.3 43.3s-19.4 43.3-43.3 43.3z" fill="#1296db"></path></svg>`;
 function widget(node, name) {
@@ -933,10 +995,39 @@ async function loadFusionUnetOptions(node) {
 			current,
 			...(Array.isArray(data?.models) ? data.models : []),
 			DEFAULT_FUSION_UNET,
-		].filter((name) => name === current || String(name).toLowerCase().includes(FUSION_UNET_FILTER)));
+		].filter((name) => name === current || FUSION_UNET_FILTERS.some((keyword) => String(name).toLowerCase().includes(keyword))));
 	} catch (error) {
 		console.warn("[GJJ_TextOverlay] 融合 UNET 列表加载失败", error);
 		return fusionUnetInitialOptions(node);
+	}
+}
+
+async function loadFusionModelOptions(node) {
+	const fallback = {};
+	for (const item of TEXT_OVERLAY_MODEL_ITEMS) {
+		if (!item.widget) continue;
+		const current = stringValue(node, item.widget, item.defaultValue || item.filename);
+		fallback[item.widget] = dedupe([current, item.defaultValue, item.filename].filter(Boolean));
+	}
+	try {
+		const response = await api.fetchApi(FUSION_MODELS_API);
+		const data = await response.json();
+		const models = data?.models && typeof data.models === "object" ? data.models : {};
+		const result = { ...fallback };
+		for (const item of TEXT_OVERLAY_MODEL_ITEMS) {
+			if (!item.widget) continue;
+			const current = stringValue(node, item.widget, item.defaultValue || item.filename);
+			result[item.widget] = dedupe([
+				current,
+				...(Array.isArray(models[item.widget]) ? models[item.widget] : []),
+				item.defaultValue,
+				item.filename,
+			].filter(Boolean));
+		}
+		return result;
+	} catch (error) {
+		console.warn("[GJJ_TextOverlay] 融合模型列表加载失败", error);
+		return fallback;
 	}
 }
 
@@ -951,6 +1042,136 @@ function updateSelectOptions(select, values, current) {
 		select.appendChild(opt);
 	}
 	select.value = previous;
+}
+
+function closeTextOverlayFloatingPanel(node) {
+	const panel = node?.__gjjTextOverlayFloatingPanel;
+	if (!panel) return;
+	if (typeof panel.__gjjTextOverlayClose === "function") panel.__gjjTextOverlayClose();
+	else panel.remove?.();
+	if (node.__gjjTextOverlayFloatingPanel === panel) node.__gjjTextOverlayFloatingPanel = null;
+}
+
+function showTextOverlayFloatingPanel(node, anchor, title, build, options = {}) {
+	closeTextOverlayFloatingPanel(node);
+	const panel = document.createElement("div");
+	panel.className = "gjj-text-overlay-floating";
+	const panelWidth = options.width || 330;
+	panel.style.width = `${panelWidth}px`;
+	const previousButton = node.__gjjTextOverlayFloatingButton;
+	if (previousButton && previousButton !== anchor) previousButton.dataset.active = "false";
+	if (anchor) anchor.dataset.active = "true";
+	node.__gjjTextOverlayFloatingButton = anchor || null;
+
+	const closePanel = () => closeTextOverlayFloatingPanel(node);
+	const outsidePointerDown = (event) => {
+		if (panel.contains(event.target) || anchor?.contains?.(event.target)) return;
+		closePanel();
+	};
+	const onKeyDown = (event) => {
+		if (event.key === "Escape") closePanel();
+	};
+	panel.__gjjTextOverlayClose = () => {
+		document.removeEventListener("pointerdown", outsidePointerDown, true);
+		document.removeEventListener("keydown", onKeyDown, true);
+		if (anchor) anchor.dataset.active = "false";
+		if (node.__gjjTextOverlayFloatingButton === anchor) node.__gjjTextOverlayFloatingButton = null;
+		options.onClose?.();
+		panel.remove?.();
+		if (node.__gjjTextOverlayFloatingPanel === panel) node.__gjjTextOverlayFloatingPanel = null;
+	};
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
+		panel.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+
+	const head = document.createElement("div");
+	head.className = "gjj-text-overlay-floating-head";
+	const headTitle = document.createElement("span");
+	headTitle.textContent = title;
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "×";
+	close.title = "关闭";
+	close.className = "gjj-text-overlay-floating-close";
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closePanel();
+	});
+	head.append(headTitle, close);
+
+	const body = document.createElement("div");
+	body.className = "gjj-text-overlay-floating-body";
+	panel.append(head, body);
+	build(body);
+	document.body.appendChild(panel);
+	node.__gjjTextOverlayFloatingPanel = panel;
+
+	const rect = anchor?.getBoundingClientRect?.() || { left: 20, bottom: 20 };
+	const maxLeft = Math.max(10, window.innerWidth - panelWidth - 10);
+	panel.style.left = `${Math.max(10, Math.min(maxLeft, Number(rect.left || 20)))}px`;
+	panel.style.top = `${Math.min(window.innerHeight - 80, Math.max(10, Number(rect.bottom || 20) + 6))}px`;
+	setTimeout(() => {
+		document.addEventListener("pointerdown", outsidePointerDown, true);
+		document.addEventListener("keydown", onKeyDown, true);
+	}, 0);
+}
+
+function appendModelInfo(body, node) {
+	const selects = [];
+
+	for (const item of TEXT_OVERLAY_MODEL_ITEMS) {
+		const card = document.createElement("div");
+		card.className = "gjj-text-overlay-model-card";
+		const title = document.createElement("div");
+		title.className = "gjj-text-overlay-model-title";
+		title.textContent = item.label;
+		card.appendChild(title);
+		if (item.widget) {
+			const current = stringValue(node, item.widget, item.defaultValue || item.filename) || item.defaultValue || item.filename;
+			if (!stringValue(node, item.widget, "")) {
+				setWidgetValue(node, item.widget, current);
+			}
+			const select = document.createElement("select");
+			select.className = "gjj-text-overlay-select";
+			updateSelectOptions(select, [current, item.defaultValue, item.filename], current);
+			select.addEventListener("change", () => {
+				setWidgetValue(node, item.widget, select.value);
+			});
+			card.appendChild(select);
+			selects.push({ select, item });
+		} else {
+			const select = document.createElement("select");
+			select.className = "gjj-text-overlay-select";
+			select.disabled = true;
+			const opt = document.createElement("option");
+			opt.value = item.filename;
+			opt.textContent = item.filename;
+			select.appendChild(opt);
+			card.appendChild(select);
+		}
+		const note = document.createElement("div");
+		note.className = "gjj-text-overlay-model-note";
+		note.textContent = item.when;
+		card.appendChild(note);
+		body.appendChild(card);
+	}
+
+	loadFusionModelOptions(node).then((models) => {
+		for (const { select, item } of selects) {
+			const values = models[item.widget] || [item.defaultValue || item.filename];
+			let selected = stringValue(node, item.widget, item.defaultValue || item.filename) || item.defaultValue || item.filename;
+			if (values.length > 1 && selected === (item.defaultValue || item.filename) && values[0] !== selected) {
+				selected = values[0];
+				setWidgetValue(node, item.widget, selected);
+			}
+			updateSelectOptions(
+				select,
+				values,
+				selected,
+			);
+		}
+	});
 }
 
 function setWidgetValue(node, name, value) {
@@ -1351,6 +1572,10 @@ function installStyles() {
 		.gjj-text-overlay-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-width:0;overflow:visible;}
 		.gjj-text-overlay-settings{display:none;flex-wrap:wrap;align-items:flex-start;gap:5px;min-width:0;}
 		.gjj-text-overlay-settings[data-open="true"]{display:flex;}
+		.gjj-text-overlay-settings[data-floating="true"]{display:flex;flex-direction:column;flex-wrap:nowrap;gap:7px;width:100%;}
+		.gjj-text-overlay-settings[data-floating="true"] .gjj-text-overlay-section,
+		.gjj-text-overlay-settings[data-floating="true"] .gjj-text-overlay-wide,
+		.gjj-text-overlay-settings[data-floating="true"] .gjj-text-overlay-check{width:100%;min-width:0;}
 		.gjj-text-overlay-icon-button{width:26px;height:24px;min-width:26px;border:1px solid #3c5058;border-radius:6px;background:#17252b;color:#f3fbfb;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
 		.gjj-text-overlay-icon-button svg{width:16px;height:16px;display:block;pointer-events:none;}
 		.gjj-text-overlay-icon-button:hover{background:#213942;border-color:#63838d;}
@@ -1406,6 +1631,17 @@ function installStyles() {
 		.gjj-text-overlay-segmented{height:27px;display:grid;grid-template-columns:1fr 1fr;gap:4px;}
 		.gjj-text-overlay-segmented button{border:1px solid #3c5058;border-radius:7px;background:#182329;color:#c7d5d9;font-size:12px;font-weight:700;cursor:pointer;}
 		.gjj-text-overlay-segmented button[data-active="true"]{background:#244850;border-color:#82b9c5;color:#fff;}
+		.gjj-text-overlay-floating{position:fixed;z-index:100000;max-width:calc(100vw - 20px);max-height:calc(100vh - 36px);padding:8px;box-sizing:border-box;border:1px solid #49616b;border-radius:8px;background:#10181d;box-shadow:0 14px 34px rgba(0,0,0,.45);color:#e4eef0;font:12px/1.35 system-ui,"Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;}
+		.gjj-text-overlay-floating-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;color:#f3faf8;font-weight:800;}
+		.gjj-text-overlay-floating-close{width:22px;height:22px;border:1px solid #40535b;border-radius:6px;background:#172228;color:#dce7e2;cursor:pointer;padding:0;line-height:18px;}
+		.gjj-text-overlay-floating-close:hover{background:#223039;}
+		.gjj-text-overlay-floating-body{display:flex;flex-direction:column;gap:7px;min-width:0;max-height:calc(100vh - 92px);overflow:auto;padding-right:2px;}
+		.gjj-text-overlay-model-select-wrap{display:flex;flex-direction:column;gap:4px;width:100%;min-width:0;padding:6px;border:1px solid #31474f;border-radius:7px;background:#0f171b;box-sizing:border-box;}
+		.gjj-text-overlay-model-label{color:#9fb0b7;font-size:11px;font-weight:700;}
+		.gjj-text-overlay-model-card{display:flex;flex-direction:column;gap:3px;padding:7px;border:1px solid #2d4148;border-radius:7px;background:#0f171b;min-width:0;}
+		.gjj-text-overlay-model-title{font-weight:800;color:#edf7f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+		.gjj-text-overlay-model-path{color:#cfe0e2;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.35;overflow-wrap:anywhere;}
+		.gjj-text-overlay-model-note{color:#8fa2a8;font-size:11px;}
 	`;
 	document.head.appendChild(style);
 }
@@ -1590,8 +1826,8 @@ function makePanel(node) {
 
 	const settings = document.createElement("div");
 	settings.className = "gjj-text-overlay-settings";
-	settings.dataset.open = node.properties?.gjj_text_overlay_settings_open ? "true" : "false";
-	root.append(toolbar, settings, preview);
+	settings.dataset.open = "false";
+	root.append(toolbar, preview);
 
 	for (const el of [root, toolbar, settings, preview, stage]) {
 		for (const name of ["pointerdown", "mousedown", "wheel"]) {
@@ -1898,16 +2134,40 @@ function makePanel(node) {
 		showPanelStatus(node, next ? "全局前景描边已开启" : "全局前景描边已关闭", 1200);
 		renderPanel(node);
 	});
+	addIconButton("🧠", "用到的模型与融合 UNET 列表", (button) => {
+		if (node.__gjjTextOverlayFloatingButton === button && node.__gjjTextOverlayFloatingPanel) {
+			closeTextOverlayFloatingPanel(node);
+			return;
+		}
+		showTextOverlayFloatingPanel(node, button, "用到的模型", (body) => {
+			appendModelInfo(body, node);
+		}, { width: 420 });
+	});
 	const settingsButton = addIconButton("⚙️", "其它设置", (button) => {
-		const open = settings.dataset.open !== "true";
-		settings.dataset.open = open ? "true" : "false";
-		button.dataset.active = open ? "true" : "false";
+		if (node.__gjjTextOverlayFloatingButton === button && node.__gjjTextOverlayFloatingPanel) {
+			closeTextOverlayFloatingPanel(node);
+			return;
+		}
+		showTextOverlayFloatingPanel(node, button, "前景参数", (body) => {
+			settings.dataset.open = "true";
+			settings.dataset.floating = "true";
+			body.appendChild(settings);
+		}, {
+			width: 330,
+			onClose: () => {
+				settings.dataset.open = "false";
+				settings.dataset.floating = "false";
+				node.properties ||= {};
+				node.properties.gjj_text_overlay_settings_open = false;
+				updatePanelHeight(node);
+			},
+		});
 		node.properties ||= {};
-		node.properties.gjj_text_overlay_settings_open = open;
+		node.properties.gjj_text_overlay_settings_open = true;
 		setStageAspect(node, node.__gjjTextOverlayBgSize?.width || 16, node.__gjjTextOverlayBgSize?.height || 9);
 		updatePanelHeight(node);
 	});
-	settingsButton.dataset.active = settings.dataset.open === "true" ? "true" : "false";
+	settingsButton.dataset.active = "false";
 	toolbar.appendChild(objectPicker);
 
 	control(node, settings, "文本", "texts", "text", { wide: true });
@@ -1927,10 +2187,6 @@ function makePanel(node) {
 	control(node, settings, "前景阴影颜色", "logo_shadow_color_hex", "color");
 	control(node, settings, "前景描边宽度", "logo_stroke_width", "number", { min: 0, step: 1 });
 	control(node, settings, "前景描边颜色", "logo_stroke_color_hex", "color");
-	const fusionUnetSelect = control(node, settings, "融合UNET", "fusion_unet_name", "select", { values: fusionUnetInitialOptions(node), wide: true });
-	loadFusionUnetOptions(node).then((values) => {
-		updateSelectOptions(fusionUnetSelect, values, stringValue(node, "fusion_unet_name", DEFAULT_FUSION_UNET));
-	});
 
 	fileInput.addEventListener("change", async () => {
 		const file = fileInput.files?.[0];

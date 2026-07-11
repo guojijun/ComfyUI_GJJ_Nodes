@@ -55,6 +55,7 @@ FUSION_CLIP_NAME = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 FUSION_VAE_NAME = "qwen_image_vae.safetensors"
 FUSION_LIGHTNING_LORA = "QWEN\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 FUSION_SCENE_LORA = "QWEN\\edit_2511人景融合20.safetensors"
+FUSION_MODELS_API = "/gjj/text_overlay/fusion_models"
 FUSION_MODEL_TREE = [
     make_model_tree_item(
         label="Qwen Image Edit 2511 主模型",
@@ -387,12 +388,45 @@ def _register_text_overlay_api():
     async def fusion_unet_models(_request):
         try:
             names = [str(item) for item in (folder_paths.get_filename_list("diffusion_models") or [])]
-            filtered = [name for name in names if "2511" in name.lower()]
+            filtered = [name for name in names if ("2511" in name.lower() or "firered" in name.lower())]
             if FUSION_UNET_NAME not in filtered:
                 filtered.insert(0, FUSION_UNET_NAME)
             return web.json_response({"ok": True, "models": filtered})
         except Exception as exc:
             return web.json_response({"ok": False, "models": [FUSION_UNET_NAME], "error": str(exc)}, status=500)
+
+    @routes.get(FUSION_MODELS_API)
+    async def fusion_models(_request):
+        def choices(folder_name, default_name, keywords=()):
+            try:
+                names = [str(item) for item in (folder_paths.get_filename_list(folder_name) or [])]
+            except Exception:
+                names = []
+            lowered_keywords = tuple(str(item).lower() for item in keywords if str(item).strip())
+            if lowered_keywords:
+                filtered = [name for name in names if any(keyword in name.lower() for keyword in lowered_keywords)]
+            else:
+                filtered = names
+            result = []
+            ordered = [default_name, *filtered] if default_name in names else [*filtered, default_name]
+            for name in ordered:
+                if name and name not in result:
+                    result.append(name)
+            return result or [default_name]
+
+        try:
+            return web.json_response({
+                "ok": True,
+                "models": {
+                    "fusion_unet_name": choices("diffusion_models", FUSION_UNET_NAME, ("2511", "firered")),
+                    "fusion_clip_name": choices("text_encoders", FUSION_CLIP_NAME, ("qwen", "vl")),
+                    "fusion_vae_name": choices("vae", FUSION_VAE_NAME, ("qwen", "vae")),
+                    "fusion_lightning_lora_name": choices("loras", FUSION_LIGHTNING_LORA, ("2511", "lightning", "qwen")),
+                    "fusion_scene_lora_name": choices("loras", FUSION_SCENE_LORA, ("2511", "人景", "fusion", "qwen", "edit")),
+                },
+            })
+        except Exception as exc:
+            return web.json_response({"ok": False, "models": {}, "error": str(exc)}, status=500)
 
     @routes.post(RMBG14_PREVIEW_API)
     async def rmbg14_preview(request):
@@ -665,46 +699,96 @@ def output_is_connected(extra_pnginfo, unique_id, output_index, prompt_graph=Non
     return False
 
 
-def pick_available_model_name(folder_name, preferred_name):
+def pick_available_by_keywords(available, keyword_groups):
+    names = [str(item or "").strip() for item in (available or []) if str(item or "").strip()]
+    for group in keyword_groups or ():
+        keywords = tuple(str(item).lower() for item in group if str(item).strip())
+        if not keywords:
+            continue
+        for name in names:
+            lowered = name.replace("\\", "/").lower()
+            if all(keyword in lowered for keyword in keywords):
+                return name
+    return ""
+
+
+def pick_available_model_name(folder_name, preferred_name, keyword_groups=()):
     try:
         available = folder_paths.get_filename_list(folder_name)
     except Exception:
         available = []
     if not available:
         return preferred_name
-    return gjjutils_model_family_pick_model_name(preferred_name, available, preferred_name)
+    picked = gjjutils_model_family_pick_model_name(preferred_name, available, preferred_name)
+    if str(picked or "").strip():
+        return picked
+    return pick_available_by_keywords(available, keyword_groups) or preferred_name
 
 
-def pick_available_lora_name(preferred_name):
+def pick_available_lora_name(preferred_name, keyword_groups=()):
     try:
         available = folder_paths.get_filename_list("loras")
     except Exception:
         available = []
     if not available:
         return preferred_name
-    return gjjutils_model_family_pick_lora_name(preferred_name, available, preferred_name) or preferred_name
+    picked = gjjutils_model_family_pick_lora_name(preferred_name, available, preferred_name)
+    if str(picked or "").strip():
+        return picked
+    return pick_available_by_keywords(available, keyword_groups) or preferred_name
 
 
-def build_fusion_lora_data():
+def normalize_fusion_model_name(value, default_name):
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    text = str(value or "").strip()
+    if not text or text in {"[未填写]", "None", "none", "null", "NULL", "[]"}:
+        return default_name
+    return text
+
+
+def build_fusion_lora_data(fusion_lightning_lora_name="", fusion_scene_lora_name=""):
+    fusion_lightning_lora_name = normalize_fusion_model_name(fusion_lightning_lora_name, FUSION_LIGHTNING_LORA)
+    fusion_scene_lora_name = normalize_fusion_model_name(fusion_scene_lora_name, FUSION_SCENE_LORA)
     return json.dumps(
         [
-            {"enabled": True, "name": pick_available_lora_name(FUSION_LIGHTNING_LORA), "strength": 1.0},
-            {"enabled": True, "name": pick_available_lora_name(FUSION_SCENE_LORA), "strength": 1.0},
+            {"enabled": True, "name": pick_available_lora_name(fusion_lightning_lora_name, (("2511", "lightning"), ("qwen", "lightning"))), "strength": 1.0},
+            {"enabled": True, "name": pick_available_lora_name(fusion_scene_lora_name, (("2511", "人景"), ("qwen", "edit"), ("fusion",))), "strength": 1.0},
         ],
         ensure_ascii=False,
     )
 
 
-def generate_qwen2511_scene_fusion(composite_outputs, seed=0, fusion_unet_name="", unique_id=None, prompt_graph=None, extra_pnginfo=None):
+def generate_qwen2511_scene_fusion(
+    composite_outputs,
+    seed=0,
+    fusion_unet_name="",
+    fusion_clip_name="",
+    fusion_vae_name="",
+    fusion_lightning_lora_name="",
+    fusion_scene_lora_name="",
+    unique_id=None,
+    prompt_graph=None,
+    extra_pnginfo=None,
+):
     from .gjj_lazy_image_studio import GJJ_LazyImageStudio
 
     if not composite_outputs:
         return composite_outputs
     studio = GJJ_LazyImageStudio()
-    unet_name = pick_available_model_name("diffusion_models", str(fusion_unet_name or FUSION_UNET_NAME))
-    clip_name = pick_available_model_name("text_encoders", FUSION_CLIP_NAME)
-    vae_name = pick_available_model_name("vae", FUSION_VAE_NAME)
-    lora_data = build_fusion_lora_data()
+    fusion_unet_name = normalize_fusion_model_name(fusion_unet_name, FUSION_UNET_NAME)
+    fusion_clip_name = normalize_fusion_model_name(fusion_clip_name, FUSION_CLIP_NAME)
+    fusion_vae_name = normalize_fusion_model_name(fusion_vae_name, FUSION_VAE_NAME)
+    unet_name = pick_available_model_name("diffusion_models", fusion_unet_name, (("2511",), ("firered",)))
+    clip_name = pick_available_model_name("text_encoders", fusion_clip_name, (("qwen", "vl"), ("qwen", "2.5"), ("qwen",)))
+    vae_name = pick_available_model_name("vae", fusion_vae_name, (("qwen", "vae"), ("qwen_image",), ("qwen",)))
+    if not str(unet_name or "").strip():
+        unet_name = FUSION_UNET_NAME
+    if not str(clip_name or "").strip():
+        clip_name = FUSION_CLIP_NAME
+    if not str(vae_name or "").strip():
+        vae_name = FUSION_VAE_NAME
+    lora_data = build_fusion_lora_data(fusion_lightning_lora_name, fusion_scene_lora_name)
     fused_outputs = []
     for index, item in enumerate(composite_outputs):
         if not isinstance(item, torch.Tensor):
@@ -713,23 +797,23 @@ def generate_qwen2511_scene_fusion(composite_outputs, seed=0, fusion_unet_name="
         height = int(reference_image.shape[1])
         width = int(reference_image.shape[2])
         result = studio.create_image(
-            FUSION_PROMPT,
-            "",
-            1,
-            width,
-            height,
-            1,
-            unet_name,
-            "default",
-            clip_name,
-            vae_name,
-            int(seed) + index,
-            4,
-            1.0,
-            "euler",
-            "simple",
-            1.0,
-            6,
+            prompt=FUSION_PROMPT,
+            negative_prompt="",
+            main_image_index=1,
+            width=width,
+            height=height,
+            batch_size=1,
+            unet_name=unet_name,
+            unet_dtype="default",
+            clip_name1=clip_name,
+            vae_name=vae_name,
+            seed=int(seed) + index,
+            steps=4,
+            cfg=1.0,
+            sampler_name="euler",
+            scheduler="simple",
+            denoise=1.0,
+            grow_mask_by=6,
             lora_data=lora_data,
             disable_reference_auto_mask=True,
             force_empty_latent_reference=True,
@@ -1055,7 +1139,35 @@ class GJJ_TextOverlay:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "融合 UNET",
-                    "tooltip": "连接【融合后图像】输出时使用的 Qwen Image Edit 2511 UNET；前端 ⚙️ 面板只显示包含 2511 的 diffusion_models。",
+                    "tooltip": "连接【融合后图像】输出时使用的 Qwen Image Edit 2511 UNET；前端 🧠 面板显示可选列表。",
+                }),
+                "fusion_clip_name": ("STRING", {
+                    "default": FUSION_CLIP_NAME,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "融合 CLIP",
+                    "tooltip": "连接【融合后图像】输出时使用的文本/视觉编码器；前端 🧠 面板显示可选列表。",
+                }),
+                "fusion_vae_name": ("STRING", {
+                    "default": FUSION_VAE_NAME,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "融合 VAE",
+                    "tooltip": "连接【融合后图像】输出时使用的 VAE；前端 🧠 面板显示可选列表。",
+                }),
+                "fusion_lightning_lora_name": ("STRING", {
+                    "default": FUSION_LIGHTNING_LORA,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "融合 Lightning LoRA",
+                    "tooltip": "连接【融合后图像】输出时使用的加速 LoRA；前端 🧠 面板显示可选列表。",
+                }),
+                "fusion_scene_lora_name": ("STRING", {
+                    "default": FUSION_SCENE_LORA,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "融合人景 LoRA",
+                    "tooltip": "连接【融合后图像】输出时使用的人景融合 LoRA；前端 🧠 面板显示可选列表。",
                 }),
             }
         return {
@@ -1113,6 +1225,10 @@ class GJJ_TextOverlay:
             watermark_objects_json="[]",
             background_image_ref_json="{}",
             fusion_unet_name=FUSION_UNET_NAME,
+            fusion_clip_name=FUSION_CLIP_NAME,
+            fusion_vae_name=FUSION_VAE_NAME,
+            fusion_lightning_lora_name=FUSION_LIGHTNING_LORA,
+            fusion_scene_lora_name=FUSION_SCENE_LORA,
             unique_id=None,
             prompt_graph=None,
             extra_pnginfo=None,
@@ -1444,6 +1560,10 @@ class GJJ_TextOverlay:
                 composite_outputs,
                 seed=seed,
                 fusion_unet_name=fusion_unet_name,
+                fusion_clip_name=fusion_clip_name,
+                fusion_vae_name=fusion_vae_name,
+                fusion_lightning_lora_name=fusion_lightning_lora_name,
+                fusion_scene_lora_name=fusion_scene_lora_name,
                 unique_id=unique_id,
                 prompt_graph=prompt_graph,
                 extra_pnginfo=extra_pnginfo,
