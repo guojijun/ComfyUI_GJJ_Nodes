@@ -30,7 +30,7 @@ class FlexibleReferenceInputs(dict):
 
 
 def _reference_index(name: Any) -> int | None:
-    match = re.match(rf"^{re.escape(REF_PREFIX)}(\d+)$", str(name or ""))
+    match = re.match(rf"^(?:reference_images\.)?{re.escape(REF_PREFIX)}(\d+)$", str(name or ""))
     if not match:
         return None
     try:

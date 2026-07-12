@@ -1,8 +1,13 @@
 import { app } from "/scripts/app.js";
 
-const TARGET_NODES = new Set(["GJJ_BerniniConditioning"]);
+const TARGET_NODES = new Set([
+	"GJJ_BerniniConditioning",
+	"GJJ_BerniniS2VConditioning",
+	"GJJ_BerniniS2VConditioningV2",
+]);
 const MIXED_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const REF_PREFIX = "reference_image_";
+const REF_NAMESPACE_PREFIX = "reference_images.reference_image_";
 
 const INPUT_META = {
 	source_video: ["source_video", "源视频帧输入。支持 IMAGE 与 GJJ_BATCH_IMAGE。"],
@@ -10,7 +15,7 @@ const INPUT_META = {
 };
 
 function refIndex(name) {
-	const match = String(name || "").match(/^reference_image_(\d+)$/);
+	const match = String(name || "").match(/^(?:reference_images\.)?reference_image_(\d+)$/);
 	return match ? Number(match[1]) : null;
 }
 
@@ -18,8 +23,13 @@ function isRefInput(input) {
 	return refIndex(input?.name) !== null;
 }
 
-function refInputName(index) {
-	return `${REF_PREFIX}${Math.max(0, Number(index) || 0)}`;
+function usesNamespacedRefs(node) {
+	return (node?.inputs || []).some((input) => String(input?.name || "").startsWith(REF_NAMESPACE_PREFIX));
+}
+
+function refInputName(node, index) {
+	const prefix = usesNamespacedRefs(node) ? REF_NAMESPACE_PREFIX : REF_PREFIX;
+	return `${prefix}${Math.max(0, Number(index) || 0)}`;
 }
 
 function isConnected(input) {
@@ -51,7 +61,7 @@ function ensureReferenceInputs(node) {
 
 	let refs = (node.inputs || []).filter(isRefInput);
 	if (!refs.length && typeof node.addInput === "function") {
-		node.addInput(refInputName(0), MIXED_IMAGE_TYPE);
+		node.addInput(refInputName(node, 0), MIXED_IMAGE_TYPE);
 		refs = (node.inputs || []).filter(isRefInput);
 	}
 
@@ -64,8 +74,8 @@ function ensureReferenceInputs(node) {
 
 	const neededLast = Math.max(0, maxConnected + 1);
 	for (let index = 0; index <= neededLast; index++) {
-		const name = refInputName(index);
-		if (!node.inputs?.some((input) => input?.name === name)) {
+		const name = refInputName(node, index);
+		if (!node.inputs?.some((input) => refIndex(input?.name) === index)) {
 			node.addInput?.(name, MIXED_IMAGE_TYPE);
 		}
 	}
