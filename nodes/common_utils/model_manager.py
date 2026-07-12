@@ -336,8 +336,9 @@ def gjjutils_find_model_list(
 _GJJ_MODEL_EXT_RE = re.compile(r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|engine|torchscript)$", re.IGNORECASE)
 _GJJ_QUANT_TOKEN_RE = re.compile(
     r"(?i)(^|[_\-. ])("
-    r"fp(?:8|16|32)|bf16|f16|f32|q[2-8](?:_[a-z0-9]+)?|int(?:4|8)|"
-    r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit"
+    r"fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:8|16|32)|bf16|f16|f32|"
+    r"q[2-8](?:_[a-z0-9]+)?|int(?:4|8)|"
+    r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed"
     r")(?=$|[_\-. ])"
 )
 

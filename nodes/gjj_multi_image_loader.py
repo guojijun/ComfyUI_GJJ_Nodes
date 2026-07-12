@@ -29,6 +29,7 @@ from .common_utils.network_media import (
     gjjutils_media_file_starts_like_html,
 )
 from .common_utils.temp_files import (
+    gjjutils_hash_file,
     gjjutils_read_temp_pil_image,
     gjjutils_temp_root,
     gjjutils_write_temp_bytes,
@@ -43,9 +44,11 @@ IMAGE_API_PATH = "/gjj/input_images"
 THUMB_API_PATH = "/gjj/input_image_thumb"
 DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image"
 TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images"
+MEDIA_BY_HASH_API_PATH = "/gjj/media_by_hash"
 MAX_OUTPUT_IMAGES = 20
 NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 8
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".gif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 SEQUENCE_RANGE_INPUT_TYPES = "INT,STRING,FLOAT"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
@@ -157,6 +160,57 @@ def _thumbnail_image_from_path(path: Path) -> Image.Image:
         array = _decode_image_array_cv2(path)
         rgb = array[:, :, :3]
         return Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255.0).round().astype(np.uint8))
+
+
+def _media_roots() -> list[tuple[str, Path]]:
+    roots = [
+        ("input", Path(folder_paths.get_input_directory()).resolve()),
+        ("output", Path(folder_paths.get_output_directory()).resolve()),
+        ("temp", Path(folder_paths.get_temp_directory()).resolve()),
+    ]
+    return [(media_type, root) for media_type, root in roots if root.exists()]
+
+
+def _media_item_from_path(path: Path, root: Path, media_type: str, digest: str) -> dict[str, Any]:
+    relative = path.relative_to(root)
+    subfolder = str(relative.parent).replace("\\", "/")
+    if subfolder == ".":
+        subfolder = ""
+    return {
+        "filename": path.name,
+        "subfolder": subfolder,
+        "type": media_type,
+        "hash": digest,
+        "size_bytes": int(path.stat().st_size),
+        "label": f"{subfolder}/{path.name}".strip("/") if subfolder else path.name,
+    }
+
+
+def _find_media_by_hash(digest: str, kind: str = "") -> list[dict[str, Any]]:
+    target = str(digest or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", target):
+        raise ValueError("hash 必须是 64 位 SHA-256 十六进制字符串。")
+    kind = str(kind or "").strip().lower()
+    if kind == "image":
+        exts = IMAGE_EXTENSIONS
+    elif kind == "video":
+        exts = VIDEO_EXTENSIONS
+    else:
+        exts = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+    matches: list[dict[str, Any]] = []
+    for media_type, root in _media_roots():
+        for path in root.rglob("*"):
+            try:
+                if not path.is_file() or path.suffix.lower() not in exts:
+                    continue
+                if gjjutils_hash_file(path) != target:
+                    continue
+                matches.append(_media_item_from_path(path, root, media_type, target))
+                if len(matches) >= 20:
+                    return matches
+            except Exception:
+                continue
+    return matches
 
 
 def list_input_images() -> list[dict[str, Any]]:
@@ -394,6 +448,16 @@ async def post_gjj_multi_image_loader_upload_temp_images(request):
         return web.json_response({"ok": False, "error": str(error), "items": []}, status=500)
 
 
+async def get_gjj_media_by_hash(request):
+    try:
+        digest = request.query.get("hash", "")
+        kind = request.query.get("kind", "")
+        matches = _find_media_by_hash(digest, kind)
+        return web.json_response({"ok": True, "items": matches, "match": matches[0] if matches else None})
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error), "items": []}, status=400)
+
+
 def _safe_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     try:
         number = int(value)
@@ -460,6 +524,7 @@ def _register_multi_image_loader_routes() -> None:
     routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
     routes.post(DEFAULT_NETWORK_IMAGE_API_PATH)(post_gjj_default_network_image)
     routes.post(TEMP_UPLOAD_API_PATH)(post_gjj_multi_image_loader_upload_temp_images)
+    routes.get(MEDIA_BY_HASH_API_PATH)(get_gjj_media_by_hash)
 
 
 _register_multi_image_loader_routes()

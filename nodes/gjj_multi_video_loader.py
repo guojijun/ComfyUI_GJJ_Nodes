@@ -19,6 +19,7 @@ except Exception:
     PromptServer = None
 
 import folder_paths
+from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -287,6 +288,7 @@ async def get_gjj_video_meta(request):
         entry = {
             "filename": request.query.get("filename", ""),
             "subfolder": request.query.get("subfolder", ""),
+            "type": request.query.get("type", "") or "input",
         }
         path = resolve_input_video_path(entry)
         meta = video_meta(path)
@@ -294,7 +296,7 @@ async def get_gjj_video_meta(request):
             "filename": path.name,
             "subfolder": entry.get("subfolder", ""),
             "label": f"{entry.get('subfolder', '')}/{path.name}" if entry.get("subfolder") else path.name,
-            "type": "input",
+            "type": entry.get("type") or "input",
             **meta,
         })
     except Exception as error:
@@ -303,7 +305,6 @@ async def get_gjj_video_meta(request):
 
 async def upload_gjj_input_video(request):
     reader = await request.multipart()
-    upload_dir = _input_dir() / UPLOAD_SUBFOLDER
     saved: list[dict[str, str]] = []
 
     while True:
@@ -317,14 +318,19 @@ async def upload_gjj_input_video(request):
         if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS:
             return web.json_response({"error": f"不支持的视频格式：{filename}"}, status=400)
 
-        target = _unique_path(upload_dir, filename)
+        target = _unique_path(gjjutils_temp_path("upload.tmp").parent, filename)
         with target.open("wb") as handle:
             while True:
                 chunk = await field.read_chunk()
                 if not chunk:
                     break
                 handle.write(chunk)
-        saved.append({"filename": target.name, "subfolder": UPLOAD_SUBFOLDER})
+        info = gjjutils_write_temp_file(target, suffix=target.suffix)
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        saved.append({"filename": info["filename"], "subfolder": info["subfolder"], "type": "temp"})
 
     if not saved:
         return web.json_response({"error": "没有收到视频文件。"}, status=400)
@@ -363,7 +369,8 @@ def parse_selected_videos(raw_value: Any) -> list[dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        cleaned.append({"filename": filename, "subfolder": subfolder})
+        media_type = str(item.get("type") or "input").strip() or "input"
+        cleaned.append({"filename": filename, "subfolder": subfolder, "type": media_type})
     return cleaned[:MAX_SELECTED_VIDEOS]
 
 
@@ -552,6 +559,13 @@ def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, un
 
 
 def resolve_input_video_path(entry: dict[str, str]) -> Path:
+    if str(entry.get("type") or "input").lower() == "temp":
+        candidate = gjjutils_temp_path(str(entry.get("filename") or "")).resolve()
+        if not candidate.exists():
+            raise RuntimeError(f"未找到临时视频：{entry.get('filename') or ''}")
+        if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise RuntimeError(f"不支持的视频格式：{candidate.name}")
+        return candidate
     input_dir = _input_dir()
     filename = str(entry.get("filename") or "").strip()
     subfolder = str(entry.get("subfolder") or "").strip().replace("\\", "/")

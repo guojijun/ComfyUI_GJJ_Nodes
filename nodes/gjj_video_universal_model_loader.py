@@ -710,8 +710,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "slots": [
             S("model", "WanMove模型", "diffusion_models", "diffusion", ["wan", "scail"], preferred_name="wan2.1_14B_SCAIL_2_fp8_scaled.safetensors", official_names=["wan2.1_14B_SCAIL_2_fp8_scaled.safetensors"]),
             S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_vit_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("clip", "T5编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES, prefer_default_dtype=True),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision", "_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
             S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"], preferred_name="wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names=["wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"]),
         ],
     },
@@ -3297,7 +3297,20 @@ class GJJ_VideoUniversalModelLoader:
                             )
                         value = _load_ltxav_text_encoder(name, ckpt_name, str(slot.get("device", "default") or "default"))
                     else:
-                        value = _load_clip(name, clip_type, dtype)
+                        if bool(slot.get("prefer_default_dtype", False)) and dtype != "default":
+                            try:
+                                value = _load_clip(name, clip_type, "default")
+                            except Exception as default_exc:
+                                try:
+                                    value = _load_clip(name, clip_type, dtype)
+                                except Exception as dtype_exc:
+                                    raise RuntimeError(
+                                        "CLIP/T5 智能加载失败：已尝试 default 和文件名推断 dtype。\n"
+                                        f"default 错误：{default_exc}\n"
+                                        f"推断 dtype({dtype}) 错误：{dtype_exc}"
+                                    ) from dtype_exc
+                        else:
+                            value = _load_clip(name, clip_type, dtype)
                 elif kind == "clip_vision":
                     value = _load_clip_vision(name)
                 elif kind == "wan_t5_encoder":

@@ -22,6 +22,10 @@ from .common_utils.text_tools import (
 	gjjutils_normalize_text as _normalize_text,
 	gjjutils_pick_available_name as _pick_available_name,
 )
+from .common_utils.model_manager import (
+	gjjutils_find_model_list,
+	gjjutils_model_stem_without_quant,
+)
 from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
 	DEFAULT_UNET_NAME,
@@ -78,6 +82,30 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 		seen.add(value)
 		result.append(value)
 	return result
+
+
+def _model_keyword_tokens(value: str) -> list[str]:
+	stem = gjjutils_model_stem_without_quant(value)
+	return [token for token in re.split(r"[\s._\-/\\]+", stem) if token]
+
+
+def _first_model_from_keywords(
+	folder_type: str,
+	seed_or_keywords: str | list[str] | tuple[str, ...],
+	extensions: list[str] | tuple[str, ...] = (),
+) -> str:
+	"""调用 common_utils 的关键词搜索，返回有效列表第一项。"""
+	exts = tuple(str(ext or "").lower() for ext in extensions if str(ext or "").strip())
+	if isinstance(seed_or_keywords, str):
+		keywords = _model_keyword_tokens(seed_or_keywords)
+	else:
+		keywords = [part for item in seed_or_keywords for part in _model_keyword_tokens(str(item or ""))]
+	matches = gjjutils_find_model_list(keywords, folder_type, "AND") if keywords else []
+	for match in matches:
+		text = str(match or "").strip()
+		if text and (not exts or text.replace("\\", "/").lower().endswith(exts)):
+			return text
+	return ""
 
 
 def input_index(name: str, prefix: str) -> int:
@@ -822,47 +850,29 @@ def _conditioning_set_values(conditioning, values: dict[str, Any], append: bool 
 
 
 def _multiview_allowed_unets() -> list[str]:
-	models = list_unet_models() or [DEFAULT_UNET_NAME]
+	models = gjjutils_find_model_list(["qwen", "image", "edit", "2511"], "diffusion_models", "AND")
 	filtered: list[str] = []
 	for model_name in models:
-		if "2511" not in str(model_name or "").lower():
+		if not str(model_name or "").replace("\\", "/").lower().endswith((".safetensors", ".gguf")):
 			continue
 		preset = _match_multiview_family(model_name)
 		if preset.get("id") in ALLOWED_PRESET_IDS or preset.get("supports_multi_image_edit"):
 			filtered.append(model_name)
-	remaining = [model_name for model_name in models if model_name not in filtered]
-	return filtered + remaining or [DEFAULT_QWEN2511_UNET]
+	return filtered
 
 
 def _multiview_lora_models() -> list[str]:
 	models = [str(item or "").strip() for item in (_safe_filename_list("loras") or []) if str(item or "").strip()]
-	return ["", *(models or [DEFAULT_QWEN2511_LIGHTNING_LORA, DEFAULT_MULTI_ANGLES_LORA])]
+	return ["", *_dedupe_keep_order(models)]
 
 
 def _pick_default_multiview_unet(unet_models: list[str]) -> str:
-	"""多视图默认优先落到 safetensors，避免未指定时被 GGUF 候选抢占。"""
-	models = [str(item or "").strip() for item in (unet_models or []) if str(item or "").strip()]
-	if not models:
-		return DEFAULT_QWEN2511_UNET
-
-	def normalized(value: str) -> str:
-		return value.replace("\\", "/").rsplit("/", 1)[-1].lower()
-
-	preferred = DEFAULT_QWEN2511_UNET.lower()
-	for model_name in models:
-		if normalized(model_name) == preferred:
-			return model_name
-
-	safetensor_models = [model_name for model_name in models if normalized(model_name).endswith(".safetensors")]
-	for model_name in safetensor_models:
-		text = normalized(model_name)
-		if "qwen" in text and "edit" in text and "2511" in text:
-			return model_name
-	for model_name in safetensor_models:
-		text = normalized(model_name)
-		if "qwen" in text and "edit" in text:
-			return model_name
-	return safetensor_models[0] if safetensor_models else models[0]
+	"""多视图默认从关键词过滤后的真实列表取第一项。"""
+	return _first_model_from_keywords(
+		"diffusion_models",
+		["qwen", "image", "edit", "2511"],
+		[".safetensors", ".gguf"],
+	)
 
 
 def _match_multiview_family(unet_name: str) -> dict[str, Any]:
@@ -904,6 +914,10 @@ def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallba
 			if candidate.replace("\\", "/").split("/")[-1].lower() == fallback_base:
 				return candidate
 
+	for source in (preferred, fallback):
+		match = _first_model_from_keywords("loras", source, [".safetensors"])
+		if match:
+			return match
 	return ""
 
 
@@ -912,9 +926,10 @@ def _normalized_model_basename(value: str) -> str:
 
 
 def _has_model_candidate(candidates: list[str], filenames: list[str]) -> bool:
-	available = {_normalized_model_basename(candidate) for candidate in candidates}
 	for filename in filenames:
-		if _normalized_model_basename(filename) in available:
+		tokens = _model_keyword_tokens(filename)
+		stems = {gjjutils_model_stem_without_quant(candidate) for candidate in candidates}
+		if tokens and any(all(token in stem for token in tokens) for stem in stems):
 			return True
 	return False
 
@@ -2322,20 +2337,36 @@ class GJJ_CharacterMultiViewStudio:
 		visible_vae_name: str,
 	):
 		preset = _match_multiview_family(unet_name)
-		clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
-		vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+		clip_models = _dedupe_keep_order(list_clip_models() or [])
+		vae_models = _dedupe_keep_order(list_vae_models() or [])
 		resolved_clip_names = resolve_clip_names_for_preset(
 			preset,
 			clip_models,
 			exposed_clip_name=exposed_clip_name,
 			legacy_clip_names=[exposed_clip_name],
 		)
+		clean_clip_names: list[str] = []
+		for clip_name in resolved_clip_names:
+			resolved = _first_model_from_keywords(
+				"text_encoders",
+				clip_name,
+				[".safetensors"],
+			)
+			if resolved:
+				clean_clip_names.append(resolved)
+		resolved_clip_names = _dedupe_keep_order(clean_clip_names)
 		if not resolved_clip_names:
-			resolved_clip_names.append(_pick_available_name("", clip_models, DEFAULT_CLIP_NAME))
-		resolved_vae_name = _pick_available_name(
-			preset.get("vae_name", DEFAULT_VAE_NAME),
-			vae_models,
-			visible_vae_name,
+			fallback_clip = _first_model_from_keywords(
+				"text_encoders",
+				exposed_clip_name or DEFAULT_QWEN2511_CLIP,
+				[".safetensors"],
+			)
+			if fallback_clip:
+				resolved_clip_names.append(fallback_clip)
+		resolved_vae_name = _first_model_from_keywords(
+			"vae",
+			str(preset.get("vae_name") or visible_vae_name or DEFAULT_QWEN2511_VAE),
+			[".safetensors"],
 		)
 		resolved_clip_type = resolve_clip_type(
 			unet_name,
@@ -2667,10 +2698,17 @@ class GJJ_CharacterMultiViewStudio:
 		"""处理单张主图的多视图生成。"""
 		total_steps = 6 if bool(save_each_image) else 5
 		_send_status(unique_id, f"1/{total_steps} 检查模型配对并加载主链...")
+		resolved_unet_name = _first_model_from_keywords(
+			"diffusion_models",
+			str(unet_name or DEFAULT_QWEN2511_UNET),
+			[".safetensors", ".gguf"],
+		)
+		if resolved_unet_name:
+			unet_name = resolved_unet_name
 		preset, resolved_clip_names, resolved_clip_type, resolved_vae_name = self._resolve_generation_bundle(
 			unet_name,
-			DEFAULT_CLIP_NAME,
-			DEFAULT_VAE_NAME,
+			DEFAULT_QWEN2511_CLIP,
+			DEFAULT_QWEN2511_VAE,
 		)
 		has_main_image = main_image is not None
 		action_pairs = self._collect_action_pairs(kwargs) if has_main_image else []

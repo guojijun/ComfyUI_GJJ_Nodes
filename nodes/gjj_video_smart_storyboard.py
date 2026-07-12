@@ -25,6 +25,7 @@ except Exception:
     PromptServer = None
 
 import folder_paths
+from .common_utils.temp_files import gjjutils_temp_path
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -36,6 +37,7 @@ AUDIO_INPUT_TYPE = "AUDIO,VIDEO"
 UI_KEY = "gjj_video_smart_storyboard"
 VIDEO_UPLOAD_API_PATH = "/gjj/video_smart_storyboard/upload"
 VIDEO_META_API_PATH = "/gjj/video_smart_storyboard/meta"
+VIDEO_ANALYZE_API_PATH = "/gjj/video_smart_storyboard/analyze"
 UPLOAD_SUBFOLDER = "gjj_video_smart_storyboard"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg", ".gif"}
 
@@ -80,6 +82,25 @@ def _display_video_entry(entry: dict[str, str]) -> str:
     filename = str(entry.get("filename") or "").strip()
     subfolder = str(entry.get("subfolder") or "").strip().replace("\\", "/")
     return f"{subfolder}/{filename}".strip("/") if subfolder else filename
+
+
+def _normalize_video_entry(filename: str, subfolder: str = "", media_type: str = "input") -> dict[str, str] | None:
+    filename = str(filename or "").strip().replace("\\", "/")
+    subfolder = str(subfolder or "").strip().replace("\\", "/").strip("/")
+    if not filename:
+        return None
+    if "/" in filename:
+        parts = [part for part in filename.split("/") if part]
+        filename = parts[-1] if parts else filename
+        prefix = "/".join(parts[:-1])
+        subfolder = "/".join(part for part in (subfolder, prefix) if part)
+    clean_parts = []
+    for part in subfolder.split("/"):
+        if not part or part in {".", ".."}:
+            continue
+        if not clean_parts or clean_parts[-1] != part:
+            clean_parts.append(part)
+    return {"filename": filename, "subfolder": "/".join(clean_parts), "type": str(media_type or "input")}
 
 
 def _video_from_file(path: Path):
@@ -131,7 +152,7 @@ def parse_selected_video(raw_value: Any) -> dict[str, str] | None:
         filename = str(parsed.get("filename") or "").strip()
         subfolder = str(parsed.get("subfolder") or "").strip().replace("\\", "/")
         if filename:
-            return {"filename": filename, "subfolder": subfolder}
+            return _normalize_video_entry(filename, subfolder, str(parsed.get("type") or "input"))
         return None
 
     text = str(parsed or "").strip().replace("\\", "/")
@@ -145,7 +166,7 @@ def parse_selected_video(raw_value: Any) -> dict[str, str] | None:
         return None
     if Path(parts[-1]).suffix.lower() not in VIDEO_EXTENSIONS:
         return None
-    return {"filename": parts[-1], "subfolder": "/".join(parts[:-1])}
+    return _normalize_video_entry(parts[-1], "/".join(parts[:-1]))
 
 
 def recover_selected_video(raw_value: Any, extra_pnginfo: Any = None, unique_id: Any = None) -> dict[str, str] | None:
@@ -186,6 +207,13 @@ def recover_selected_video(raw_value: Any, extra_pnginfo: Any = None, unique_id:
 
 
 def resolve_input_video_path(entry: dict[str, str]) -> Path:
+    if str(entry.get("type") or "input").lower() == "temp":
+        candidate = gjjutils_temp_path(str(entry.get("filename") or "")).resolve()
+        if not candidate.exists():
+            raise RuntimeError(f"未找到临时视频：{_display_video_entry(entry)}")
+        if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise RuntimeError(f"不支持的视频格式：{candidate.name}")
+        return candidate
     input_dir = _input_dir()
     filename = str(entry.get("filename") or "").strip()
     subfolder = str(entry.get("subfolder") or "").strip().replace("\\", "/")
@@ -298,6 +326,53 @@ async def get_video_smart_storyboard_meta(request):
         return web.json_response({"ok": False, "error": str(error)}, status=400)
 
 
+async def analyze_video_smart_storyboard(request):
+    if web is None:
+        return None
+    try:
+        if request.method == "POST":
+            payload = await request.json()
+        else:
+            payload = request.query
+        entry = {
+            "filename": payload.get("filename", ""),
+            "subfolder": payload.get("subfolder", ""),
+        }
+        path = resolve_input_video_path(entry)
+        frames, fps, source_label, _audio = _coerce_media_to_frames(_video_from_file(path))
+        total_frames = int(frames.shape[0])
+        if total_frames <= 0:
+            raise RuntimeError("输入视频没有可用帧。")
+        analysis = _analyze_scenes(frames)
+        scenes = []
+        fps_value = float(fps or 24.0)
+        for item in list(analysis.get("scene_items") or []):
+            start_frame = int(item.get("start_frame") or 1)
+            end_frame = int(item.get("end_frame") or start_frame)
+            scenes.append(
+                {
+                    **item,
+                    "start_seconds": float(max(0, start_frame - 1) / max(0.01, fps_value)),
+                    "end_seconds": float(max(start_frame, end_frame) / max(0.01, fps_value)),
+                }
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "source": source_label,
+                "fps": fps_value,
+                "total_frames": total_frames,
+                "total_scenes": len(scenes),
+                "threshold": float(analysis.get("threshold") or 0.0),
+                "transition_count": int(analysis.get("transition_count") or 0),
+                "trimmed_frames": int(analysis.get("trimmed_frames") or 0),
+                "scenes": scenes,
+            }
+        )
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+
 def _register_routes() -> None:
     server = getattr(PromptServer, "instance", None) if PromptServer is not None else None
     routes = getattr(server, "routes", None)
@@ -308,6 +383,8 @@ def _register_routes() -> None:
     setattr(server, "_gjj_video_smart_storyboard_routes_registered", True)
     routes.post(VIDEO_UPLOAD_API_PATH)(upload_video_smart_storyboard_video)
     routes.get(VIDEO_META_API_PATH)(get_video_smart_storyboard_meta)
+    routes.get(VIDEO_ANALYZE_API_PATH)(analyze_video_smart_storyboard)
+    routes.post(VIDEO_ANALYZE_API_PATH)(analyze_video_smart_storyboard)
 
 
 _register_routes()

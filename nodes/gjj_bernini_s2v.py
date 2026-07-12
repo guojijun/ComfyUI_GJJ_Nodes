@@ -739,6 +739,274 @@ def _restore_gjj_wan_s2v_bernini_patch() -> bool:
     return restored
 
 
+def apply_gjj_wan_s2v_v2_model_patches() -> None:
+    _patch_wan_model_s2v_forward_v2()
+    _patch_audio_injector_v2()
+    _patch_wan22_s2v_extra_conds_v2()
+    log.info("GJJ Bernini S2V V2: applied original-compatible Bernini S2V model patches.")
+
+
+def _patch_wan_model_s2v_forward_v2() -> None:
+    from comfy.ldm.wan.model import WanModel_S2V
+
+    if getattr(WanModel_S2V.forward_orig, "__gjj_bernini_s2v_exact_v2_patch__", False):
+        original = getattr(WanModel_S2V.forward_orig, "__gjj_bernini_s2v_original__", None)
+        if original is not None:
+            WanModel_S2V.forward_orig = original
+
+    if getattr(WanModel_S2V.forward_orig, "__wan_bernini_s2v_v2_patch__", False):
+        return
+
+    try:
+        source = inspect.getsource(WanModel_S2V.forward_orig)
+    except (OSError, TypeError):
+        source = ""
+    if "context_latents" in source and getattr(WanModel_S2V.forward_orig, "__wan_bernini_s2v_patch__", False):
+        WanModel_S2V.forward_orig.__wan_bernini_s2v_v2_patch__ = True
+        return
+
+    original = WanModel_S2V.forward_orig
+
+    def forward_orig(
+        self,
+        x,
+        t,
+        context,
+        audio_embed=None,
+        reference_latent=None,
+        control_video=None,
+        reference_motion=None,
+        clip_fea=None,
+        freqs=None,
+        transformer_options={},
+        **kwargs,
+    ):
+        if audio_embed is not None:
+            num_embeds = x.shape[-3] * 4
+            audio_emb_global, audio_emb = self.casual_audio_encoder(audio_embed[:, :, :, :num_embeds])
+        else:
+            audio_emb = None
+            audio_emb_global = None
+
+        bs, _, time, height, width = x.shape
+        x = self.patch_embedding(x.float()).to(x.dtype)
+        if control_video is not None:
+            x = x + self.cond_encoder(control_video)
+
+        if t.ndim == 1:
+            t = t.unsqueeze(1).repeat(1, x.shape[2])
+
+        grid_sizes = x.shape[2:]
+        x = x.flatten(2).transpose(1, 2)
+        seq_len = x.size(1)
+
+        cond_mask_weight = comfy.model_management.cast_to(
+            self.trainable_cond_mask.weight, dtype=x.dtype, device=x.device
+        ).unsqueeze(1).unsqueeze(1)
+        x = x + cond_mask_weight[0]
+        x = _append_context_latents(self, x, kwargs)
+
+        if reference_latent is not None:
+            ref = self.patch_embedding(reference_latent.float()).to(x.dtype)
+            ref = ref.flatten(2).transpose(1, 2)
+            freqs_ref = self.rope_encode(
+                reference_latent.shape[-3],
+                reference_latent.shape[-2],
+                reference_latent.shape[-1],
+                t_start=max(30, time + 9),
+                device=x.device,
+                dtype=x.dtype,
+            )
+            ref = ref + cond_mask_weight[1]
+            x = torch.cat([x, ref], dim=1)
+            freqs = torch.cat([freqs, freqs_ref], dim=1)
+            t = torch.cat(
+                [t, torch.zeros((t.shape[0], reference_latent.shape[-3]), device=t.device, dtype=t.dtype)],
+                dim=1,
+            )
+
+        if reference_motion is not None:
+            motion_encoded, freqs_motion = self.frame_packer(reference_motion, self)
+            motion_encoded = motion_encoded + cond_mask_weight[2]
+            x = torch.cat([x, motion_encoded], dim=1)
+            freqs = torch.cat([freqs, freqs_motion], dim=1)
+            t = torch.repeat_interleave(t, 2, dim=1)
+            t = torch.cat([t, torch.zeros((t.shape[0], 3), device=t.device, dtype=t.dtype)], dim=1)
+
+        from comfy.ldm.wan.model import sinusoidal_embedding_1d
+
+        e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(dtype=x[0].dtype))
+        e = e.reshape(t.shape[0], -1, e.shape[-1])
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+
+        context = self.text_embedding(context)
+
+        patches_replace = transformer_options.get("patches_replace", {})
+        blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
+        for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
+            if ("double_block", i) in blocks_replace:
+
+                def block_wrap(args):
+                    out = {}
+                    out["img"] = block(
+                        args["img"],
+                        context=args["txt"],
+                        e=args["vec"],
+                        freqs=args["pe"],
+                        transformer_options=args["transformer_options"],
+                    )
+                    return out
+
+                out = blocks_replace[("double_block", i)](
+                    {
+                        "img": x,
+                        "txt": context,
+                        "vec": e0,
+                        "pe": freqs,
+                        "transformer_options": transformer_options,
+                    },
+                    {"original_block": block_wrap},
+                )
+                x = out["img"]
+            else:
+                x = block(x, e=e0, freqs=freqs, context=context, transformer_options=transformer_options)
+            if audio_emb is not None:
+                inject_scale = kwargs.get("audio_inject_scale", 1.0)
+                if isinstance(inject_scale, torch.Tensor):
+                    inject_scale = inject_scale.reshape(-1)[0].item()
+                x = self.audio_injector(
+                    x,
+                    i,
+                    audio_emb,
+                    audio_emb_global,
+                    seq_len,
+                    scale=inject_scale,
+                    token_mask=kwargs.get("audio_inject_mask", None),
+                )
+        x = self.head(x, e)
+        x = self.unpatchify(x, grid_sizes)
+        return x
+
+    forward_orig.__wan_bernini_s2v_v2_patch__ = True
+    forward_orig.__wan_bernini_s2v_patch__ = True
+    forward_orig.__wan_bernini_s2v_original__ = original
+    WanModel_S2V.forward_orig = forward_orig
+
+
+def _patch_audio_injector_v2() -> None:
+    from comfy.ldm.wan.model import AudioInjector_WAN
+
+    if getattr(AudioInjector_WAN.forward, "__gjj_bernini_s2v_exact_v2_masked_patch__", False):
+        original = getattr(AudioInjector_WAN.forward, "__gjj_bernini_s2v_masked_original__", None)
+        if original is not None:
+            AudioInjector_WAN.forward = original
+
+    if getattr(AudioInjector_WAN.forward, "__wan_bernini_s2v_v2_masked_patch__", False):
+        return
+
+    original_forward = AudioInjector_WAN.forward
+
+    def forward(self, x, block_id, audio_emb, audio_emb_global, seq_len, scale=1.0, token_mask=None):
+        if token_mask is None:
+            return original_forward(self, x, block_id, audio_emb, audio_emb_global, seq_len, scale=scale)
+
+        audio_attn_id = self.injected_block_id.get(block_id, None)
+        if audio_attn_id is None:
+            return x
+
+        from einops import rearrange
+
+        num_frames = audio_emb.shape[1]
+        input_hidden_states = rearrange(x[:, :seq_len], "b (t n) c -> (b t) n c", t=num_frames)
+        if self.enable_adain and self.adain_mode == "attn_norm":
+            audio_emb_global = rearrange(audio_emb_global, "b t n c -> (b t) n c")
+            adain_hidden_states = self.injector_adain_layers[audio_attn_id](
+                input_hidden_states, temb=audio_emb_global[:, 0]
+            )
+            attn_hidden_states = adain_hidden_states
+        else:
+            attn_hidden_states = self.injector_pre_norm_feat[audio_attn_id](input_hidden_states)
+
+        if audio_emb.dim() == 3:
+            attn_audio_emb = rearrange(audio_emb, "b t c -> (b t) 1 c", t=num_frames)
+        else:
+            attn_audio_emb = rearrange(audio_emb, "b t n c -> (b t) n c", t=num_frames)
+
+        residual_out = self.injector[audio_attn_id](x=attn_hidden_states, context=attn_audio_emb)
+        residual_out = rearrange(residual_out, "(b t) n c -> b (t n) c", t=num_frames)
+
+        if token_mask.ndim == 4:
+            token_mask = token_mask.flatten(1, 2)
+        if token_mask.shape[1] == residual_out.shape[1]:
+            residual_out = residual_out * token_mask.to(device=residual_out.device, dtype=residual_out.dtype)
+        else:
+            logging.warning(
+                "ComfyUI-WanBerniniS2V_v2: mask length %s does not match token count %s; using global audio injection",
+                token_mask.shape[1],
+                residual_out.shape[1],
+            )
+
+        x[:, :seq_len] = x[:, :seq_len] + residual_out * scale
+        return x
+
+    forward.__wan_bernini_s2v_v2_masked_patch__ = True
+    forward.__wan_bernini_s2v_masked_patch__ = True
+    forward.__wan_bernini_s2v_masked_original__ = original_forward
+    AudioInjector_WAN.forward = forward
+
+
+def _patch_wan22_s2v_extra_conds_v2() -> None:
+    import comfy.conds
+    from comfy.model_base import WAN22_S2V
+
+    if getattr(WAN22_S2V.extra_conds, "__gjj_bernini_s2v_exact_v2_masked_patch__", False):
+        original = getattr(WAN22_S2V.extra_conds, "__gjj_bernini_s2v_masked_original__", None)
+        if original is not None:
+            WAN22_S2V.extra_conds = original
+
+    if getattr(WAN22_S2V.resize_cond_for_context_window, "__gjj_bernini_s2v_exact_v2_masked_patch__", False):
+        original = getattr(WAN22_S2V.resize_cond_for_context_window, "__gjj_bernini_s2v_masked_original__", None)
+        if original is not None:
+            WAN22_S2V.resize_cond_for_context_window = original
+
+    if getattr(WAN22_S2V.extra_conds, "__wan_bernini_s2v_v2_masked_patch__", False):
+        return
+
+    original_extra_conds = WAN22_S2V.extra_conds
+
+    def extra_conds(self, **kwargs):
+        out = original_extra_conds(self, **kwargs)
+        audio_inject_mask = kwargs.get("audio_inject_mask", None)
+        if audio_inject_mask is not None:
+            out["audio_inject_mask"] = comfy.conds.CONDRegular(audio_inject_mask)
+        audio_inject_scale = kwargs.get("audio_inject_scale", None)
+        if audio_inject_scale is not None:
+            out["audio_inject_scale"] = comfy.conds.CONDRegular(torch.FloatTensor([audio_inject_scale]))
+        return out
+
+    extra_conds.__wan_bernini_s2v_v2_masked_patch__ = True
+    extra_conds.__wan_bernini_s2v_masked_patch__ = True
+    extra_conds.__wan_bernini_s2v_masked_original__ = original_extra_conds
+    WAN22_S2V.extra_conds = extra_conds
+
+    original_resize = WAN22_S2V.resize_cond_for_context_window
+
+    def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
+        if cond_key == "audio_inject_mask":
+            mask = cond_value.cond
+            if mask.ndim == 4 and mask.shape[1] == x_in.shape[2]:
+                return cond_value._copy_with(window.get_tensor(mask, device, dim=1))
+        return original_resize(self, cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
+
+    resize_cond_for_context_window.__wan_bernini_s2v_v2_masked_patch__ = True
+    resize_cond_for_context_window.__wan_bernini_s2v_masked_patch__ = True
+    resize_cond_for_context_window.__wan_bernini_s2v_masked_original__ = original_resize
+    WAN22_S2V.resize_cond_for_context_window = resize_cond_for_context_window
+
+
 class GJJBerniniS2VConditioning:
     CATEGORY = "GJJ/视频"
     FUNCTION = "build"
@@ -943,7 +1211,7 @@ class GJJBerniniS2VConditioningV2:
         audio_inject_scale=1.0,
         **kwargs,
     ):
-        apply_gjj_wan_s2v_bernini_patch(include_shared_patch=False)
+        apply_gjj_wan_s2v_v2_model_patches()
 
         width = int(width)
         height = int(height)
@@ -970,19 +1238,19 @@ class GJJBerniniS2VConditioningV2:
             device=comfy.model_management.intermediate_device(),
         )
 
-        reference_images = _reference_images_from_kwargs(kwargs)
+        reference_images = _reference_images_dict_from_kwargs(kwargs)
         if any(_has_value(value) for key, value in kwargs.items() if _reference_index(key) is not None) and not reference_images:
             raise RuntimeError(f"参考图输入没有解析出有效图片。{FRAME_QUEUE_REQUIREMENT}")
 
-        context = _build_s2v_context(
+        context = _build_v2_context_latents(
             vae,
-            length,
             width,
             height,
-            source_video=source_video,
-            reference_video=reference_video,
-            reference_images=reference_images,
-            ref_max_size=int(ref_max_size),
+            length,
+            source_video,
+            reference_video,
+            reference_images,
+            ref_max_size,
         )
         if context:
             positive = _conditioning_set_values(positive, {"context_latents": context})
@@ -1014,7 +1282,7 @@ if not ENABLE_S2V_RUNTIME_PATCH:
     _restore_gjj_wan_s2v_bernini_patch()
 else:
     try:
-        apply_gjj_wan_s2v_bernini_patch(include_shared_patch=False)
+        apply_gjj_wan_s2v_v2_model_patches()
     except Exception as exc:
         log.warning("GJJ Bernini S2V: V2 model patch failed during import: %s", exc)
 

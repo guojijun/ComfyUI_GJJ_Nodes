@@ -26,6 +26,11 @@ except Exception:
 from .common_utils.model_loader import gjjutils_load_clip_from_names, gjjutils_load_model, gjjutils_load_vae
 from .common_utils.model_manager import gjjutils_model_stem_without_quant, gjjutils_resolve_model_name
 from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    print_dependency_model_report,
+    send_dependency_model_notice,
+)
 from .gjj_multi_image_loader import load_image_tensor, parse_selected_images, resolve_selected_image_path
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 from .gjj_mmaudio_nsfw_single import (
@@ -66,6 +71,7 @@ DEFAULT_AUDIO_PROMPT = "强烈、有节奏的动作音效，贴近画面的 Fole
 DEFAULT_AUDIO_NEGATIVE = "音乐，唱歌，说话，对话，男声，背景噪声，干燥声音，安静，平静"
 GGUF_DEFAULT_CLIP = "umt5-xxl-encoder-Q4_K_M.gguf"
 GGUF_DEFAULT_VAE = "wan_2.1_vae.safetensors"
+GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 RAPID_AIO_SEARCH_SEED = "wan2.2-rapid-mega-aio"
 WAN22_RAPID_AIO_MODEL_DOWNLOAD_URL = "https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne"
 WAN22_RAPID_AIO_MODEL_TREE = [
@@ -265,31 +271,42 @@ def _find_model_file(category: str, name: str) -> str | None:
     return None
 
 
+def _folder_entry_parts(entry: Any) -> tuple[Any, set[str], tuple[Any, ...]] | None:
+    if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+        return None
+    paths = entry[0]
+    exts = set(entry[1] or set())
+    return paths, exts, tuple(entry[2:])
+
+
+def _folder_entry_with_exts(paths: Any, exts: set[str], extra: tuple[Any, ...] = ()) -> tuple[Any, ...]:
+    return (paths, exts, *extra)
+
+
 def _ensure_checkpoint_gguf_extension() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
-    current = existing.get("checkpoints")
+    current = _folder_entry_parts(existing.get("checkpoints"))
     if not current:
         return
-    paths, exts = current
-    ext_set = set(exts or set())
+    paths, ext_set, extra = current
     if ".gguf" not in ext_set:
-        existing["checkpoints"] = (paths, ext_set | {".gguf"})
+        existing["checkpoints"] = _folder_entry_with_exts(paths, ext_set | {".gguf"}, extra)
 
 
 def _ensure_unet_gguf_folder() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
     paths: list[str] = []
     exts: set[str] = {".gguf"}
-    current = existing.get("unet_gguf")
+    current = _folder_entry_parts(existing.get("unet_gguf"))
     if current:
-        current_paths, current_exts = current
+        current_paths, current_exts, _current_extra = current
         paths.extend(str(path) for path in current_paths or [])
         exts.update(current_exts or set())
     for source in ("diffusion_models", "unet", "checkpoints"):
-        source_entry = existing.get(source)
+        source_entry = _folder_entry_parts(existing.get(source))
         if not source_entry:
             continue
-        source_paths, _source_exts = source_entry
+        source_paths, _source_exts, _source_extra = source_entry
         paths.extend(str(path) for path in source_paths or [])
     try:
         paths.append(str(Path(getattr(folder_paths, "models_dir", "")) / "unet_gguf"))
@@ -303,23 +320,23 @@ def _ensure_unet_gguf_folder() -> None:
             continue
         seen.add(key)
         deduped.append(path)
-    existing["unet_gguf"] = (deduped, exts | {".gguf"})
+    existing["unet_gguf"] = _folder_entry_with_exts(deduped, exts | {".gguf"})
 
 
 def _ensure_clip_gguf_folder() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
     paths: list[str] = []
     exts: set[str] = {".gguf"}
-    current = existing.get("clip_gguf")
+    current = _folder_entry_parts(existing.get("clip_gguf"))
     if current:
-        current_paths, current_exts = current
+        current_paths, current_exts, _current_extra = current
         paths.extend(str(path) for path in current_paths or [])
         exts.update(current_exts or set())
     for source in ("text_encoders", "clip"):
-        source_entry = existing.get(source)
+        source_entry = _folder_entry_parts(existing.get(source))
         if not source_entry:
             continue
-        source_paths, _source_exts = source_entry
+        source_paths, _source_exts, _source_extra = source_entry
         paths.extend(str(path) for path in source_paths or [])
     try:
         paths.append(str(Path(getattr(folder_paths, "models_dir", "")) / "clip_gguf"))
@@ -333,7 +350,7 @@ def _ensure_clip_gguf_folder() -> None:
             continue
         seen.add(key)
         deduped.append(path)
-    existing["clip_gguf"] = (deduped, exts | {".gguf"})
+    existing["clip_gguf"] = _folder_entry_with_exts(deduped, exts | {".gguf"})
 
 
 def _pick_available_name(preferred: str, available: list[str], fallback: str = "") -> str:
@@ -455,6 +472,87 @@ def _is_gguf_model(value: Any) -> bool:
     return _split_model_selection(value)[1].lower().endswith(".gguf")
 
 
+def _is_gguf_dependency_error(exc: Any) -> bool:
+    text_parts = [str(exc or "")]
+    cause = getattr(exc, "__cause__", None)
+    context = getattr(exc, "__context__", None)
+    if cause is not None:
+        text_parts.append(str(cause or ""))
+        if isinstance(cause, ModuleNotFoundError) and getattr(cause, "name", "") == "gguf":
+            return True
+    if context is not None:
+        text_parts.append(str(context or ""))
+        if isinstance(context, ModuleNotFoundError) and getattr(context, "name", "") == "gguf":
+            return True
+    text = "\n".join(text_parts).lower()
+    return (
+        "no module named 'gguf'" in text
+        or 'no module named "gguf"' in text
+        or "需要先安装 gguf" in text
+        or "需要安装 gguf python 依赖" in text
+        or "缺少 gguf 依赖" in text
+    )
+
+
+def _build_gguf_dependency_report(model_name: str, original_error: Any = "", model_kind: str = "模型") -> dict[str, Any]:
+    report = build_dependency_model_report(
+        node_name=NODE_NAME,
+        missing_dependencies=[
+            {
+                "module_name": "gguf",
+                "package_name": GGUF_PACKAGE_SPEC,
+                "display_name": "gguf",
+                "description": f"读取 .gguf {model_kind} 权重时需要；safetensors 模型不需要此依赖。",
+            }
+        ],
+        install_packages=[GGUF_PACKAGE_SPEC],
+        description=(
+            f"当前 {model_kind} 选择的是 GGUF 模型：{model_name}\n"
+            "GJJ 已内置 GGUF UNET/CLIP 加载器，不需要安装 ComfyUI-GGUF 第三方节点。\n"
+            "只需要安装/升级 gguf Python 依赖；或者改用 safetensors 版 Wan Rapid AIO。"
+        ),
+        original_error=str(original_error or ""),
+    )
+    report["warning_message"] = "⚠️缺失 gguf 依赖，点击按钮复制安装命令。"
+    report["description_message"] = report["warning_message"]
+    report["copy_label"] = "📋 复制安装 gguf 依赖命令"
+    report["model_download_url"] = ""
+    return report
+
+
+def _raise_gguf_dependency_missing(
+    model_name: str,
+    unique_id: Any = None,
+    original_error: Any = "",
+    model_kind: str = "模型",
+) -> None:
+    report = _build_gguf_dependency_report(model_name, original_error, model_kind=model_kind)
+    print_dependency_model_report(report, title="GJJ Wan Rapid-AIO GGUF 依赖缺失！")
+    send_dependency_model_notice(report, unique_id=unique_id)
+    err = RuntimeError(
+        f"检测到 GGUF {model_kind}，但当前 ComfyUI Python 缺少 gguf 依赖。"
+        "请点击面板按钮复制安装命令，或改用 safetensors 版 Wan Rapid AIO。"
+    )
+    setattr(err, "gjj_report", report)
+    raise err
+
+
+def _ensure_gguf_dependency(model_name: str, unique_id: Any = None, model_kind: str = "模型") -> None:
+    try:
+        from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
+    except Exception:
+        try:
+            from gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
+        except Exception as exc:
+            _raise_gguf_dependency_missing(model_name, unique_id=unique_id, original_error=exc, model_kind=model_kind)
+    try:
+        gguf_module = ensure_optional_gguf_module()
+    except Exception as exc:
+        _raise_gguf_dependency_missing(model_name, unique_id=unique_id, original_error=exc, model_kind=model_kind)
+    if getattr(gguf_module, "_GJJ_OPTIONAL_RUNTIME_STUB", False):
+        _raise_gguf_dependency_missing(model_name, unique_id=unique_id, model_kind=model_kind)
+
+
 def _is_q2_gguf_model(value: Any) -> bool:
     clean_name = _split_model_selection(value)[1].lower()
     return clean_name.endswith(".gguf") and any(token in clean_name for token in ("q2_k", "q2-k"))
@@ -547,8 +645,9 @@ def _call_node_function(node_cls: Any, *args, **kwargs):
     raise RuntimeError("; ".join(errors) or f"{node_cls.__name__} 没有可调用的加载函数")
 
 
-def _load_wan_clip_model(clip_name: str):
+def _load_wan_clip_model(clip_name: str, unique_id: Any = None):
     if _is_gguf_model(clip_name):
+        _ensure_gguf_dependency(clip_name, unique_id=unique_id, model_kind="Wan CLIP")
         try:
             from ..vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
         except ImportError:
@@ -557,23 +656,21 @@ def _load_wan_clip_model(clip_name: str):
             return load_gjj_gguf_clip(clip_name, "wan")
         except ModuleNotFoundError as exc:
             if getattr(exc, "name", "") == "gguf":
-                raise RuntimeError(
-                    "加载 GGUF Wan CLIP 需要安装 gguf Python 依赖。"
-                    "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
-                ) from exc
+                _raise_gguf_dependency_missing(clip_name, unique_id=unique_id, original_error=exc, model_kind="Wan CLIP")
             raise
         except Exception as exc:
-            error_text = str(exc)
-            if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
-                raise RuntimeError(
-                    "加载 GGUF Wan CLIP 需要安装 gguf Python 依赖。"
-                    "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
-                ) from exc
+            if _is_gguf_dependency_error(exc):
+                _raise_gguf_dependency_missing(clip_name, unique_id=unique_id, original_error=exc, model_kind="Wan CLIP")
             raise RuntimeError(f"GJJ 内置 GGUF Wan CLIP 加载失败：{clip_name}\n{exc}") from exc
     return gjjutils_load_clip_from_names([clip_name], "wan")
 
 
-def _load_wan_split_workflow_models(unet_name: str, clip_name: str = GGUF_DEFAULT_CLIP, vae_name: str = GGUF_DEFAULT_VAE):
+def _load_wan_split_workflow_models(
+    unet_name: str,
+    clip_name: str = GGUF_DEFAULT_CLIP,
+    vae_name: str = GGUF_DEFAULT_VAE,
+    unique_id: Any = None,
+):
     _ensure_unet_gguf_folder()
     _ensure_clip_gguf_folder()
     source_category, clean_unet_name = _split_model_selection(unet_name)
@@ -605,16 +702,30 @@ def _load_wan_split_workflow_models(unet_name: str, clip_name: str = GGUF_DEFAUL
         extensions={".safetensors", ".pt", ".pth", ".ckpt"},
         label="Wan VAE",
     )
-    model = gjjutils_load_model(resolved_unet, "default")
-    clip = _load_wan_clip_model(resolved_clip)
+    if is_gguf:
+        _ensure_gguf_dependency(resolved_unet, unique_id=unique_id, model_kind="UNET")
+    try:
+        model = gjjutils_load_model(resolved_unet, "default")
+    except Exception as exc:
+        if is_gguf and _is_gguf_dependency_error(exc):
+            _raise_gguf_dependency_missing(resolved_unet, unique_id=unique_id, original_error=exc, model_kind="UNET")
+        raise
+    clip = _load_wan_clip_model(resolved_clip, unique_id=unique_id)
     vae = gjjutils_load_vae(resolved_vae)
     return model, clip, vae
 
 
-def _load_aio_checkpoint_gguf(checkpoint_name: str, clip_name: str = GGUF_DEFAULT_CLIP, vae_name: str = GGUF_DEFAULT_VAE):
+def _load_aio_checkpoint_gguf(
+    checkpoint_name: str,
+    clip_name: str = GGUF_DEFAULT_CLIP,
+    vae_name: str = GGUF_DEFAULT_VAE,
+    unique_id: Any = None,
+):
     try:
-        return _load_wan_split_workflow_models(checkpoint_name, clip_name, vae_name)
+        return _load_wan_split_workflow_models(checkpoint_name, clip_name, vae_name, unique_id=unique_id)
     except Exception as workflow_exc:
+        if getattr(workflow_exc, "gjj_report", None):
+            raise
         workflow_error = str(workflow_exc)
         try:
             import nodes as comfy_nodes
@@ -671,12 +782,24 @@ def _is_split_model_selection(model_name: str) -> bool:
     return bool(diffusion_path and not checkpoint_path)
 
 
-def _load_rapid_pipeline(checkpoint_name: str, wan_clip_model: str = GGUF_DEFAULT_CLIP, wan_vae_model: str = GGUF_DEFAULT_VAE):
+def _load_rapid_pipeline(
+    checkpoint_name: str,
+    wan_clip_model: str = GGUF_DEFAULT_CLIP,
+    wan_vae_model: str = GGUF_DEFAULT_VAE,
+    unique_id: Any = None,
+):
     resolved_checkpoint = _require_checkpoint_name(checkpoint_name)
     if _is_split_model_selection(resolved_checkpoint):
         try:
-            return resolved_checkpoint, *_load_wan_split_workflow_models(resolved_checkpoint, wan_clip_model, wan_vae_model)
+            return resolved_checkpoint, *_load_wan_split_workflow_models(
+                resolved_checkpoint,
+                wan_clip_model,
+                wan_vae_model,
+                unique_id=unique_id,
+            )
         except Exception as exc:
+            if getattr(exc, "gjj_report", None):
+                raise
             raise RuntimeError(
                 "当前选择的是 Wan Rapid AllInOne 分体主模型，已按 GJJ 零依赖链路加载：内置 UNET/GGUF UNET + 内置 GGUF Wan CLIP + 内置 VAE。\n"
                 f"主模型：{resolved_checkpoint}\n"
@@ -685,8 +808,15 @@ def _load_rapid_pipeline(checkpoint_name: str, wan_clip_model: str = GGUF_DEFAUL
             ) from exc
     if _is_gguf_model(resolved_checkpoint):
         try:
-            return resolved_checkpoint, *_load_aio_checkpoint_gguf(resolved_checkpoint, wan_clip_model, wan_vae_model)
+            return resolved_checkpoint, *_load_aio_checkpoint_gguf(
+                resolved_checkpoint,
+                wan_clip_model,
+                wan_vae_model,
+                unique_id=unique_id,
+            )
         except Exception as exc:
+            if getattr(exc, "gjj_report", None):
+                raise
             raise RuntimeError(
                 "当前选择的是 Wan Rapid AllInOne GGUF，已按 GJJ 零依赖链路加载：内置 GGUF UNET + 内置 GGUF Wan CLIP + 内置 VAE。\n"
                 f"GGUF：{resolved_checkpoint}\n"
@@ -2111,7 +2241,12 @@ class GJJ_Wan22RapidAIOMega:
             image_count = len(image_frames)
 
             _send_status(unique_id, "1/7 加载 Wan Rapid-AIO Checkpoint...", 0.06)
-            resolved_checkpoint, model, clip, vae = _load_rapid_pipeline(checkpoint_name, wan_clip_model, wan_vae_model)
+            resolved_checkpoint, model, clip, vae = _load_rapid_pipeline(
+                checkpoint_name,
+                wan_clip_model,
+                wan_vae_model,
+                unique_id=unique_id,
+            )
             model = _apply_sd3_shift(model, DEFAULT_SHIFT)
 
             _send_status(unique_id, "2/7 应用 LoRA串联配置...", 0.14)

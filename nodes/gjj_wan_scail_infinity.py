@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Any
 
 import torch
+import folder_paths
+from PIL import Image
 
 import comfy.model_management as model_management
 import comfy.model_sampling
@@ -163,6 +167,52 @@ def _apply_model_sampling_sd3(model: Any, shift: float, multiplier: int = 1000) 
         pass
     patched.add_object_patch("model_sampling", model_sampling)
     return patched
+
+
+def _save_segment_preview(tensor: torch.Tensor, title: str, fps: float = 8.0) -> dict[str, Any] | None:
+    if not isinstance(tensor, torch.Tensor) or tensor.ndim != 4 or int(tensor.shape[0]) <= 0:
+        return None
+    try:
+        preview = tensor.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+        max_frames = 48
+        if int(preview.shape[0]) > max_frames:
+            indices = torch.linspace(0, int(preview.shape[0]) - 1, steps=max_frames).round().to(torch.long)
+            preview = preview.index_select(0, indices).contiguous()
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "scail2_infinity_segments"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"GJJ_SCAIL2Segment_{uuid.uuid4().hex[:12]}.webp"
+        arrays = torch.round(preview[..., :3] * 255.0).to(torch.uint8).numpy()
+        frames = [Image.fromarray(array, mode="RGB") for array in arrays]
+        frames[0].save(
+            target_dir / filename,
+            format="WEBP",
+            save_all=len(frames) > 1,
+            append_images=frames[1:],
+            duration=max(1, round(1000.0 / max(0.01, float(fps)))),
+            loop=0,
+            lossless=False,
+            quality=82,
+            method=3,
+        )
+        return {
+            "filename": filename,
+            "subfolder": "GJJ/scail2_infinity_segments",
+            "type": "temp",
+            "format": "image/webp",
+            "media_type": "image",
+            "title": title,
+            "is_sequence": len(frames) > 1,
+            "autoplay": len(frames) > 1,
+            "loop": len(frames) > 1,
+            "frame_rate": float(fps),
+            "frame_count": int(tensor.shape[0]),
+            "preview_frame_count": len(frames),
+            "width": int(tensor.shape[2]),
+            "height": int(tensor.shape[1]),
+        }
+    except Exception as exc:
+        log.warning("SCAIL-2 分段预览保存失败：%s", exc)
+        return None
 
 
 class GJJ_WanSCAILInfinity:
@@ -410,6 +460,7 @@ class GJJ_WanSCAILInfinity:
         scail_builder = GJJ_WanSCAILToVideo()
         stitched_imgs: list[torch.Tensor] = []
         stitched_latents: list[torch.Tensor] = []
+        preview_images: list[dict[str, Any]] = []
         prev_anchor: torch.Tensor | None = None
         offset = 0
         window_index = 0
@@ -490,6 +541,9 @@ class GJJ_WanSCAILInfinity:
             new_images = images[anchor:]
             if int(new_images.shape[0]) <= 0:
                 raise RuntimeError("当前窗口没有新增帧。请减少上一段锚定帧数或增大窗口帧数。")
+            segment_preview = _save_segment_preview(new_images, f"SCAIL2 第 {window_index + 1} 段")
+            if segment_preview is not None:
+                preview_images.append(segment_preview)
             kept_latent = chunk_latent[:, :, (0 if first_window else lat_drop):]
             stitched_imgs.append(new_images.detach().cpu())
             stitched_latents.append(kept_latent.detach().cpu())
@@ -522,7 +576,14 @@ class GJJ_WanSCAILInfinity:
             result_latent = result_latent[:, :, :_latent_frame_count(target)]
 
         _send_progress(unique_id, f"完成：输出 {int(result_images.shape[0])} 帧，共 {window_index} 个窗口。", 1.0, done=True)
-        return (result_images, {"samples": result_latent}, int(result_images.shape[0]))
+        return {
+            "ui": {
+                "images": preview_images,
+                "frame_count": [int(result_images.shape[0])],
+                "segment_count": [int(window_index)],
+            },
+            "result": (result_images, {"samples": result_latent}, int(result_images.shape[0])),
+        }
 
 
 NODE_CLASS_MAPPINGS = {

@@ -2217,6 +2217,21 @@ async function copyImagesToInput(images) {
 	return normalizeMediaPayload(data.images);
 }
 
+async function copyMediaToInput(items) {
+	const response = await api.fetchApi("/gjj/any_preview/copy_media_to_input", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			media: items.map((item) => ({ ...item })),
+		}),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response.ok || !Array.isArray(data?.media) || !data.media.length) {
+		throw new Error(data?.error || "复制媒体失败");
+	}
+	return normalizeMediaPayload(data.media);
+}
+
 function imageFilesFromDropEvent(event) {
 	const files = Array.from(event?.dataTransfer?.files || []);
 	return files.filter((file) => String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file?.name || ""));
@@ -2484,8 +2499,9 @@ function installAnyPreviewDropTarget(node, elements) {
 async function copyPreviewToAnyPreviewNode(node) {
 	const button = node?.__gjjAnyPreviewCopyNodeButton;
 	const images = currentPreviewImages(node);
-	if (!images.length) {
-		flashActionButton(button, "无图片", false);
+	const media = images.length ? { kind: "image", items: images } : currentPreviewMedia(node);
+	if (!media.items.length) {
+		flashActionButton(button, "无媒体", false);
 		return;
 	}
 	const graph = node?.graph || app.graph;
@@ -2496,14 +2512,27 @@ async function copyPreviewToAnyPreviewNode(node) {
 	}
 	try {
 		flashActionButton(button, "复制中...");
-		const inputImages = await copyImagesToInput(images);
+		const inputItems = media.kind === "image"
+			? await copyImagesToInput(media.items)
+			: await copyMediaToInput(media.items);
 		graph.add(copyNode);
 		copyNode.pos = nextAnyPreviewCopyPosition(node, copyNode, graph);
 		copyNode.properties = copyNode.properties || {};
-		copyNode.properties[HELD_IMAGES_PROPERTY] = inputImages.map((item) => ({ ...item }));
-		delete copyNode.properties[HELD_TEXT_PROPERTY];
+		if (media.kind === "image") {
+			copyNode.properties[HELD_IMAGES_PROPERTY] = inputItems.map((item) => ({ ...item }));
+			delete copyNode.properties[HELD_MEDIA_PROPERTY];
+			delete copyNode.properties[HELD_TEXT_PROPERTY];
+		} else {
+			copyNode.properties[HELD_MEDIA_PROPERTY] = {
+				kind: media.kind,
+				items: inputItems.map((item) => ({ ...item })),
+				text: String(node.__gjjAnyPreviewText || "").trim(),
+			};
+			delete copyNode.properties[HELD_IMAGES_PROPERTY];
+			delete copyNode.properties[HELD_TEXT_PROPERTY];
+		}
 		resetLivePreviewState(copyNode);
-		applyHeldImagePreview(copyNode);
+		applyHeldPreview(copyNode);
 		scheduleStabilize(copyNode, 0);
 		app.canvas?.selectNode?.(copyNode, false);
 		copyNode.setDirtyCanvas?.(true, true);
@@ -2521,7 +2550,8 @@ async function copyPreviewToAnyPreviewNode(node) {
 }
 
 async function copyPreviewToNode(node) {
-	if (currentPreviewImages(node).length) {
+	const media = currentPreviewMedia(node);
+	if (currentPreviewImages(node).length || media.items.length) {
 		await copyPreviewToAnyPreviewNode(node);
 		return;
 	}
@@ -2641,19 +2671,28 @@ function mediaFromPreviewItems(items, key) {
 }
 
 function currentPreviewMedia(node) {
-	const kind = String(node?.__gjjAnyPreviewKind || "").trim();
-	if (kind === "audio") {
-		const audio = normalizeMediaPayload(node?.__gjjAnyPreviewAudio);
-		return { kind, items: audio.length ? audio : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "audio") };
+	const explicitKind = String(node?.__gjjAnyPreviewKind || "").trim();
+	const audio = normalizeMediaPayload(node?.__gjjAnyPreviewAudio);
+	const video = normalizeMediaPayload(node?.__gjjAnyPreviewVideo);
+	const files = normalizeMediaPayload(node?.__gjjAnyPreviewFiles);
+	if (explicitKind === "audio") {
+		return { kind: explicitKind, items: audio.length ? audio : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "audio") };
 	}
-	if (kind === "video") {
-		const video = normalizeMediaPayload(node?.__gjjAnyPreviewVideo);
-		return { kind, items: video.length ? video : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "video") };
+	if (explicitKind === "video") {
+		return { kind: explicitKind, items: video.length ? video : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "video") };
 	}
-	if (kind === "3d") {
-		const files = normalizeMediaPayload(node?.__gjjAnyPreviewFiles);
-		return { kind, items: files.length ? files : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "files") };
+	if (explicitKind === "3d") {
+		return { kind: explicitKind, items: files.length ? files : mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "files") };
 	}
+	if (video.length) return { kind: "video", items: video };
+	if (audio.length) return { kind: "audio", items: audio };
+	if (files.length) return { kind: "3d", items: files };
+	const itemVideo = mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "video");
+	if (itemVideo.length) return { kind: "video", items: itemVideo };
+	const itemAudio = mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "audio");
+	if (itemAudio.length) return { kind: "audio", items: itemAudio };
+	const itemFiles = mediaFromPreviewItems(node?.__gjjAnyPreviewItems, "files");
+	if (itemFiles.length) return { kind: "3d", items: itemFiles };
 	return { kind: "", items: [] };
 }
 
@@ -4813,7 +4852,7 @@ function ensurePreviewWidget(node) {
 	const copyNodeButton = document.createElement("button");
 	copyNodeButton.type = "button";
 	copyNodeButton.style.cssText = buttonStyle;
-	setupIconButton(copyNodeButton, "复制节点：在当前节点旁边新建 GJJ_TextInput，并填入当前预览文本", COPY_NODE_ICON_SVG);
+	setupIconButton(copyNodeButton, "复制节点：在当前节点旁边新建预览节点或文本节点", COPY_NODE_ICON_SVG);
 	const copyClipboardButton = document.createElement("button");
 	copyClipboardButton.type = "button";
 	copyClipboardButton.style.cssText = buttonStyle;

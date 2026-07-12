@@ -1723,17 +1723,23 @@ def _register_gjj_character_library_api():
 				reader = await request.multipart()
 				fields = {}
 				raw = b""
+				action_raws = []
 				while True:
 					part = await reader.next()
 					if part is None:
 						break
 					if part.name == "file":
 						raw = await part.read(decode=False)
+					elif str(part.name or "").startswith("action_file"):
+						action_raw = await part.read(decode=False)
+						if action_raw:
+							action_raws.append(action_raw)
 					else:
 						fields[part.name] = await part.text()
 				name = str(fields.get("name") or "").strip()
 				character_id = clean_key(fields.get("id") or name, "character")
 				image = Image.open(io.BytesIO(raw)).convert("RGBA") if raw else None
+				action_images = [Image.open(io.BytesIO(item)).convert("RGBA") for item in action_raws]
 				base_prompt = str(fields.get("base_prompt") or "").strip()
 				reference_label = str(fields.get("reference_label") or "").strip()
 				reference_labels = parse_view_labels(fields.get("reference_labels") or "")
@@ -1741,6 +1747,7 @@ def _register_gjj_character_library_api():
 					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(fields.get("labels") or fields.get("views") or "")
 				prompt_labels = parse_view_labels(fields.get("prompt_labels") or "")
+				multiview_unet_override = str(fields.get("multiview_unet") or "").strip()
 				seed = int(fields.get("seed") or 0)
 			else:
 				data = await request.json()
@@ -1748,6 +1755,7 @@ def _register_gjj_character_library_api():
 				character_id = clean_key(data.get("id") or name, "character")
 				image_value = data.get("image") or data.get("png") or ""
 				image = decode_image(image_value) if image_value else None
+				action_images = []
 				base_prompt = str(data.get("base_prompt") or "").strip()
 				reference_label = str(data.get("reference_label") or "").strip()
 				reference_labels = parse_view_labels(data.get("reference_labels") or "")
@@ -1755,6 +1763,7 @@ def _register_gjj_character_library_api():
 					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(data.get("labels") or data.get("views") or "")
 				prompt_labels = parse_view_labels(data.get("prompt_labels") or "")
+				multiview_unet_override = str(data.get("multiview_unet") or "").strip()
 				seed = int(data.get("seed") or 0)
 			manifest = read_manifest(character_id)
 			manifest["name"] = name or manifest.get("name") or character_id
@@ -1791,6 +1800,15 @@ def _register_gjj_character_library_api():
 					GJJ_CharacterMultiViewStudio,
 					_pick_available_lora_name,
 					_safe_filename_list,
+				)
+				from .nodes.common_utils.model_manager import (
+					gjjutils_find_model_list,
+					gjjutils_model_stem_without_quant,
+				)
+				from .nodes.common_utils.model_family import (
+					gjjutils_match_model_family_preset,
+					gjjutils_model_family_pick_lora_name,
+					gjjutils_model_family_pick_model_name,
 				)
 			except Exception as exc:
 				raise RuntimeError(f"加载 GJJ_CharacterMultiViewStudio 运行时失败：{exc}") from exc
@@ -1830,23 +1848,42 @@ def _register_gjj_character_library_api():
 			])
 			lora_models = _safe_filename_list("loras") or []
 			character_settings = _gjj_section_settings("character_library")
-			def lora_exists(name: str) -> bool:
-				target = os.path.basename(str(name or "").replace("\\", "/")).lower()
-				return bool(target) and any(os.path.basename(str(item or "").replace("\\", "/")).lower() == target for item in lora_models)
-			lora_1_name = _pick_available_lora_name(
-				lora_models,
-				str(character_settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA),
-				DEFAULT_QWEN2511_LIGHTNING_LORA,
-			)
-			lora_2_name = _pick_available_lora_name(
-				lora_models,
-				str(character_settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA),
-				DEFAULT_MULTI_ANGLES_LORA,
-			)
-			if not lora_exists(lora_1_name) or not lora_exists(lora_2_name):
-				raise RuntimeError("生成多视图必须使用 Qwen Lightning LoRA 和 multiple-angles LoRA，但未在 models/loras 中找到。")
+			def first_keyword_model(folder_type: str, seed: str, extensions: tuple[str, ...]) -> str:
+				keywords = [part for part in gjjutils_model_stem_without_quant(seed).split(" ") if part]
+				matches = gjjutils_find_model_list(keywords, folder_type, "AND") if keywords else []
+				exts = tuple(ext.lower() for ext in extensions)
+				for match in matches:
+					if str(match or "").replace("\\", "/").lower().endswith(exts):
+						return str(match)
+				return ""
+			unet_name = first_keyword_model("diffusion_models", str(character_settings.get("multiview_unet") or "qwen image edit 2511"), (".safetensors", ".gguf"))
+			available_unets = _safe_filename_list("diffusion_models") or []
+			if multiview_unet_override:
+				unet_name = gjjutils_model_family_pick_model_name(multiview_unet_override, available_unets, unet_name, "basename") or unet_name
+			preset = gjjutils_match_model_family_preset(unet_name) or {}
+			has_preset = bool(preset)
+			lora_1_seed = str(preset.get("lora_1_name") if has_preset else (character_settings.get("multiview_lora_1") or "qwen lightning"))
+			lora_2_seed = str(preset.get("lora_2_name") if has_preset else (character_settings.get("multiview_lora_2") or "multiple angles"))
+			lora_1_name = gjjutils_model_family_pick_lora_name(lora_1_seed, lora_models, first_keyword_model("loras", lora_1_seed, (".safetensors",))) if lora_1_seed else ""
+			lora_2_name = gjjutils_model_family_pick_lora_name(lora_2_seed, lora_models, first_keyword_model("loras", lora_2_seed, (".safetensors",))) if lora_2_seed else ""
+			lora_1_strength = float(preset.get("lora_1_strength", 1.0) or 1.0)
+			lora_2_strength = float(preset.get("lora_2_strength", 1.0) or 1.0)
+			missing_models = []
+			if not unet_name:
+				missing_models.append("主模型")
+			if lora_1_seed and not lora_1_name:
+				missing_models.append("Lightning LoRA")
+			if lora_2_seed and not lora_2_name:
+				missing_models.append("多角度 LoRA")
+			if missing_models:
+				raise RuntimeError(f"生成多视图缺少模型：{'、'.join(missing_models)}。请在 🧠 面板选择关键词匹配到的模型。")
 
 			main_image = _pil_list_to_tensor([fit_character_reference_canvas(image, 1024, 1280)])
+			action_kwargs = {}
+			for index, action_image in enumerate(action_images[:len(output_labels)], start=1):
+				action_kwargs[f"action_image_{index:02d}"] = _pil_list_to_tensor([
+					fit_character_reference_canvas(action_image, 1024, 1280)
+				])
 			context_unique_id = "gjj_character_library_multiview"
 			had_last_prompt_id = hasattr(server, "last_prompt_id")
 			if not had_last_prompt_id:
@@ -1860,16 +1897,17 @@ def _register_gjj_character_library_api():
 					base_prompt=identity_prompt,
 					negative_prompt=DEFAULT_NEGATIVE_PROMPT,
 					action_prompts=action_prompts,
-					unet_name=str(character_settings.get("multiview_unet") or DEFAULT_QWEN2511_UNET),
+					unet_name=unet_name,
 					lora_1_name=lora_1_name,
-					lora_1_strength=1.0,
+					lora_1_strength=lora_1_strength,
 					lora_2_name=lora_2_name,
-					lora_2_strength=1.0,
+					lora_2_strength=lora_2_strength,
 					seed=seed,
 					save_each_image=False,
 					prompt={},
 					extra_pnginfo={},
 					unique_id=context_unique_id,
+					**action_kwargs,
 				)
 				if isinstance(multiview_result, dict):
 					_collage, batch_images = multiview_result.get("result", (None, None))
@@ -4276,26 +4314,35 @@ def _register_gjj_costume_library_api():
 					_pick_available_lora_name,
 					_safe_filename_list,
 				)
+				from .nodes.common_utils.model_manager import (
+					gjjutils_find_model_list,
+					gjjutils_model_stem_without_quant,
+				)
 			except Exception as exc:
 				raise RuntimeError(f"加载 GJJ_CharacterMultiViewStudio 运行时失败：{exc}") from exc
 
 			lora_models = _safe_filename_list("loras") or []
 			settings = _gjj_section_settings("character_library")
-			def lora_exists(name: str) -> bool:
-				target = os.path.basename(str(name or "").replace("\\", "/")).lower()
-				return bool(target) and any(os.path.basename(str(item or "").replace("\\", "/")).lower() == target for item in lora_models)
-			lora_1_name = _pick_available_lora_name(
-				lora_models,
-				str(settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA),
-				DEFAULT_QWEN2511_LIGHTNING_LORA,
-			)
-			lora_2_name = _pick_available_lora_name(
-				lora_models,
-				str(settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA),
-				DEFAULT_MULTI_ANGLES_LORA,
-			)
-			if not lora_exists(lora_1_name) or not lora_exists(lora_2_name):
-				raise RuntimeError("生成多视图必须使用 Qwen Lightning LoRA 和 multiple-angles LoRA，但未在 models/loras 中找到。")
+			def first_keyword_model(folder_type: str, seed: str, extensions: tuple[str, ...]) -> str:
+				keywords = [part for part in gjjutils_model_stem_without_quant(seed).split(" ") if part]
+				matches = gjjutils_find_model_list(keywords, folder_type, "AND") if keywords else []
+				exts = tuple(ext.lower() for ext in extensions)
+				for match in matches:
+					if str(match or "").replace("\\", "/").lower().endswith(exts):
+						return str(match)
+				return ""
+			unet_name = first_keyword_model("diffusion_models", str(settings.get("multiview_unet") or "qwen image edit 2511"), (".safetensors", ".gguf"))
+			lora_1_name = first_keyword_model("loras", str(settings.get("multiview_lora_1") or "qwen lightning"), (".safetensors",))
+			lora_2_name = first_keyword_model("loras", str(settings.get("multiview_lora_2") or "multiple angles"), (".safetensors",))
+			missing_models = []
+			if not unet_name:
+				missing_models.append("主模型")
+			if not lora_1_name:
+				missing_models.append("Lightning LoRA")
+			if not lora_2_name:
+				missing_models.append("多角度 LoRA")
+			if missing_models:
+				raise RuntimeError(f"生成多视图缺少模型：{'、'.join(missing_models)}。请在 🧠 面板选择关键词匹配到的模型。")
 
 			identity_prompt = (
 				"图一只作为产品类别、轮廓、材质、颜色、品牌标识、结构细节和比例参考；"
@@ -4319,7 +4366,7 @@ def _register_gjj_costume_library_api():
 					base_prompt=identity_prompt,
 					negative_prompt=DEFAULT_NEGATIVE_PROMPT,
 					action_prompts=action_prompts,
-					unet_name=str(settings.get("multiview_unet") or DEFAULT_QWEN2511_UNET),
+					unet_name=unet_name,
 					lora_1_name=lora_1_name,
 					lora_1_strength=1.0,
 					lora_2_name=lora_2_name,

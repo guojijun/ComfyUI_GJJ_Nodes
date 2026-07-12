@@ -31,6 +31,32 @@ class AnyType(str):
 
 any_type = AnyType("*")
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+FRONTEND_MANAGED_WIDGETS = {
+    "model_name": "model",
+    "multiplier": "classic",
+    "clear_cache_after_n_frames": "classic",
+    "fast_mode": "classic",
+    "ensemble": "classic",
+    "scale_factor": "classic,hdv3",
+    "source_fps": "hdv3",
+    "target_fps": "hdv3",
+    "batch_size": "hdv3",
+    "use_fp16": "hdv3",
+}
+
+
+def _declare_frontend_managed_widgets(input_types: dict[str, Any]) -> dict[str, Any]:
+    required = input_types.get("required") or {}
+    for name, panel in FRONTEND_MANAGED_WIDGETS.items():
+        config = required.get(name)
+        if not (isinstance(config, tuple) and len(config) >= 2 and isinstance(config[1], dict)):
+            continue
+        options = config[1]
+        options["hidden"] = True
+        options["display"] = "hidden"
+        options["gjj_frontend_managed"] = "rife_vfi"
+        options["gjj_rife_vfi_panel"] = panel
+    return input_types
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -164,7 +190,7 @@ class GJJ_RifeVideoInterpolator:
     def INPUT_TYPES(cls):
         model_choices = list_rife_models() or [DEFAULT_CKPT]
         default_model = DEFAULT_CKPT if DEFAULT_CKPT in model_choices else model_choices[0]
-        return {
+        input_types = {
             "required": {
                 "media": (
                     MEDIA_INPUT_TYPE,
@@ -222,7 +248,7 @@ class GJJ_RifeVideoInterpolator:
                 "scale_factor": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": 2.0,
                         "min": 0.25,
                         "max": 4.0,
                         "step": 0.25,
@@ -233,7 +259,7 @@ class GJJ_RifeVideoInterpolator:
                 "source_fps": (
                     "FLOAT",
                     {
-                        "default": 24.0,
+                        "default": 16.0,
                         "min": 0.1,
                         "max": 240.0,
                         "step": 0.1,
@@ -244,7 +270,7 @@ class GJJ_RifeVideoInterpolator:
                 "target_fps": (
                     "FLOAT",
                     {
-                        "default": 60.0,
+                        "default": 24.0,
                         "min": 0.1,
                         "max": 480.0,
                         "step": 0.1,
@@ -255,7 +281,7 @@ class GJJ_RifeVideoInterpolator:
                 "batch_size": (
                     "INT",
                     {
-                        "default": 8,
+                        "default": 4,
                         "min": 1,
                         "max": 32,
                         "step": 1,
@@ -276,6 +302,11 @@ class GJJ_RifeVideoInterpolator:
                 "unique_id": "UNIQUE_ID",
             },
         }
+        return _declare_frontend_managed_widgets(input_types)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        return True
 
     def interpolate(
         self,
@@ -285,10 +316,10 @@ class GJJ_RifeVideoInterpolator:
         clear_cache_after_n_frames=10,
         fast_mode=True,
         ensemble=True,
-        scale_factor=1.0,
-        source_fps=24.0,
-        target_fps=60.0,
-        batch_size=8,
+        scale_factor=2.0,
+        source_fps=16.0,
+        target_fps=24.0,
+        batch_size=4,
         use_fp16=True,
         input_video=None,
         input_frames=None,

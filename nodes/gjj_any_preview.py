@@ -1726,7 +1726,7 @@ try:
         path.relative_to(root)
         return root, path
 
-    def _copy_preview_media_to_input(item: dict[str, Any]) -> dict[str, Any]:
+    def _copy_preview_media_to_input(item: dict[str, Any], allowed_suffixes: set[str] | None = None) -> dict[str, Any]:
         media_type = str(item.get("type") or "temp").strip().lower()
         filename = str(item.get("filename") or "").strip()
         subfolder = str(item.get("subfolder") or "").strip()
@@ -1734,10 +1734,16 @@ try:
             raise ValueError("缺少文件名")
         _, source = _safe_media_path(media_type, subfolder, filename)
         if not source.exists() or not source.is_file():
-            raise FileNotFoundError("源图片不存在")
+            raise FileNotFoundError("源文件不存在")
         suffix = source.suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
-            raise ValueError("仅支持复制图片文件")
+        allowed = allowed_suffixes or {
+            ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+            ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif",
+            ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv",
+            ".glb", ".gltf", ".obj", ".fbx", ".stl", ".usdz", ".ply", ".splat", ".spz", ".ksplat",
+        }
+        if suffix not in allowed:
+            raise ValueError("不支持复制此类型文件")
         if media_type == "input":
             return {**item, "type": "input"}
         input_root = Path(folder_paths.get_input_directory()).resolve()
@@ -1915,15 +1921,19 @@ try:
         try:
             payload = await request.json()
             images = payload.get("images") if isinstance(payload, dict) else None
-            if not isinstance(images, list) or not images:
-                return web.json_response({"error": "缺少图片"}, status=400)
+            media = payload.get("media") if isinstance(payload, dict) else None
+            items = images if isinstance(images, list) and images else media
+            if not isinstance(items, list) or not items:
+                return web.json_response({"error": "缺少媒体文件"}, status=400)
+            image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"} if isinstance(images, list) and images else None
             copied = []
-            for item in images:
+            for item in items:
                 if isinstance(item, dict):
-                    copied.append(_copy_preview_media_to_input(item))
+                    copied.append(_copy_preview_media_to_input(item, image_suffixes))
             if not copied:
-                return web.json_response({"error": "没有可复制的图片"}, status=400)
-            return web.json_response({"images": copied})
+                return web.json_response({"error": "没有可复制的媒体文件"}, status=400)
+            response = {"images": copied} if isinstance(images, list) and images else {"media": copied}
+            return web.json_response(response)
         except Exception as error:
             return web.json_response({"error": str(error)}, status=500)
 
