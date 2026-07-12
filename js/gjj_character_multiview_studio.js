@@ -22,6 +22,7 @@ const KEEP_MODEL_PROPERTY = "gjj_multiview_keep_model";
 const RANDOM_SEED_PROPERTY = "gjj_multiview_random_seed";
 const PREVIEW_LAYOUT_PROPERTY = "gjj_multiview_preview_layout";
 const PREVIEW_PAGE_PROPERTY = "gjj_multiview_preview_page";
+const FLOATING_PANEL_PROPERTY = "gjj_multiview_floating_panel";
 const PREVIEW_DRAG_MIME = "application/x-gjj-character-multiview-preview";
 const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const ANY_PREVIEW_HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
@@ -33,9 +34,16 @@ const LORA2_WIDGET = "lora_2_name";
 const LORA2_STRENGTH_WIDGET = "lora_2_strength";
 const LORA3_WIDGET = "lora_3_name";
 const LORA3_STRENGTH_WIDGET = "lora_3_strength";
+const CLIP_WIDGET = "clip_name";
+const VAE_WIDGET = "vae_name";
+const RMBG_WIDGET = "rmbg_model_name";
+const TEMPLATE_NAME_WIDGET = "template_name";
 const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
 const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const TEMP_OUTPUT_NODE_FLAG = "__gjjCharacterMultiViewTempOutputNode";
+const DEFAULT_QWEN2511_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors";
+const DEFAULT_QWEN2511_VAE = "qwen_image_vae.safetensors";
+const DEFAULT_RMBG14_MODEL = "rmbg1.4.safetensors";
 const PY_DECLARED_HIDDEN_WIDGETS = new Set([
 	BASE_PROMPT_WIDGET,
 	"negative_prompt",
@@ -49,6 +57,10 @@ const PY_DECLARED_HIDDEN_WIDGETS = new Set([
 	"seed",
 	"save_each_image",
 	"keep_model",
+	CLIP_WIDGET,
+	VAE_WIDGET,
+	RMBG_WIDGET,
+	TEMPLATE_NAME_WIDGET,
 ]);
 const PY_DECLARED_HIDDEN_INPUTS = new Set([MAIN_IMAGE_INPUT, LORA_CHAIN_INPUT]);
 const REQUIRED_WIDGET_ORDER = [
@@ -65,6 +77,10 @@ const REQUIRED_WIDGET_ORDER = [
 	"seed",
 	"save_each_image",
 	"keep_model",
+	CLIP_WIDGET,
+	VAE_WIDGET,
+	RMBG_WIDGET,
+	TEMPLATE_NAME_WIDGET,
 ];
 const WIDGET_CHINESE_META = {
 	base_prompt: {
@@ -118,6 +134,22 @@ const WIDGET_CHINESE_META = {
 	keep_model: {
 		label: "保持模型",
 		tooltip: "开启后执行完成会尽量保留当前模型在内存中；关闭后允许释放模型缓存。",
+	},
+	clip_name: {
+		label: "文本编码器",
+		tooltip: "Qwen Image Edit 使用的文本 / 视觉编码器，可在模型树中切换其它量化版本。",
+	},
+	vae_name: {
+		label: "VAE",
+		tooltip: "Qwen Image VAE，可在模型树中切换其它量化版本。",
+	},
+	rmbg_model_name: {
+		label: "RMBG1.4 抠图模型",
+		tooltip: "人物资产分支使用的 RMBG1.4 抠图模型，可在模型树中切换其它量化版本。",
+	},
+	template_name: {
+		label: "当前模板名",
+		tooltip: "由模板按钮自动写入，用于后端识别人物资产等专用拼接分支。",
 	},
 };
 const OUTPUT_SPECS = [
@@ -1559,6 +1591,7 @@ function ensureCharacterMultiViewLoraPopup() {
 			return panel.style.display === "flex" && this.state?.anchorEl === anchorEl;
 		},
 		open(state) {
+			closeCharacterMultiViewFloatingPanels(this);
 			this.state = state;
 			search.value = String(state.searchValue || "");
 			search.placeholder = "搜索微调模型";
@@ -1915,6 +1948,11 @@ function enforceRequiredModelChoices(node) {
 	if (unetValues?.length) {
 		const filtered = unetValues.filter((value) => String(value || "").toLowerCase().includes("2511"));
 		if (filtered.length) {
+			filtered.sort((a, b) => {
+				const left = modelNameScore(a, [], 0);
+				const right = modelNameScore(b, [], 1);
+				return (left?.[0] ?? 9) - (right?.[0] ?? 9) || String(a).localeCompare(String(b));
+			});
 			unetValues.splice(0, unetValues.length, ...filtered);
 			if (!filtered.includes(String(unetWidget.value || ""))) {
 				setWidgetValue(unetWidget, filtered[0]);
@@ -1934,6 +1972,11 @@ function enforceRequiredModelChoices(node) {
 				const text = String(values[index] || "").toLowerCase();
 				if (text.trim() && !keywords.every((keyword) => text.includes(keyword))) values.splice(index, 1);
 			}
+			values.sort((a, b) => {
+				const left = modelNameScore(a, [], 0);
+				const right = modelNameScore(b, [], 1);
+				return (left?.[0] ?? 9) - (right?.[0] ?? 9) || String(a).localeCompare(String(b));
+			});
 			if (values.length && !String(widget.value || "").trim()) {
 				setWidgetValue(widget, values[0]);
 			}
@@ -2035,6 +2078,181 @@ function createButton(label, title, onClick, container) {
 	return button;
 }
 
+function floatingRegistry() {
+	if (!globalThis.__gjjCharacterMultiViewFloatingPanels) {
+		globalThis.__gjjCharacterMultiViewFloatingPanels = new Set();
+	}
+	return globalThis.__gjjCharacterMultiViewFloatingPanels;
+}
+
+function closeCharacterMultiViewFloatingPanels(except = null) {
+	for (const panel of Array.from(floatingRegistry())) {
+		if (panel && panel !== except) {
+			panel.close?.();
+		}
+	}
+	if (except !== globalThis.__gjjCharacterMultiViewLoraPopup) {
+		globalThis.__gjjCharacterMultiViewLoraPopup?.close?.();
+	}
+}
+
+function modelSearchTokens(query) {
+	return String(query || "")
+		.toLowerCase()
+		.split(/[\s,，;；|/\\]+/)
+		.map((token) => token.trim())
+		.filter(Boolean);
+}
+
+function modelNameScore(value, tokens, index) {
+	const text = String(value || "").toLowerCase();
+	const normalized = normalizeModelText(text);
+	const suffixScore = text.endsWith(".safetensors") ? 0 : text.endsWith(".gguf") ? 1 : 2;
+	if (!tokens.length) {
+		return [suffixScore, index];
+	}
+	let positionScore = 0;
+	for (const token of tokens) {
+		const normalizedToken = normalizeModelText(token);
+		if (!text.includes(token) && (!normalizedToken || !normalized.includes(normalizedToken))) {
+			return null;
+		}
+		const rawIndex = text.indexOf(token);
+		const normIndex = normalizedToken ? normalized.indexOf(normalizedToken) : rawIndex;
+		positionScore += rawIndex >= 0 ? rawIndex : Math.max(0, normIndex);
+	}
+	return [suffixScore, positionScore, index];
+}
+
+function filteredModelChoices(widget, query = "", limit = 80) {
+	const values = widgetChoices(widget) || [];
+	const current = String(widget?.value || "");
+	const seen = new Set();
+	const tokens = modelSearchTokens(query);
+	const scored = [];
+	values.forEach((value, index) => {
+		const text = String(value || "");
+		if (seen.has(text)) {
+			return;
+		}
+		seen.add(text);
+		const score = modelNameScore(text, tokens, index);
+		if (score) {
+			scored.push({ text, score });
+		}
+	});
+	scored.sort((a, b) => {
+		for (let index = 0; index < a.score.length; index += 1) {
+			if (a.score[index] !== b.score[index]) {
+				return a.score[index] - b.score[index];
+			}
+		}
+		return a.text.localeCompare(b.text);
+	});
+	const result = scored.slice(0, limit).map((item) => item.text);
+	if (current && !result.includes(current) && (!tokens.length || modelNameScore(current, tokens, -1))) {
+		result.unshift(current);
+	}
+	return result;
+}
+
+function selectFirstModelChoice(widget, query = "") {
+	const first = filteredModelChoices(widget, query, 1)[0];
+	if (widget && first != null && String(widget.value || "") !== String(first || "")) {
+		setWidgetValue(widget, first);
+		return first;
+	}
+	return first ?? "";
+}
+
+function makeFloatingPanel(node, key, anchor, title) {
+	closeCharacterMultiViewFloatingPanels();
+	const panel = document.createElement("div");
+	panel.className = "gjj-mv-floating-panel";
+	panel.style.cssText = [
+		"position:fixed",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"width:min(560px,calc(100vw - 24px))",
+		"max-height:min(680px,calc(100vh - 24px))",
+		"overflow:auto",
+		"padding:10px",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#dce7e2",
+		"box-shadow:0 12px 32px rgba(0,0,0,.42)",
+		"box-sizing:border-box",
+		"z-index:100000",
+		"font-size:12px",
+	].join(";");
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:700;color:#eef8f4;";
+	const titleEl = document.createElement("div");
+	titleEl.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;";
+	titleEl.textContent = title;
+	const close = createButton("✖关闭", "关闭窗口", () => popup.close());
+	close.style.minWidth = "58px";
+	close.style.padding = "2px 8px";
+	header.append(titleEl, close);
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+	panel.append(header, body);
+	document.body.appendChild(panel);
+
+	const popup = {
+		key,
+		node,
+		panel,
+		titleEl,
+		body,
+		close() {
+			panel.remove();
+			floatingRegistry().delete(this);
+			if (key === "models" && node?.__gjjCharacterMultiViewKeepModelHeaderButton) {
+				delete node.__gjjCharacterMultiViewKeepModelHeaderButton;
+			}
+			if (node?.properties?.[FLOATING_PANEL_PROPERTY] === key) {
+				delete node.properties[FLOATING_PANEL_PROPERTY];
+			}
+			updateFloatingButtonStates(node);
+			document.removeEventListener("pointerdown", outside, true);
+			window.removeEventListener("resize", reposition);
+		},
+		reposition() {
+			const rect = anchor?.getBoundingClientRect?.() || { left: 12, right: 12, bottom: 36, top: 12 };
+			const pad = 12;
+			const width = Math.min(560, Math.max(320, window.innerWidth - pad * 2));
+			const left = Math.max(pad, Math.min(Math.floor(rect.left), window.innerWidth - width - pad));
+			panel.style.width = `${width}px`;
+			panel.style.left = `${left}px`;
+			panel.style.top = `${Math.max(pad, Math.min(Math.ceil(rect.bottom + 6), window.innerHeight - 160))}px`;
+		},
+	};
+	function outside(event) {
+		if (panel.contains(event.target) || anchor?.contains?.(event.target)) {
+			return;
+		}
+		popup.close();
+	}
+	function reposition() {
+		popup.reposition();
+	}
+	panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+	panel.addEventListener("mousedown", (event) => event.stopPropagation());
+	panel.addEventListener("click", (event) => event.stopPropagation());
+	panel.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+	document.addEventListener("pointerdown", outside, true);
+	window.addEventListener("resize", reposition);
+	floatingRegistry().add(popup);
+	node.properties ||= {};
+	node.properties[FLOATING_PANEL_PROPERTY] = key;
+	popup.reposition();
+	updateFloatingButtonStates(node);
+	return popup;
+}
+
 function parseMultiviewTemplates(text) {
 	const blocks = String(text || "")
 		.replace(/\r\n/g, "\n")
@@ -2092,11 +2310,15 @@ async function saveMultiviewTemplateText(text) {
 function applyMultiviewTemplate(node, template) {
 	const textWidget = getWidget(node, ACTION_TEXT_WIDGET);
 	const basePromptWidget = getWidget(node, BASE_PROMPT_WIDGET);
+	const templateNameWidget = getWidget(node, TEMPLATE_NAME_WIDGET);
 	if (basePromptWidget) {
 		setWidgetValue(basePromptWidget, template.basePrompt || "");
 	}
 	if (textWidget) {
 		setWidgetValue(textWidget, (template.actions || []).join("\n"));
+	}
+	if (templateNameWidget) {
+		setWidgetValue(templateNameWidget, template.name || "");
 	}
 	syncWidgetValuesCache(node);
 	setStatus(node, `已应用模板：${template.name}`);
@@ -2370,14 +2592,14 @@ function setInputHidden(input, hidden) {
 }
 
 function showSettings(node) {
-	return Boolean(node?.properties?.[SETTINGS_PROPERTY]);
+	return false;
 }
 
 function setSettingsVisible(node, visible) {
 	if (!node.properties) {
 		node.properties = {};
 	}
-	node.properties[SETTINGS_PROPERTY] = Boolean(visible);
+	node.properties[SETTINGS_PROPERTY] = false;
 	applyCompactVisibility(node);
 	syncWidgetValuesCache(node);
 }
@@ -2398,6 +2620,7 @@ function setKeepModelEnabled(node, enabled) {
 	node.properties[KEEP_MODEL_PROPERTY] = Boolean(enabled);
 	setWidgetValue(getWidget(node, "keep_model"), Boolean(enabled));
 	updateKeepModelButtonState(node);
+	updateKeepModelHeaderButtonState(node);
 	syncWidgetValuesCache(node);
 	refreshNode(node);
 }
@@ -2428,15 +2651,7 @@ function randomizeSeedIfEnabled(node) {
 }
 
 function updateSettingsButtonState(node) {
-	const button = node?.__gjjCharacterMultiViewSettingsButton;
-	if (!button) {
-		return;
-	}
-	const open = showSettings(node);
-	button.textContent = open ? "⚙️收起" : "⚙️";
-	button.title = open ? "收起其它参数，只保留顶部按钮和动作文本列表。" : "显示模型、微调模型、提示词、种子和保存参数。";
-	button.style.background = open ? "#2a3f4a" : "#172026";
-	button.style.borderColor = open ? "#5a7a8a" : "#41535b";
+	updateFloatingButtonStates(node);
 }
 
 function applyToolbarToggleStyle(button, enabled, colors) {
@@ -2467,15 +2682,7 @@ function updateKeepModelButtonState(node) {
 	if (widget && widget.value !== enabled) {
 		widget.value = enabled;
 	}
-	button.textContent = "🧠";
-	button.title = enabled ? "保持模型：开启。执行后尽量保留当前模型在内存中。" : "保持模型：关闭。执行后允许释放当前模型。";
-	applyToolbarToggleStyle(button, enabled, {
-		onBg: "#1d3d34",
-		onBorder: "#54c985",
-		onColor: "#eafff2",
-		onInset: "rgba(111,255,174,0.28)",
-		onGlow: "rgba(84,201,133,0.32)",
-	});
+	updateFloatingButtonStates(node);
 }
 
 function updateRandomSeedButtonState(node) {
@@ -2493,6 +2700,445 @@ function updateRandomSeedButtonState(node) {
 		onInset: "rgba(255,207,98,0.28)",
 		onGlow: "rgba(242,184,75,0.34)",
 	});
+}
+
+function makeBooleanRow(node, widgetName, labelText) {
+	const widget = getWidget(node, widgetName);
+	const label = document.createElement("label");
+	label.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#172026;";
+	const input = document.createElement("input");
+	input.type = "checkbox";
+	input.checked = Boolean(widget?.value);
+	const text = document.createElement("span");
+	text.textContent = labelText || chineseWidgetMeta(widgetName)?.label || widgetName;
+	input.addEventListener("change", () => {
+		setWidgetValue(widget, Boolean(input.checked));
+		if (widgetName === "keep_model") {
+			node.properties ||= {};
+			node.properties[KEEP_MODEL_PROPERTY] = Boolean(input.checked);
+			updateKeepModelButtonState(node);
+		}
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	});
+	label.append(input, text);
+	return label;
+}
+
+function styleKeepModelHeaderButton(button, enabled) {
+	if (!button) {
+		return;
+	}
+	button.textContent = enabled ? "保持模型：开" : "保持模型：关";
+	button.title = enabled ? "保持模型已开启，点击关闭。" : "保持模型已关闭，点击开启。";
+	button.style.minWidth = "82px";
+	button.style.padding = "3px 8px";
+	button.style.fontSize = "11px";
+	button.style.fontWeight = "700";
+	button.style.background = enabled ? "#1d3d34" : "#11181c";
+	button.style.borderColor = enabled ? "#54c985" : "#43555f";
+	button.style.color = enabled ? "#eafff2" : "#8fa0a8";
+	button.style.boxShadow = enabled
+		? "inset 0 0 0 1px rgba(111,255,174,0.28), 0 0 8px rgba(84,201,133,0.26)"
+		: "inset 0 0 0 1px rgba(255,255,255,0.03)";
+}
+
+function makeKeepModelHeaderButton(node) {
+	const button = createButton("", "", () => {
+		setKeepModelEnabled(node, !keepModelEnabled(node));
+	});
+	button.__gjjToggleButton = true;
+	node.__gjjCharacterMultiViewKeepModelHeaderButton = button;
+	styleKeepModelHeaderButton(button, keepModelEnabled(node));
+	return button;
+}
+
+function updateKeepModelHeaderButtonState(node) {
+	styleKeepModelHeaderButton(node?.__gjjCharacterMultiViewKeepModelHeaderButton, keepModelEnabled(node));
+}
+
+function makeNumberRow(node, widgetName) {
+	const widget = getWidget(node, widgetName);
+	const wrap = document.createElement("label");
+	wrap.style.cssText = "display:grid;grid-template-columns:110px minmax(0,1fr);align-items:center;gap:8px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#172026;";
+	const label = document.createElement("span");
+	label.textContent = chineseWidgetMeta(widgetName)?.label || widgetName;
+	const input = document.createElement("input");
+	input.type = "number";
+	input.value = String(widget?.value ?? 0);
+	input.style.cssText = "min-width:0;background:#11181c;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+	input.addEventListener("change", () => {
+		setWidgetValue(widget, coerceWidgetValue(widget, input.value));
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	});
+	wrap.append(label, input);
+	return wrap;
+}
+
+function makeTextRow(node, widgetName) {
+	const widget = getWidget(node, widgetName);
+	const wrap = document.createElement("label");
+	wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#172026;";
+	const label = document.createElement("span");
+	label.textContent = chineseWidgetMeta(widgetName)?.label || widgetName;
+	const input = document.createElement("textarea");
+	input.value = String(widget?.value || "");
+	input.rows = widgetName === BASE_PROMPT_WIDGET ? 2 : 3;
+	input.style.cssText = "width:100%;min-height:54px;resize:vertical;background:#11181c;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:6px 7px;box-sizing:border-box;font-size:12px;";
+	input.addEventListener("change", () => {
+		setWidgetValue(widget, input.value);
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	});
+	wrap.append(label, input);
+	return wrap;
+}
+
+function makeModelSearchRow(node, widgetName, strengthWidgetName = "") {
+	const widget = getWidget(node, widgetName);
+	const strengthWidget = strengthWidgetName ? getWidget(node, strengthWidgetName) : null;
+	const wrap = document.createElement("div");
+	wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#172026;";
+
+	const top = document.createElement("div");
+	top.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:6px;align-items:center;";
+	const label = document.createElement("div");
+	label.style.cssText = "font-weight:700;color:#eef8f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+	label.textContent = chineseWidgetMeta(widgetName)?.label || widgetName;
+	const strength = document.createElement("input");
+	strength.type = "number";
+	strength.step = "0.01";
+	strength.value = String(strengthWidget?.value ?? "");
+	strength.placeholder = "强度";
+	strength.style.cssText = "display:" + (strengthWidget ? "block" : "none") + ";width:76px;background:#11181c;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:4px 6px;box-sizing:border-box;text-align:center;";
+	strength.addEventListener("change", () => {
+		setWidgetValue(strengthWidget, coerceWidgetValue(strengthWidget, strength.value));
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	});
+	top.append(label, strength);
+
+	const search = document.createElement("input");
+	search.type = "text";
+	search.placeholder = "输入关键词搜索，自动使用第一个匹配模型";
+	search.style.cssText = "width:100%;background:#11181c;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+
+	const current = document.createElement("div");
+	current.style.cssText = "color:#9fd4c3;font-size:11px;line-height:1.35;word-break:break-all;";
+	const list = document.createElement("div");
+	list.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:170px;overflow:auto;";
+
+	const applyValue = (value) => {
+		if (value == null || !widget) {
+			return;
+		}
+		const choices = mutableWidgetChoices(widget);
+		if (choices && value && !choices.includes(value)) {
+			choices.unshift(value);
+		}
+		setWidgetValue(widget, value);
+		if (widgetName === UNET_WIDGET) {
+			applyPresetForCurrentModel(node);
+		}
+		current.textContent = `当前：${String(widget.value || "未选择")}`;
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	};
+
+	const render = (autoPick = false) => {
+		const options = filteredModelChoices(widget, search.value, 60);
+		if ((autoPick || !String(widget?.value || "").trim()) && options.length) {
+			applyValue(options[0]);
+		}
+		current.textContent = `当前：${String(widget?.value || "未选择")}`;
+		list.replaceChildren();
+		if (!options.length) {
+			const empty = document.createElement("div");
+			empty.style.cssText = "color:#8da2ad;font-size:11px;padding:4px 2px;";
+			empty.textContent = "没有匹配模型";
+			list.appendChild(empty);
+			return;
+		}
+		for (const option of options) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = `${String(option || "") === String(widget?.value || "") ? "✓ " : ""}${option || "未选择"}`;
+			button.title = option || "未选择";
+			button.style.cssText = "width:100%;display:block;text-align:left;background:#182127;color:#dce7e2;border:1px solid #33454c;border-radius:6px;padding:5px 7px;box-sizing:border-box;white-space:normal;word-break:break-all;cursor:pointer;";
+			if (String(option || "") === String(widget?.value || "")) {
+				button.style.background = "#18352f";
+				button.style.borderColor = "#2f7d67";
+			}
+			button.addEventListener("click", () => {
+				applyValue(option);
+				render(false);
+			});
+			list.appendChild(button);
+		}
+	};
+	search.addEventListener("input", () => render(true));
+	search.addEventListener("keydown", (event) => {
+		if (event.key === "Enter") {
+			event.preventDefault();
+			const first = filteredModelChoices(widget, search.value, 1)[0];
+			if (first != null) {
+				applyValue(first);
+				render(false);
+			}
+		}
+	});
+	wrap.append(top, search, current, list);
+	render(false);
+	return wrap;
+}
+
+function displayModelFilename(value, fallback = "") {
+	const text = String(value || fallback || "").trim();
+	if (!text) {
+		return "未选择";
+	}
+	return text.replace(/\\/g, "/").split("/").pop() || text;
+}
+
+function modelTreeLine(prefix, icon, filename, { clickable = false, selected = false } = {}) {
+	const row = document.createElement(clickable ? "button" : "div");
+	if (clickable) {
+		row.type = "button";
+	}
+	row.style.cssText = [
+		"display:block",
+		"width:100%",
+		"border:0",
+		"background:" + (selected ? "#18352f" : "transparent"),
+		"color:#dce7e2",
+		"padding:2px 4px",
+		"border-radius:5px",
+		"text-align:left",
+		"font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace",
+		"white-space:pre",
+		"cursor:" + (clickable ? "pointer" : "default"),
+	].join(";");
+	row.textContent = `${prefix}${icon} ${filename}`;
+	if (clickable) {
+		row.addEventListener("mouseenter", () => {
+			if (!selected) row.style.background = "#17262d";
+		});
+		row.addEventListener("mouseleave", () => {
+			if (!selected) row.style.background = "transparent";
+		});
+	}
+	return row;
+}
+
+function makeModelChoicePanel(node, widget, onApply, strengthWidget = null) {
+	const wrap = document.createElement("div");
+	wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;margin:3px 0 5px 26px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#11181c;";
+	if (strengthWidget) {
+		const strengthRow = document.createElement("label");
+		strengthRow.style.cssText = "display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;align-items:center;color:#b9c9cf;";
+		const strengthLabel = document.createElement("span");
+		strengthLabel.textContent = "强度";
+		const strength = document.createElement("input");
+		strength.type = "number";
+		strength.step = "0.01";
+		strength.value = String(strengthWidget.value ?? "");
+		strength.style.cssText = "min-width:0;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+		strength.addEventListener("change", () => {
+			setWidgetValue(strengthWidget, coerceWidgetValue(strengthWidget, strength.value));
+			syncWidgetValuesCache(node);
+			refreshNode(node);
+		});
+		strengthRow.append(strengthLabel, strength);
+		wrap.appendChild(strengthRow);
+	}
+	const search = document.createElement("input");
+	search.type = "text";
+	search.placeholder = "输入关键词，自动使用第一个匹配模型";
+	search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+	const list = document.createElement("div");
+	list.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;";
+
+	const render = (autoPick = false) => {
+		const options = filteredModelChoices(widget, search.value, 80);
+		if (autoPick && options.length) {
+			onApply(options[0]);
+		}
+		list.replaceChildren();
+		if (!options.length) {
+			const empty = document.createElement("div");
+			empty.style.cssText = "color:#8da2ad;font-size:11px;padding:4px 2px;";
+			empty.textContent = "没有匹配模型";
+			list.appendChild(empty);
+			return;
+		}
+		for (const option of options) {
+			const button = document.createElement("button");
+			button.type = "button";
+			const selected = String(option || "") === String(widget?.value || "");
+			button.textContent = `${selected ? "✓ " : ""}${displayModelFilename(option)}`;
+			button.title = String(option || "");
+			button.style.cssText = [
+				"width:100%",
+				"display:block",
+				"text-align:left",
+				"background:" + (selected ? "#18352f" : "#182127"),
+				"color:#dce7e2",
+				"border:1px solid " + (selected ? "#2f7d67" : "#33454c"),
+				"border-radius:6px",
+				"padding:5px 7px",
+				"box-sizing:border-box",
+				"white-space:normal",
+				"word-break:break-all",
+				"cursor:pointer",
+			].join(";");
+			button.addEventListener("click", () => {
+				onApply(option);
+				render(false);
+			});
+			list.appendChild(button);
+		}
+	};
+	search.addEventListener("input", () => render(true));
+	search.addEventListener("keydown", (event) => {
+		if (event.key === "Enter") {
+			event.preventDefault();
+			const first = filteredModelChoices(widget, search.value, 1)[0];
+			if (first != null) {
+				onApply(first);
+				render(false);
+			}
+		}
+	});
+	wrap.append(search, list);
+	render(false);
+	setTimeout(() => search.focus(), 0);
+	return wrap;
+}
+
+function makeClickableModelTreeFile(node, widgetName, prefix, icon, fallback = "", afterApply = null, strengthWidgetName = "") {
+	const widget = getWidget(node, widgetName);
+	const strengthWidget = strengthWidgetName ? getWidget(node, strengthWidgetName) : null;
+	if (widget && !String(widget.value || "").trim()) {
+		const first = filteredModelChoices(widget, "", 1).find((item) => String(item || "").trim());
+		if (first) {
+			setWidgetValue(widget, first);
+		}
+	}
+	const host = document.createElement("div");
+	let choicePanel = null;
+	const renderLine = () => {
+		const filename = displayModelFilename(widget?.value, fallback);
+		const line = modelTreeLine(prefix, icon, filename, { clickable: true, selected: Boolean(choicePanel) });
+		line.title = String(widget?.value || fallback || "");
+		line.addEventListener("click", () => {
+			if (choicePanel) {
+				choicePanel.remove();
+				choicePanel = null;
+				renderLine();
+				return;
+			}
+			choicePanel = makeModelChoicePanel(node, widget, (value) => {
+				const choices = mutableWidgetChoices(widget);
+				if (choices && value && !choices.includes(value)) {
+					choices.unshift(value);
+				}
+				setWidgetValue(widget, value);
+				afterApply?.(value);
+				syncWidgetValuesCache(node);
+				refreshNode(node);
+				renderLine();
+			}, strengthWidget);
+			host.appendChild(choicePanel);
+			renderLine();
+		});
+		const existing = host.firstChild;
+		if (existing) {
+			host.replaceChild(line, existing);
+		} else {
+			host.prepend(line);
+		}
+	};
+	renderLine();
+	return host;
+}
+
+function makeModelTreeView(node) {
+	const root = document.createElement("div");
+	root.style.cssText = "display:flex;flex-direction:column;gap:1px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;overflow:auto;";
+	root.append(
+		modelTreeLine("", "📁", "models/"),
+		modelTreeLine("├─", "📁", "diffusion_models/"),
+		makeClickableModelTreeFile(node, UNET_WIDGET, "│　└─", "🟣", "", () => applyPresetForCurrentModel(node)),
+		modelTreeLine("├─", "📁", "loras/"),
+		makeClickableModelTreeFile(node, LORA2_WIDGET, "│　└─", "🟠", DEFAULT_MULTI_ANGLES_LORA, null, LORA2_STRENGTH_WIDGET),
+		makeClickableModelTreeFile(node, LORA1_WIDGET, "│　└─", "🟠", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", null, LORA1_STRENGTH_WIDGET),
+		modelTreeLine("├─", "📁", "RMBG/"),
+		makeClickableModelTreeFile(node, RMBG_WIDGET, "│　└─", "🟣", DEFAULT_RMBG14_MODEL),
+		modelTreeLine("├─", "📁", "text_encoders/"),
+		makeClickableModelTreeFile(node, CLIP_WIDGET, "│　└─", "🟡", DEFAULT_QWEN2511_CLIP),
+		modelTreeLine("├─", "📁", "vae/"),
+		makeClickableModelTreeFile(node, VAE_WIDGET, "│　└─", "🔴", DEFAULT_QWEN2511_VAE)
+	);
+	return root;
+}
+
+function openModelFloatingPanel(node, anchor) {
+	if (node?.properties?.[FLOATING_PANEL_PROPERTY] === "models") {
+		closeCharacterMultiViewFloatingPanels();
+		return;
+	}
+	const popup = makeFloatingPanel(node, "models", anchor, "🧠 模型");
+	popup.titleEl.appendChild(makeKeepModelHeaderButton(node));
+	popup.body.append(
+		makeModelTreeView(node)
+	);
+	popup.reposition();
+}
+
+function openSettingsFloatingPanel(node, anchor) {
+	if (node?.properties?.[FLOATING_PANEL_PROPERTY] === "settings") {
+		closeCharacterMultiViewFloatingPanels();
+		return;
+	}
+	const popup = makeFloatingPanel(node, "settings", anchor, "⚙️ 参数");
+	popup.body.append(
+		makeTextRow(node, BASE_PROMPT_WIDGET),
+		makeTextRow(node, "negative_prompt"),
+		makeNumberRow(node, "seed"),
+		makeBooleanRow(node, "save_each_image")
+	);
+	popup.reposition();
+}
+
+function updateFloatingButtonStates(node) {
+	const active = String(node?.properties?.[FLOATING_PANEL_PROPERTY] || "");
+	const modelButton = node?.__gjjCharacterMultiViewKeepModelButton;
+	const settingsButton = node?.__gjjCharacterMultiViewSettingsButton;
+	if (modelButton) {
+		const enabled = keepModelEnabled(node);
+		modelButton.textContent = "🧠";
+		modelButton.title = "打开模型窗口：主模型、微调模型、保持模型。";
+		applyToolbarToggleStyle(modelButton, enabled, {
+			onBg: "#1d3d34",
+			onBorder: "#54c985",
+			onColor: "#eafff2",
+			onInset: "rgba(111,255,174,0.28)",
+			onGlow: "rgba(84,201,133,0.32)",
+		});
+		if (active === "models") {
+			modelButton.style.boxShadow = `${modelButton.style.boxShadow}, 0 0 0 2px rgba(127,167,187,0.38)`;
+		}
+	}
+	updateKeepModelHeaderButtonState(node);
+	if (settingsButton) {
+		const open = active === "settings";
+		settingsButton.textContent = "⚙️";
+		settingsButton.title = "打开参数窗口：提示词、种子、保存选项。";
+		settingsButton.style.background = open ? "#2a3f4a" : "#172026";
+		settingsButton.style.borderColor = open ? "#5a7a8a" : "#41535b";
+		settingsButton.style.color = open ? "#ffffff" : "#dce7e2";
+	}
 }
 
 async function runCurrentCharacterMultiViewNode(node) {
@@ -2551,7 +3197,7 @@ function applyCompactVisibility(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
-	const open = showSettings(node);
+	const open = false;
 	const hiddenLoraWidgets = new Set([
 		LORA1_WIDGET,
 		LORA1_STRENGTH_WIDGET,
@@ -2607,6 +3253,9 @@ function ensureToolbar(node) {
 
 	const setActionLines = (lines) => {
 		setWidgetValue(textWidget, lines.join("\n"));
+		if (!lines.length) {
+			setWidgetValue(getWidget(node, TEMPLATE_NAME_WIDGET), "");
+		}
 		syncWidgetValuesCache(node);
 		refreshNode(node);
 	};
@@ -2619,8 +3268,8 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewRunButton = runButton;
 	container.appendChild(runButton);
 
-	const keepModelButton = createButton("🧠", "保持模型：开启。执行后尽量保留当前模型在内存中。", () => {
-		setKeepModelEnabled(node, !keepModelEnabled(node));
+	const keepModelButton = createButton("🧠", "打开模型窗口：主模型、微调模型、保持模型。", (event) => {
+		openModelFloatingPanel(node, event.currentTarget || keepModelButton);
 	});
 	node.__gjjCharacterMultiViewKeepModelButton = keepModelButton;
 	container.appendChild(keepModelButton);
@@ -2640,8 +3289,8 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewTemplateInsertBefore = clearButton;
 	node.__gjjCharacterMultiViewTemplateButtonElements = [];
 	container.appendChild(clearButton);
-	const settingsButton = createButton("⚙️", "显示模型、微调模型、提示词、种子和保存参数。", () => {
-		setSettingsVisible(node, !showSettings(node));
+	const settingsButton = createButton("⚙️", "打开参数窗口：提示词、种子、保存选项。", (event) => {
+		openSettingsFloatingPanel(node, event.currentTarget || settingsButton);
 	});
 	node.__gjjCharacterMultiViewSettingsButton = settingsButton;
 	container.appendChild(settingsButton);

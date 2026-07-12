@@ -55,6 +55,13 @@ from .common_utils.dependency_checker import (
 	build_dependency_model_report,
 )
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .gjj_comprehensive_matting import (
+	METHOD_RMBG14,
+	_load_rmbg14_model,
+	_resolve_model_path,
+	_run_rmbg14,
+	_select_device,
+)
 
 
 
@@ -426,6 +433,13 @@ REQUIRED_MULTIVIEW_MODELS = [
 		"download_url": MODEL_DOWNLOAD_URL,
 		"description": "多视图角度一致性 LoRA。",
 	},
+	{
+		"label": "RMBG1.4 抠图模型",
+		"subdir": "models/RMBG",
+		"filename": "rmbg1.4.safetensors",
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "人物资产分支用于去背景横向拼接的抠图模型。",
+	},
 ]
 
 MULTIVIEW_MODEL_TREE = [
@@ -458,6 +472,12 @@ MULTIVIEW_MODEL_TREE = [
 		"folder": "loras/QWEN/2511",
 		"filename": DEFAULT_MULTI_ANGLES_LORA,
 		"icon": "🟠",
+	},
+	{
+		"label": "RMBG1.4 抠图模型",
+		"folder": "RMBG",
+		"filename": "rmbg1.4.safetensors",
+		"icon": "🟣",
 	},
 ]
 
@@ -921,6 +941,22 @@ def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallba
 	return ""
 
 
+def _pick_default_model_name(candidates: list[str], preferred_name: str, fallback: str = "") -> str:
+	clean_candidates = [str(candidate or "").strip() for candidate in (candidates or []) if str(candidate or "").strip()]
+	for source in (preferred_name, fallback):
+		source_text = str(source or "").strip()
+		if not source_text:
+			continue
+		if source_text in clean_candidates:
+			return source_text
+		source_base = source_text.replace("\\", "/").split("/")[-1].lower()
+		for candidate in clean_candidates:
+			if candidate.replace("\\", "/").split("/")[-1].lower() == source_base:
+				return candidate
+	safetensors = [candidate for candidate in clean_candidates if candidate.lower().endswith(".safetensors")]
+	return (safetensors or clean_candidates or [str(fallback or preferred_name or "")])[0]
+
+
 def _normalized_model_basename(value: str) -> str:
 	return os.path.splitext(str(value or "").replace("\\", "/").split("/")[-1].lower())[0]
 
@@ -934,21 +970,36 @@ def _has_model_candidate(candidates: list[str], filenames: list[str]) -> bool:
 	return False
 
 
+def _has_model_keyword_group(candidates: list[str], keyword_groups: list[tuple[str, ...]], extensions: tuple[str, ...] = ()) -> bool:
+	clean_extensions = tuple(str(ext or "").lower() for ext in extensions if str(ext or "").strip())
+	for candidate in candidates:
+		text = str(candidate or "").replace("\\", "/").lower()
+		if clean_extensions and not text.endswith(clean_extensions):
+			continue
+		stem = gjjutils_model_stem_without_quant(candidate)
+		for group in keyword_groups:
+			if all(str(keyword or "").lower() in stem for keyword in group):
+				return True
+	return False
+
+
 def _missing_multiview_models() -> list[dict[str, str]]:
 	unet_models = list_unet_models() or []
 	clip_models = list_clip_models() or []
 	vae_models = list_vae_models() or []
 	lora_models = _safe_filename_list("loras")
+	rmbg_models = _safe_filename_list("RMBG")
 	missing: list[dict[str, str]] = []
 	checks = [
-		(REQUIRED_MULTIVIEW_MODELS[0], unet_models, [DEFAULT_QWEN2511_UNET, "qwen_image_edit_2511_nvfp4.safetensors"]),
-		(REQUIRED_MULTIVIEW_MODELS[1], clip_models, [DEFAULT_QWEN2511_CLIP]),
-		(REQUIRED_MULTIVIEW_MODELS[2], vae_models, [DEFAULT_QWEN2511_VAE]),
-		(REQUIRED_MULTIVIEW_MODELS[3], lora_models, [DEFAULT_QWEN2511_LIGHTNING_LORA, "Qwen-Image-Edit-2511-Lightning"]),
-		(REQUIRED_MULTIVIEW_MODELS[4], lora_models, [DEFAULT_MULTI_ANGLES_LORA]),
+		(REQUIRED_MULTIVIEW_MODELS[0], unet_models, [("qwen", "image", "edit", "2511")], (".safetensors", ".gguf")),
+		(REQUIRED_MULTIVIEW_MODELS[1], clip_models, [("qwen", "2", "5", "vl"), ("qwen25", "vl")], (".safetensors", ".gguf")),
+		(REQUIRED_MULTIVIEW_MODELS[2], vae_models, [("qwen", "image", "vae")], (".safetensors", ".gguf")),
+		(REQUIRED_MULTIVIEW_MODELS[3], lora_models, [("qwen", "image", "edit", "2511", "lightning")], (".safetensors",)),
+		(REQUIRED_MULTIVIEW_MODELS[4], lora_models, [("qwen", "image", "edit", "2511", "multiple", "angles"), ("qwen", "image", "edit", "2511", "angles")], (".safetensors",)),
+		(REQUIRED_MULTIVIEW_MODELS[5], rmbg_models, [("rmbg1", "4"), ("rmbg", "1", "4")], (".safetensors", ".pth")),
 	]
-	for model_info, candidates, filenames in checks:
-		if not _has_model_candidate(candidates, filenames):
+	for model_info, candidates, keyword_groups, extensions in checks:
+		if not _has_model_keyword_group(candidates, keyword_groups, extensions):
 			missing.append(model_info)
 	return missing
 
@@ -1225,6 +1276,50 @@ def _resolve_image_aspect(image: torch.Tensor, fallback: float = 1.0) -> float:
 	if width <= 0 or height <= 0:
 		return float(fallback)
 	return float(width) / float(height)
+
+
+def _prepare_character_asset_reference_image(image: torch.Tensor, target_size: int = 1024) -> torch.Tensor:
+	"""Only for 人物资产: fit height to 1024, then pad to 1024x1024 without cropping."""
+	if image is None or not isinstance(image, torch.Tensor):
+		return image
+	tensor = image.detach().float()
+	if tensor.ndim == 3:
+		tensor = tensor.unsqueeze(0)
+	if tensor.ndim != 4 or int(tensor.shape[-1]) < 3:
+		return image
+	height = int(tensor.shape[1])
+	width = int(tensor.shape[2])
+	if width <= 0 or height <= 0:
+		return image
+	target = int(target_size)
+	if height >= width:
+		scale = float(target) / float(height)
+		resized_height = target
+		resized_width = max(1, min(target, int(round(width * scale))))
+	else:
+		scale = float(target) / float(width)
+		resized_width = target
+		resized_height = max(1, min(target, int(round(height * scale))))
+	resized = comfy.utils.common_upscale(
+		tensor.movedim(-1, 1),
+		resized_width,
+		resized_height,
+		"lanczos",
+		"disabled",
+	).movedim(1, -1)
+	pad_left = max(0, (target - resized_width) // 2)
+	pad_right = max(0, target - resized_width - pad_left)
+	pad_top = max(0, (target - resized_height) // 2)
+	pad_bottom = max(0, target - resized_height - pad_top)
+	if pad_left or pad_right or pad_top or pad_bottom:
+		canvas = torch.ones(
+			(resized.shape[0], target, target, resized.shape[-1]),
+			dtype=resized.dtype,
+			device=resized.device,
+		)
+		canvas[:, pad_top:pad_top + resized_height, pad_left:pad_left + resized_width, :] = resized
+		resized = canvas
+	return resized[:, :target, :target, :].clamp(0.0, 1.0).contiguous()
 
 
 def _sorted_action_items(kwargs: dict[str, Any]) -> list[tuple[int, torch.Tensor]]:
@@ -1690,63 +1785,123 @@ def _best_fixed_grid(
 	)
 
 
-def _make_character_asset_collage(images: list[torch.Tensor], captions: list[str]) -> torch.Tensor:
-	"""创建人物资产 1x4 横向长图拼接。
-	第一张图保持原图比例，后三张裁剪为竖版构图（9:16）。
-	后三张图采用中心裁剪策略，从生成的方形图片中裁出竖版中心区域。
-	"""
-	if len(images) != 4:
-		# 如果不是4张图，使用默认拼接方式
-		return _make_squareish_collage(images, captions)
+def _tensor_image_to_rgb_pil(image: torch.Tensor) -> Image.Image:
+	sample = image[:1] if image.ndim == 4 else image.unsqueeze(0)
+	array = sample[0, :, :, :3].detach().float().cpu().numpy()
+	return Image.fromarray(np.clip(array * 255.0, 0, 255).astype(np.uint8), mode="RGB")
 
-	bchw_images = [image[:1].movedim(-1, 1) for image in images]
 
-	# 统一所有图片的高度（以第一张图为准）
-	cell_height = int(bchw_images[0].shape[2])
+def _mask_bbox(mask: Image.Image, threshold: int = 8) -> tuple[int, int, int, int]:
+	alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+	ys, xs = np.where(alpha > int(threshold))
+	if len(xs) == 0 or len(ys) == 0:
+		return (0, 0, mask.width, mask.height)
+	left = int(xs.min())
+	top = int(ys.min())
+	right = int(xs.max()) + 1
+	bottom = int(ys.max()) + 1
+	pad_x = max(1, int(round((right - left) * 0.01)))
+	pad_y = max(1, int(round((bottom - top) * 0.01)))
+	return (
+		max(0, left - pad_x),
+		max(0, top - pad_y),
+		min(mask.width, right + pad_x),
+		min(mask.height, bottom + pad_y),
+	)
 
-	# 第一张图：保持原始宽高比，不裁剪
-	first_cell_width = int(bchw_images[0].shape[3])
-	fitted_first = bchw_images[0]
 
-	# 后三张图：裁剪为竖版（9:16）
-	# 策略：先缩放到统一高度，然后从中心裁剪出竖版宽度
-	portrait_ratio = 9.0 / 16.0
-	portrait_cell_width = int(cell_height * portrait_ratio)
+def _keep_largest_mask_component(mask: Image.Image, threshold: int = 8) -> Image.Image:
+	alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+	binary = (alpha > int(threshold)).astype(np.uint8)
+	if int(binary.sum()) <= 0:
+		return mask.convert("L")
+	try:
+		import cv2
+		component_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+		if component_count <= 1:
+			return mask.convert("L")
+		largest = max(range(1, component_count), key=lambda index: int(stats[index, cv2.CC_STAT_AREA]))
+		cleaned = np.where(labels == largest, alpha, 0).astype(np.uint8)
+		return Image.fromarray(cleaned, mode="L")
+	except Exception:
+		return mask.convert("L")
 
-	fitted_images = [fitted_first]  # 第一张图
-	for i in range(1, 4):
-		# 先缩放到统一高度，保持原始宽高比
-		scaled = _fit_bchw_to_height(bchw_images[i], cell_height)
-		# 从缩放后的图片中心裁剪出竖版宽度
-		original_width = int(scaled.shape[3])
-		if original_width > portrait_cell_width:
-			# 从中心裁剪，保留人物主体
-			crop_start = (original_width - portrait_cell_width) // 2
-			fitted = scaled[:, :, :, crop_start:crop_start + portrait_cell_width]
-		else:
-			# 如果宽度不够，使用原始缩放后的图片（不拉伸）
-			fitted = scaled
-		fitted_images.append(fitted)
 
-	# 计算画布尺寸：1行4列，横向排列
-	total_width = first_cell_width + portrait_cell_width * 3
-	total_height = cell_height + CAPTION_HEIGHT
-	canvas = np.ones((total_height, total_width, 3), dtype=np.float32)
-	font = _load_caption_font(18)
+def _resolve_rmbg14_model_path(model_name: str = "") -> Path:
+	name = str(model_name or "").strip()
+	if name:
+		path = folder_paths.get_full_path("RMBG", name)
+		if path:
+			return Path(path)
+	return _resolve_model_path(METHOD_RMBG14)
 
-	# 排列第一张图（保持原比例）
-	_paste_bchw_in_cell(canvas, fitted_images[0], 0, 0, first_cell_width, cell_height)
-	caption_text = str(captions[0] if len(captions) > 0 else "视图 1")
-	_draw_caption_on_canvas(canvas, cell_height, 0, first_cell_width, caption_text, font)
 
-	# 横向排列后三张图（竖版构图，居中显示）
-	for index in range(1, 4):
-		left = first_cell_width + (index - 1) * portrait_cell_width
-		_paste_bchw_in_cell(canvas, fitted_images[index], 0, left, portrait_cell_width, cell_height)
-		caption_text = str(captions[index] if len(captions) > index else f"视图 {index + 1}")
-		_draw_caption_on_canvas(canvas, cell_height, left, portrait_cell_width, caption_text, font)
+def _make_character_asset_collage(images: list[torch.Tensor], rmbg_model_name: str = "", unique_id=None) -> torch.Tensor:
+	"""人物资产分支：RMBG1.4 抠图后按统一前景高度横向拼接，不绘制文字。"""
+	if not images:
+		raise RuntimeError("未生成任何人物资产图片，无法拼接。")
 
-	return torch.from_numpy(canvas).unsqueeze(0)
+	source_images = [_tensor_image_to_rgb_pil(image) for image in images]
+	_send_status(unique_id, "人物资产分支：正在使用 RMBG1.4 批量抠图...")
+	weight_path = _resolve_rmbg14_model_path(rmbg_model_name)
+	device = _select_device("Auto")
+	model = _load_rmbg14_model(weight_path, device)
+	masks = _run_rmbg14(model, source_images, device, 1024)
+
+	resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+	cutouts: list[Image.Image] = []
+	for image, mask in zip(source_images, masks):
+		mask = _keep_largest_mask_component(mask)
+		rgba = image.convert("RGBA")
+		rgba.putalpha(mask)
+		cutouts.append(rgba.crop(_mask_bbox(mask)))
+
+	target_height = max(1, max(cutout.height for cutout in cutouts))
+	fitted: list[Image.Image] = []
+	for cutout in cutouts:
+		scale = float(target_height) / float(max(1, cutout.height))
+		target_width = max(1, int(round(cutout.width * scale)))
+		fitted.append(cutout.resize((target_width, target_height), resample))
+
+	total_width = max(1, sum(item.width for item in fitted))
+	canvas = Image.new("RGBA", (total_width, target_height), (255, 255, 255, 255))
+	left = 0
+	for cutout in fitted:
+		canvas.alpha_composite(cutout, (left, 0))
+		left += cutout.width
+
+	array = np.asarray(canvas.convert("RGB"), dtype=np.float32) / 255.0
+	return torch.from_numpy(array).unsqueeze(0).contiguous()
+
+
+def _is_character_asset_request(probe_text: str, jobs: list[dict[str, Any]]) -> bool:
+	if "人物资产" in str(probe_text or ""):
+		return True
+	normalized = _normalize_text(probe_text)
+	if len(jobs) != 4:
+		return False
+	required = [
+		_normalize_text("大头特写"),
+		_normalize_text("标准正面"),
+		_normalize_text("后视图"),
+	]
+	if not all(token and token in normalized for token in required):
+		return False
+	return any(token in normalized for token in (_normalize_text("斜侧身"), _normalize_text("45")))
+
+
+def _is_character_asset_text_probe(probe_text: str) -> bool:
+	if "人物资产" in str(probe_text or ""):
+		return True
+	normalized = _normalize_text(probe_text)
+	required = [
+		_normalize_text("大头特写"),
+		_normalize_text("标准正面"),
+		_normalize_text("后视图"),
+	]
+	return all(token and token in normalized for token in required) and any(
+		token in normalized for token in (_normalize_text("斜侧身"), _normalize_text("45"))
+	)
 
 
 def _make_five_view_collage(images: list[torch.Tensor], captions: list[str]) -> torch.Tensor:
@@ -1936,9 +2091,13 @@ class GJJ_CharacterMultiViewStudio:
 		unet_models = _multiview_allowed_unets()
 		clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
 		vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+		rmbg_models = _safe_filename_list("RMBG") or ["rmbg1.4.safetensors"]
 		lora_models = _multiview_lora_models()
 		default_unet_name = _pick_default_multiview_unet(unet_models)
 		default_preset = _match_multiview_family(default_unet_name)
+		default_clip_name = _pick_default_model_name(clip_models, DEFAULT_QWEN2511_CLIP, DEFAULT_CLIP_NAME)
+		default_vae_name = _pick_default_model_name(vae_models, DEFAULT_QWEN2511_VAE, DEFAULT_VAE_NAME)
+		default_rmbg_name = _pick_default_model_name(rmbg_models, "rmbg1.4.safetensors")
 		return {
 			"required": {
 				"base_prompt": (
@@ -2099,6 +2258,47 @@ class GJJ_CharacterMultiViewStudio:
 					}
 					),
 				),
+				"clip_name": (
+					clip_models,
+					_hidden_multiview_param(
+					{
+						"default": default_clip_name,
+						"display_name": "文本编码器",
+						"tooltip": "Qwen Image Edit 使用的文本 / 视觉编码器，可在 🧠 模型树中切换其它量化版本。",
+					}
+					),
+				),
+				"vae_name": (
+					vae_models,
+					_hidden_multiview_param(
+					{
+						"default": default_vae_name,
+						"display_name": "VAE",
+						"tooltip": "Qwen Image VAE，可在 🧠 模型树中切换其它量化版本。",
+					}
+					),
+				),
+				"rmbg_model_name": (
+					rmbg_models,
+					_hidden_multiview_param(
+					{
+						"default": default_rmbg_name,
+						"display_name": "RMBG1.4 抠图模型",
+						"tooltip": "人物资产分支使用的 RMBG1.4 抠图模型，可在 🧠 模型树中切换其它量化版本。",
+					}
+					),
+				),
+				"template_name": (
+					"STRING",
+					_hidden_multiview_param(
+					{
+						"default": "",
+						"multiline": False,
+						"display_name": "当前模板名",
+						"tooltip": "前端模板按钮写入，用于后端识别人物资产等专用拼接分支。",
+					}
+					),
+				),
 			},
 			"optional": FlexibleMultiViewInputType(
 				{
@@ -2156,6 +2356,10 @@ class GJJ_CharacterMultiViewStudio:
 		seed=0,
 		save_each_image=True,
 		keep_model=True,
+		clip_name="",
+		vae_name="",
+		rmbg_model_name="",
+		template_name="",
 		unique_id=None,
 		**kwargs,
 	):
@@ -2183,6 +2387,10 @@ class GJJ_CharacterMultiViewStudio:
 				str(seed),
 				str(bool(save_each_image)),
 				str(bool(keep_model)),
+				str(clip_name),
+				str(vae_name),
+				str(rmbg_model_name),
+				str(template_name),
 			]
 		)
 
@@ -2339,12 +2547,15 @@ class GJJ_CharacterMultiViewStudio:
 		preset = _match_multiview_family(unet_name)
 		clip_models = _dedupe_keep_order(list_clip_models() or [])
 		vae_models = _dedupe_keep_order(list_vae_models() or [])
-		resolved_clip_names = resolve_clip_names_for_preset(
-			preset,
-			clip_models,
-			exposed_clip_name=exposed_clip_name,
-			legacy_clip_names=[exposed_clip_name],
-		)
+		if str(exposed_clip_name or "").strip():
+			resolved_clip_names = [str(exposed_clip_name or "").strip()]
+		else:
+			resolved_clip_names = resolve_clip_names_for_preset(
+				preset,
+				clip_models,
+				exposed_clip_name=exposed_clip_name,
+				legacy_clip_names=[exposed_clip_name],
+			)
 		clean_clip_names: list[str] = []
 		for clip_name in resolved_clip_names:
 			resolved = _first_model_from_keywords(
@@ -2365,7 +2576,7 @@ class GJJ_CharacterMultiViewStudio:
 				resolved_clip_names.append(fallback_clip)
 		resolved_vae_name = _first_model_from_keywords(
 			"vae",
-			str(preset.get("vae_name") or visible_vae_name or DEFAULT_QWEN2511_VAE),
+			str(visible_vae_name or preset.get("vae_name") or DEFAULT_QWEN2511_VAE),
 			[".safetensors"],
 		)
 		resolved_clip_type = resolve_clip_type(
@@ -2606,6 +2817,10 @@ class GJJ_CharacterMultiViewStudio:
 		seed=0,
 		save_each_image=True,
 		keep_model=True,
+		clip_name="",
+		vae_name="",
+		rmbg_model_name="",
+		template_name="",
 		prompt=None,
 		extra_pnginfo=None,
 		unique_id=None,
@@ -2638,6 +2853,10 @@ class GJJ_CharacterMultiViewStudio:
 					lora_3_strength,
 					seed + batch_index - 1,
 					save_each_image,
+					clip_name,
+					vae_name,
+					rmbg_model_name,
+					template_name,
 					prompt,
 					extra_pnginfo,
 					unique_id,
@@ -2667,6 +2886,10 @@ class GJJ_CharacterMultiViewStudio:
 				lora_3_strength,
 				seed,
 				save_each_image,
+				clip_name,
+				vae_name,
+				rmbg_model_name,
+				template_name,
 				prompt,
 				extra_pnginfo,
 				unique_id,
@@ -2690,6 +2913,10 @@ class GJJ_CharacterMultiViewStudio:
 		lora_3_strength,
 		seed,
 		save_each_image,
+		clip_name,
+		vae_name,
+		rmbg_model_name,
+		template_name,
 		prompt=None,
 		extra_pnginfo=None,
 		unique_id=None,
@@ -2707,12 +2934,22 @@ class GJJ_CharacterMultiViewStudio:
 			unet_name = resolved_unet_name
 		preset, resolved_clip_names, resolved_clip_type, resolved_vae_name = self._resolve_generation_bundle(
 			unet_name,
-			DEFAULT_QWEN2511_CLIP,
-			DEFAULT_QWEN2511_VAE,
+			clip_name or DEFAULT_QWEN2511_CLIP,
+			vae_name or DEFAULT_QWEN2511_VAE,
 		)
 		has_main_image = main_image is not None
 		action_pairs = self._collect_action_pairs(kwargs) if has_main_image else []
 		use_action_reference_mode = bool(action_pairs) and bool(preset.get("supports_multi_image_edit"))
+		early_character_asset_probe = "\n".join(
+			[
+				str(template_name or ""),
+				str(base_prompt or ""),
+				str(action_prompts or ""),
+			]
+		)
+		if has_main_image and _is_character_asset_text_probe(early_character_asset_probe):
+			main_image = _prepare_character_asset_reference_image(main_image, 1024)
+			_send_status(unique_id, "人物资产分支：主参考图已等比缩高到 1024，并扩边为 1024×1024。")
 
 		if use_action_reference_mode:
 			lora_models = _safe_filename_list("loras")
@@ -2825,13 +3062,19 @@ class GJJ_CharacterMultiViewStudio:
 
 		captions = _resolve_job_captions(jobs)
 		_send_status(unique_id, f"3/{total_steps} 计算最优拼图布局...")
-		# 检测是否为4张图且使用了人物资产预设（通过检测动作文本中的关键词）
-		is_character_asset = (
-			len(results) == 4
-			and any("人物资产" in str(job.get("text", "")) for job in jobs)
+		# 人物资产预设单独走抠图横向拼接分支。
+		character_asset_probe = "\n".join(
+			[
+				str(template_name or ""),
+				str(base_prompt or ""),
+				str(action_prompts or ""),
+				*(str(job.get("text", "") or "") for job in jobs),
+			]
 		)
+		is_character_asset = _is_character_asset_request(character_asset_probe, jobs)
 		if is_character_asset:
-			collage = _make_character_asset_collage(results, captions)
+			_send_status(unique_id, "人物资产分支：取消文字，RMBG1.4 抠图，只保留主体，统一高度横向紧凑拼接。")
+			collage = _make_character_asset_collage(results, rmbg_model_name, unique_id)
 		else:
 			collage = _make_squareish_collage(
 				results,
