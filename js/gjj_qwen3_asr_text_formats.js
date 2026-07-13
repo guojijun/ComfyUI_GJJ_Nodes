@@ -131,14 +131,33 @@ function positionPopup(popup, anchor) {
 	popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6))}px`;
 }
 
-function makePopup(title) {
+function makePopup(title, onClose = null) {
 	const popup = document.createElement("div");
 	popup.style.cssText = "position:fixed;z-index:100000;width:330px;max-width:calc(100vw - 16px);padding:9px;border:1px solid #526873;border-radius:8px;background:#10171b;box-shadow:0 12px 28px #0008;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
 	const head = document.createElement("div");
-	head.textContent = title;
-	head.style.cssText = "font-weight:700;color:#edf7fb;margin-bottom:7px";
+	head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:700;color:#edf7fb;margin-bottom:7px";
+	const caption = document.createElement("span");
+	caption.textContent = title;
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "×";
+	close.title = "关闭";
+	close.style.cssText = "width:24px;height:22px;border:1px solid #40535b;border-radius:6px;background:#172228;color:#dce7e2;cursor:pointer;padding:0;line-height:18px";
+	close.onclick = (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onClose?.();
+	};
+	head.append(caption, close);
 	popup.append(head);
-	for (const event of ["pointerdown", "mousedown"]) popup.addEventListener(event, (e) => e.stopPropagation());
+	popup.tabIndex = -1;
+	popup.addEventListener("keydown", (event) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			onClose?.();
+		}
+	});
+	for (const event of ["pointerdown", "mousedown", "click", "dblclick", "contextmenu"]) popup.addEventListener(event, (e) => e.stopPropagation());
 	return popup;
 }
 
@@ -193,7 +212,7 @@ function toggleParameterPopup(node, group, stateKey, anchor, title) {
 		return;
 	}
 	closePopups(node, stateKey);
-	const popup = makePopup(title);
+	const popup = makePopup(title, () => closePopups(node));
 	for (const name of PARAM_GROUPS[group]) addParameterRow(node, popup, name);
 	const done = document.createElement("button");
 	done.textContent = "确定";
@@ -209,7 +228,7 @@ function toggleOutputPopup(node) {
 	const state = node.__gjjQwen3Panel;
 	if (state.outputPopup) return closePopups(node);
 	closePopups(node, "outputPopup");
-	const popup = makePopup("输出接口");
+	const popup = makePopup("输出接口", () => closePopups(node));
 	const order = readOutputOrder(node);
 	for (const def of OUTPUT_DEFS) {
 		const row = document.createElement("label");
@@ -417,9 +436,9 @@ app.registerExtension({
 			const data = event.detail || {};
 			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) {
 				const state = ensurePanel(node);
-				state.textDisplay.textContent = `❌ 执行失败：\n\n${data.error || ""}`;
-				state.textDisplay.style.display = "block";
-				state.textDisplay.style.color = "#ffb86b";
+				state.textDisplay.textContent = EMPTY_TEXT;
+				state.textDisplay.style.display = "none";
+				state.textDisplay.title = String(data.error || "");
 				setStatus(node, "执行失败", 1);
 			}
 		});

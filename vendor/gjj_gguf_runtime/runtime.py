@@ -143,12 +143,14 @@ def load_unet_gguf(
     ops = _gguf_ops(dequant_dtype, patch_dtype)
     unet_path = _full_path_or_raise(("unet", "unet_gguf", "diffusion_models", "checkpoints"), unet_name)
     sd, extra = gguf_sd_loader(unet_path)
+    if _is_acestep_gguf(extra):
+        sd = _adapt_acestep15_state_dict(sd)
 
     kwargs = {}
     valid_params = inspect.signature(comfy.sd.load_diffusion_model_state_dict).parameters
     if "metadata" in valid_params:
         kwargs["metadata"] = extra.get("metadata", {})
-    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options={"custom_operations": ops}, **kwargs)
+    model = _load_diffusion_model_state_dict(sd, {"custom_operations": ops}, kwargs, extra)
     if model is None:
         raise RuntimeError(f"无法识别 GGUF UNET 模型类型：{unet_path}")
     model = GGUFModelPatcher.clone(model)
@@ -157,9 +159,118 @@ def load_unet_gguf(
 
 
 def _real_tensor_for_aux(tensor: Any) -> Any:
-    if is_quantized(tensor):
-        return dequantize_tensor(tensor, dtype=torch.float32)
+    if is_quantized(tensor) or tensor.__class__.__name__ == "GGMLTensor":
+        tensor = dequantize_tensor(tensor, dtype=torch.float32)
+        if tensor.__class__.__name__ == "GGMLTensor":
+            return torch.Tensor(tensor)
+        return tensor
     return tensor
+
+
+def _is_acestep_gguf(extra: dict[str, Any]) -> bool:
+    return str(extra.get("arch_str") or "").lower().replace("_", "-") == "acestep-dit"
+
+
+def _adapt_acestep15_state_dict(sd: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in sd.items():
+        if key == "null_condition_emb":
+            tensor = _real_tensor_for_aux(value)
+            if getattr(tensor, "ndim", None) == 1:
+                tensor = tensor.reshape(1, 1, -1)
+            result[key] = tensor
+        elif key == "decoder.scale_shift_table" or (
+            key.startswith("decoder.layers.") and key.endswith(".scale_shift_table")
+        ):
+            tensor = _real_tensor_for_aux(value)
+            if getattr(tensor, "ndim", None) == 2:
+                tensor = tensor.unsqueeze(0)
+            result[key] = tensor
+        elif key.endswith(".special_token"):
+            tensor = _real_tensor_for_aux(value)
+            if getattr(tensor, "ndim", None) == 1:
+                tensor = tensor.reshape(1, 1, -1)
+            result[key] = tensor
+        elif key.endswith(".special_tokens"):
+            tensor = _real_tensor_for_aux(value)
+            if getattr(tensor, "ndim", None) == 2:
+                tensor = tensor.unsqueeze(0)
+            result[key] = tensor
+        else:
+            result[key] = value
+    return result
+
+
+def _infer_acestep15_config(sd: dict[str, Any]) -> dict[str, Any]:
+    config: dict[str, Any] = {"audio_model": "ace1.5"}
+    proj_in = sd.get("decoder.proj_in.1.weight")
+    if proj_in is not None and len(getattr(proj_in, "shape", ())) >= 3:
+        config["hidden_size"] = int(proj_in.shape[0])
+        config["in_channels"] = int(proj_in.shape[1])
+        config["patch_size"] = int(proj_in.shape[2])
+
+    proj_out = sd.get("decoder.proj_out.1.weight")
+    if proj_out is not None and len(getattr(proj_out, "shape", ())) >= 2:
+        config["audio_acoustic_hidden_dim"] = int(proj_out.shape[1])
+
+    layer0 = "decoder.layers.0."
+    head_dim = 128
+    q_proj = sd.get(layer0 + "self_attn.q_proj.weight")
+    if q_proj is not None and len(getattr(q_proj, "shape", ())) >= 1:
+        config["num_heads"] = int(q_proj.shape[0]) // head_dim
+    gate = sd.get(layer0 + "mlp.gate_proj.weight")
+    if gate is not None and len(getattr(gate, "shape", ())) >= 1:
+        config["intermediate_size"] = int(gate.shape[0])
+    enc_norm = sd.get("encoder.lyric_encoder.layers.0.input_layernorm.weight")
+    if enc_norm is not None and len(getattr(enc_norm, "shape", ())) >= 1:
+        config["encoder_hidden_size"] = int(enc_norm.shape[0])
+    enc_q_proj = sd.get("encoder.lyric_encoder.layers.0.self_attn.q_proj.weight")
+    if enc_q_proj is not None and len(getattr(enc_q_proj, "shape", ())) >= 1:
+        config["encoder_num_heads"] = int(enc_q_proj.shape[0]) // head_dim
+    enc_gate = sd.get("encoder.lyric_encoder.layers.0.mlp.gate_proj.weight")
+    if enc_gate is not None and len(getattr(enc_gate, "shape", ())) >= 1:
+        config["encoder_intermediate_size"] = int(enc_gate.shape[0])
+
+    layer_indices = set()
+    prefix = "decoder.layers."
+    for key in sd:
+        if key.startswith(prefix):
+            suffix = key[len(prefix):]
+            index = suffix.split(".", 1)[0]
+            if index.isdigit():
+                layer_indices.add(int(index))
+    if layer_indices:
+        config["num_dit_layers"] = max(layer_indices) + 1
+    return config
+
+
+def _load_diffusion_model_state_dict(
+    sd: dict[str, Any],
+    model_options: dict[str, Any],
+    kwargs: dict[str, Any],
+    extra: dict[str, Any],
+) -> Any:
+    if not _is_acestep_gguf(extra):
+        return comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, **kwargs)
+
+    from comfy import model_detection
+
+    original_detect = model_detection.detect_unet_config
+    ace_config = _infer_acestep15_config(sd)
+
+    def detect_unet_config_with_acestep15_patch(state_dict, unet_key_prefix, metadata=None):
+        config = original_detect(state_dict, unet_key_prefix, metadata=metadata)
+        if config and config.get("audio_model") == "ace1.5":
+            patched = dict(config)
+            patched.update(ace_config)
+            return patched
+        return config
+
+    model_detection.detect_unet_config = detect_unet_config_with_acestep15_patch
+    try:
+        return comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, **kwargs)
+    finally:
+        model_detection.detect_unet_config = original_detect
 
 
 def _materialize_aux_tensors(sd: dict[str, Any]) -> dict[str, Any]:

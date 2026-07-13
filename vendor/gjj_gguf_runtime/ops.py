@@ -248,6 +248,34 @@ class GGMLOps(comfy.ops.manual_cast):
             weight, bias = self.cast_bias_weight(input)
             return self._conv_forward(input, weight, bias)
 
+    class Conv1d(GGMLLayer, comfy.ops.manual_cast.Conv1d):
+        def forward_ggml_cast_weights(self, input):
+            weight, bias = self.cast_bias_weight(input)
+            return self._conv_forward(input, weight, bias)
+
+    class ConvTranspose1d(GGMLLayer, comfy.ops.manual_cast.ConvTranspose1d):
+        def forward_ggml_cast_weights(self, input, output_size=None):
+            weight, bias = self.cast_bias_weight(input)
+            output_padding = self._output_padding(
+                input,
+                output_size,
+                self.stride,
+                self.padding,
+                self.kernel_size,
+                1,
+                self.dilation,
+            )
+            return torch.nn.functional.conv_transpose1d(
+                input,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                output_padding,
+                self.groups,
+                self.dilation,
+            )
+
     class Embedding(GGMLLayer, comfy.ops.manual_cast.Embedding):
         def forward_ggml_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype

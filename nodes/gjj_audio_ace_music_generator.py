@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import time
 from typing import Any
 
 import comfy.model_management
@@ -18,6 +20,14 @@ from nodes import (
     VAELoader,
     common_ksampler,
 )
+
+try:
+    from .common_utils.model_loader import gjjutils_load_model
+except Exception:
+    try:
+        from nodes.common_utils.model_loader import gjjutils_load_model
+    except Exception:
+        gjjutils_load_model = None
 
 
 NODE_NAME = "GJJ_AudioAceMusicGenerator"
@@ -44,7 +54,57 @@ DEFAULT_SCHEDULER = "simple"
 DEFAULT_DENOISE = 1.0
 DEFAULT_TAIL_PADDING_SECONDS = 3.0
 DEFAULT_FADE_OUT_SECONDS = 1.5
-HIDDEN_UI_PARAMETERS = (
+ACE_MODEL_TREE = [
+    {
+        "label": "AIO 整包模型（可选）",
+        "folder": "checkpoints",
+        "filename": DEFAULT_CHECKPOINT,
+        "description": "ACE 1.5 checkpoint 整包；选择 checkpoints 下的 AIO 时不需要单独选择 CLIP/VAE。",
+    },
+    {
+        "label": "ACE 主模型 / UNET",
+        "folder": "diffusion_models",
+        "filename": DEFAULT_UNET,
+        "description": "ACE 1.5 分体主模型；列表按文件名同时包含 ace + step 过滤，支持 safetensors。",
+    },
+    {
+        "label": "ACE GGUF 主模型",
+        "folder": "diffusion_models",
+        "filename": "acestep-v15-turbo-Q4_K_M.gguf",
+        "description": "低显存 GGUF 主模型；与 safetensors 主模型互斥，同样放在 diffusion_models。",
+    },
+    {
+        "label": "CLIP 1",
+        "folder": "text_encoders",
+        "filename": DEFAULT_CLIP_1,
+        "description": "分体 safetensors / GGUF 主模型需要的 ACE 文本编码器 1。",
+    },
+    {
+        "label": "CLIP 2",
+        "folder": "text_encoders",
+        "filename": DEFAULT_CLIP_2,
+        "description": "分体 safetensors / GGUF 主模型需要的 ACE 文本编码器 2。",
+    },
+    {
+        "label": "VAE",
+        "folder": "vae",
+        "filename": DEFAULT_VAE,
+        "description": "ACE 音频 VAE；分体 safetensors / GGUF 主模型需要。",
+    },
+]
+ACE_MODEL_TREE_TEXT = f"""models/
+├─ checkpoints/
+│  └─ {DEFAULT_CHECKPOINT}  # 可选 AIO 整包
+├─ diffusion_models/
+│  ├─ {DEFAULT_UNET}  # safetensors 主模型
+│  ├─ acestep_v1.5_xl_turbo_bf16.safetensors  # XL safetensors 主模型
+│  └─ acestep-v15-turbo-Q4_K_M.gguf  # GGUF 主模型，和 safetensors 互斥
+├─ text_encoders/
+│  ├─ {DEFAULT_CLIP_1}
+│  └─ {DEFAULT_CLIP_2}
+└─ vae/
+   └─ {DEFAULT_VAE}"""
+UI_PARAMETER_ORDER = (
     "model_name",
     "tags",
     "lyrics",
@@ -67,7 +127,16 @@ HIDDEN_UI_PARAMETERS = (
     "sampler_name",
     "scheduler",
     "denoise",
+    "clip_1_name",
+    "clip_2_name",
+    "vae_name",
+    "model_test_mode",
 )
+HIDDEN_UI_PARAMETERS = tuple(
+    name for name in UI_PARAMETER_ORDER
+    if name not in {"tags", "lyrics"}
+)
+_TIMESTAMP_ASR_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 
 def _mark_hidden_ui_parameters(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +183,13 @@ def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
         )
     except Exception:
         pass
+
+
+def _safe_output_name(value: Any) -> str:
+    name = str(value or "ACE_Model").replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    name = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "_", name).strip(" ._")
+    name = re.sub(r"\s+", "_", name)
+    return name or "ACE_Model"
 
 
 def _save_audio_mp3_ui(audio: dict[str, Any], filename_prefix: str = "audio/GJJ_ACEMusic", quality: str = "320k") -> dict[str, Any]:
@@ -185,8 +261,6 @@ def _filter_ace_models(names: list[str], *, allow_checkpoint: bool) -> list[str]
     filtered: list[str] = []
     for name in names:
         normalized = _normalize_text(name)
-        if "xl" in normalized:
-            continue
         if "ace" not in normalized:
             continue
         if "15" not in normalized and "step15" not in normalized and "step1" not in normalized:
@@ -200,9 +274,36 @@ def _filter_ace_models(names: list[str], *, allow_checkpoint: bool) -> list[str]
     return filtered
 
 
+def _filter_ace_unet_models(names: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for name in names:
+        normalized = _normalize_text(name)
+        if "ace" in normalized and "step" in normalized:
+            filtered.append(name)
+    return filtered
+
+
+def _filter_ace_clip_models(names: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for name in names:
+        normalized = _normalize_text(name)
+        if "ace" in normalized or "qwen" in normalized:
+            filtered.append(name)
+    return filtered or names
+
+
+def _filter_ace_vae_models(names: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for name in names:
+        normalized = _normalize_text(name)
+        if "ace" in normalized or "vae" in normalized:
+            filtered.append(name)
+    return filtered or names
+
+
 def _list_visible_models() -> list[str]:
     checkpoints = _filter_ace_models(_safe_filename_list("checkpoints"), allow_checkpoint=True)
-    diffusion_models = _filter_ace_models(_safe_filename_list("diffusion_models"), allow_checkpoint=False)
+    diffusion_models = _filter_ace_unet_models(_safe_filename_list("diffusion_models"))
     ordered: list[str] = []
     seen: set[str] = set()
     for name in checkpoints + diffusion_models:
@@ -214,14 +315,30 @@ def _list_visible_models() -> list[str]:
     return ordered
 
 
+def _list_visible_clip_models() -> list[str]:
+    ordered = _filter_ace_clip_models(_safe_filename_list("text_encoders"))
+    if not ordered:
+        ordered = [DEFAULT_CLIP_1, DEFAULT_CLIP_2]
+    return ordered
+
+
+def _list_visible_vae_models() -> list[str]:
+    ordered = _filter_ace_vae_models(_safe_filename_list("vae"))
+    if not ordered:
+        ordered = [DEFAULT_VAE]
+    return ordered
+
+
 def _resolve_model_bundle(model_name: str) -> tuple[str, str]:
     checkpoints = _filter_ace_models(_safe_filename_list("checkpoints"), allow_checkpoint=True)
-    diffusion_models = _filter_ace_models(_safe_filename_list("diffusion_models"), allow_checkpoint=False)
+    diffusion_models = _filter_ace_unet_models(_safe_filename_list("diffusion_models"))
 
     model_name = str(model_name or "").strip()
     if model_name in checkpoints:
         return "checkpoint", model_name
     if model_name in diffusion_models:
+        if model_name.replace("\\", "/").lower().endswith(".gguf"):
+            return "gguf", model_name
         return "split", model_name
 
     checkpoint_match = _pick_available_name(model_name, checkpoints, DEFAULT_CHECKPOINT)
@@ -230,6 +347,8 @@ def _resolve_model_bundle(model_name: str) -> tuple[str, str]:
 
     diffusion_match = _pick_available_name(model_name, diffusion_models, DEFAULT_UNET)
     if diffusion_match:
+        if diffusion_match.replace("\\", "/").lower().endswith(".gguf"):
+            return "gguf", diffusion_match
         return "split", diffusion_match
 
     raise RuntimeError("未找到可用的 ACE 1.5 音乐模型。")
@@ -246,13 +365,35 @@ def _require_category_name(category: str, preferred: str, label: str, fallback: 
     return resolved
 
 
-def _load_split_bundle(unet_name: str):
-    resolved_unet = _require_category_name("diffusion_models", unet_name, "分体 UNET", DEFAULT_UNET)
-    resolved_clip_1 = _require_category_name("text_encoders", DEFAULT_CLIP_1, "文本编码器 1", DEFAULT_CLIP_1)
-    resolved_clip_2 = _require_category_name("text_encoders", DEFAULT_CLIP_2, "文本编码器 2", DEFAULT_CLIP_2)
-    resolved_vae = _require_category_name("vae", DEFAULT_VAE, "VAE", DEFAULT_VAE)
+def _load_ace_unet(unet_name: str):
+    if str(unet_name or "").replace("\\", "/").lower().endswith(".gguf"):
+        if gjjutils_load_model is None:
+            raise RuntimeError("当前环境缺少 GJJ GGUF UNET 加载器，无法加载 GGUF 主模型。")
+        return gjjutils_load_model(unet_name, "default")
+    if gjjutils_load_model is not None:
+        return gjjutils_load_model(unet_name, "fp8_e4m3fn_fast")
+    return UNETLoader().load_unet(unet_name, "fp8_e4m3fn_fast")[0]
 
-    model = UNETLoader().load_unet(resolved_unet, "fp8_e4m3fn_fast")[0]
+
+def _load_split_bundle(unet_name: str, clip_1_name: str = DEFAULT_CLIP_1, clip_2_name: str = DEFAULT_CLIP_2, vae_name: str = DEFAULT_VAE):
+    resolved_unet = _require_category_name("diffusion_models", unet_name, "分体 UNET", DEFAULT_UNET)
+    resolved_clip_1 = _require_category_name("text_encoders", clip_1_name, "文本编码器 1", DEFAULT_CLIP_1)
+    resolved_clip_2 = _require_category_name("text_encoders", clip_2_name, "文本编码器 2", DEFAULT_CLIP_2)
+    resolved_vae = _require_category_name("vae", vae_name, "VAE", DEFAULT_VAE)
+
+    model = _load_ace_unet(resolved_unet)
+    clip = DualCLIPLoader().load_clip(resolved_clip_1, resolved_clip_2, "ace", "default")[0]
+    vae = VAELoader().load_vae(resolved_vae)[0]
+    return model, clip, vae
+
+
+def _load_gguf_bundle(unet_name: str, clip_1_name: str = DEFAULT_CLIP_1, clip_2_name: str = DEFAULT_CLIP_2, vae_name: str = DEFAULT_VAE):
+    resolved_unet = _require_category_name("diffusion_models", unet_name, "GGUF 主模型", unet_name)
+    resolved_clip_1 = _require_category_name("text_encoders", clip_1_name, "文本编码器 1", DEFAULT_CLIP_1)
+    resolved_clip_2 = _require_category_name("text_encoders", clip_2_name, "文本编码器 2", DEFAULT_CLIP_2)
+    resolved_vae = _require_category_name("vae", vae_name, "VAE", DEFAULT_VAE)
+
+    model = _load_ace_unet(resolved_unet)
     clip = DualCLIPLoader().load_clip(resolved_clip_1, resolved_clip_2, "ace", "default")[0]
     vae = VAELoader().load_vae(resolved_vae)[0]
     return model, clip, vae
@@ -381,6 +522,307 @@ def _apply_fade_out(audio: dict[str, Any], fade_seconds: float) -> dict[str, Any
     }
 
 
+def _clean_lyric_line(line: str) -> str:
+    text = str(line or "").strip()
+    if re.fullmatch(r"\[[^\]]+\]", text):
+        return ""
+    return text
+
+
+def _lyrics_to_srt_lines(lyrics: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in str(lyrics or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = _clean_lyric_line(raw_line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _alignment_key(text: str) -> str:
+    return re.sub(
+        r"[\s\[\]（）(){}<>《》“”\"'.,，。!?！？;；:：、…~\-—_]+",
+        "",
+        str(text or "").lower(),
+    )
+
+
+def _srt_time(seconds: float) -> str:
+    total_ms = max(0, int(round(float(seconds or 0.0) * 1000.0)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _format_srt(entries: list[tuple[float, float, str]]) -> str:
+    blocks: list[str] = []
+    for index, (start, end, text) in enumerate(entries, 1):
+        blocks.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}")
+    return "\n\n".join(blocks)
+
+
+def _estimated_line_duration(text: str) -> float:
+    char_count = max(1, len(_alignment_key(text)))
+    return min(8.0, max(1.6, char_count * 0.22))
+
+
+def _extract_first_time_from_text(text: str) -> float | None:
+    values: list[float] = []
+    for match in re.finditer(r"<\|(\d+(?:\.\d+)?)\|>|\[(\d+(?:\.\d+)?)\]", str(text or "")):
+        try:
+            value = float(match.group(1) or match.group(2))
+        except (TypeError, ValueError):
+            continue
+        if value > 0.2:
+            values.append(value)
+    return min(values) if values else None
+
+
+def _extract_first_time(value: Any, depth: int = 0) -> float | None:
+    if depth > 5 or value is None:
+        return None
+    if isinstance(value, str):
+        return _extract_first_time_from_text(value)
+    if isinstance(value, dict):
+        direct_values: list[float] = []
+        for key in ("start", "start_time", "begin", "begin_time", "from", "timestamp"):
+            if key not in value:
+                continue
+            try:
+                start = float(value[key])
+            except (TypeError, ValueError):
+                continue
+            if start > 0.2:
+                direct_values.append(start)
+        if direct_values:
+            return min(direct_values)
+        nested = [_extract_first_time(item, depth + 1) for item in value.values()]
+        nested = [item for item in nested if item is not None]
+        return min(nested) if nested else None
+    if isinstance(value, (list, tuple)):
+        nested = [_extract_first_time(item, depth + 1) for item in value]
+        nested = [item for item in nested if item is not None]
+        return min(nested) if nested else None
+
+    direct_values = []
+    for attr in ("start", "start_time", "begin", "begin_time"):
+        if not hasattr(value, attr):
+            continue
+        try:
+            start = float(getattr(value, attr))
+        except (TypeError, ValueError):
+            continue
+        if start > 0.2:
+            direct_values.append(start)
+    if direct_values:
+        return min(direct_values)
+
+    nested_values = []
+    for attr in ("items", "segments", "chunks", "timestamps", "time_stamps", "words", "text"):
+        if hasattr(value, attr):
+            nested = _extract_first_time(getattr(value, attr), depth + 1)
+            if nested is not None:
+                nested_values.append(nested)
+    return min(nested_values) if nested_values else None
+
+
+def _repair_srt_entries(entries: list[tuple[float, float, str]], vocal_start: float | None) -> list[tuple[float, float, str]]:
+    if not entries:
+        return entries
+
+    repaired: list[tuple[float, float, str]] = []
+    current = 0.0
+    if vocal_start is not None and vocal_start > 0.5 and float(entries[0][0]) <= 0.5:
+        current = float(vocal_start)
+
+    for start, end, text in entries:
+        start = max(0.0, float(start or 0.0))
+        end = max(start, float(end or start))
+        duration = end - start
+        estimate = _estimated_line_duration(text)
+        broken = (
+            duration < 0.6
+            or duration > max(12.0, estimate * 2.8)
+            or (vocal_start is not None and vocal_start > 0.5 and start <= 0.5)
+            or start < current - 0.2
+        )
+
+        if broken:
+            start = max(current, float(vocal_start or 0.0))
+            duration = estimate
+            end = start + duration
+        elif start < current:
+            shift = current - start
+            start += shift
+            end += shift
+
+        repaired.append((start, end, text))
+        current = end + 0.12
+    return repaired
+
+
+def _load_timestamp_asr_model(asr_dir: str, aligner_dir: str, dtype_name: str, device_map: str, unique_id: Any = None):
+    cache_key = (asr_dir, aligner_dir, dtype_name, device_map)
+    if cache_key in _TIMESTAMP_ASR_CACHE:
+        return _TIMESTAMP_ASR_CACHE[cache_key]
+
+    try:
+        from .gjj_qwen3_asr_text_formats import _dtype_from_name, _load_qwen_runtime
+    except Exception:
+        from gjj_qwen3_asr_text_formats import _dtype_from_name, _load_qwen_runtime
+
+    Qwen3ASRModel, _ = _load_qwen_runtime(unique_id)
+    dtype = _dtype_from_name(dtype_name)
+    model = Qwen3ASRModel.from_pretrained(
+        asr_dir,
+        forced_aligner=aligner_dir,
+        forced_aligner_kwargs={"dtype": dtype, "device_map": device_map},
+        dtype=dtype,
+        device_map=device_map,
+        max_inference_batch_size=8,
+        max_new_tokens=512,
+    )
+    _TIMESTAMP_ASR_CACHE[cache_key] = model
+    return model
+
+
+def _detect_first_vocal_start(
+    waveform: Any,
+    sample_rate: int,
+    dtype_name: str,
+    device_map: str,
+    aligner_dir: str,
+    unique_id: Any = None,
+) -> tuple[float | None, Any | None]:
+    try:
+        from .gjj_qwen3_asr_text_formats import _find_local_model_dir
+    except Exception:
+        from gjj_qwen3_asr_text_formats import _find_local_model_dir
+
+    for asr_model_name in ("Qwen3-ASR-1.7B", "Qwen3-ASR-0.6B"):
+        asr_dir = _find_local_model_dir(asr_model_name, "asr")
+        if not asr_dir:
+            continue
+        try:
+            asr_model = _load_timestamp_asr_model(asr_dir, aligner_dir, dtype_name, device_map, unique_id)
+            transcriptions = asr_model.transcribe(
+                audio=(waveform, sample_rate),
+                context="",
+                language=None,
+                return_time_stamps=True,
+            )
+            first_time = _extract_first_time(transcriptions)
+            if first_time is not None:
+                return first_time, getattr(asr_model, "forced_aligner", None)
+        except Exception:
+            continue
+    return None, None
+
+
+def _align_items_to_lyric_lines(items: list[Any], lines: list[str]) -> list[tuple[float, float, str]]:
+    entries: list[tuple[float, float, str]] = []
+    item_index = 0
+    item_count = len(items)
+
+    for line in lines:
+        target_key = _alignment_key(line)
+        if not target_key:
+            continue
+
+        matched = ""
+        start_time = None
+        end_time = None
+        while item_index < item_count and len(_alignment_key(matched)) < len(target_key):
+            item = items[item_index]
+            item_text = str(getattr(item, "text", "") or "")
+            if item_text:
+                if start_time is None:
+                    start_time = float(getattr(item, "start_time", 0.0) or 0.0)
+                end_time = float(getattr(item, "end_time", start_time or 0.0) or 0.0)
+                matched += item_text
+            item_index += 1
+
+        if start_time is not None and end_time is not None:
+            if end_time <= start_time:
+                end_time = start_time + 0.1
+            entries.append((start_time, end_time, line))
+
+    return entries
+
+
+def _ace_language_to_qwen(language: str) -> str:
+    mapping = {
+        "zh": "Chinese",
+        "cn": "Chinese",
+        "en": "English",
+        "ja": "Japanese",
+        "jp": "Japanese",
+        "ko": "Korean",
+        "kr": "Korean",
+        "es": "Spanish",
+        "de": "German",
+        "fr": "French",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "it": "Italian",
+        "ar": "Arabic",
+        "tr": "Turkish",
+        "vi": "Vietnamese",
+        "id": "Indonesian",
+    }
+    return mapping.get(str(language or "").strip().lower(), "Chinese")
+
+
+def _align_lyrics_to_srt(audio: dict[str, Any], lyrics: str, language: str, unique_id: Any = None) -> str:
+    lines = _lyrics_to_srt_lines(lyrics)
+    if not lines:
+        return ""
+
+    try:
+        from .gjj_qwen3_asr_text_formats import (
+            _audio_to_numpy,
+            _load_aligner_model,
+            _resolve_device_map,
+            _resolve_dtype_name,
+            _resolve_model_dir,
+        )
+    except Exception:
+        from gjj_qwen3_asr_text_formats import (
+            _audio_to_numpy,
+            _load_aligner_model,
+            _resolve_device_map,
+            _resolve_dtype_name,
+            _resolve_model_dir,
+        )
+
+    waveform, sample_rate = _audio_to_numpy(audio)
+    dtype_name = _resolve_dtype_name("自动")
+    device_map = _resolve_device_map()
+    aligner_dir = _resolve_model_dir("Qwen3-ForcedAligner-0.6B", "aligner", unique_id)
+    vocal_start, timestamp_aligner = _detect_first_vocal_start(
+        waveform,
+        sample_rate,
+        dtype_name,
+        device_map,
+        aligner_dir,
+        unique_id,
+    )
+    aligner = timestamp_aligner or _load_aligner_model(aligner_dir, dtype_name, device_map, unique_id)
+    align_results = aligner.align(
+        audio=(waveform, sample_rate),
+        text="\n".join(lines),
+        language=_ace_language_to_qwen(language),
+    )
+    if not align_results:
+        raise RuntimeError("强制对齐没有返回时间戳结果。")
+
+    entries = _align_items_to_lyric_lines(list(align_results[0]), lines)
+    if not entries:
+        raise RuntimeError("强制对齐没有匹配到可用的歌词时间戳。")
+    entries = _repair_srt_entries(entries, vocal_start)
+    return _format_srt(entries)
+
+
 class GJJ_AudioAceMusicGenerator:
     CATEGORY = "GJJ/音频"
     FUNCTION = "generate"
@@ -388,16 +830,41 @@ class GJJ_AudioAceMusicGenerator:
     DESCRIPTION = "将 Audio ACE 1.5 两套工作流合并成单节点：优先使用整包 checkpoint，缺失时自动回退到 split 模型组，直接生成音乐音频。"
     SEARCH_ALIASES = ["ace 音乐", "music", "audio ace", "作曲", "音乐", "歌曲生成", "音频生成"]
     RETURN_TYPES = ("AUDIO", "STRING")
-    RETURN_NAMES = ("音乐音频输出", "音乐结果摘要")
-    OUTPUT_TOOLTIPS = ("生成的音乐音频。", "当前生成任务的简要信息。")
+    RETURN_NAMES = ("音乐音频输出", "原歌词SRT")
+    OUTPUT_TOOLTIPS = ("生成的音乐音频。", "使用 Qwen3-ForcedAligner 对齐原始歌词生成的 SRT 字幕文本。")
+    GJJ_HELP = {
+        "title": "GJJ · 🎵 ACE音乐生成器",
+        "description": DESCRIPTION,
+        "notice": (
+            "模型选择规则：checkpoints 下的 AIO 整包自带 CLIP/VAE；"
+            "diffusion_models 下的 safetensors 或 GGUF 主模型需要配套 text_encoders 与 vae。"
+            "GGUF 主模型也放在 diffusion_models，与 safetensors 主模型互斥。"
+        ),
+        "model_tree": ACE_MODEL_TREE,
+        "model_tree_text": ACE_MODEL_TREE_TEXT,
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
+        "models": [
+            {
+                "label": item["label"],
+                "subdir": f"models/{item['folder']}",
+                "filename": item["filename"],
+                "description": item["description"],
+            }
+            for item in ACE_MODEL_TREE
+        ],
+    }
     GJJ_UI = {
-        "toolbar": ["🔄", "▶️", "🎲", "🌐", "🪄", "🎵", "⚡", "🧠", "⚙️"],
+        "toolbar": ["🔄", "🎲", "🌐", "🪄", "⚡", "🧠", "⚙️", "▶️", "🧪"],
+        "parameter_order": list(UI_PARAMETER_ORDER),
         "hidden_parameters": list(HIDDEN_UI_PARAMETERS),
     }
 
     @classmethod
     def INPUT_TYPES(cls):
         models = _list_visible_models()
+        clip_models = _list_visible_clip_models()
+        vae_models = _list_visible_vae_models()
         return _mark_hidden_ui_parameters({
             "required": {
                 "model_name": (
@@ -412,8 +879,9 @@ class GJJ_AudioAceMusicGenerator:
                     "STRING",
                     {
                         "default": DEFAULT_TAGS,
-                        "multiline": True,
+                        "multiline": False,
                         "dynamicPrompts": True,
+                        "forceInput": False,
                         "display_name": "音乐标签",
                         "tooltip": "描述曲风、编曲、情绪、声线和音质要求。",
                     },
@@ -424,6 +892,7 @@ class GJJ_AudioAceMusicGenerator:
                         "default": DEFAULT_LYRICS,
                         "multiline": True,
                         "dynamicPrompts": True,
+                        "forceInput": False,
                         "display_name": "歌词",
                         "tooltip": "歌词内容；纯音乐可留空。",
                     },
@@ -618,6 +1087,38 @@ class GJJ_AudioAceMusicGenerator:
                         "tooltip": "主采样阶段的降噪强度。",
                     },
                 ),
+                "clip_1_name": (
+                    clip_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_CLIP_1, clip_models, DEFAULT_CLIP_1),
+                        "display_name": "CLIP 1",
+                        "tooltip": "ACE 文本编码器 1，默认 qwen_0.6b_ace15。",
+                    },
+                ),
+                "clip_2_name": (
+                    clip_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_CLIP_2, clip_models, DEFAULT_CLIP_2),
+                        "display_name": "CLIP 2",
+                        "tooltip": "ACE 文本编码器 2，默认 qwen_1.7b_ace15。",
+                    },
+                ),
+                "vae_name": (
+                    vae_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_VAE, vae_models, DEFAULT_VAE),
+                        "display_name": "VAE",
+                        "tooltip": "ACE 音频 VAE。",
+                    },
+                ),
+                "model_test_mode": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "模型测试模式",
+                        "tooltip": "由 🧪 模型测试按钮自动控制；开启时输出文件名使用模型名和耗时。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -648,15 +1149,22 @@ class GJJ_AudioAceMusicGenerator:
         sampler_name=DEFAULT_SAMPLER,
         scheduler=DEFAULT_SCHEDULER,
         denoise=DEFAULT_DENOISE,
+        clip_1_name=DEFAULT_CLIP_1,
+        clip_2_name=DEFAULT_CLIP_2,
+        vae_name=DEFAULT_VAE,
+        model_test_mode=False,
         unique_id=None,
     ):
-        _send_status(unique_id, "1/6 加载 ACE 音乐模型...")
+        started_at = time.perf_counter()
+        _send_status(unique_id, "1/7 加载 ACE 音乐模型...")
         try:
             mode, resolved_name = _resolve_model_bundle(model_name)
             if mode == "checkpoint":
                 model, clip, vae = CheckpointLoaderSimple().load_checkpoint(resolved_name)
+            elif mode == "gguf":
+                model, clip, vae = _load_gguf_bundle(resolved_name, clip_1_name, clip_2_name, vae_name)
             else:
-                model, clip, vae = _load_split_bundle(resolved_name)
+                model, clip, vae = _load_split_bundle(resolved_name, clip_1_name, clip_2_name, vae_name)
             model = _apply_aura_shift(model, float(shift))
         except Exception as exc:
             raise RuntimeError(
@@ -667,9 +1175,10 @@ class GJJ_AudioAceMusicGenerator:
 
         target_duration = float(duration)
         generation_duration = min(2000.0, target_duration + DEFAULT_TAIL_PADDING_SECONDS)
-        tags, lyrics = _ensure_smooth_ending_prompt(tags, lyrics)
+        source_lyrics = str(lyrics or "")
+        tags, lyrics = _ensure_smooth_ending_prompt(tags, source_lyrics)
 
-        _send_status(unique_id, "2/6 编码音乐提示词与歌词...")
+        _send_status(unique_id, "2/7 编码音乐提示词与歌词...")
         try:
             positive = _encode_ace15_text(
                 clip,
@@ -693,13 +1202,13 @@ class GJJ_AudioAceMusicGenerator:
         except Exception as exc:
             raise RuntimeError(f"ACE 音乐生成器编码提示词失败。\n详细错误：{exc}") from exc
 
-        _send_status(unique_id, "3/6 构建音频 latent...")
+        _send_status(unique_id, "3/7 构建音频 latent...")
         try:
             latent = _build_empty_ace15_latent(generation_duration, 1)
         except Exception as exc:
             raise RuntimeError(f"ACE 音乐生成器构建音频 latent 失败。\n详细错误：{exc}") from exc
 
-        _send_status(unique_id, "4/6 采样生成音乐 latent...")
+        _send_status(unique_id, "4/7 采样生成音乐 latent...")
         try:
             samples = common_ksampler(
                 model,
@@ -716,7 +1225,7 @@ class GJJ_AudioAceMusicGenerator:
         except Exception as exc:
             raise RuntimeError(f"ACE 音乐生成器采样失败。\n详细错误：{exc}") from exc
 
-        _send_status(unique_id, "5/6 解码音频...")
+        _send_status(unique_id, "5/7 解码音频...")
         try:
             audio = vae_decode_audio(vae, samples)
             audio = _fit_audio_duration(audio, target_duration)
@@ -730,12 +1239,29 @@ class GJJ_AudioAceMusicGenerator:
             f"目标 {target_duration:.1f}s / 输出 {actual_duration:.1f}s / "
             f"{int(bpm)} BPM / {str(language)}"
         )
-        _send_status(unique_id, f"6/6 完成：{summary}")
+        _send_status(unique_id, f"6/7 保存音乐：{summary}")
 
-        audio_ui = _save_audio_mp3_ui(audio, "audio/GJJ_ACEMusic", "320k")
+        elapsed_seconds = max(0.0, time.perf_counter() - started_at)
+        if bool(model_test_mode):
+            prefix = f"audio/{_safe_output_name(resolved_name)}+{elapsed_seconds:.1f}s"
+        else:
+            prefix = "audio/GJJ_ACEMusic"
+        audio_ui = _save_audio_mp3_ui(audio, prefix, "320k")
         _send_audio_preview(unique_id, audio_ui)
 
-        return {"ui": audio_ui, "result": (audio, summary)}
+        srt_text = ""
+        if _lyrics_to_srt_lines(source_lyrics):
+            _send_status(unique_id, "7/7 对齐原歌词 SRT...")
+            try:
+                srt_text = _align_lyrics_to_srt(audio, source_lyrics, str(language), unique_id)
+                _send_status(unique_id, f"完成：已输出 {len(_lyrics_to_srt_lines(source_lyrics))} 行原歌词 SRT。")
+            except Exception as exc:
+                srt_text = f"SRT 对齐失败：{exc}"
+                _send_status(unique_id, "完成：音乐已生成，SRT 对齐失败。")
+        else:
+            _send_status(unique_id, "完成：音乐已生成；没有歌词，SRT 留空。")
+
+        return {"ui": audio_ui, "result": (audio, srt_text)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioAceMusicGenerator}

@@ -567,6 +567,31 @@ def preview_media_images_to_tensor(items: list[dict[str, Any]]) -> torch.Tensor 
     return torch.stack(frames, dim=0).contiguous()
 
 
+def preview_media_audio_to_audio(items: list[dict[str, Any]]) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """把保持预览里的音频文件描述还原成 ComfyUI AUDIO，避免把 UI 字典透传给下游。"""
+    restored: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            path = preview_media_item_path(item)
+            if not path.exists() or not path.is_file():
+                continue
+            from comfy_extras.nodes_audio import load as comfy_load_audio
+
+            waveform, sample_rate = comfy_load_audio(str(path))
+            audio = normalize_audio_object(
+                {"waveform": waveform, "sample_rate": int(sample_rate)}
+            )
+            if audio is not None:
+                restored.append(audio)
+        except Exception as error:
+            print(f"[GJJ] AnyPreview 音频透传还原失败：{error}")
+    if not restored:
+        return None
+    return restored[0] if len(restored) == 1 else restored
+
+
 def annotate_preview_image_dimensions(
     items: list[dict[str, Any]],
     images: torch.Tensor,
@@ -1501,6 +1526,7 @@ class GJJ_AnyPreview:
         held_media_kind = ""
         held_media: list[dict[str, Any]] = []
         held_media_text = ""
+        held_audio_output: dict[str, Any] | list[dict[str, Any]] | None = None
 
         # 优先处理 batch_image 参数
         if batch_image is not None and not is_none(batch_image):
@@ -1550,7 +1576,13 @@ class GJJ_AnyPreview:
                 "媒体",
             )
             preview_text = held_media_text or f"保持{label}预览：{len(held_media)} 个"
-            merged = held_media[0] if len(held_media) == 1 else held_media
+            if held_media_kind == "audio":
+                held_audio_output = preview_media_audio_to_audio(held_media)
+            merged = (
+                held_audio_output
+                if held_audio_output is not None
+                else (held_media[0] if len(held_media) == 1 else held_media)
+            )
         if using_cached_inputs and preview_values:
             preview_text = f"使用断开前缓存：{preview_text}"
         sequence_media: list[dict[str, Any]] = []

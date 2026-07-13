@@ -5,9 +5,9 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set(["GJJ_AudioAceMusicGenerator"]);
 const STATUS_WIDGET_NAME = "gjj_audio_ace_music_status";
 const AUDIO_WIDGET_NAME = "gjj_audio_ace_music_audio";
-const COMPACT_PANEL_HEIGHT = 158;
-const SIMPLE_HOME_WIDGETS = new Set(["lyrics", "tags"]);
-const HIDDEN_HOME_WIDGETS = new Set([
+const COMPACT_PANEL_HEIGHT = 40;
+const COMPACT_NODE_HEIGHT = 260;
+const PARAM_ORDER = [
 	"model_name",
 	"tags",
 	"lyrics",
@@ -30,7 +30,45 @@ const HIDDEN_HOME_WIDGETS = new Set([
 	"sampler_name",
 	"scheduler",
 	"denoise",
+	"clip_1_name",
+	"clip_2_name",
+	"vae_name",
+	"model_test_mode",
+];
+const HIDDEN_HOME_WIDGETS = new Set([
+	"model_name",
+	"duration",
+	"bpm",
+	"timesignature",
+	"language",
+	"keyscale",
+	"seed",
+	"lyrics_strength",
+	"generate_audio_codes",
+	"cfg_scale",
+	"temperature",
+	"top_p",
+	"top_k",
+	"min_p",
+	"shift",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"clip_1_name",
+	"clip_2_name",
+	"vae_name",
+	"model_test_mode",
 ]);
+const PANEL_GROUPS = {
+	seed: { title: "🎲 种子", names: ["seed"] },
+	music: { title: "🌐 音乐结构", names: ["bpm", "timesignature", "language", "keyscale"] },
+	text: { title: "🪄 文本采样", names: ["lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
+	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes"] },
+	generate: { title: "⚡ 生成参数", names: ["duration", "steps", "cfg", "sampler_name", "scheduler", "denoise"] },
+	other: { title: "⚙️ 其它参数", names: ["generate_audio_codes"] },
+};
 
 function isExecutionOutputNode(node) {
 	if (!node) return false;
@@ -102,6 +140,40 @@ function getWidget(node, name) {
 	return node?.widgets?.find((widget) => widget?.name === name);
 }
 
+function orderedParamValues(node) {
+	return PARAM_ORDER.map((name) => getWidget(node, name)?.value);
+}
+
+function syncOrderedWidgetValues(node) {
+	if (!node) return;
+	node.widgets_values = orderedParamValues(node);
+}
+
+function applyOrderedWidgetValues(node, values) {
+	if (!node || !Array.isArray(values)) return;
+	for (let index = 0; index < PARAM_ORDER.length; index += 1) {
+		if (index >= values.length) break;
+		const widget = getWidget(node, PARAM_ORDER[index]);
+		if (!widget) continue;
+		widget.value = values[index];
+		try {
+			widget.callback?.(widget.value);
+		} catch (_) {}
+	}
+	syncOrderedWidgetValues(node);
+}
+
+function writePromptInputsFromWidgets(node, promptData) {
+	const promptNode = promptData?.prompt?.[String(node?.id)] || promptData?.prompt?.[node?.id];
+	if (!promptNode?.inputs) return;
+	for (const name of PARAM_ORDER) {
+		const widget = getWidget(node, name);
+		if (widget) {
+			promptNode.inputs[name] = widget.value;
+		}
+	}
+}
+
 function setWidgetValue(node, name, value) {
 	const widget = getWidget(node, name);
 	if (!widget) return;
@@ -110,63 +182,389 @@ function setWidgetValue(node, name, value) {
 		widget.callback?.(value);
 	} catch (_) {}
 	if (Array.isArray(node.widgets_values)) {
-		const serializableWidgets = (node.widgets || []).filter((item) => item?.options?.serialize !== false && item?.serialize !== false);
-		const index = serializableWidgets.indexOf(widget);
+		const index = PARAM_ORDER.indexOf(name);
 		if (index >= 0) {
 			node.widgets_values[index] = value;
 		}
 	}
+	syncOrderedWidgetValues(node);
 	node.graph && (node.graph._version += 1);
-	syncTextareasFromWidgets(node);
 	refreshNode(node);
-}
-
-function appendUniqueTag(node, text) {
-	const widget = getWidget(node, "tags");
-	const current = String(widget?.value || "").trim();
-	const exists = current.toLowerCase().includes(String(text).toLowerCase());
-	setWidgetValue(node, "tags", exists || !current ? current || text : `${current}，${text}`);
-}
-
-function cycleChoice(node, name, values) {
-	const widget = getWidget(node, name);
-	if (!widget || !values.length) return;
-	const currentIndex = values.indexOf(String(widget.value || ""));
-	const next = values[(currentIndex + 1 + values.length) % values.length];
-	setWidgetValue(node, name, next);
-}
-
-function randomizeSeed(node) {
-	const seed = Math.floor(Math.random() * 0xFFFFFFFF);
-	setWidgetValue(node, "seed", seed);
-}
-
-function cycleDuration(node) {
-	const widget = getWidget(node, "duration");
-	const durations = [60, 90, 120, 180, 240];
-	const current = Number(widget?.value || 120);
-	const currentIndex = durations.findIndex((item) => item >= current);
-	const next = durations[(currentIndex + 1 + durations.length) % durations.length];
-	setWidgetValue(node, "duration", next);
-}
-
-function syncTextareasFromWidgets(node) {
-	const panel = node?.__gjjAudioAceMusicStatus;
-	if (!panel) return;
-	for (const name of SIMPLE_HOME_WIDGETS) {
-		const textarea = panel.inputs?.[name];
-		const widget = getWidget(node, name);
-		if (textarea && widget && textarea.value !== String(widget.value || "")) {
-			textarea.value = String(widget.value || "");
-		}
-	}
 }
 
 function hideHomeWidgets(node) {
 	for (const name of HIDDEN_HOME_WIDGETS) {
 		GJJ_Utils.hideWidget(getWidget(node, name));
 	}
-	GJJ_Utils.reorderWidgets(node, HIDDEN_HOME_WIDGETS);
+}
+
+function restoreParameterWidgetOrder(node) {
+	if (!node || !Array.isArray(node.widgets)) return;
+	const ordered = [];
+	const used = new Set();
+	for (const name of PARAM_ORDER) {
+		const widget = getWidget(node, name);
+		if (widget && !used.has(widget)) {
+			ordered.push(widget);
+			used.add(widget);
+		}
+	}
+	for (const widget of node.widgets) {
+		if (!used.has(widget)) {
+			ordered.push(widget);
+			used.add(widget);
+		}
+	}
+	node.widgets = ordered;
+}
+
+function placeToolbarFirst(node) {
+	const status = node?.__gjjAudioAceMusicStatus?.widget;
+	if (!status || !Array.isArray(node.widgets)) return;
+	const rest = node.widgets.filter((widget) => widget !== status);
+	node.widgets = [status, ...rest];
+}
+
+function scheduleToolbarFirst(node) {
+	const move = () => {
+		placeToolbarFirst(node);
+		refreshNode(node);
+	};
+	requestAnimationFrame?.(move);
+	setTimeout(move, 0);
+}
+
+function ensureCompactSize(node) {
+	if (!node) return;
+	const width = Math.max(360, Number(node.size?.[0] || 360));
+	node.setSize?.([width, COMPACT_NODE_HEIGHT]);
+	node.size = [width, COMPACT_NODE_HEIGHT];
+	refreshNode(node);
+}
+
+function scheduleCompactSize(node) {
+	ensureCompactSize(node);
+	requestAnimationFrame?.(() => ensureCompactSize(node));
+	setTimeout(() => ensureCompactSize(node), 0);
+}
+
+function patchPromptData(promptData) {
+	const nodes = app.graph?._nodes || [];
+	for (const node of nodes) {
+		if (!node || !TARGET_NODES.has(String(node.comfyClass || node.type || ""))) continue;
+		syncOrderedWidgetValues(node);
+		writePromptInputsFromWidgets(node, promptData);
+	}
+	return promptData;
+}
+
+function installGraphToPromptPatch() {
+	if (app.__gjjAudioAceMusicGraphToPromptPatched || typeof app.graphToPrompt !== "function") {
+		return;
+	}
+	app.__gjjAudioAceMusicGraphToPromptPatched = true;
+	const originalGraphToPrompt = app.graphToPrompt.bind(app);
+	app.graphToPrompt = async function (...args) {
+		const result = await originalGraphToPrompt(...args);
+		return patchPromptData(result);
+	};
+}
+
+function protectPanelEvents(element) {
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		element.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	element.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+}
+
+function floatingPanelStyle() {
+	return [
+		"position:fixed",
+		"z-index:900",
+		"width:min(440px, calc(100vw - 28px))",
+		"max-height:min(520px, calc(100vh - 32px))",
+		"overflow:auto",
+		"display:none",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:10px",
+		"box-sizing:border-box",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#dce7e2",
+		"box-shadow:0 16px 42px rgba(0,0,0,.45)",
+		"pointer-events:auto",
+	].join(";");
+}
+
+function createFloatingPanel(node, key) {
+	const config = PANEL_GROUPS[key];
+	if (!config) return null;
+	const panel = document.createElement("div");
+	panel.className = `gjj-audio-ace-floating-panel gjj-audio-ace-${key}-panel`;
+	panel.style.cssText = floatingPanelStyle();
+	protectPanelEvents(panel);
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;background:#10171b;padding-bottom:4px;z-index:1";
+	const title = document.createElement("div");
+	title.textContent = config.title;
+	title.style.cssText = "font-size:13px;font-weight:700;color:#f2faf7";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "×";
+	close.title = "关闭";
+	close.style.cssText = "width:26px;height:24px;border:1px solid #41535b;border-radius:6px;background:#1a2328;color:#dce7e2;cursor:pointer";
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setPanelOpen(node, key, false);
+	});
+	header.append(title, close);
+
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex-direction:column;gap:8px";
+	panel.append(header, body);
+	document.body.appendChild(panel);
+	return { panel, body, key };
+}
+
+function widgetLabel(widget, fallback) {
+	return String(widget?.options?.display_name || widget?.label || widget?.localized_name || widget?.name || fallback || "");
+}
+
+function widgetChoices(widget) {
+	const values = widget?.options?.values || widget?.options?.items || widget?.values;
+	return Array.isArray(values) ? values : [];
+}
+
+function modelWidgetChoices(node, name) {
+	return widgetChoices(getWidget(node, name)).map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function aceMainModelTreeEntries(node) {
+	const mainChoices = modelWidgetChoices(node, "model_name");
+	return [
+		{
+			widget: "model_name",
+			label: "ACE 主模型 / UNET",
+			folder: "diffusion_models",
+			icon: "🟣",
+			models: mainChoices,
+			keywords: ["ace", "step"],
+			fallback: getWidget(node, "model_name")?.value || "未找到 ACE/Step 主模型",
+			description: "ACE 主模型；.safetensors 与 .gguf 写入同一个 model_name，二者互斥。GGUF 执行时走 GJJ 内置 GGUF UNET 加载器。",
+		},
+		{
+			widget: "clip_1_name",
+			label: "CLIP 1",
+			folder: "text_encoders",
+			icon: "🟡",
+			models: modelWidgetChoices(node, "clip_1_name"),
+			anyKeywords: ["ace", "qwen"],
+			fallback: getWidget(node, "clip_1_name")?.value || "qwen_0.6b_ace15.safetensors",
+			description: "ACE 文本编码器 1。",
+		},
+		{
+			widget: "clip_2_name",
+			label: "CLIP 2",
+			folder: "text_encoders",
+			icon: "🟡",
+			models: modelWidgetChoices(node, "clip_2_name"),
+			anyKeywords: ["ace", "qwen"],
+			fallback: getWidget(node, "clip_2_name")?.value || "qwen_1.7b_ace15.safetensors",
+			description: "ACE 文本编码器 2。",
+		},
+		{
+			widget: "vae_name",
+			label: "VAE",
+			folder: "vae",
+			icon: "🔴",
+			models: modelWidgetChoices(node, "vae_name"),
+			anyKeywords: ["ace", "vae"],
+			fallback: getWidget(node, "vae_name")?.value || "ace_1.5_vae.safetensors",
+			description: "ACE 音频 VAE。",
+		},
+	];
+}
+
+function createFloatingControl(node, name) {
+	const widget = getWidget(node, name);
+	if (!widget) return null;
+	const row = document.createElement("label");
+	row.dataset.widgetName = name;
+	row.style.cssText = "display:grid;grid-template-columns:112px minmax(0,1fr);align-items:center;gap:8px";
+
+	const label = document.createElement("span");
+	label.textContent = widgetLabel(widget, name);
+	label.title = widget?.options?.tooltip || "";
+	label.style.cssText = "font-size:12px;color:#aebfbd;line-height:1.25";
+
+	let input;
+	const choices = widgetChoices(widget);
+	if (choices.length) {
+		input = document.createElement("select");
+		for (const value of choices) {
+			const option = document.createElement("option");
+			option.value = String(value);
+			option.textContent = String(value);
+			input.appendChild(option);
+		}
+	} else if (typeof widget.value === "boolean") {
+		input = document.createElement("input");
+		input.type = "checkbox";
+	} else {
+		input = document.createElement("input");
+		input.type = typeof widget.value === "number" ? "number" : "text";
+		if (input.type === "number") {
+			if (widget.options?.min != null) input.min = String(widget.options.min);
+			if (widget.options?.max != null) input.max = String(widget.options.max);
+			if (widget.options?.step != null) input.step = String(widget.options.step);
+		}
+	}
+	input.title = widget?.options?.tooltip || "";
+	input.style.cssText = [
+		"box-sizing:border-box",
+		"width:100%",
+		"min-height:28px",
+		"border:1px solid rgba(255,255,255,.1)",
+		"border-radius:6px",
+		"background:#2d3034",
+		"color:#eef5f1",
+		"font:12px/1.35 sans-serif",
+		"padding:5px 7px",
+		"outline:none",
+	].join(";");
+
+	const readInputValue = () => {
+		if (input.type === "checkbox") return input.checked;
+		if (input.type === "number") return Number(input.value);
+		return input.value;
+	};
+	const refresh = () => {
+		if (input.type === "checkbox") input.checked = !!widget.value;
+		else input.value = widget.value ?? "";
+	};
+	input.addEventListener("input", () => setWidgetValue(node, name, readInputValue()));
+	input.addEventListener("change", () => setWidgetValue(node, name, readInputValue()));
+	row.__gjjRefresh = refresh;
+	row.append(label, input);
+	refresh();
+	return row;
+}
+
+function ensureFloatingPanels(node) {
+	node.__gjjAudioAcePanels ||= {};
+	for (const key of Object.keys(PANEL_GROUPS)) {
+		if (!node.__gjjAudioAcePanels[key]) {
+			node.__gjjAudioAcePanels[key] = createFloatingPanel(node, key);
+		}
+	}
+	return node.__gjjAudioAcePanels;
+}
+
+function panelOpenKey(node) {
+	return String(node?.properties?.gjj_audio_ace_open_panel || "");
+}
+
+function setPanelOpen(node, key, open) {
+	node.properties ||= {};
+	node.properties.gjj_audio_ace_open_panel = open ? key : "";
+	syncFloatingPanels(node);
+}
+
+function positionFloatingPanel(node, panel, anchor) {
+	if (!panel) return;
+	const rect = anchor?.getBoundingClientRect?.();
+	const width = Math.min(440, Math.max(320, window.innerWidth - 28));
+	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect?.left || 80));
+	const top = Math.min(window.innerHeight - 120, Math.max(14, (rect?.bottom || 80) + 6));
+	panel.style.width = `${width}px`;
+	panel.style.left = `${Math.round(left)}px`;
+	panel.style.top = `${Math.round(top)}px`;
+}
+
+function renderPanelControls(node, panelInfo, names) {
+	if (!panelInfo?.body) return;
+	panelInfo.body.replaceChildren();
+	for (const name of names) {
+		const control = createFloatingControl(node, name);
+		if (!control) continue;
+		control.__gjjRefresh?.();
+		panelInfo.body.appendChild(control);
+	}
+}
+
+function renderModelPanelControls(node, panelInfo) {
+	if (!panelInfo?.body) return;
+	panelInfo.body.replaceChildren();
+	const tree = GJJ_Utils.createModelTreeView({
+		node,
+		entries: aceMainModelTreeEntries(node),
+		refresh: () => {
+			syncOrderedWidgetValues(node);
+			refreshNode(node);
+			syncFloatingPanels(node);
+		},
+		onApply: () => {
+			syncOrderedWidgetValues(node);
+			refreshNode(node);
+		},
+	});
+	tree.style.maxHeight = "360px";
+	panelInfo.body.appendChild(tree);
+	for (const name of PANEL_GROUPS.model.names) {
+		const control = createFloatingControl(node, name);
+		if (!control) continue;
+		control.__gjjRefresh?.();
+		panelInfo.body.appendChild(control);
+	}
+}
+
+function syncFloatingPanels(node) {
+	const panels = ensureFloatingPanels(node);
+	const openKey = panelOpenKey(node);
+	for (const [key, panelInfo] of Object.entries(panels)) {
+		if (!panelInfo) continue;
+		if (key === "model") renderModelPanelControls(node, panelInfo);
+		else renderPanelControls(node, panelInfo, PANEL_GROUPS[key]?.names || []);
+		const open = key === openKey;
+		panelInfo.panel.style.display = open ? "flex" : "none";
+		if (open) {
+			positionFloatingPanel(node, panelInfo.panel, node.__gjjAudioAceButtons?.[key]);
+		}
+	}
+}
+
+function positionOpenFloatingPanels(node) {
+	const panels = node?.__gjjAudioAcePanels;
+	const openKey = panelOpenKey(node);
+	const panelInfo = panels?.[openKey];
+	if (!panelInfo?.panel || panelInfo.panel.style.display === "none") return;
+	positionFloatingPanel(node, panelInfo.panel, node.__gjjAudioAceButtons?.[openKey]);
+}
+
+function positionAllOpenFloatingPanels() {
+	for (const node of app.graph?._nodes || []) {
+		if (TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
+			positionOpenFloatingPanels(node);
+		}
+	}
+}
+
+function removeFloatingPanels(node) {
+	for (const panelInfo of Object.values(node?.__gjjAudioAcePanels || {})) {
+		panelInfo?.panel?.remove?.();
+	}
+	node.__gjjAudioAcePanels = {};
+}
+
+function installWindowPositionHandlers() {
+	if (app.__gjjAudioAceWindowHandlersInstalled || typeof window === "undefined") return;
+	app.__gjjAudioAceWindowHandlersInstalled = true;
+	window.addEventListener("resize", positionAllOpenFloatingPanels);
+	window.addEventListener("scroll", positionAllOpenFloatingPanels, true);
 }
 
 function createIconButton({ icon, title, color = "#293340", onClick }) {
@@ -202,46 +600,191 @@ function createIconButton({ icon, title, color = "#293340", onClick }) {
 	return button;
 }
 
-function createTextField(node, name, labelText, placeholder) {
-	const wrap = document.createElement("label");
-	wrap.style.cssText = [
-		"display:grid",
-		"grid-template-columns:56px minmax(0,1fr)",
-		"align-items:start",
-		"gap:6px",
-		"min-width:0",
-	].join(";");
-
-	const label = document.createElement("span");
-	label.textContent = labelText;
-	label.style.cssText = [
-		"color:#c9d4d0",
-		"font-size:12px",
-		"line-height:28px",
+function createButton(text, title, onClick) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = text;
+	button.title = title || "";
+	button.style.cssText = [
+		"height:28px",
+		"border:1px solid #40535d",
+		"border-radius:6px",
+		"background:#1b252b",
+		"color:#edf7f4",
+		"font:700 12px/1 sans-serif",
+		"padding:0 10px",
+		"cursor:pointer",
 		"white-space:nowrap",
 	].join(";");
+	if (onClick) {
+		button.addEventListener("click", onClick);
+	}
+	return button;
+}
 
-	const textarea = document.createElement("textarea");
-	textarea.value = String(getWidget(node, name)?.value || "");
-	textarea.placeholder = placeholder;
-	textarea.spellcheck = false;
-	textarea.style.cssText = [
+function selectedModelChoices(dialog) {
+	return [...dialog.querySelectorAll("input[data-model-choice]:checked")].map((input) => input.value);
+}
+
+function applyModelTestFilter(dialog, value) {
+	const terms = String(value || "").toLowerCase().split(/\s+/).filter(Boolean);
+	for (const row of dialog.querySelectorAll("[data-model-row]")) {
+		const text = String(row.dataset.modelRow || "").toLowerCase();
+		row.style.display = terms.every((term) => text.includes(term)) ? "flex" : "none";
+	}
+}
+
+async function queueModelTestBatch(node, models, dialog) {
+	const modelWidget = getWidget(node, "model_name");
+	if (!modelWidget || !models.length) return;
+	const original = modelWidget.value;
+	const originalTestMode = getWidget(node, "model_test_mode")?.value;
+	const runButton = dialog?.querySelector("[data-model-test-run]");
+	try {
+		if (runButton) {
+			runButton.disabled = true;
+			runButton.style.opacity = "0.6";
+		}
+		for (let index = 0; index < models.length; index += 1) {
+			const model = models[index];
+			setWidgetValue(node, "model_name", model);
+			setWidgetValue(node, "model_test_mode", true);
+			setStatus(node, `模型测试 ${index + 1}/${models.length}: ${model}`);
+			await queueOnlyCurrentNode(node);
+		}
+		setStatus(node, `已加入模型测试队列：${models.length} 个`);
+	} catch (error) {
+		console.error("[GJJ] 模型测试排队失败:", error);
+		setStatus(node, "模型测试排队失败");
+	} finally {
+		setWidgetValue(node, "model_name", original);
+		setWidgetValue(node, "model_test_mode", Boolean(originalTestMode));
+		dialog?.remove?.();
+	}
+}
+
+function openModelTestDialog(node) {
+	document.querySelector(".gjj-audio-ace-model-test-dialog")?.remove?.();
+	const choices = modelWidgetChoices(node, "model_name");
+	const current = String(getWidget(node, "model_name")?.value || "");
+	const overlay = document.createElement("div");
+	overlay.className = "gjj-audio-ace-model-test-dialog";
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:1100",
+		"background:rgba(0,0,0,.35)",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"padding:18px",
 		"box-sizing:border-box",
-		"width:100%",
-		"height:42px",
-		"resize:none",
-		"border:1px solid rgba(255,255,255,.08)",
-		"border-radius:6px",
-		"background:#2d3034",
-		"color:#eef5f1",
-		"font:12px/1.35 sans-serif",
-		"padding:7px 9px",
-		"outline:none",
-		"overflow:auto",
 	].join(";");
-	textarea.addEventListener("input", () => setWidgetValue(node, name, textarea.value));
-	wrap.append(label, textarea);
-	return { wrap, textarea };
+	protectPanelEvents(overlay);
+
+	const panel = document.createElement("div");
+	panel.style.cssText = [
+		"width:min(720px, calc(100vw - 36px))",
+		"max-height:min(620px, calc(100vh - 36px))",
+		"display:flex",
+		"flex-direction:column",
+		"gap:10px",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#dce7e2",
+		"box-shadow:0 18px 48px rgba(0,0,0,.48)",
+		"padding:12px",
+		"box-sizing:border-box",
+	].join(";");
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
+	const title = document.createElement("div");
+	title.textContent = "🧪 模型测试";
+	title.style.cssText = "font-size:14px;font-weight:800;color:#f2fbff";
+	const close = createIconButton({ icon: "×", title: "关闭", color: "#1b252b", onClick: () => overlay.remove() });
+	header.append(title, close);
+
+	const controls = document.createElement("div");
+	controls.style.cssText = "display:flex;gap:8px;align-items:center";
+	const filter = document.createElement("input");
+	filter.placeholder = "关键词过滤，支持空格 AND";
+	filter.style.cssText = [
+		"flex:1",
+		"height:30px",
+		"box-sizing:border-box",
+		"border:1px solid #40535d",
+		"border-radius:6px",
+		"background:#0d1418",
+		"color:#edf7f4",
+		"padding:0 10px",
+		"outline:none",
+	].join(";");
+	filter.addEventListener("input", () => applyModelTestFilter(overlay, filter.value));
+	const selectAll = createButton("全选", "选择当前过滤结果", () => {
+		for (const row of overlay.querySelectorAll("[data-model-row]")) {
+			if (row.style.display === "none") continue;
+			const input = row.querySelector("input[data-model-choice]");
+			if (input) input.checked = true;
+		}
+	});
+	const clear = createButton("清空", "清空选择", () => {
+		for (const input of overlay.querySelectorAll("input[data-model-choice]")) {
+			input.checked = false;
+		}
+	});
+	controls.append(filter, selectAll, clear);
+
+	const list = document.createElement("div");
+	list.style.cssText = [
+		"min-height:140px",
+		"max-height:390px",
+		"overflow:auto",
+		"display:flex",
+		"flex-direction:column",
+		"gap:6px",
+		"border:1px solid #263b43",
+		"border-radius:8px",
+		"padding:8px",
+		"background:#0b1418",
+	].join(";");
+	for (const name of choices) {
+		const row = document.createElement("label");
+		row.dataset.modelRow = name;
+		row.style.cssText = "display:flex;align-items:center;gap:8px;min-height:28px;padding:4px 6px;border-radius:6px;background:#132329;color:#ecf7f3;font:12px/1.3 monospace";
+		const checkbox = document.createElement("input");
+		checkbox.type = "checkbox";
+		checkbox.value = name;
+		checkbox.dataset.modelChoice = "1";
+		checkbox.checked = name === current;
+		const text = document.createElement("span");
+		text.textContent = name;
+		text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+		row.append(checkbox, text);
+		list.appendChild(row);
+	}
+
+	const footer = document.createElement("div");
+	footer.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
+	const note = document.createElement("div");
+	note.textContent = "使用当前歌词、音乐标签和采样参数，逐个主模型加入队列。";
+	note.style.cssText = "font-size:12px;color:#9eb2b4;min-width:0";
+	const run = createButton("加入队列", "按选择的模型逐个生成音乐", () => {
+		const models = selectedModelChoices(overlay);
+		if (!models.length) {
+			setStatus(node, "模型测试：未选择模型");
+			return;
+		}
+		queueModelTestBatch(node, models, overlay);
+	});
+	run.dataset.modelTestRun = "1";
+	footer.append(note, run);
+
+	panel.append(header, controls, list, footer);
+	overlay.appendChild(panel);
+	document.body.appendChild(overlay);
+	filter.focus();
 }
 
 function progressFromText(text) {
@@ -308,35 +851,33 @@ function ensureStatusWidget(node) {
 	track.appendChild(bar);
 	statusContent.append(track, label);
 
-	const inputs = {};
-	const generateBtn = createIconButton({ icon: "🎵", title: "只执行当前节点，生成音乐", color: "#0f8c55" });
+	const generateBtn = createIconButton({ icon: "▶️", title: "只执行当前节点，生成音乐", color: "#16845a" });
+	const testBtn = createIconButton({ icon: "🧪", title: "模型测试：多选模型并用当前参数生成", color: "#355f76" });
+	const buttons = {};
+	const panelButton = (key, icon, title, color) => {
+		const button = createIconButton({
+			icon,
+			title,
+			color,
+			onClick: () => setPanelOpen(node, key, panelOpenKey(node) !== key),
+		});
+		buttons[key] = button;
+		return button;
+	};
 	statusRow.append(
 		createIconButton({ icon: "🔄", title: "刷新节点", color: "#315db9", onClick: () => refreshNode(node) }),
-		createIconButton({ icon: "▶️", title: "只执行当前节点", color: "#16845a", onClick: () => generateBtn.click() }),
-		createIconButton({ icon: "🎲", title: "随机种子", color: "#4a4f5c", onClick: () => randomizeSeed(node) }),
-		createIconButton({ icon: "🌐", title: "切换语言 zh / en / ja / ko", color: "#16728d", onClick: () => cycleChoice(node, "language", ["zh", "en", "ja", "ko"]) }),
-		createIconButton({ icon: "🪄", title: "填入默认音乐标签", color: "#a65f00", onClick: () => setWidgetValue(node, "tags", "流行音乐，女声独唱，旋律抓耳，高音质，编曲完整。") }),
+		panelButton("seed", "🎲", "种子", "#4a4f5c"),
+		panelButton("music", "🌐", "音乐结构", "#16728d"),
+		panelButton("text", "🪄", "文本采样", "#a65f00"),
+		panelButton("generate", "⚡", "生成参数", "#72500f"),
+		panelButton("model", "🧠", "模型相关", "#4d3d83"),
+		panelButton("other", "⚙️", "其它参数", "#3d4251"),
 		generateBtn,
-		createIconButton({ icon: "⚡", title: "切换时长", color: "#72500f", onClick: () => cycleDuration(node) }),
-		createIconButton({ icon: "🧠", title: "纯音乐模式", color: "#4d3d83", onClick: () => {
-			setWidgetValue(node, "lyrics", "");
-			appendUniqueTag(node, "纯音乐，无人声");
-			syncTextareasFromWidgets(node);
-		} }),
-		createIconButton({ icon: "⚙️", title: "使用隐藏的默认高级参数", color: "#3d4251" }),
+		testBtn,
 		statusContent,
 	);
 
-	const lyricsField = createTextField(node, "lyrics", "歌词", "纯音乐可留空");
-	const tagsField = createTextField(node, "tags", "音乐标签", "曲风、情绪、声线、音质要求");
-	inputs.lyrics = lyricsField.textarea;
-	inputs.tags = tagsField.textarea;
-
-	const fields = document.createElement("div");
-	fields.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0";
-	fields.append(lyricsField.wrap, tagsField.wrap);
-
-	box.append(statusRow, fields);
+	box.append(statusRow);
 
 	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
 		serialize: false,
@@ -347,7 +888,8 @@ function ensureStatusWidget(node) {
 		widget.computeSize = (width) => [Math.max(320, Number(width || node.size?.[0] || 360)), COMPACT_PANEL_HEIGHT];
 	}
 
-	node.__gjjAudioAceMusicStatus = { widget, box, label, bar, generateBtn, inputs };
+	node.__gjjAudioAceButtons = buttons;
+	node.__gjjAudioAceMusicStatus = { widget, box, label, bar, generateBtn, testBtn };
 	return node.__gjjAudioAceMusicStatus;
 }
 
@@ -450,11 +992,13 @@ function patchNode(node) {
 	node.__gjjAudioAceMusicPatched = true;
 	ensureStatusWidget(node);
 	ensureAudioWidget(node);
+	syncOrderedWidgetValues(node);
 	hideHomeWidgets(node);
-	syncTextareasFromWidgets(node);
+	ensureFloatingPanels(node);
+	syncFloatingPanels(node);
 	setStatus(node, "等待执行");
 
-	node.setSize?.([Math.max(360, node.size?.[0] || 360), node.computeSize?.()[1] || 260]);
+	scheduleCompactSize(node);
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 
@@ -473,6 +1017,7 @@ function patchNode(node) {
 				btn.style.opacity = "0.65";
 
 				setStatus(node, "正在生成音乐...");
+				setWidgetValue(node, "model_test_mode", false);
 
 				const ok = await queueOnlyCurrentNode(node);
 
@@ -492,6 +1037,11 @@ function patchNode(node) {
 					btn.style.opacity = "1";
 				}, 500);
 			}
+		});
+	}
+	if (status?.testBtn) {
+		status.testBtn.addEventListener("click", () => {
+			openModelTestDialog(node);
 		});
 	}
 }
@@ -521,18 +1071,60 @@ app.registerExtension({
 		if (!TARGET_NODES.has(String(nodeData?.name || ""))) {
 			return;
 		}
+		installGraphToPromptPatch();
+		installWindowPositionHandlers();
+
+		const originalComputeSize = nodeType.prototype.computeSize;
+		nodeType.prototype.computeSize = function (out) {
+			const size = originalComputeSize?.apply(this, arguments) || [this.size?.[0] || 360, COMPACT_NODE_HEIGHT];
+			size[0] = Math.max(360, Number(size[0] || this.size?.[0] || 360));
+			size[1] = COMPACT_NODE_HEIGHT;
+			return size;
+		};
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
 			patchNode(this);
+			scheduleToolbarFirst(this);
 			return result;
 		};
 
+		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			const result = originalOnDrawForeground?.apply(this, args);
+			positionOpenFloatingPanels(this);
+			return result;
+		};
+
+		const originalOnRemoved = nodeType.prototype.onRemoved;
+		nodeType.prototype.onRemoved = function (...args) {
+			removeFloatingPanels(this);
+			return originalOnRemoved?.apply(this, args);
+		};
+
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			restoreParameterWidgetOrder(this);
+			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			if (Array.isArray(serializedNode?.widgets_values)) {
+				applyOrderedWidgetValues(this, serializedNode.widgets_values);
+			} else {
+				syncOrderedWidgetValues(this);
+			}
 			patchNode(this);
+			scheduleToolbarFirst(this);
+			scheduleCompactSize(this);
+			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (data) {
+			const result = originalOnSerialize?.apply(this, arguments);
+			syncOrderedWidgetValues(this);
+			if (data) {
+				data.widgets_values = orderedParamValues(this);
+			}
 			return result;
 		};
 

@@ -9,6 +9,7 @@ const MAX_OUTPUT_IMAGES = 20;
 const MIN_WIDTH = 260;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_image_loader_dom";
+const INPUT_LINK_MEMORY_PROPERTY = "gjj_multi_image_loader_input_link_memory";
 const IMAGE_API_PATH = "/gjj/input_images";
 const THUMB_API_PATH = "/gjj/input_image_thumb";
 const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
@@ -480,6 +481,280 @@ function addSelectionItems(node, items) {
 	renderPreview(node);
 	updateSummary(node);
 	scheduleLayout(node);
+	return true;
+}
+
+function graphLink(linkId) {
+	const links = app.graph?.links || app.graph?._links;
+	if (linkId == null || !links) return null;
+	if (typeof links.get === "function") return links.get(linkId) || links.get(String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function linkField(link, name) {
+	if (!link) return null;
+	if (!Array.isArray(link)) return link[name];
+	const indexes = { id: 0, origin_id: 1, origin_slot: 2, target_id: 3, target_slot: 4, type: 5 };
+	return link[indexes[name]];
+}
+
+function inputIndexByName(node, name) {
+	return (node?.inputs || []).findIndex((input) => input?.name === name);
+}
+
+function findGraphNodeById(id) {
+	if (id == null) return null;
+	const found = app.graph?.getNodeById?.(id);
+	if (found) return found;
+	return (app.graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null;
+}
+
+function currentInputImageLinkRecord(node) {
+	const targetSlot = inputIndexByName(node, INPUT_IMAGES_NAME);
+	const input = targetSlot >= 0 ? node.inputs?.[targetSlot] : null;
+	const linkId = input?.link;
+	const link = graphLink(linkId);
+	if (targetSlot < 0 || linkId == null || !link) return null;
+	const originId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
+	const originSlot = linkField(link, "origin_slot") ?? linkField(link, "source_slot") ?? linkField(link, "from_slot");
+	const source = findGraphNodeById(originId);
+	if (originId == null || !Number.isFinite(Number(originSlot))) return null;
+	return {
+		input_name: INPUT_IMAGES_NAME,
+		origin_id: originId,
+		origin_slot: Number(originSlot),
+		target_slot: Number(linkField(link, "target_slot") ?? targetSlot),
+		type: String(linkField(link, "type") || input?.type || INPUT_IMAGES_TYPE),
+		origin_name: String(source?.title || source?.comfyClass || source?.type || "上游节点"),
+	};
+}
+
+function inputImageLinkMemory(node, create = false) {
+	if (!create && (!node?.properties || !node.properties[INPUT_LINK_MEMORY_PROPERTY])) return null;
+	node.properties = node.properties || {};
+	const memory = node.properties[INPUT_LINK_MEMORY_PROPERTY];
+	if (memory && typeof memory === "object" && !Array.isArray(memory)) return memory;
+	if (!create) return null;
+	node.properties[INPUT_LINK_MEMORY_PROPERTY] = {};
+	return node.properties[INPUT_LINK_MEMORY_PROPERTY];
+}
+
+function rememberedInputImageLink(node) {
+	const memory = inputImageLinkMemory(node);
+	return memory && typeof memory === "object" ? memory : null;
+}
+
+function hasRememberedInputImageLink(node) {
+	const record = rememberedInputImageLink(node);
+	return Boolean(record?.origin_id != null && Number.isFinite(Number(record?.origin_slot)));
+}
+
+function updateInputLinkButtonState(node) {
+	const button = node?.__gjjMultiImageLinkButton;
+	if (!button) return;
+	const active = Boolean(currentInputImageLinkRecord(node));
+	const remembered = hasRememberedInputImageLink(node);
+	button.style.display = active || remembered ? "inline-flex" : "none";
+	button.textContent = "🔗";
+	button.title = active
+		? "断开导入图片上游连接，并记住来源。再次点击可恢复。"
+		: "恢复刚才断开的导入图片上游连接。";
+	button.style.background = active ? "#20362f" : "#2b4250";
+	button.style.borderColor = active ? "#4f8f7a" : "#5ca6d6";
+	button.style.boxShadow = active ? "0 0 0 1px rgba(79,143,122,.28) inset" : "0 0 0 1px rgba(92,166,214,.3) inset";
+	button.__gjjStyleRefresh = () => {
+		button.style.background = active ? "#20362f" : "#2b4250";
+		button.style.borderColor = active ? "#4f8f7a" : "#5ca6d6";
+		button.style.boxShadow = active ? "0 0 0 1px rgba(79,143,122,.28) inset" : "0 0 0 1px rgba(92,166,214,.3) inset";
+	};
+}
+
+function disconnectRememberedInputImageLink(node) {
+	const record = currentInputImageLinkRecord(node);
+	if (!record) {
+		updateInputLinkButtonState(node);
+		return false;
+	}
+	inputImageLinkMemory(node, true);
+	node.properties[INPUT_LINK_MEMORY_PROPERTY] = record;
+	const targetSlot = inputIndexByName(node, INPUT_IMAGES_NAME);
+	try {
+		node.disconnectInput?.(targetSlot);
+	} catch (_) {
+		if (node.inputs?.[targetSlot]) node.inputs[targetSlot].link = null;
+	}
+	markGraphChanged(node);
+	updateInputLinkButtonState(node);
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = `已断开上游：${record.origin_name || "上游节点"}`;
+	}
+	scheduleLayout(node, true);
+	return true;
+}
+
+function reconnectRememberedInputImageLink(node) {
+	const record = rememberedInputImageLink(node);
+	if (!record) {
+		updateInputLinkButtonState(node);
+		return false;
+	}
+	const source = findGraphNodeById(record.origin_id);
+	const sourceSlot = Number(record.origin_slot);
+	ensureExternalImageInput(node);
+	reorderInputSlots(node);
+	const targetSlot = inputIndexByName(node, INPUT_IMAGES_NAME);
+	if (!source || !source.outputs?.[sourceSlot] || targetSlot < 0) {
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = "上游节点或接口不存在，无法恢复连接";
+		}
+		updateInputLinkButtonState(node);
+		return false;
+	}
+	try {
+		if (node.inputs?.[targetSlot]?.link != null) node.disconnectInput?.(targetSlot);
+		source.connect(sourceSlot, node, targetSlot);
+		node.properties = node.properties || {};
+		node.properties[INPUT_LINK_MEMORY_PROPERTY] = { ...record, target_slot: targetSlot };
+		markGraphChanged(node);
+		updateInputLinkButtonState(node);
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = `已恢复上游：${record.origin_name || "上游节点"}`;
+		}
+		scheduleStabilize(node, 0);
+		return true;
+	} catch (error) {
+		console.warn("[GJJ_MultiImageLoader] reconnect upstream failed", error);
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = error?.message || "恢复上游连接失败";
+		}
+		updateInputLinkButtonState(node);
+		return false;
+	}
+}
+
+function toggleInputImageLink(node) {
+	if (currentInputImageLinkRecord(node)) {
+		return disconnectRememberedInputImageLink(node);
+	}
+	return reconnectRememberedInputImageLink(node);
+}
+
+function linkedInputImageSources(node) {
+	const input = (node?.inputs || []).find((item) => item?.name === INPUT_IMAGES_NAME);
+	const linkIds = Array.isArray(input?.link) ? input.link : (input?.link == null ? [] : [input.link]);
+	const sources = [];
+	for (const linkId of linkIds) {
+		const link = graphLink(linkId);
+		const sourceId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
+		if (sourceId == null) {
+			continue;
+		}
+		const source = findGraphNodeById(sourceId);
+		if (source) {
+			sources.push(source);
+		}
+	}
+	return sources;
+}
+
+function mediaItemsFromPreviewItems(items) {
+	const result = [];
+	for (const item of Array.isArray(items) ? items : []) {
+		for (const key of ["images", "preview_images", "__gjj_queue_images"]) {
+			const payload = item?.[key];
+			if (Array.isArray(payload)) {
+				for (const media of payload.flat()) {
+					if (media?.filename) result.push(media);
+				}
+			} else if (payload?.filename) {
+				result.push(payload);
+			}
+		}
+	}
+	return result;
+}
+
+function normalizeUpstreamImageRef(item) {
+	if (!item?.filename) {
+		return null;
+	}
+	return normalizeInputImageItem({
+		filename: String(item.filename || ""),
+		subfolder: String(item.subfolder || ""),
+		type: String(item.type || "temp"),
+		width: Number(item.width || item.preview_width || item.w || 0),
+		height: Number(item.height || item.preview_height || item.h || 0),
+		mtime_ns: Number(item.mtime_ns || 0),
+		size_bytes: Number(item.size_bytes || 0),
+		hash: String(item.hash || ""),
+		format: String(item.format || ""),
+		media_type: String(item.media_type || "image"),
+		source_url: String(item.source_url || ""),
+	});
+}
+
+function imageRefsFromUpstreamNode(source) {
+	const refs = [];
+	const state = source?.__gjjMultiImageState || source?.__gjjMultiImageLoaderState || {};
+	for (const payload of [
+		state.executedImages,
+		state.selection,
+		parseSelection(source?.properties?.[DATA_WIDGET_NAME]),
+		source?.__gjjAnyPreviewImages,
+		mediaItemsFromPreviewItems(source?.__gjjAnyPreviewItems),
+		source?.properties?.gjj_any_preview_held_images,
+	]) {
+		const list = Array.isArray(payload) ? payload : (payload?.filename ? [payload] : []);
+		for (const item of list) {
+			const ref = normalizeUpstreamImageRef(item);
+			if (ref) refs.push(ref);
+		}
+	}
+	const seen = new Set();
+	return refs.filter((item) => {
+		const key = itemKey(item);
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+async function importLinkedUpstreamImages(node) {
+	const sources = linkedInputImageSources(node);
+	if (!sources.length) {
+		return false;
+	}
+	const items = sources.flatMap((source) => imageRefsFromUpstreamNode(source));
+	if (!items.length) {
+		await refreshOptions(node);
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = "上游暂无可获取的图片，请先执行或刷新上游节点";
+		}
+		requestRedraw(node);
+		return true;
+	}
+	const state = ensureState(node);
+	state.selection = items;
+	state.executedImages = [];
+	state.externalCount = 0;
+	state.mergedCount = state.selection.length;
+	if (state.slideOutputEnabled) {
+		applySlidingRange(node);
+	} else {
+		syncSequenceRange(node, "");
+		syncSequenceRangeInput(node);
+	}
+	syncDataWidget(node);
+	ensureOutputs(node, totalImageCount(node));
+	await refreshOptions(node);
+	enrichSelectionWithOptions(state);
+	renderPreview(node);
+	updateSummary(node);
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = `已从上游获取 ${items.length} 张图片到本节点`;
+	}
+	scheduleLayout(node, true);
+	requestRedraw(node);
 	return true;
 }
 
@@ -2075,6 +2350,8 @@ function buildDom(node) {
 
 	const browseButton = makeIconButton("📁", "浏览图片：打开系统图片选择器，可用 Shift/Ctrl 一次选择多张图片。");
 	const refreshButton = makeIconButton("🔄", "刷新：重新扫描 ComfyUI input 目录中的图片列表，并刷新当前预览。");
+	const linkButton = makeIconButton("🔗", "断开或恢复导入图片上游连接。");
+	linkButton.style.display = "none";
 	const clearErrorButton = makeIconButton("🧹", "清理错误：移除当前列表里加载失败或损坏的图片。");
 	const clearAllButton = makeIconButton("🗑️", "清空：清空所有已选图片，保留外部输入连接。");
 	const defaultImageButton = makeIconButton("🌐", "设置默认图片：输入一条或多条 http/https 网络图片地址，下载到 ComfyUI input 后作为当前默认已选图片。");
@@ -2093,10 +2370,18 @@ function buildDom(node) {
 	const thumbLabel = document.createElement("span");
 	thumbLabel.style.cssText = "display:none;font-size:10px;color:#8ea0a8;min-width:34px;text-align:center;user-select:none";
 
-	refreshButton.addEventListener("click", (event) => {
+	refreshButton.addEventListener("click", async (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		refreshOptions(node);
+		const imported = await importLinkedUpstreamImages(node);
+		if (!imported) {
+			await refreshOptions(node);
+		}
+	});
+	linkButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		toggleInputImageLink(node);
 	});
 	clearErrorButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -2260,6 +2545,7 @@ function buildDom(node) {
 
 	toolbar.appendChild(browseButton);
 	toolbar.appendChild(refreshButton);
+	toolbar.appendChild(linkButton);
 	toolbar.appendChild(rangeButton);
 	toolbar.appendChild(outputButton);
 	toolbar.appendChild(slideButton1);
@@ -2339,6 +2625,7 @@ function buildDom(node) {
 
 	node.__gjjMultiImageContainer = container;
 	node.__gjjMultiImageToolbar = toolbar;
+	node.__gjjMultiImageLinkButton = linkButton;
 	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
@@ -2356,6 +2643,7 @@ function buildDom(node) {
 	node.__gjjMultiImageDropHint = dropHint;
 	installDropTarget(node, [container, previewWrap, grid, empty]);
 	applyThumbnailSize(node);
+	updateInputLinkButtonState(node);
 	updateOutputButtonState(node);
 	updateToolbarCompact(node);
 	return container;
@@ -2396,6 +2684,7 @@ function stabilizeNode(node) {
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
+	updateInputLinkButtonState(node);
 	scheduleLayout(node);
 }
 
@@ -2552,6 +2841,7 @@ app.registerExtension({
 				state.executedImages = [];
 				state.mergedCount = state.selection.length;
 			}
+			updateInputLinkButtonState(this);
 			scheduleStabilize(this);
 			return result;
 		};

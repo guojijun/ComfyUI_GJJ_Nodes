@@ -355,6 +355,14 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 	function applyNotice(node, data, options = {}) {
 		data = compactOptionalNoticeForNode(node, data, options) || data;
+		if (nodeKey(node) === "GJJ_Qwen3ASRTextFormats") {
+			data = {
+				...data,
+				panel_message: "",
+				warning_message: String(data?.warning_message || data?.panel_message || "⚠️ 缺失模型，点击按钮了解详情。").split(/\r?\n/)[0],
+			};
+			options = { ...options, detailed: false };
+		}
 		const warning = String(data?.warning_message || "");
 		const panel = String(data?.panel_message || "");
 		const copyTextValue = String(data?.copy_text || data?.install_command || data?.optional_install_command || data?.model_download_url || "");
