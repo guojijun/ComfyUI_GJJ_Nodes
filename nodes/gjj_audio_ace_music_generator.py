@@ -171,15 +171,18 @@ def _send_status(unique_id: Any, text: str) -> None:
         pass
 
 
-def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
+def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any], srt_text: str = "") -> None:
     if not unique_id or not audio_ui:
         return
     try:
         from server import PromptServer
 
+        payload: dict[str, Any] = {"node": str(unique_id), "audio": audio_ui.get("audio", [])}
+        if srt_text:
+            payload["srt_text"] = str(srt_text)
         PromptServer.instance.send_sync(
             "gjj_node_audio",
-            {"node": str(unique_id), "audio": audio_ui.get("audio", [])},
+            payload,
         )
     except Exception:
         pass
@@ -855,7 +858,7 @@ class GJJ_AudioAceMusicGenerator:
         ],
     }
     GJJ_UI = {
-        "toolbar": ["🔄", "🎲", "🌐", "🪄", "⚡", "🧠", "⚙️", "▶️", "🧪"],
+        "toolbar": ["🔄", "🎲", "🌐", "🪄", "⚡", "🧠", "▶️", "🧪"],
         "parameter_order": list(UI_PARAMETER_ORDER),
         "hidden_parameters": list(HIDDEN_UI_PARAMETERS),
     }
@@ -1254,6 +1257,7 @@ class GJJ_AudioAceMusicGenerator:
             _send_status(unique_id, "7/7 对齐原歌词 SRT...")
             try:
                 srt_text = _align_lyrics_to_srt(audio, source_lyrics, str(language), unique_id)
+                _send_audio_preview(unique_id, audio_ui, srt_text)
                 _send_status(unique_id, f"完成：已输出 {len(_lyrics_to_srt_lines(source_lyrics))} 行原歌词 SRT。")
             except Exception as exc:
                 srt_text = f"SRT 对齐失败：{exc}"
@@ -1261,7 +1265,9 @@ class GJJ_AudioAceMusicGenerator:
         else:
             _send_status(unique_id, "完成：音乐已生成；没有歌词，SRT 留空。")
 
-        return {"ui": audio_ui, "result": (audio, srt_text)}
+        ui = dict(audio_ui)
+        ui["srt_text"] = [srt_text]
+        return {"ui": ui, "result": (audio, srt_text)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioAceMusicGenerator}

@@ -6,7 +6,7 @@ const TARGET_NODES = new Set(["GJJ_AudioAceMusicGenerator"]);
 const STATUS_WIDGET_NAME = "gjj_audio_ace_music_status";
 const AUDIO_WIDGET_NAME = "gjj_audio_ace_music_audio";
 const COMPACT_PANEL_HEIGHT = 40;
-const COMPACT_NODE_HEIGHT = 260;
+const COMPACT_NODE_HEIGHT = 390;
 const PARAM_ORDER = [
 	"model_name",
 	"tags",
@@ -67,7 +67,6 @@ const PANEL_GROUPS = {
 	text: { title: "🪄 文本采样", names: ["lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
 	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes"] },
 	generate: { title: "⚡ 生成参数", names: ["duration", "steps", "cfg", "sampler_name", "scheduler", "denoise"] },
-	other: { title: "⚙️ 其它参数", names: ["generate_audio_codes"] },
 };
 
 function isExecutionOutputNode(node) {
@@ -871,7 +870,6 @@ function ensureStatusWidget(node) {
 		panelButton("text", "🪄", "文本采样", "#a65f00"),
 		panelButton("generate", "⚡", "生成参数", "#72500f"),
 		panelButton("model", "🧠", "模型相关", "#4d3d83"),
-		panelButton("other", "⚙️", "其它参数", "#3d4251"),
 		generateBtn,
 		testBtn,
 		statusContent,
@@ -917,6 +915,175 @@ function buildViewUrl(item) {
 	return `/view?${params.toString()}`;
 }
 
+function parseSrtTime(value) {
+	const match = String(value || "").trim().match(/(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})/);
+	if (!match) return null;
+	const hours = Number(match[1] || 0);
+	const minutes = Number(match[2] || 0);
+	const seconds = Number(match[3] || 0);
+	const millis = Number(String(match[4] || "0").padEnd(3, "0").slice(0, 3));
+	return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+}
+
+function parseSrtEntries(text) {
+	const blocks = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split(/\n{2,}/);
+	const entries = [];
+	for (const block of blocks) {
+		const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+		const timeIndex = lines.findIndex((line) => line.includes("-->"));
+		if (timeIndex < 0) continue;
+		const [startText, endText] = lines[timeIndex].split("-->").map((part) => part.trim());
+		const start = parseSrtTime(startText);
+		const end = parseSrtTime(endText);
+		const lyric = lines.slice(timeIndex + 1).join(" ").trim();
+		if (start == null || end == null || !lyric) continue;
+		entries.push({ start, end: Math.max(end, start + 0.2), text: lyric });
+	}
+	return entries.sort((a, b) => a.start - b.start);
+}
+
+function formatClock(seconds) {
+	const total = Math.max(0, Math.floor(Number(seconds) || 0));
+	const minutes = Math.floor(total / 60);
+	const secs = total % 60;
+	return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function extractSrtText(message) {
+	const candidates = [message?.srt_text, message?.text, message?.lyrics_srt];
+	for (const candidate of candidates) {
+		if (Array.isArray(candidate) && candidate.length) {
+			return String(candidate[0] || "");
+		}
+		if (typeof candidate === "string") {
+			return candidate;
+		}
+	}
+	return "";
+}
+
+function buildAudioPeaks(audioBuffer, count = 240) {
+	const channels = Math.max(1, audioBuffer.numberOfChannels || 1);
+	const length = Math.max(1, audioBuffer.length || 1);
+	const block = Math.max(1, Math.floor(length / count));
+	const peaks = [];
+	for (let index = 0; index < count; index += 1) {
+		const start = index * block;
+		const end = Math.min(length, start + block);
+		let peak = 0;
+		for (let channel = 0; channel < channels; channel += 1) {
+			const data = audioBuffer.getChannelData(channel);
+			for (let sample = start; sample < end; sample += 1) {
+				const value = Math.abs(data[sample] || 0);
+				if (value > peak) peak = value;
+			}
+		}
+		peaks.push(Math.min(1, peak));
+	}
+	const maxPeak = Math.max(0.01, ...peaks);
+	return peaks.map((peak) => peak / maxPeak);
+}
+
+function drawWaveform(audioWidget) {
+	const { canvas, audio } = audioWidget;
+	const peaks = audioWidget.peaks || [];
+	const rect = canvas.getBoundingClientRect();
+	const width = Math.max(1, Math.floor(rect.width || 1));
+	const height = Math.max(1, Math.floor(rect.height || 1));
+	const dpr = Math.max(1, window.devicePixelRatio || 1);
+	if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+		canvas.width = Math.floor(width * dpr);
+		canvas.height = Math.floor(height * dpr);
+	}
+	const ctx = canvas.getContext("2d");
+	if (!ctx) return;
+	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+	ctx.clearRect(0, 0, width, height);
+	ctx.fillStyle = "#0d1519";
+	ctx.fillRect(0, 0, width, height);
+	const progress = audio.duration > 0 ? Math.max(0, Math.min(1, audio.currentTime / audio.duration)) : 0;
+	const barCount = peaks.length || 96;
+	const gap = 1;
+	const barWidth = Math.max(1, (width - gap * (barCount - 1)) / barCount);
+	for (let index = 0; index < barCount; index += 1) {
+		const x = index * (barWidth + gap);
+		const value = peaks[index] ?? (0.2 + 0.18 * Math.sin(index * 0.37));
+		const barHeight = Math.max(2, value * (height - 10));
+		const y = (height - barHeight) / 2;
+		const active = index / Math.max(1, barCount - 1) <= progress;
+		ctx.fillStyle = active ? "#75d2c5" : "#3f555c";
+		ctx.fillRect(x, y, Math.max(1, barWidth), barHeight);
+	}
+	ctx.fillStyle = "#ffd86a";
+	ctx.fillRect(Math.max(0, Math.min(width - 2, width * progress)), 0, 2, height);
+}
+
+async function loadWaveform(audioWidget, url) {
+	audioWidget.peaks = [];
+	drawWaveform(audioWidget);
+	try {
+		const response = await fetch(url, { cache: "force-cache" });
+		const arrayBuffer = await response.arrayBuffer();
+		const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+		if (!AudioContextClass) return;
+		const context = new AudioContextClass();
+		const decoded = await context.decodeAudioData(arrayBuffer.slice(0));
+		audioWidget.peaks = buildAudioPeaks(decoded);
+		await context.close?.();
+		drawWaveform(audioWidget);
+	} catch (error) {
+		console.warn("[GJJ] 音频波形解析失败:", error);
+	}
+}
+
+function updateLyricsDisplay(audioWidget) {
+	const entries = audioWidget.lyricsEntries || [];
+	const currentTime = Number(audioWidget.audio.currentTime || 0);
+	const currentIndex = entries.findIndex((entry, index) => {
+		const next = entries[index + 1];
+		return currentTime >= entry.start && currentTime < Math.max(entry.end, next?.start ?? entry.end);
+	});
+	let activeIndex = currentIndex;
+	if (activeIndex < 0) {
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			if (entries[index].start <= currentTime) {
+				activeIndex = index;
+				break;
+			}
+		}
+	}
+	audioWidget.lyricsList.replaceChildren();
+	if (!entries.length) {
+		const empty = document.createElement("div");
+		empty.textContent = "生成 SRT 后将在这里按时间显示歌词";
+		empty.style.cssText = "color:#8ea0a4;font-size:12px;text-align:center;padding:12px 4px";
+		audioWidget.lyricsList.appendChild(empty);
+		return;
+	}
+	const start = Math.max(0, activeIndex - 1);
+	const end = Math.min(entries.length, Math.max(activeIndex + 3, 3));
+	for (let index = start; index < end; index += 1) {
+		const entry = entries[index];
+		const row = document.createElement("div");
+		const active = index === activeIndex;
+		row.textContent = entry.text;
+		row.title = `${formatClock(entry.start)} - ${formatClock(entry.end)}`;
+		row.style.cssText = [
+			"padding:3px 6px",
+			"border-radius:6px",
+			"font-size:12px",
+			"line-height:1.35",
+			"white-space:normal",
+			"overflow-wrap:anywhere",
+			`color:${active ? "#f7fbff" : "#9fb2b2"}`,
+			`background:${active ? "rgba(117,210,197,.16)" : "transparent"}`,
+			`font-weight:${active ? "800" : "500"}`,
+			`transform:${active ? "scale(1.01)" : "none"}`,
+		].join(";");
+		audioWidget.lyricsList.appendChild(row);
+	}
+}
+
 function ensureAudioWidget(node) {
 	if (node.__gjjAudioAceMusicAudio) {
 		return node.__gjjAudioAceMusicAudio;
@@ -928,11 +1095,39 @@ function ensureAudioWidget(node) {
 		"border:1px solid #41535b",
 		"border-radius:8px",
 		"background:#22282d",
+		"box-sizing:border-box",
+	].join(";");
+	const canvas = document.createElement("canvas");
+	canvas.style.cssText = [
+		"display:block",
+		"width:100%",
+		"height:86px",
+		"border:1px solid #31454d",
+		"border-radius:7px",
+		"background:#0d1519",
+		"cursor:pointer",
+		"box-sizing:border-box",
 	].join(";");
 	const audio = document.createElement("audio");
 	audio.controls = true;
 	audio.preload = "metadata";
-	audio.style.cssText = "display:block;width:100%;height:34px";
+	audio.style.cssText = "display:block;width:100%;height:34px;margin-top:6px";
+	const lyricsList = document.createElement("div");
+	lyricsList.style.cssText = [
+		"margin-top:6px",
+		"min-height:60px",
+		"max-height:88px",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"justify-content:center",
+		"gap:2px",
+		"border:1px solid #31454d",
+		"border-radius:7px",
+		"background:#0d1519",
+		"padding:5px",
+		"box-sizing:border-box",
+	].join(";");
 	const row = document.createElement("div");
 	row.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:6px;font-size:12px";
 	const openLink = document.createElement("a");
@@ -945,13 +1140,32 @@ function ensureAudioWidget(node) {
 	downloadLink.download = "";
 	downloadLink.style.cssText = "color:#9ecbff;text-decoration:none";
 	row.append(openLink, downloadLink);
-	box.append(audio, row);
+	box.append(canvas, audio, lyricsList, row);
 	const widget = node.addDOMWidget?.(AUDIO_WIDGET_NAME, AUDIO_WIDGET_NAME, box, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => (box.style.display === "none" ? 0 : 92),
+		getHeight: () => (box.style.display === "none" ? 0 : 220),
 	});
-	node.__gjjAudioAceMusicAudio = { widget, box, audio, openLink, downloadLink };
+	const audioWidget = { widget, box, canvas, audio, lyricsList, openLink, downloadLink, peaks: [], lyricsEntries: [] };
+	canvas.addEventListener("click", (event) => {
+		if (!audio.duration) return;
+		const rect = canvas.getBoundingClientRect();
+		const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+		audio.currentTime = ratio * audio.duration;
+		updateLyricsDisplay(audioWidget);
+		drawWaveform(audioWidget);
+	});
+	audio.addEventListener("timeupdate", () => {
+		updateLyricsDisplay(audioWidget);
+		drawWaveform(audioWidget);
+	});
+	audio.addEventListener("loadedmetadata", () => {
+		updateLyricsDisplay(audioWidget);
+		drawWaveform(audioWidget);
+	});
+	window.addEventListener("resize", () => drawWaveform(audioWidget));
+	updateLyricsDisplay(audioWidget);
+	node.__gjjAudioAceMusicAudio = audioWidget;
 	return node.__gjjAudioAceMusicAudio;
 }
 
@@ -977,7 +1191,17 @@ function setAudioPreview(node, message) {
 	}
 	const audioWidget = ensureAudioWidget(node);
 	const url = buildViewUrl(item);
-	audioWidget.audio.src = url;
+	const itemKey = `${item.type || "output"}\n${item.subfolder || ""}\n${item.filename || ""}`;
+	if (audioWidget.itemKey !== itemKey) {
+		audioWidget.itemKey = itemKey;
+		audioWidget.audio.src = url;
+		loadWaveform(audioWidget, url);
+	}
+	const srtText = extractSrtText(message);
+	if (srtText) {
+		audioWidget.lyricsEntries = parseSrtEntries(srtText);
+		updateLyricsDisplay(audioWidget);
+	}
 	audioWidget.openLink.href = url;
 	audioWidget.downloadLink.href = url;
 	audioWidget.downloadLink.download = item.filename || "GJJ_ACEMusic.mp3";
