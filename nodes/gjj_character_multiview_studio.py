@@ -927,6 +927,35 @@ def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 	return preset
 
 
+def _is_qwen2511_unet_name(unet_name: str) -> bool:
+	"""兼容人物库旧接口：判断是否为多视图可用的 Qwen 2511 编辑模型。"""
+	text = str(unet_name or "").strip()
+	if not text:
+		return False
+	preset = _match_multiview_family(text)
+	if preset.get("id") in ALLOWED_PRESET_IDS or preset.get("supports_multi_image_edit"):
+		return True
+	canonical = _canonical_model_text(text)
+	return "qwenimageedit2511" in canonical
+
+
+def _pick_qwen2511_unet_name(available_unets: list[str] | None = None) -> str:
+	"""兼容人物库旧接口：从可用模型中挑选 2511 多视图主模型。"""
+	candidates = [
+		str(item or "").strip()
+		for item in (available_unets if available_unets is not None else _safe_filename_list("diffusion_models"))
+		if str(item or "").strip()
+	]
+	for candidate in candidates:
+		if _is_qwen2511_unet_name(candidate):
+			return candidate
+	return _first_model_from_keywords(
+		"diffusion_models",
+		["qwen", "image", "edit", "2511"],
+		[".safetensors", ".gguf"],
+	)
+
+
 def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallback: str = "") -> str:
 	candidates = [str(candidate or "").strip() for candidate in (candidates or []) if str(candidate or "").strip()]
 	preferred = str(preferred_name or "").strip()
