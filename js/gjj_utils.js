@@ -1007,6 +1007,359 @@ export class GJJ_Utils {
             },
         });
     }
+
+    static _modelTreeFolder(folder) {
+        return String(folder || "")
+            .replaceAll("\\", "/")
+            .replace(/^models\//i, "")
+            .replace(/^\/+|\/+$/g, "");
+    }
+
+    static _modelTreeFilename(value, fallback = "") {
+        const text = String(value || fallback || "").trim();
+        if (!text) return "未选择";
+        return text.replaceAll("\\", "/").split("/").pop() || text;
+    }
+
+    static _modelTreeKey(value) {
+        return String(value || "")
+            .toLowerCase()
+            .replaceAll("\\", "/")
+            .replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
+            .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+    }
+
+    static _modelTreeWidget(node, entry) {
+        if (typeof entry?.getWidget === "function") return entry.getWidget(entry.widget || entry.widgetName || entry.name);
+        return GJJ_Utils.getWidget(node, entry?.widget || entry?.widgetName || entry?.name);
+    }
+
+    static _modelTreeWidgetChoices(widget) {
+        const values = widget?.options?.values || widget?.options?.items || widget?.values || widget?.options;
+        return Array.isArray(values) ? values : [];
+    }
+
+    static _modelTreeChoices(entry, widget) {
+        const raw = Array.isArray(entry?.models) && entry.models.length
+            ? entry.models
+            : GJJ_Utils._modelTreeWidgetChoices(widget);
+        const seen = new Set();
+        return raw
+            .map((item) => String(item || "").trim())
+            .filter((item) => {
+                if (!item || seen.has(item)) return false;
+                seen.add(item);
+                return true;
+            });
+    }
+
+    static _modelTreeFilteredChoices(entry, widget, query = "", limit = 80) {
+        const terms = String(query || "")
+            .toLowerCase()
+            .split(/[\s,，|/\\]+/)
+            .map((item) => GJJ_Utils._modelTreeKey(item))
+            .filter(Boolean);
+        const keywords = Array.from(entry?.keywords || []).map((item) => GJJ_Utils._modelTreeKey(item)).filter(Boolean);
+        const anyKeywords = Array.from(entry?.anyKeywords || entry?.any_keywords || []).map((item) => GJJ_Utils._modelTreeKey(item)).filter(Boolean);
+        const all = GJJ_Utils._modelTreeChoices(entry, widget);
+        return all.filter((name) => {
+            const key = GJJ_Utils._modelTreeKey(name);
+            if (keywords.length && !keywords.every((keyword) => key.includes(keyword))) return false;
+            if (anyKeywords.length && !anyKeywords.some((keyword) => key.includes(keyword))) return false;
+            if (terms.length && !terms.every((term) => key.includes(term))) return false;
+            return true;
+        }).slice(0, Math.max(1, Number(limit || 80)));
+    }
+
+    static _modelTreeSetWidgetValue(widget, value, entry, node) {
+        if (!widget || value == null) return;
+        const choices = GJJ_Utils._modelTreeWidgetChoices(widget);
+        if (Array.isArray(choices) && value && !choices.includes(value)) choices.unshift(value);
+        widget.value = value;
+        widget.callback?.(value);
+        entry?.onApply?.(value, widget, node);
+        node?.setDirtyCanvas?.(true, true);
+        node?.graph?.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+    }
+
+    static _modelTreeLine(prefix, icon, filename, { clickable = false, selected = false, missing = false, copyValue = "" } = {}) {
+        const row = document.createElement("div");
+        row.style.cssText = [
+            "display:grid",
+            "grid-template-columns:minmax(0,1fr) 24px",
+            "align-items:center",
+            "gap:3px",
+            "width:100%",
+            "border-radius:5px",
+            "background:" + (selected ? "#18352f" : "transparent"),
+        ].join(";");
+        const button = document.createElement(clickable ? "button" : "div");
+        if (clickable) button.type = "button";
+        button.style.cssText = [
+            "display:block",
+            "min-width:0",
+            "width:100%",
+            "border:0",
+            "background:transparent",
+            "color:" + (missing ? "#ff6b72" : "#dce7e2"),
+            "padding:2px 4px",
+            "text-align:left",
+            "font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace",
+            "white-space:pre",
+            "overflow:hidden",
+            "text-overflow:ellipsis",
+            "cursor:" + (clickable ? "pointer" : "default"),
+        ].join(";");
+        button.textContent = `${prefix}${icon} ${filename}`;
+        row.appendChild(button);
+        if (copyValue) {
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.textContent = "📋";
+            copy.title = `复制模型名称：${copyValue}`;
+            copy.style.cssText = [
+                "width:22px",
+                "height:22px",
+                "padding:0",
+                "border:1px solid #3d535d",
+                "border-radius:5px",
+                "background:#17242a",
+                "color:#dce7e2",
+                "font-size:12px",
+                "line-height:18px",
+                "cursor:pointer",
+            ].join(";");
+            copy.addEventListener("click", async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const ok = await GJJ_Utils.copyTextToClipboard(copyValue);
+                const old = copy.textContent;
+                copy.textContent = ok ? "✓" : "!";
+                setTimeout(() => { copy.textContent = old; }, 900);
+            });
+            row.appendChild(copy);
+        } else {
+            row.appendChild(document.createElement("span"));
+        }
+        if (clickable) {
+            row.addEventListener("mouseenter", () => {
+                if (!selected) row.style.background = "#17262d";
+            });
+            row.addEventListener("mouseleave", () => {
+                if (!selected) row.style.background = "transparent";
+            });
+        }
+        return { row, button };
+    }
+
+    static _modelTreeChoicePanel(node, entry, widget, onApply, strengthWidget = null) {
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;margin:3px 0 5px 26px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#11181c;";
+        if (strengthWidget) {
+            const strengthRow = document.createElement("label");
+            strengthRow.style.cssText = "display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;align-items:center;color:#b9c9cf;";
+            const strengthLabel = document.createElement("span");
+            strengthLabel.textContent = "强度";
+            const strength = document.createElement("input");
+            strength.type = "number";
+            strength.step = "0.01";
+            strength.value = String(strengthWidget.value ?? "");
+            strength.style.cssText = "min-width:0;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+            strength.addEventListener("change", () => {
+                const value = Number.parseFloat(strength.value);
+                strengthWidget.value = Number.isFinite(value) ? value : strengthWidget.value;
+                strengthWidget.callback?.(strengthWidget.value);
+                node?.setDirtyCanvas?.(true, true);
+            });
+            strengthRow.append(strengthLabel, strength);
+            wrap.appendChild(strengthRow);
+        }
+        const search = document.createElement("input");
+        search.type = "text";
+        search.placeholder = "输入关键词过滤；回车使用第一个匹配模型";
+        search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+        const list = document.createElement("div");
+        list.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;";
+
+        const render = (autoPick = false) => {
+            const options = GJJ_Utils._modelTreeFilteredChoices(entry, widget, search.value, 100);
+            if (autoPick && options.length) onApply(options[0]);
+            list.replaceChildren();
+            if (!options.length) {
+                const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || entry?.filename || "").trim();
+                const empty = document.createElement("div");
+                empty.style.cssText = "color:#ff6b72;font-size:12px;padding:4px 2px;line-height:1.35;word-break:break-all;";
+                empty.title = entry?.description || entry?.tooltip || "";
+                empty.textContent = fallback ? `没有匹配模型，默认：${fallback}` : "没有匹配模型";
+                list.appendChild(empty);
+                return;
+            }
+            for (const option of options) {
+                const item = document.createElement("div");
+                item.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 24px;gap:4px;align-items:center;";
+                const selected = String(option || "") === String(widget?.value || "");
+                const button = document.createElement("button");
+                button.type = "button";
+                button.textContent = `${selected ? "✓ " : ""}${option}`;
+                button.title = [
+                    entry?.label || entry?.name || "模型",
+                    option,
+                    entry?.description || entry?.tooltip || "",
+                ].filter(Boolean).join("\n");
+                button.style.cssText = [
+                    "width:100%",
+                    "display:block",
+                    "text-align:left",
+                    "background:" + (selected ? "#18352f" : "#182127"),
+                    "color:#dce7e2",
+                    "border:1px solid " + (selected ? "#2f7d67" : "#33454c"),
+                    "border-radius:6px",
+                    "padding:5px 7px",
+                    "box-sizing:border-box",
+                    "white-space:normal",
+                    "word-break:break-all",
+                    "cursor:pointer",
+                ].join(";");
+                button.addEventListener("click", () => {
+                    onApply(option);
+                    render(false);
+                });
+                const copy = document.createElement("button");
+                copy.type = "button";
+                copy.textContent = "📋";
+                copy.title = [
+                    `复制模型名称：${option}`,
+                    entry?.description || entry?.tooltip || "",
+                ].filter(Boolean).join("\n");
+                copy.style.cssText = "width:24px;height:24px;border:1px solid #3d535d;border-radius:5px;background:#17242a;color:#dce7e2;cursor:pointer;";
+                copy.addEventListener("click", async (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const ok = await GJJ_Utils.copyTextToClipboard(option);
+                    const old = copy.textContent;
+                    copy.textContent = ok ? "✓" : "!";
+                    setTimeout(() => { copy.textContent = old; }, 900);
+                });
+                item.append(button, copy);
+                list.appendChild(item);
+            }
+        };
+        search.addEventListener("input", () => render(false));
+        search.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                const first = GJJ_Utils._modelTreeFilteredChoices(entry, widget, search.value, 1)[0];
+                if (first != null) {
+                    onApply(first);
+                    render(false);
+                }
+            }
+        });
+        wrap.append(search, list);
+        render(false);
+        setTimeout(() => search.focus(), 0);
+        return wrap;
+    }
+
+    static _modelTreeFileNode(node, entry, callbacks = {}) {
+        const widget = GJJ_Utils._modelTreeWidget(node, entry);
+        const strengthWidget = entry?.strengthWidget || entry?.strengthWidgetName
+            ? GJJ_Utils.getWidget(node, entry.strengthWidget || entry.strengthWidgetName)
+            : null;
+        const candidates = GJJ_Utils._modelTreeFilteredChoices(entry, widget, "", 1);
+        const autoSelect = entry?.autoSelect !== false;
+        if (autoSelect && widget && !String(widget.value || "").trim() && candidates.length) {
+            GJJ_Utils._modelTreeSetWidgetValue(widget, candidates[0], entry, node);
+        }
+        const host = document.createElement("div");
+        let choicePanel = null;
+        const renderLine = () => {
+            const current = String(widget?.value || "").trim();
+            const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || entry?.filename || "").trim();
+            const choices = GJJ_Utils._modelTreeChoices(entry, widget);
+            const hasCandidates = GJJ_Utils._modelTreeFilteredChoices(entry, widget, "", 1).length > 0;
+            const currentMissing = Boolean(current && choices.length && !choices.includes(current));
+            const missing = currentMissing || (!current && !hasCandidates && !!fallback);
+            const value = current || fallback;
+            const filename = missing ? value : GJJ_Utils._modelTreeFilename(value);
+            const icon = entry?.icon || "🟣";
+            const prefix = entry?.prefix || "│　└─";
+            const { row, button } = GJJ_Utils._modelTreeLine(prefix, icon, filename, {
+                clickable: true,
+                selected: Boolean(choicePanel),
+                missing,
+                copyValue: value,
+            });
+            row.title = [
+                entry?.label || entry?.name || "",
+                value,
+                currentMissing ? "当前模型不在可用列表中，可能已删除或移动。" : "",
+                missing && !currentMissing ? "未搜索到候选模型，显示默认模型全名。" : "",
+                entry?.description || entry?.tooltip || "",
+            ].filter(Boolean).join("\n");
+            button.title = row.title;
+            const copyButton = row.querySelector?.("button:last-child");
+            if (copyButton && copyButton !== button) {
+                copyButton.title = [
+                    `复制模型名称：${value}`,
+                    entry?.description || entry?.tooltip || "",
+                ].filter(Boolean).join("\n");
+            }
+            button.addEventListener("click", () => {
+                if (choicePanel) {
+                    choicePanel.remove();
+                    choicePanel = null;
+                    renderLine();
+                    return;
+                }
+                choicePanel = GJJ_Utils._modelTreeChoicePanel(node, entry, widget, (nextValue) => {
+                    GJJ_Utils._modelTreeSetWidgetValue(widget, nextValue, entry, node);
+                    callbacks.onApply?.(entry, nextValue, widget);
+                    callbacks.refresh?.();
+                    renderLine();
+                }, strengthWidget);
+                host.appendChild(choicePanel);
+                renderLine();
+            });
+            const existing = host.firstChild;
+            if (existing) host.replaceChild(row, existing);
+            else host.prepend(row);
+        };
+        renderLine();
+        return host;
+    }
+
+    static createModelTreeView({ node, entries = [], refresh = null, onApply = null } = {}) {
+        const root = document.createElement("div");
+        root.style.cssText = "display:flex;flex-direction:column;gap:1px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;overflow:auto;";
+        const folderMap = new Map();
+        for (const entry of entries || []) {
+            const folder = GJJ_Utils._modelTreeFolder(entry?.folder || entry?.path || entry?.directory || "");
+            if (!folderMap.has(folder)) folderMap.set(folder, []);
+            folderMap.get(folder).push(entry);
+        }
+        const folders = Array.from(folderMap.keys());
+        const { row: rootLine } = GJJ_Utils._modelTreeLine("", "📁", "models/");
+        root.appendChild(rootLine);
+        folders.forEach((folder, folderIndex) => {
+            const folderPrefix = folderIndex === folders.length - 1 ? "└─" : "├─";
+            const { row: folderLine } = GJJ_Utils._modelTreeLine(folderPrefix, "📁", `${folder || "models"}/`);
+            root.appendChild(folderLine);
+            const items = folderMap.get(folder) || [];
+            items.forEach((entry, index) => {
+                const branch = index === items.length - 1 ? "└─" : "├─";
+                root.appendChild(GJJ_Utils._modelTreeFileNode(node, {
+                    ...entry,
+                    prefix: `│　${branch}`,
+                }, {
+                    onApply,
+                    refresh: refresh || (() => GJJ_Utils.refreshNode(node)),
+                }));
+            });
+        });
+        return root;
+    }
 }
 
 globalThis.GJJ_Utils = GJJ_Utils;

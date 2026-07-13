@@ -37,6 +37,7 @@ const CHECKPOINT_WIDGET_NAME = "ckpt_name";
 const CHECKPOINT_MODEL_SOURCE_VALUE = "底模 checkpoint";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const MODEL_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_model_settings_open";
+const SIZE_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_size_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
@@ -108,6 +109,7 @@ const MODEL_SETTINGS_BUTTON_STYLES = {
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
 const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
+const STRICT_MODEL_WIDGETS = new Set(["unet_name", "clip_name1", "vae_name", CHECKPOINT_WIDGET_NAME]);
 const MODEL_PANEL_WIDGETS = new Set([
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
@@ -120,9 +122,6 @@ const MODEL_PANEL_WIDGETS = new Set([
 const OTHER_PANEL_WIDGETS = new Set([
 	"negative_prompt",
 	"main_image_index",
-	"width",
-	"height",
-	"batch_size",
 	"seed",
 	"steps",
 	"cfg",
@@ -130,6 +129,12 @@ const OTHER_PANEL_WIDGETS = new Set([
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+]);
+const SIZE_PANEL_WIDGETS = new Set([
+	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
+	"width",
+	"height",
+	"batch_size",
 ]);
 const PROTECTED_WIDGET_NAMES = new Set([
 	EXECUTE_BUTTON_NAME,
@@ -535,6 +540,57 @@ function ensureComboOption(widget, value) {
 	return true;
 }
 
+function modelOptionRank(name, value) {
+	const text = canonicalizeText(value);
+	if (!text) return -1;
+	if (name === "unet_name") {
+		if (text.includes("flux2klein") || text.includes("flux2") || text.includes("f2k")) return 100;
+		if (text.includes("flux") && text.includes("klein")) return 90;
+		if (text.includes("flux")) return 70;
+		if (text.includes("krea") || text.includes("zimage") || text.includes("boogu")) return 60;
+		return 10;
+	}
+	if (name === "clip_name1") {
+		if (text.includes("qwen3") && text.includes("8b")) return 100;
+		if (text.includes("qwen3")) return 90;
+		if (text.includes("t5") || text.includes("clip")) return 50;
+		return 10;
+	}
+	if (name === "vae_name") {
+		if (text.includes("flux2") && text.includes("vae")) return 100;
+		if (text === "default") return 80;
+		if (text.includes("vae")) return 50;
+		return 10;
+	}
+	if (name === CHECKPOINT_WIDGET_NAME) {
+		return 10;
+	}
+	return 0;
+}
+
+function pickAvailableModelValue(node, name, desired = "") {
+	const options = optionValues(node, name).filter((item) => item !== "");
+	const wanted = String(desired || "").trim();
+	if (wanted && options.includes(wanted)) {
+		return wanted;
+	}
+	const ranked = options
+		.map((value, index) => ({ value, index, score: modelOptionRank(name, value) }))
+		.sort((left, right) => right.score - left.score || left.index - right.index);
+	return ranked[0]?.value || wanted || "";
+}
+
+function normalizeStrictModelParam(node, name, value) {
+	const text = String(value ?? "").trim();
+	if (!STRICT_MODEL_WIDGETS.has(name)) {
+		return value;
+	}
+	if (!text && name === CHECKPOINT_WIDGET_NAME) {
+		return "";
+	}
+	return pickAvailableModelValue(node, name, text);
+}
+
 function getWidgetIndex(node, name) {
 	return Array.isArray(node?.widgets)
 		? node.widgets.findIndex((widget) => widget?.name === name)
@@ -686,21 +742,27 @@ function applyInputSizeButtonState(node) {
 	if (!button) {
 		return;
 	}
-	const linked = inputLinked(node, PRIMARY_IMAGE_INPUT);
+	const open = sizeSettingsOpen(node);
 	const enabled = inputSizeSyncEnabled(node);
-	button.style.display = linked ? "flex" : "none";
+	button.style.display = "flex";
 	button.textContent = "📐";
-	button.title = enabled
-		? "已开启：第一个图像输入有连接时，生成尺寸使用输入图尺寸。"
-		: "已关闭：第一个图像输入有连接时，仍使用面板宽高。";
-	button.style.borderColor = enabled ? "#22c55e" : "#64748b";
-	button.style.color = enabled ? "#ecfdf5" : "#cbd5e1";
-	const background = enabled
-		? "linear-gradient(135deg, #065f46, #16a34a)"
-		: "linear-gradient(135deg, #1f2933, #374151)";
-	const hoverBackground = enabled
-		? "linear-gradient(135deg, #16a34a, #22c55e)"
-		: "linear-gradient(135deg, #374151, #4b5563)";
+	button.title = [
+		open ? "关闭尺寸浮动窗口。" : "打开尺寸浮动窗口。",
+		enabled ? "输入图尺寸同步：开。" : "输入图尺寸同步：关。",
+	].join("\n");
+	button.classList.toggle("on", open);
+	button.style.borderColor = open ? "#94a3b8" : enabled ? "#22c55e" : "#64748b";
+	button.style.color = open || enabled ? "#ecfdf5" : "#cbd5e1";
+	const background = open
+		? "linear-gradient(135deg, #4b5563, #64748b)"
+		: enabled
+			? "linear-gradient(135deg, #065f46, #16a34a)"
+			: "linear-gradient(135deg, #1f2933, #374151)";
+	const hoverBackground = open
+		? background
+		: enabled
+			? "linear-gradient(135deg, #16a34a, #22c55e)"
+			: "linear-gradient(135deg, #374151, #4b5563)";
 	button.style.background = background;
 	button.__gjjLazyDefaultBg = background;
 	button.__gjjLazyHoverBg = hoverBackground;
@@ -1038,6 +1100,10 @@ function settingsOpen(node) {
 
 function modelSettingsOpen(node) {
 	return Boolean(node?.properties?.[MODEL_SETTINGS_OPEN_PROPERTY]);
+}
+
+function sizeSettingsOpen(node) {
+	return Boolean(node?.properties?.[SIZE_SETTINGS_OPEN_PROPERTY]);
 }
 
 function translationEnabled(node) {
@@ -1393,6 +1459,10 @@ function updateSettingsButtonState(node) {
 	button.__gjjLazyHoverBg = open ? button.style.background : "linear-gradient(135deg, #374151, #4b5563)";
 }
 
+function updateSizeSettingsButtonState(node) {
+	applyInputSizeButtonState(node);
+}
+
 function orderLazyWidgets(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
@@ -1427,6 +1497,7 @@ function applySettingsVisibility(node) {
 	setDomWidgetHidden(node.__gjjLoraWidget, null, true);
 	syncFloatingPanels(node);
 	updateModelSettingsButtonState(node);
+	updateSizeSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 	orderLazyWidgets(node);
@@ -1446,6 +1517,7 @@ function setSettingsOpen(node, open) {
 	node.properties[SETTINGS_OPEN_PROPERTY] = nextOpen;
 	if (nextOpen) {
 		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
 	}
 	applySettingsVisibility(node);
 }
@@ -1461,6 +1533,24 @@ function setModelSettingsOpen(node, open) {
 	}
 	node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = nextOpen;
 	if (nextOpen) {
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
+	}
+	applySettingsVisibility(node);
+}
+
+function setSizeSettingsOpen(node, open) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const nextOpen = Boolean(open);
+	if (nextOpen) {
+		closeLazyFloatingSurfaces(node, "size");
+	}
+	node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = nextOpen;
+	if (nextOpen) {
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
 	}
 	applySettingsVisibility(node);
@@ -1482,6 +1572,12 @@ function closeLazyFloatingSurfaces(node, except = "") {
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
 		if (node.__gjjLazyOtherFloatingPanel?.panel) {
 			node.__gjjLazyOtherFloatingPanel.panel.style.display = "none";
+		}
+	}
+	if (except !== "size") {
+		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
+		if (node.__gjjLazySizeFloatingPanel?.panel) {
+			node.__gjjLazySizeFloatingPanel.panel.style.display = "none";
 		}
 	}
 	if (except !== "lora" && globalThis.__gjjLoraPopup?.state?.node === node) {
@@ -1544,6 +1640,7 @@ function createFloatingPanel(node, kind, titleText) {
 		event.preventDefault();
 		event.stopPropagation();
 		if (kind === "model") setModelSettingsOpen(node, false);
+		else if (kind === "size") setSizeSettingsOpen(node, false);
 		else setSettingsOpen(node, false);
 	});
 	panel.addEventListener("keydown", (event) => {
@@ -1553,6 +1650,7 @@ function createFloatingPanel(node, kind, titleText) {
 		event.preventDefault();
 		event.stopPropagation();
 		if (kind === "model") setModelSettingsOpen(node, false);
+		else if (kind === "size") setSizeSettingsOpen(node, false);
 		else setSettingsOpen(node, false);
 	});
 	header.append(title, close);
@@ -1831,6 +1929,10 @@ function createFloatingControl(node, name) {
 		const current = getWidget(node, name);
 		if (!current) return;
 		const nextValue = valueElement.type === "checkbox" ? valueElement.checked : valueElement.value;
+		if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) {
+			setInputSizeSyncEnabled(node, nextValue);
+			return;
+		}
 		setWidgetValue(current, coerceParamValue(name, nextValue, node));
 		if (name === MODEL_SOURCE_WIDGET_NAME) {
 			applySettingsVisibility(node);
@@ -1857,11 +1959,15 @@ function ensureFloatingPanels(node) {
 	if (!node.__gjjLazyModelFloatingPanel) {
 		node.__gjjLazyModelFloatingPanel = createFloatingPanel(node, "model", "🧠 模型参数");
 	}
+	if (!node.__gjjLazySizeFloatingPanel) {
+		node.__gjjLazySizeFloatingPanel = createFloatingPanel(node, "size", "📐 尺寸");
+	}
 	if (!node.__gjjLazyOtherFloatingPanel) {
 		node.__gjjLazyOtherFloatingPanel = createFloatingPanel(node, "settings", "⚙️ 其它参数");
 	}
 	return {
 		model: node.__gjjLazyModelFloatingPanel,
+		size: node.__gjjLazySizeFloatingPanel,
 		other: node.__gjjLazyOtherFloatingPanel,
 	};
 }
@@ -1929,19 +2035,105 @@ function renderFloatingPanelControls(node, body, names) {
 	}
 }
 
+function lazyModelTreeEntries(node) {
+	const useCheckpoint = checkpointModelSourceEnabled(node);
+	if (useCheckpoint) {
+		return [{
+			widget: CHECKPOINT_WIDGET_NAME,
+			label: "底模 checkpoint",
+			folder: "models/checkpoints",
+			icon: "🟣",
+			fallback: widgetValue(node, CHECKPOINT_WIDGET_NAME) || "未找到可用 checkpoint",
+			description: "作为底模直接加载，内部拆出 MODEL / CLIP / VAE。",
+		}];
+	}
+	return [
+		{
+			widget: "unet_name",
+			label: "UNET 主模型",
+			folder: "models/diffusion_models",
+			icon: "🟣",
+			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "gguf"],
+			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
+			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
+		},
+		{
+			widget: "clip_name1",
+			label: "CLIP 编码器",
+			folder: "models/text_encoders",
+			icon: "🟡",
+			anyKeywords: ["qwen", "t5", "clip", "mistral"],
+			fallback: widgetValue(node, "clip_name1") || "未找到可用 CLIP 编码器",
+			description: "文本编码器；将提示词编码为当前模型族需要的条件。",
+		},
+		{
+			widget: "vae_name",
+			label: "VAE 解码器",
+			folder: "models/vae",
+			icon: "🔴",
+			anyKeywords: ["flux2", "vae", "qwen", "ae", "default"],
+			fallback: widgetValue(node, "vae_name") || "未找到可用 VAE 解码器",
+			description: "VAE 解码器；把采样 latent 解码成最终图片。",
+		},
+	];
+}
+
+function renderModelPanelControls(node, body) {
+	body.replaceChildren();
+	for (const name of [MODEL_SOURCE_WIDGET_NAME]) {
+		const control = createFloatingControl(node, name);
+		if (control) {
+			control.__gjjRefresh?.();
+			body.appendChild(control);
+		}
+	}
+	const tree = GJJ_Utils.createModelTreeView({
+		node,
+		entries: lazyModelTreeEntries(node),
+		refresh: () => {
+			applySettingsVisibility(node);
+			GJJ_Utils.refreshNode(node);
+		},
+		onApply: (entry, value, widget) => {
+			if (entry?.widget === "unet_name") {
+				node.properties = node.properties || {};
+				node.properties[LAST_PRESET_KEY] = "";
+				clearPresetLoras(node);
+				applyPreset(node, true);
+			}
+			writeLiveParamSnapshot(node);
+		},
+	});
+	tree.style.maxHeight = "320px";
+	body.appendChild(tree);
+	for (const name of [KEEP_MODEL_WIDGET_NAME]) {
+		const control = createFloatingControl(node, name);
+		if (control) {
+			control.__gjjRefresh?.();
+			body.appendChild(control);
+		}
+	}
+}
+
 function syncFloatingPanels(node) {
 	if (!node || typeof document === "undefined") {
 		return;
 	}
-	const { model, other } = ensureFloatingPanels(node);
+	const { model, size, other } = ensureFloatingPanels(node);
 	if (modelSettingsOpen(node) && settingsOpen(node)) {
 		node.properties = node.properties || {};
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
 	}
+	if (sizeSettingsOpen(node) && (modelSettingsOpen(node) || settingsOpen(node))) {
+		node.properties = node.properties || {};
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+	}
 	const modelOpen = modelSettingsOpen(node);
+	const sizeOpen = sizeSettingsOpen(node);
 	const otherOpen = settingsOpen(node);
 
-	renderFloatingPanelControls(node, model.body, Array.from(MODEL_PANEL_WIDGETS));
+	renderModelPanelControls(node, model.body);
 	if (node.__gjjLoraContainer) {
 		if (!node.__gjjLoraFloatingTitle) {
 			const title = document.createElement("div");
@@ -1960,12 +2152,17 @@ function syncFloatingPanels(node) {
 		}
 		node.__gjjLoraContainer.style.display = modelOpen ? "flex" : "none";
 	}
+	renderFloatingPanelControls(node, size.body, Array.from(SIZE_PANEL_WIDGETS));
 	renderFloatingPanelControls(node, other.body, Array.from(OTHER_PANEL_WIDGETS));
 
 	model.panel.style.display = modelOpen ? "flex" : "none";
+	size.panel.style.display = sizeOpen ? "flex" : "none";
 	other.panel.style.display = otherOpen ? "flex" : "none";
 	if (modelOpen) {
 		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
+	}
+	if (sizeOpen) {
+		positionFloatingPanel(node, size.panel, node.__gjjInputSizeButton);
 	}
 	if (otherOpen) {
 		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
@@ -1978,13 +2175,18 @@ function positionOpenFloatingPanels(node) {
 	}
 	if (app.graph?._nodes && !app.graph._nodes.includes(node)) {
 		if (node.__gjjLazyModelFloatingPanel?.panel) node.__gjjLazyModelFloatingPanel.panel.style.display = "none";
+		if (node.__gjjLazySizeFloatingPanel?.panel) node.__gjjLazySizeFloatingPanel.panel.style.display = "none";
 		if (node.__gjjLazyOtherFloatingPanel?.panel) node.__gjjLazyOtherFloatingPanel.panel.style.display = "none";
 		return;
 	}
 	const model = node.__gjjLazyModelFloatingPanel;
+	const size = node.__gjjLazySizeFloatingPanel;
 	const other = node.__gjjLazyOtherFloatingPanel;
 	if (modelSettingsOpen(node) && model?.panel?.style.display !== "none") {
 		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
+	}
+	if (sizeSettingsOpen(node) && size?.panel?.style.display !== "none") {
+		positionFloatingPanel(node, size.panel, node.__gjjInputSizeButton);
 	}
 	if (settingsOpen(node) && other?.panel?.style.display !== "none") {
 		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
@@ -2170,6 +2372,7 @@ function coerceParamValue(name, value, node) {
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
+	if (STRICT_MODEL_WIDGETS.has(name)) return normalizeStrictModelParam(node, name, value);
 	if (name === MODEL_SOURCE_WIDGET_NAME) return comboLikeValue(name, value, node) ? textValue(value) : fallbackParamValue(node, name);
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
@@ -2305,7 +2508,9 @@ function applyParamValues(node, params) {
 		if (!widget) {
 			continue;
 		}
-		ensureComboOption(widget, params[name]);
+		if (!STRICT_MODEL_WIDGETS.has(name)) {
+			ensureComboOption(widget, params[name]);
+		}
 		if (widget.value === params[name]) continue;
 		setWidgetValue(widget, params[name]);
 		changed = true;
@@ -2415,16 +2620,27 @@ function patchLazySeedIntoPromptData(promptData) {
 			continue;
 		}
 		const seed = applySeedControlBeforeQueue(node);
-		if (seed === null || seed === undefined) {
-			continue;
-		}
 		entry.inputs = entry.inputs || {};
-		entry.inputs.seed = seed;
+		if (seed !== null && seed !== undefined) {
+			entry.inputs.seed = seed;
+		}
 		entry.inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
+		for (const name of STRICT_MODEL_WIDGETS) {
+			if (Object.prototype.hasOwnProperty.call(entry.inputs, name)) {
+				entry.inputs[name] = normalizeStrictModelParam(node, name, entry.inputs[name]);
+			}
+		}
 		if (promptData?.prompt && promptData.prompt !== promptData.output && promptData.prompt[key]) {
 			promptData.prompt[key].inputs = promptData.prompt[key].inputs || {};
-			promptData.prompt[key].inputs.seed = seed;
+			if (seed !== null && seed !== undefined) {
+				promptData.prompt[key].inputs.seed = seed;
+			}
 			promptData.prompt[key].inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
+			for (const name of STRICT_MODEL_WIDGETS) {
+				if (Object.prototype.hasOwnProperty.call(promptData.prompt[key].inputs, name)) {
+					promptData.prompt[key].inputs[name] = normalizeStrictModelParam(node, name, promptData.prompt[key].inputs[name]);
+				}
+			}
 		}
 	}
 	return promptData;
@@ -2933,6 +3149,8 @@ async function syncSizeFromPrimaryInput(node) {
 		setWidgetValue(getWidget(node, "width"), roundToEight(size.width));
 		setWidgetValue(getWidget(node, "height"), roundToEight(size.height));
 		node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY] = signature;
+		writeLiveParamSnapshot(node);
+		syncFloatingPanels(node);
 	} finally {
 		node.__gjjLazyImageSizeSyncRunning = false;
 	}
@@ -3446,6 +3664,9 @@ function createButtons(node) {
 		btn.__gjjLazyDefaultBg = defaultBg;
 		btn.__gjjLazyHoverBg = hoverBg;
 		btn.addEventListener("mouseenter", () => {
+			if (btn === inputSizeButton && sizeSettingsOpen(node)) {
+				return;
+			}
 			if (btn === modelSettingsButton && modelSettingsOpen(node)) {
 				return;
 			}
@@ -3457,6 +3678,11 @@ function createButtons(node) {
 		});
 
 		btn.addEventListener("mouseleave", () => {
+			if (btn === inputSizeButton && sizeSettingsOpen(node)) {
+				btn.style.transform = "translateY(0)";
+				updateSizeSettingsButtonState(node);
+				return;
+			}
 			if (btn === modelSettingsButton && modelSettingsOpen(node)) {
 				btn.style.transform = "translateY(0)";
 				updateModelSettingsButtonState(node);
@@ -3656,7 +3882,7 @@ function createButtons(node) {
 
 	function handleInputSize(event) {
 		protectEvent(event);
-		setInputSizeSyncEnabled(node, !inputSizeSyncEnabled(node));
+		setSizeSettingsOpen(node, !sizeSettingsOpen(node));
 	}
 
 	function handleSeedRandom(event) {

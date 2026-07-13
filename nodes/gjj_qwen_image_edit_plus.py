@@ -81,12 +81,17 @@ PREFERED_KONTEXT_RESOLUTIONS = [
 ]
 
 DEFAULT_LLAMA_TEMPLATE = (
-    "<|im_start|>system\n"
-    "Describe the key features of the input image (color, shape, size, texture, objects, background), "
-    "then explain how the user's text instruction should alter or modify the image. Generate a new image "
-    "that meets the user's requirements while maintaining consistency with the original input where appropriate."
-    "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+	"<|im_start|>system\n"
+	"Describe the key features of the input image (color, shape, size, texture, objects, background), "
+	"then explain how the user's text instruction should alter or modify the image. Generate a new image "
+	"that meets the user's requirements while maintaining consistency with the original input where appropriate."
+	"<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 )
+SHORT_IMAGE_EDIT_TEMPLATE = (
+    "<|im_start|>user\n{}<|im_end|>\n"
+    "<|im_start|>assistant\nEdited image preserving the subject identity and following the requested view.\n"
+)
+SAFE_IMAGE_EDIT_PROMPT = "Edit the image while preserving the same subject identity and visual style."
 
 _CN_NUMBER_MAP = {
     "一": 1,
@@ -230,6 +235,22 @@ def _append_background_hint(prompt: str, background_index: int, image_count: int
 
 def _empty_image() -> torch.Tensor:
     return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+
+
+def _ensure_latent_samples_4d(samples: Any, label: str = "latent") -> torch.Tensor:
+    if isinstance(samples, dict):
+        samples = samples.get("samples")
+    if not isinstance(samples, torch.Tensor):
+        raise RuntimeError(f"{label} 不是有效 latent 张量：{type(samples).__name__}")
+    if samples.ndim == 4:
+        return samples.contiguous()
+    if samples.ndim == 5 and int(samples.shape[2]) == 1:
+        return samples[:, :, 0, :, :].contiguous()
+    raise RuntimeError(
+        f"{label} 维度不正确：{tuple(samples.shape)}。"
+        "Qwen Image Edit 需要图像 VAE 产生 BCHW latent；请使用 qwen_image_vae.safetensors，"
+        "不要使用 audio/video/ltx/wan VAE。"
+    )
 
 
 def _image_size(image: torch.Tensor | None) -> tuple[int, int]:
@@ -424,7 +445,10 @@ def _encode_qwen_image_edit_plus(
                 "area",
             )
             images_vl.append(vl_image[:, :, :, :3])
-            ref_latents.append(vae.encode(vae_image[:, :, :, :3]))
+            ref_latents.append(_ensure_latent_samples_4d(
+                vae.encode(vae_image[:, :, :, :3]),
+                f"Qwen 参考图 {index} latent",
+            ))
             image_prompt += f"image{index}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
             continue
 
@@ -444,11 +468,18 @@ def _encode_qwen_image_edit_plus(
                 width = round(current_w * scale_by / 8.0) * 8
                 height = round(current_h * scale_by / 8.0) * 8
                 vae_image = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
-            ref_latents.append(vae.encode(vae_image[:, :, :, :3]))
+            ref_latents.append(_ensure_latent_samples_4d(
+                vae.encode(vae_image[:, :, :, :3]),
+                f"Qwen 参考图 {index} latent",
+            ))
 
         image_prompt += f"image{index}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
 
-    tokens = clip.tokenize(_rewrite_qwen_image_references(image_prompt + str(prompt or ""), len(images_vl)), images=images_vl, llama_template=DEFAULT_LLAMA_TEMPLATE)
+    prompt_text = str(prompt or "").strip() or SAFE_IMAGE_EDIT_PROMPT
+    full_prompt = SHORT_IMAGE_EDIT_TEMPLATE.format(
+        _rewrite_qwen_image_references(image_prompt + prompt_text, len(images_vl))
+    )
+    tokens = clip.tokenize(full_prompt, images=images_vl, prevent_empty_text=True)
     conditioning = clip.encode_from_tokens_scheduled(tokens)
     if ref_latents:
         conditioning = node_helpers.conditioning_set_values(
@@ -480,9 +511,15 @@ def _encode_qwen_image_edit_single(
             scaled = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
             images_vl = [scaled[:, :, :, :3]]
             if vae is not None:
-                ref_latent = vae.encode(scaled[:, :, :, :3])
+                ref_latent = _ensure_latent_samples_4d(
+                    vae.encode(scaled[:, :, :, :3]),
+                    "Qwen 单图参考 latent",
+                )
 
-    tokens = clip.tokenize(str(prompt or ""), images=images_vl)
+    prompt_text = str(prompt or "").strip() or SAFE_IMAGE_EDIT_PROMPT
+    if images_vl:
+        prompt_text = SHORT_IMAGE_EDIT_TEMPLATE.format(f"{QWEN_IMAGE_EDIT_IMAGE_TOKEN}{prompt_text}")
+    tokens = clip.tokenize(prompt_text, images=images_vl, prevent_empty_text=True)
     conditioning = clip.encode_from_tokens_scheduled(tokens)
     if ref_latent is not None:
         conditioning = node_helpers.conditioning_set_values(
@@ -494,7 +531,7 @@ def _encode_qwen_image_edit_single(
 
 
 def _encode_text_conditioning(clip: Any, prompt: str):
-    tokens = clip.tokenize(str(prompt or ""))
+    tokens = clip.tokenize(str(prompt or "").strip() or SAFE_IMAGE_EDIT_PROMPT, prevent_empty_text=True)
     return clip.encode_from_tokens_scheduled(tokens)
 
 

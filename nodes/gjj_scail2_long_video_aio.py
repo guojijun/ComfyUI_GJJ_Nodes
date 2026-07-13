@@ -440,10 +440,13 @@ async def _get_scail2_aio_models(request):
         _model_field("dpo_lora_file", "DPO LoRA", "loras", "models/loras", ["scail", "dpo"], [".safetensors"], "SCAIL-2 DPO 修正 LoRA，可增强动作迁移/人物替换效果。"),
         _model_field("slop_bounce_lora_file", "Slop Bounce", "loras", "models/loras", ["slop", "bounce"], [".safetensors"], "弹跳 LoRA，不变脸方向；可留空禁用。"),
         _model_field("sam3_checkpoint", "SAM3", "checkpoints", "models/checkpoints", ["sam3.1", "multiplex"], [".safetensors"], "SAM3.1 Multiplex checkpoint，用于目标跟踪并生成 SCAIL-2 彩色身份遮罩。", True),
-        _model_field("multiview_unet", "多视图主模型", "diffusion_models", "models/diffusion_models", ["flux", "f2k", "edit"], [".safetensors", ".gguf"], "【生成多视图】使用的编辑型主模型。支持 flux / f2k / edit 关键词过滤，UNET 与 VAE 按模型族预设自动匹配。"),
-        _model_field("multiview_lora_1", "多视图Lightning LoRA", "loras", "models/loras", ["qwen", "lightning"], [".safetensors"], "人物库“自定义视图”使用的 Qwen Lightning LoRA。"),
-        _model_field("multiview_lora_2", "多角度LoRA", "loras", "models/loras", ["multiple", "angles"], [".safetensors"], "人物库“自定义视图”使用的多角度 LoRA。"),
-        _model_field("rmbg_model", "RMBG抠图模型", "RMBG", "models/RMBG", ["rmbg", "1.4"], [".safetensors", ".pth"], "GJJ_RemoveBgStitch 拼接图片时使用的 RMBG1.4 去背景模型。"),
+        _model_field("multiview_unet", "多视图主模型", "diffusion_models", "models/diffusion_models", ["qwen", "image", "edit", "2511"], [".safetensors", ".gguf"], "【生成多视图】按 GJJ_CharacterMultiViewStudio 的 2511 链路使用 Qwen Image Edit 主模型。"),
+        _model_field("multiview_clip", "多视图CLIP", "text_encoders", "models/text_encoders", ["qwen", "2.5", "vl"], [".safetensors", ".gguf"], "【生成多视图】2511 链路使用的 Qwen 2.5 VL 文本/视觉编码器。"),
+        _model_field("multiview_vae", "多视图VAE", "vae", "models/vae", ["qwen", "image", "vae"], [".safetensors"], "【生成多视图】2511 链路使用的 Qwen Image VAE。"),
+        _model_field("multiview_lora_1", "多视图Lightning LoRA", "loras", "models/loras", ["qwen", "lightning"], [".safetensors"], "【生成多视图】2511 链路使用的 Lightning / 加速 LoRA。"),
+        _model_field("multiview_lora_2", "多角度LoRA", "loras", "models/loras", ["multiple", "angles"], [".safetensors"], "【生成多视图】2511 链路使用的多角度一致性 LoRA。"),
+        _model_field("multiview_lora_3", "多视图第3 LoRA", "loras", "models/loras", ["qwen", "edit"], [".safetensors"], "【生成多视图】可选第3组微调模型；留空表示不使用。"),
+        _model_field("rmbg_model", "RMBG抠图模型", "RMBG", "models/RMBG", ["rmbg", "1.4"], [".safetensors", ".pth"], "【去背景/拼接】GJJ_CharacterMultiViewStudio 人物资产分支、批量去背景与 GJJ_RemoveBgStitch 拼接图片使用的 RMBG1.4 模型。"),
     ]
     return web.json_response({
         "ok": True,
@@ -603,56 +606,98 @@ class GJJ_SCAIL2LongVideoAIO:
             {
                 "label": "包含 wan + scail 的 SCAIL 主模型",
                 "path": "models/diffusion_models",
-                "filename": "<wan + scail>.safetensors / <wan + scail>.gguf",
+                "filename": "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors",
                 "required": True,
                 "description": "SCAIL-2 主扩散模型。🧠 浮窗里的“SCAIL模型”会按关键词 wan + scail 从 diffusion_models 中过滤；也支持同目录下 .gguf 候选。",
             },
             {
                 "label": "文件名包含 wan + 2.1 + vae 的 VAE",
                 "path": "models/vae",
-                "filename": "<wan + 2.1 + vae>.safetensors",
+                "filename": "wan_2.1_vae.safetensors",
                 "required": True,
                 "description": "Wan 2.1 视频 VAE，用于 SCAIL 条件编码、续段锚定解码和最终视频帧解码。",
             },
             {
                 "label": "文件名包含 umt5 + xxl 的 T5 文本编码器",
                 "path": "models/text_encoders",
-                "filename": "<umt5 + xxl>.safetensors",
+                "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
                 "required": True,
                 "description": "Wan T5 文本编码器，用于正向提示词和负向提示词编码。默认提示词为空时可配合“条件零化”输出稳定空负向条件。",
             },
             {
                 "label": "文件名包含 clip + vision 的 CLIP Vision",
                 "path": "models/clip_vision",
-                "filename": "<clip + vision>.safetensors",
+                "filename": "clip_vision_h.safetensors",
                 "required": True,
                 "description": "CLIP Vision 参考图编码器。连接或选择参考图时用于增强参考图语义一致性；运行时不可用会自动跳过 CLIP Vision 条件。",
             },
             {
                 "label": "文件名包含 wan + lightx2v 的加速 LoRA",
                 "path": "models/loras",
-                "filename": "<wan + lightx2v>.safetensors",
+                "filename": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
                 "required": False,
                 "description": "LightX2V 加速 LoRA。默认开启“使用加速LoRA”；关闭后只加载 SCAIL 主模型，不叠加该 LoRA。",
             },
             {
                 "label": "文件名包含 scail + dpo 的 DPO LoRA",
                 "path": "models/loras",
-                "filename": "<scail + dpo>.safetensors",
+                "filename": "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
                 "required": False,
                 "description": "SCAIL-2 DPO LoRA，用于增强 SCAIL2 动作迁移/人物替换效果；作为外接 LoRA 配置叠加到主模型。",
             },
             {
                 "label": "文件名包含 slop + bounce 的 LoRA",
                 "path": "models/loras",
-                "filename": "<slop + bounce>.safetensors",
+                "filename": "i2v_slop_bounce.safetensors",
                 "required": False,
                 "description": "Slop Bounce 弹跳 LoRA，关键词 wan / i2v / slop / bounce；作为外接 LoRA 配置叠加到主模型。",
             },
             {
+                "label": "多视图 / 多角度主模型",
+                "path": "models/diffusion_models",
+                "filename": "qwen_image_edit_2511_int8_convrot.safetensors",
+                "required": False,
+                "description": "导演台“生成多视图”调用 GJJ_CharacterMultiViewStudio 时使用的 Qwen Image Edit 2511 主模型。",
+            },
+            {
+                "label": "多视图 CLIP 文本编码器",
+                "path": "models/text_encoders",
+                "filename": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                "required": False,
+                "description": "2511 多视图生成使用的 Qwen 2.5 VL 文本/视觉编码器；留空时会按 GJJ_CharacterMultiViewStudio 的模型族规则自动匹配。",
+            },
+            {
+                "label": "多视图 VAE",
+                "path": "models/vae",
+                "filename": "qwen_image_vae.safetensors",
+                "required": False,
+                "description": "2511 多视图生成使用的 Qwen Image VAE；留空时会按 GJJ_CharacterMultiViewStudio 的模型族规则自动匹配。",
+            },
+            {
+                "label": "多视图 Lightning / 加速 LoRA",
+                "path": "models/loras",
+                "filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+                "required": False,
+                "description": "多视图生成第1组 LoRA，通常用于加速或适配当前编辑模型。",
+            },
+            {
+                "label": "多角度 LoRA",
+                "path": "models/loras",
+                "filename": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+                "required": False,
+                "description": "多视图生成第2组 LoRA，用于角色/产品的多角度一致性。",
+            },
+            {
+                "label": "RMBG1.4 去背景 / 拼接模型",
+                "path": "models/RMBG",
+                "filename": "rmbg1.4.safetensors",
+                "required": False,
+                "description": "去背景、拼接图片，以及多视图人物资产分支调用 RMBG1.4 时使用。",
+            },
+            {
                 "label": "文件名包含 sam3 + multiplex 的 checkpoint",
                 "path": "models/checkpoints",
-                "filename": "<sam3 + multiplex>.safetensors",
+                "filename": "sam3.1_multiplex.safetensors",
                 "required": True,
                 "description": "SAM3.1 Multiplex checkpoint，用于内部双通道目标跟踪并生成 SCAIL-2 彩色身份遮罩。",
             },
@@ -668,19 +713,26 @@ class GJJ_SCAIL2LongVideoAIO:
             "ComfyUI/\n"
             "├── models/\n"
             "│   ├── diffusion_models/\n"
-            "│   │   └── <文件名包含 wan + scail 的 .safetensors / .gguf>\n"
+            "│   │   └── wan2.1_14B_SCAIL_2_fp8_scaled.safetensors\n"
+            "│   │   └── qwen_image_edit_2511_int8_convrot.safetensors\n"
             "│   ├── vae/\n"
-            "│   │   └── <文件名包含 wan + 2.1 + vae 的 .safetensors>\n"
+            "│   │   └── wan_2.1_vae.safetensors\n"
+            "│   │   └── qwen_image_vae.safetensors\n"
             "│   ├── text_encoders/\n"
-            "│   │   └── <文件名包含 umt5 + xxl 的 .safetensors>\n"
+            "│   │   └── umt5_xxl_fp8_e4m3fn_scaled.safetensors\n"
+            "│   │   └── qwen_2.5_vl_7b_fp8_scaled.safetensors\n"
             "│   ├── clip_vision/\n"
-            "│   │   └── <文件名包含 clip + vision 的 .safetensors>\n"
+            "│   │   └── clip_vision_h.safetensors\n"
             "│   ├── loras/\n"
-            "│   │   └── <文件名包含 wan + lightx2v 的 .safetensors>\n"
-            "│   │   └── <文件名包含 scail + dpo 的 .safetensors>\n"
-            "│   │   └── <文件名包含 slop + bounce 的 .safetensors>\n"
+            "│   │   └── lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors\n"
+            "│   │   └── wan2.1_SCAIL_2_DPO_lora_bf16.safetensors\n"
+            "│   │   └── i2v_slop_bounce.safetensors\n"
+            "│   │   └── Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors\n"
+            "│   │   └── qwen-image-edit-2511-multiple-angles-lora.safetensors\n"
+            "│   ├── RMBG/\n"
+            "│   │   └── rmbg1.4.safetensors\n"
             "│   ├── checkpoints/\n"
-            "│   │   └── <文件名包含 sam3 + multiplex 的 .safetensors>\n"
+            "│   │   └── sam3.1_multiplex.safetensors\n"
             "│   └── translation/\n"
             "│       └── opus-mt-zh-en.safetensors"
         ),
@@ -933,6 +985,34 @@ class GJJ_SCAIL2LongVideoAIO:
                 "reference_crop_keep_position": (
                     ["上", "下", "左", "右", "中"],
                     {"default": "中", "hidden": True, "display": "hidden", "display_name": "裁剪保留位置"},
+                ),
+                "multiview_unet": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图主模型"},
+                ),
+                "multiview_clip": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图CLIP"},
+                ),
+                "multiview_vae": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图VAE"},
+                ),
+                "multiview_lora_1": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图LoRA 1"},
+                ),
+                "multiview_lora_2": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图LoRA 2"},
+                ),
+                "multiview_lora_3": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图第3 LoRA"},
+                ),
+                "rmbg_model": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "RMBG抠图模型"},
                 ),
             },
             "optional": {

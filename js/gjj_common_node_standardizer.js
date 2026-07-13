@@ -115,7 +115,6 @@ const FULLY_BYPASS_CLASSES = new Set([
 // Nodes migrated from individual execution bars to the shared status panel.
 const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_LTXVVideoSampler",
-	"GJJ_AudioAceMusicGenerator",
 	"GJJ_AudioSeparator",
 	"GJJ_BatchOutpaint",
 	"GJJ_BatchTextSegmenter",
@@ -1454,6 +1453,7 @@ function parseModelTreeItem(entry, part, fallbackFolder = "") {
 		icon,
 		kind,
 		label: String(entry.label || "模型"),
+		tooltip: String(entry.tooltip || entry.description || entry.note || ""),
 	};
 }
 
@@ -1500,12 +1500,12 @@ function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 	return link;
 }
 
-function modelTreeText(items, emptyText) {
+function buildModelTreeNode(items) {
 	const modelsNode = { name: "models", directory: true, children: new Map() };
 	const addNode = (parent, name, directory, icon = "📁") => {
 		const key = `${directory ? "dir" : "file"}:${name}:${icon}`;
 		if (!parent.children.has(key)) {
-			parent.children.set(key, { name, directory, icon, children: new Map() });
+			parent.children.set(key, { name, directory, icon, children: new Map(), tooltip: "", label: "" });
 		}
 		return parent.children.get(key);
 	};
@@ -1522,9 +1522,16 @@ function modelTreeText(items, emptyText) {
 			node = addNode(node, part, true, "📁");
 		}
 		if (filename) {
-			addNode(node, filename, false, item.icon || "⚫");
+			const fileNode = addNode(node, filename, false, item.icon || "⚫");
+			fileNode.tooltip = item.tooltip || "";
+			fileNode.label = item.label || "";
 		}
 	}
+	return modelsNode;
+}
+
+function modelTreeText(items, emptyText) {
+	const modelsNode = buildModelTreeNode(items);
 	const lines = ["ComfyUI/", "├──📁 models/"];
 	if (!modelsNode.children.size) {
 		lines.push(`│   └──⚫ ${emptyText}`);
@@ -1545,6 +1552,78 @@ function modelTreeText(items, emptyText) {
 	};
 	render(modelsNode);
 	return lines.join("\n");
+}
+
+function createHelpModelTreeLine(prefix, icon, name, { directory = false, tooltip = "", label = "" } = {}) {
+	const row = document.createElement("div");
+	row.className = "gjj-help-model-tree-row";
+	const text = document.createElement("div");
+	text.className = "gjj-help-model-tree-row-text";
+	text.textContent = `${prefix}${icon} ${name}${directory ? "/" : ""}`;
+	text.title = [
+		label,
+		name,
+		tooltip,
+	].filter(Boolean).join("\n");
+	row.appendChild(text);
+	if (!directory && name) {
+		const copy = document.createElement("button");
+		copy.type = "button";
+		copy.className = "gjj-help-model-copy-btn";
+		copy.textContent = "📋";
+		copy.title = [
+			`复制模型名称：${name}`,
+			tooltip,
+		].filter(Boolean).join("\n");
+		copy.addEventListener("click", async (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const ok = await GJJ_Utils.copyTextToClipboard(name);
+			const old = copy.textContent;
+			copy.textContent = ok ? "✓" : "!";
+			setTimeout(() => { copy.textContent = old; }, 900);
+		});
+		row.appendChild(copy);
+	} else {
+		row.appendChild(document.createElement("span"));
+	}
+	return row;
+}
+
+function createModelTreeDom(items, emptyText) {
+	const modelsNode = buildModelTreeNode(items);
+	const tree = document.createElement("div");
+	tree.className = "gjj-help-model-tree-dom";
+	tree.appendChild(createHelpModelTreeLine("", "📁", "ComfyUI", { directory: true }));
+	tree.appendChild(createHelpModelTreeLine("├──", "📁", "models", { directory: true }));
+	if (!modelsNode.children.size) {
+		tree.appendChild(createHelpModelTreeLine("│   └──", "⚫", emptyText || "未选择模型文件"));
+		return tree;
+	}
+	const render = (node, prefix = "│   ") => {
+		const children = Array.from(node.children.values()).sort((a, b) => {
+			if (a.directory !== b.directory) return a.directory ? -1 : 1;
+			return a.name.localeCompare(b.name, "zh-Hans-CN");
+		});
+		children.forEach((child, index) => {
+			const last = index === children.length - 1;
+			tree.appendChild(createHelpModelTreeLine(
+				`${prefix}${last ? "└" : "├"}──`,
+				child.directory ? "📁" : child.icon || "⚫",
+				child.name,
+				{
+					directory: child.directory,
+					tooltip: child.tooltip || "",
+					label: child.label || "",
+				}
+			));
+			if (child.directory) {
+				render(child, `${prefix}${last ? "    " : "│   "}`);
+			}
+		});
+	};
+	render(modelsNode);
+	return tree;
 }
 
 function modelTreeTextLineHasIcon(text) {
@@ -1600,10 +1679,7 @@ function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DO
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-help-model-content gjj-help-model-tree";
 	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
-	const pre = document.createElement("pre");
-	pre.className = "gjj-help-model-tree-pre";
-	pre.textContent = modelTreeText(modelTreeItems(items), emptyText || "未选择模型文件");
-	wrap.appendChild(pre);
+	wrap.appendChild(createModelTreeDom(modelTreeItems(items), emptyText || "未选择模型文件"));
 	return wrap;
 }
 
@@ -1786,6 +1862,51 @@ function ensureHelpStyles() {
 			white-space: pre-wrap;
 			word-break: break-word;
 			overflow-x: auto;
+		}
+		.gjj-help-model-tree-dom {
+			display: flex;
+			flex-direction: column;
+			gap: 1px;
+			margin: 0;
+			padding: 10px 11px;
+			border: 1px solid rgba(113, 137, 148, 0.28);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.035);
+			color: #d7e3e6;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+			font-size: 12.5px;
+			line-height: 1.62;
+			overflow: auto;
+		}
+		.gjj-help-model-tree-row {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) 25px;
+			align-items: center;
+			gap: 4px;
+			min-height: 20px;
+		}
+		.gjj-help-model-tree-row-text {
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: pre;
+		}
+		.gjj-help-model-copy-btn {
+			width: 23px;
+			height: 22px;
+			padding: 0;
+			border: 1px solid rgba(113, 137, 148, 0.42);
+			border-radius: 5px;
+			background: rgba(22, 33, 39, 0.88);
+			color: #d7e3e6;
+			font-size: 12px;
+			line-height: 18px;
+			cursor: pointer;
+		}
+		.gjj-help-model-copy-btn:hover {
+			border-color: rgba(168, 240, 207, 0.72);
+			color: #ffffff;
+			background: rgba(35, 92, 72, 0.38);
 		}
 		.gjj-help-model-download {
 			display: block;

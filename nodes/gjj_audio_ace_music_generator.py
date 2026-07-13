@@ -44,6 +44,48 @@ DEFAULT_SCHEDULER = "simple"
 DEFAULT_DENOISE = 1.0
 DEFAULT_TAIL_PADDING_SECONDS = 3.0
 DEFAULT_FADE_OUT_SECONDS = 1.5
+HIDDEN_UI_PARAMETERS = (
+    "model_name",
+    "tags",
+    "lyrics",
+    "duration",
+    "bpm",
+    "timesignature",
+    "language",
+    "keyscale",
+    "seed",
+    "lyrics_strength",
+    "generate_audio_codes",
+    "cfg_scale",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "shift",
+    "steps",
+    "cfg",
+    "sampler_name",
+    "scheduler",
+    "denoise",
+)
+
+
+def _mark_hidden_ui_parameters(input_data: dict[str, Any]) -> dict[str, Any]:
+    hidden_names = set(HIDDEN_UI_PARAMETERS)
+    for group_name in ("required", "optional"):
+        group = input_data.get(group_name)
+        if not isinstance(group, dict):
+            continue
+        for name, definition in group.items():
+            if name not in hidden_names or not isinstance(definition, tuple) or len(definition) < 2:
+                continue
+            options = definition[1]
+            if not isinstance(options, dict):
+                continue
+            options.setdefault("hidden", True)
+            options.setdefault("display", "hidden")
+            options.setdefault("advanced", True)
+    return input_data
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -348,11 +390,15 @@ class GJJ_AudioAceMusicGenerator:
     RETURN_TYPES = ("AUDIO", "STRING")
     RETURN_NAMES = ("音乐音频输出", "音乐结果摘要")
     OUTPUT_TOOLTIPS = ("生成的音乐音频。", "当前生成任务的简要信息。")
+    GJJ_UI = {
+        "toolbar": ["🔄", "▶️", "🎲", "🌐", "🪄", "🎵", "⚡", "🧠", "⚙️"],
+        "hidden_parameters": list(HIDDEN_UI_PARAMETERS),
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
         models = _list_visible_models()
-        return {
+        return _mark_hidden_ui_parameters({
             "required": {
                 "model_name": (
                     models,
@@ -576,7 +622,7 @@ class GJJ_AudioAceMusicGenerator:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
-        }
+        })
 
     def generate(
         self,

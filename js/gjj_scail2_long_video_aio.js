@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const NODE_NAME = "GJJ_SCAIL2LongVideoAIO";
 const DIRECTOR_WIDGET = "director_storyboard_json";
@@ -69,16 +70,67 @@ const MODEL_FIELDS = [
 	["sam3_checkpoint", "SAM3", "text"],
 ];
 
+const MODEL_FIELD_FALLBACKS = {
+	model_file: "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors",
+	vae_file: "wan_2.1_vae.safetensors",
+	text_encoder_file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+	clip_vision_file: "clip_vision_h.safetensors",
+	accel_lora_file: "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+	dpo_lora_file: "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
+	slop_bounce_lora_file: "wan/i2v_slop_bounce.safetensors",
+	sam3_checkpoint: "sam3.1_multiplex.safetensors",
+	multiview_unet: "qwen_image_edit_2511_int8_convrot.safetensors",
+	multiview_clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+	multiview_vae: "qwen_image_vae.safetensors",
+	multiview_lora_1: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+	multiview_lora_2: "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+	multiview_lora_3: "",
+	rmbg_model: "rmbg1.4.safetensors",
+};
+
+const MODEL_FIELD_ICONS = {
+	diffusion_models: "🟣",
+	vae: "🔴",
+	text_encoders: "🟡",
+	clip_vision: "🟡",
+	loras: "🟠",
+	checkpoints: "🟣",
+	RMBG: "🟣",
+	translation: "🧠",
+};
+
 const EXTRA_MODEL_FIELDS = [
 	{
 		name: "multiview_unet",
 		label: "多视图主模型",
 		folder: "diffusion_models",
 		path: "models/diffusion_models",
-		anyKeywords: ["flux", "f2k", "edit"],
-		keywords: [],
+		anyKeywords: [],
+		keywords: ["qwen", "image", "edit", "2511"],
 		extensions: [".safetensors", ".gguf"],
-		description: "【生成多视图】使用的编辑型主模型。支持 flux / f2k / edit 关键词过滤，UNET 与 VAE 按模型族预设自动匹配。",
+		description: "【生成多视图】按 GJJ_CharacterMultiViewStudio 的 2511 链路使用 Qwen Image Edit 主模型。",
+		required: false,
+	},
+	{
+		name: "multiview_clip",
+		label: "多视图CLIP",
+		folder: "text_encoders",
+		path: "models/text_encoders",
+		anyKeywords: [],
+		keywords: ["qwen", "2.5", "vl"],
+		extensions: [".safetensors", ".gguf"],
+		description: "【生成多视图】2511 链路使用的 Qwen 2.5 VL 文本/视觉编码器。",
+		required: false,
+	},
+	{
+		name: "multiview_vae",
+		label: "多视图VAE",
+		folder: "vae",
+		path: "models/vae",
+		anyKeywords: [],
+		keywords: ["qwen", "image", "vae"],
+		extensions: [".safetensors"],
+		description: "【生成多视图】2511 链路使用的 Qwen Image VAE。",
 		required: false,
 	},
 	{
@@ -88,7 +140,7 @@ const EXTRA_MODEL_FIELDS = [
 		path: "models/loras",
 		keywords: ["qwen", "lightning"],
 		extensions: [".safetensors"],
-		description: "【生成多视图】使用的人物库自定义视图 Lightning LoRA。",
+		description: "【生成多视图】2511 链路使用的 Lightning / 加速 LoRA。",
 		required: false,
 	},
 	{
@@ -98,7 +150,18 @@ const EXTRA_MODEL_FIELDS = [
 		path: "models/loras",
 		keywords: ["multiple", "angles"],
 		extensions: [".safetensors"],
-		description: "【生成多视图】使用的人物库自定义视图多角度 LoRA。",
+		description: "【生成多视图】2511 链路使用的多角度一致性 LoRA。",
+		required: false,
+	},
+	{
+		name: "multiview_lora_3",
+		label: "多视图LoRA 3",
+		folder: "loras",
+		path: "models/loras",
+		anyKeywords: [],
+		keywords: [],
+		extensions: [".safetensors"],
+		description: "【生成多视图】可选第3组微调模型；留空表示不使用。",
 		required: false,
 	},
 	{
@@ -108,7 +171,7 @@ const EXTRA_MODEL_FIELDS = [
 		path: "models/RMBG",
 		keywords: ["rmbg", "1.4"],
 		extensions: [".safetensors", ".pth"],
-		description: "【拼接图片】调用 GJJ_RemoveBgStitch 时使用的 RMBG1.4 去背景模型。",
+		description: "【去背景/拼接】多视图人物资产、批量去背景和 GJJ_RemoveBgStitch 拼接图片使用的 RMBG1.4 模型。",
 		required: false,
 	},
 ];
@@ -1628,6 +1691,29 @@ function mergeExtraModelFields(fields) {
 	return result;
 }
 
+function modelTreeEntriesFromFields(fields) {
+	return (fields || [])
+		.map((field) => {
+			const name = String(field?.name || "");
+			if (!name) return null;
+			const localExtra = EXTRA_MODEL_FIELDS.find((item) => item.name === name);
+			const merged = localExtra ? { ...field, ...localExtra } : field;
+			return {
+				widget: name,
+				label: merged.label || name,
+				folder: merged.path || merged.folder || "",
+				icon: MODEL_FIELD_ICONS[String(merged.folder || "").replace(/^models[\\/]/, "")] || "🟣",
+				models: Array.isArray(merged.models) ? merged.models : [],
+				keywords: Array.isArray(merged.keywords) ? merged.keywords : [],
+				anyKeywords: Array.isArray(merged.anyKeywords) ? merged.anyKeywords : [],
+				fallback: MODEL_FIELD_FALLBACKS[name] || merged.preferred_name || merged.filename || "",
+				description: merged.description || "",
+				required: Boolean(merged.required),
+			};
+		})
+		.filter(Boolean);
+}
+
 function openModelPopup(node) {
 	const wrap = popupBase("模型", 560, node);
 	const panel = document.createElement("div");
@@ -1662,57 +1748,17 @@ function openModelPopup(node) {
 			panel.appendChild(empty);
 			return;
 		}
-		for (const sourceField of fields) {
-			const name = String(sourceField.name || "");
-			if (!name) continue;
-			const localExtra = EXTRA_MODEL_FIELDS.find((item) => item.name === name);
-			const field = name === "multiview_unet" && localExtra ? { ...sourceField, ...localExtra } : sourceField;
-			const row = document.createElement("div");
-			row.style.cssText = "display:grid;grid-template-columns:118px 1fr;gap:8px;align-items:start;";
-			const label = document.createElement("div");
-			label.textContent = field.label || name;
-			label.style.cssText = "color:#aeb9bd;line-height:28px;";
-			const box = document.createElement("div");
-			box.style.cssText = "display:flex;flex-direction:column;gap:4px;min-width:0;";
-			const select = document.createElement("select");
-			select.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #3f525d;border-radius:6px;background:#1b2429;color:#eef7f2;padding:6px;";
-			const allModels = sortModelNames(field.models || []);
-			const filtered = filterModelNames(allModels, field);
-			select.title = modelTooltip(field, filtered.length, allModels.length);
-			label.title = select.title;
-			if (!field.required && !filtered.length) {
-				const blank = document.createElement("option");
-				blank.value = "";
-				blank.textContent = "不使用";
-				select.appendChild(blank);
-			}
-			for (const model of filtered) {
-				const option = document.createElement("option");
-				option.value = model;
-				option.textContent = model;
-				option.title = select.title;
-				select.appendChild(option);
-			}
-			if (filtered.length) {
-				select.value = filtered[0];
-				setWidget(node, name, filtered[0]);
-			} else {
-				select.value = "";
-				select.disabled = true;
-			}
-			select.onchange = () => setWidget(node, name, select.value);
-			box.appendChild(select);
-			if (!filtered.length) {
-				const hint = document.createElement("div");
-				const keywords = modelKeywordLabel(field) || "无";
-				hint.textContent = `没有找到匹配关键词「${keywords}」的模型；请检查 ${field.path || field.folder || "模型目录"}。`;
-				hint.style.cssText = "color:#fbbf24;font-size:12px;line-height:1.35;";
-				hint.title = select.title;
-				box.appendChild(hint);
-			}
-			row.append(label, box);
-			panel.appendChild(row);
-		}
+		panel.appendChild(GJJ_Utils.createModelTreeView({
+			node,
+			entries: modelTreeEntriesFromFields(fields),
+			refresh: () => {
+				updateDomToolbarState(node);
+				app.graph?.setDirtyCanvas?.(true, true);
+			},
+			onApply: (entry, value) => {
+				setWidget(node, entry.widget, value);
+			},
+		}));
 	}).catch((error) => {
 		panel.replaceChildren();
 		const fail = document.createElement("div");
@@ -1837,6 +1883,7 @@ function openDirector(node) {
 	let referenceLightbox = null;
 	let viewStart = Math.max(1, Number(plan.view_start || 1));
 	let viewEnd = Math.max(viewStart, Number(plan.view_end || plan.total_frames || 1));
+	let refreshReferenceActionButtons = () => {};
 
 	const sceneVideo = (scene) => normalizeMediaItem(scene?.video || plan.videos?.[0] || {});
 	const currentAudio = () => normalizeMediaItem((plan.audios || [])[0] || {});
@@ -2204,11 +2251,13 @@ function openDirector(node) {
 	};
 	const setBusy = (button, label = "⌛执行中...") => {
 		const oldText = button.textContent;
+		button.dataset.gjjBusy = "1";
 		button.textContent = label;
 		button.disabled = true;
 		return () => {
+			delete button.dataset.gjjBusy;
 			button.textContent = oldText;
-			button.disabled = false;
+			refreshReferenceActionButtons();
 		};
 	};
 	const deleteSelectedScene = () => {
@@ -2600,6 +2649,37 @@ function openDirector(node) {
 		const refsList = currentSceneReferences();
 		const indexes = Array.from(selectedRefIndexes).filter((index) => index >= 0 && index < refsList.length);
 		return indexes.length ? indexes.map((index) => refsList[index]) : refsList.slice();
+	};
+	const selectedReferenceCount = () => selectedReferenceItems().length;
+	const stitchReferenceCount = () => selectedOrCurrentReferenceItems().length;
+	const setReferenceActionButtonState = (button, enabled, enabledTitle, disabledTitle) => {
+		const busy = button.dataset.gjjBusy === "1";
+		button.disabled = busy || !enabled;
+		button.title = busy ? "正在执行，请稍候。" : (enabled ? enabledTitle : disabledTitle);
+		button.style.opacity = button.disabled ? "0.45" : "1";
+		button.style.cursor = button.disabled ? "not-allowed" : "pointer";
+	};
+	refreshReferenceActionButtons = () => {
+		const selectedCount = selectedReferenceCount();
+		const stitchCount = stitchReferenceCount();
+		setReferenceActionButtonState(
+			multiViewBtn,
+			selectedCount >= 1,
+			"用选中的参考图调用 GJJ_CharacterMultiViewStudio 生成【侧面】【背面】，结果会加入当前片段参考图。",
+			"需要当前片段至少有 1 张参考图，才能生成多视图。",
+		);
+		setReferenceActionButtonState(
+			removeBgBtn,
+			selectedCount >= 1,
+			"用选中的参考图调用 RMBG1.4 去除背景，生成透明 PNG 并加入当前片段参考图。",
+			"需要当前片段至少有 1 张参考图，才能去除背景。",
+		);
+		setReferenceActionButtonState(
+			stitchBtn,
+			stitchCount >= 2,
+			"用选中的参考图调用 GJJ_RemoveBgStitch 去背景拼接，生成结果会加入当前片段参考图。",
+			"需要至少 2 张参考图，才能拼接图片。",
+		);
 	};
 	const addMediaItemsToSelectedScene = (items) => {
 		const currentScene = plan.scenes[selected] || plan.scenes[0];
@@ -3239,6 +3319,7 @@ function openDirector(node) {
 			empty.style.cssText = "color:#78909a;font-size:12px;padding:24px 4px;";
 			refs.appendChild(empty);
 		}
+		refreshReferenceActionButtons();
 		scheduleTimelineThumbnails();
 	};
 	const addReferencesToSelectedScene = async (files = [], directItems = []) => {
@@ -3487,14 +3568,13 @@ function openDirector(node) {
 		input.click();
 	};
 	const multiviewOptions = [
-		{ label: "正面", prompt: "<sks> front view full body", checked: true },
-		{ label: "右前45°", prompt: "<sks> front-right quarter view full body", checked: true },
-		{ label: "右侧", prompt: "<sks> right side view full body", checked: true },
-		{ label: "右后45°", prompt: "<sks> back-right quarter view full body", checked: false },
-		{ label: "背面", prompt: "<sks> back view full body", checked: true },
-		{ label: "左后45°", prompt: "<sks> back-left quarter view full body", checked: false },
-		{ label: "左侧", prompt: "<sks> left side view full body", checked: false },
-		{ label: "左前45°", prompt: "<sks> front-left quarter view full body", checked: false },
+		{ label: "侧面", prompt: "side view, full body", checked: true },
+		{ label: "背面", prompt: "back view, full body", checked: true },
+		{ label: "正面", prompt: "front view, full body", checked: false },
+		{ label: "右前45°", prompt: "front-right quarter view, full body", checked: false },
+		{ label: "右后45°", prompt: "back-right quarter view, full body", checked: false },
+		{ label: "左后45°", prompt: "back-left quarter view, full body", checked: false },
+		{ label: "左前45°", prompt: "front-left quarter view, full body", checked: false },
 	];
 	const captureCurrentVideoFrameBlob = async () => {
 		if (!video.videoWidth || !video.videoHeight) throw new Error("当前视频帧还没有加载完成。");
@@ -3583,8 +3663,13 @@ function openDirector(node) {
 			form.append("file", blob, "scail2_reference_board.png");
 			form.append("labels", JSON.stringify(options.labels));
 			form.append("prompt_labels", JSON.stringify(options.promptLabels));
-			const selectedUnet = String(getWidget(node, "multiview_unet", "") || "").trim();
-			if (selectedUnet) form.append("multiview_unet", selectedUnet);
+			for (const name of ["multiview_unet", "multiview_clip", "multiview_vae", "multiview_lora_1", "multiview_lora_2", "multiview_lora_3", "rmbg_model"]) {
+				const value = String(getWidget(node, name, "") || "").trim();
+				if (name === "multiview_unet" && value && !/qwen.*image.*edit.*2511|firered.*image.*edit/i.test(value)) continue;
+				if (name === "multiview_clip" && value && !/qwen[_-]?2\.?5.*vl|qwen25vl/i.test(value)) continue;
+				if (name === "multiview_vae" && value && !/qwen[_-]?image[_-]?vae/i.test(value)) continue;
+				if (value && value !== "不使用") form.append(name, value);
+			}
 			if (actionBlob) {
 				for (let index = 0; index < options.labels.length; index += 1) {
 					form.append(`action_file_${index + 1}`, actionBlob, `current_video_frame_${index + 1}.png`);
@@ -3592,7 +3677,11 @@ function openDirector(node) {
 			}
 			const data = await fetchJson(CHARACTER_MULTIVIEW_API, { method: "POST", body: form });
 			const views = Array.isArray(data?.character?.views) ? data.character.views : [];
-			const urls = views.map((view) => view?.url).filter(Boolean);
+			const generatedLabels = new Set((Array.isArray(data?.labels) ? data.labels : options.labels).map((label) => String(label || "").trim()).filter(Boolean));
+			const urls = views
+				.filter((view) => !generatedLabels.size || generatedLabels.has(String(view?.label || view?.id || "").trim()))
+				.map((view) => view?.url)
+				.filter(Boolean);
 			const additions = await mediaItemsFromUrls(urls);
 			if (!additions.length) throw new Error("多视图已执行，但没有拿到可加入参考图的图片。");
 			addMediaItemsToSelectedScene(additions);
@@ -3619,7 +3708,7 @@ function openDirector(node) {
 	};
 	const runReferenceStitch = async () => {
 		const items = selectedOrCurrentReferenceItems();
-		if (items.length < 2) return;
+		if (items.length < 2) throw new Error("请至少选择或添加 2 张参考图片。");
 		const releaseBusy = setBusy(stitchBtn);
 		try {
 			const blob = await stitchedImageBlobFromReferences(items);

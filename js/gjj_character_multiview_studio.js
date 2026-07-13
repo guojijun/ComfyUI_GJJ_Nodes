@@ -235,15 +235,15 @@ const DEFAULT_TEMPLATE_TEXT = templateTextFromGroups();
 
 const DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors";
 
-const ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors";
+const ACTION_MIGRATION_LORA_1 = "FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors";
 const ACTION_MIGRATION_LORA_1_STRENGTH = 1.0;
-const ACTION_MIGRATION_LORA_2 = "QWEN\\2511\\edit_2511人景融合20.safetensors";
+const ACTION_MIGRATION_LORA_2 = "edit_2511人景融合20.safetensors";
 const ACTION_MIGRATION_LORA_2_STRENGTH = 1.0;
 
 const MODEL_PRESETS = [
 	{
 		keywords: ["qwen_image_edit_2511", "firered-image-edit", "realfire"],
-		lora1: "QWEN\\lighting\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		lora1: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 		lora1Strength: 1.0,
 		lora2: DEFAULT_MULTI_ANGLES_LORA,
 		lora2Strength: 1.0,
@@ -252,7 +252,7 @@ const MODEL_PRESETS = [
 	},
 	{
 		keywords: ["qwen_image_edit"],
-		lora1: "QWEN\\lighting\\Qwen-Image-Lightning-4steps-V1.0.safetensors",
+		lora1: "Qwen-Image-Lightning-4steps-V1.0.safetensors",
 		lora1Strength: 1.0,
 		lora2: DEFAULT_MULTI_ANGLES_LORA,
 		lora2Strength: 1.0,
@@ -1056,6 +1056,7 @@ function resolveWidgetOption(widget, desiredValue) {
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
+	refreshOpenModelFloatingPanel(node);
 }
 
 function formatActionName(index) {
@@ -1954,33 +1955,21 @@ function enforceRequiredModelChoices(node) {
 				return (left?.[0] ?? 9) - (right?.[0] ?? 9) || String(a).localeCompare(String(b));
 			});
 			unetValues.splice(0, unetValues.length, ...filtered);
-			if (!filtered.includes(String(unetWidget.value || ""))) {
+			if (!String(unetWidget.value || "").trim()) {
 				setWidgetValue(unetWidget, filtered[0]);
 			}
 		}
 	}
-	const loraFilters = new Map([
-		[LORA1_WIDGET, ["2511", "lightning"]],
-		[LORA2_WIDGET, ["2511", "angles"]],
-		[LORA3_WIDGET, ["qwen"]],
-	]);
-	for (const [name, keywords] of loraFilters.entries()) {
+	for (const name of [LORA1_WIDGET, LORA2_WIDGET, LORA3_WIDGET]) {
 		const widget = getWidget(node, name);
 		const values = mutableWidgetChoices(widget);
 		if (values?.length) {
-			for (let index = values.length - 1; index >= 0; index--) {
-				const text = String(values[index] || "").toLowerCase();
-				if (text.trim() && !keywords.every((keyword) => text.includes(keyword))) values.splice(index, 1);
-			}
 			values.sort((a, b) => {
 				const left = modelNameScore(a, [], 0);
 				const right = modelNameScore(b, [], 1);
 				return (left?.[0] ?? 9) - (right?.[0] ?? 9) || String(a).localeCompare(String(b));
 			});
 			if (values.length && !String(widget.value || "").trim()) {
-				setWidgetValue(widget, values[0]);
-			}
-			if (values.length && !values.includes(String(widget.value || ""))) {
 				setWidgetValue(widget, values[0]);
 			}
 		}
@@ -2083,6 +2072,14 @@ function floatingRegistry() {
 		globalThis.__gjjCharacterMultiViewFloatingPanels = new Set();
 	}
 	return globalThis.__gjjCharacterMultiViewFloatingPanels;
+}
+
+function refreshOpenModelFloatingPanel(node) {
+	for (const panel of Array.from(floatingRegistry())) {
+		if (panel?.node === node && panel?.key === "models") {
+			panel.refresh?.();
+		}
+	}
 }
 
 function closeCharacterMultiViewFloatingPanels(except = null) {
@@ -2207,6 +2204,13 @@ function makeFloatingPanel(node, key, anchor, title) {
 		panel,
 		titleEl,
 		body,
+		refreshers: new Set(),
+		refresh() {
+			for (const refresher of Array.from(this.refreshers || [])) {
+				refresher?.();
+			}
+			updateKeepModelHeaderButtonState(node);
+		},
 		close() {
 			panel.remove();
 			floatingRegistry().delete(this);
@@ -3016,7 +3020,74 @@ function makeModelChoicePanel(node, widget, onApply, strengthWidget = null) {
 	return wrap;
 }
 
-function makeClickableModelTreeFile(node, widgetName, prefix, icon, fallback = "", afterApply = null, strengthWidgetName = "") {
+function characterModelTreeEntries(node) {
+	return [
+		{
+			widget: UNET_WIDGET,
+			label: "主模型",
+			folder: "diffusion_models",
+			icon: "🟣",
+			models: widgetChoices(getWidget(node, UNET_WIDGET)) || [],
+			keywords: ["qwen", "image", "edit", "2511"],
+			fallback: "qwen_image_edit_2511_int8_convrot.safetensors",
+			description: "Qwen Image Edit 2511 多视图主生成模型。",
+		},
+		{
+			widget: LORA2_WIDGET,
+			label: "多角度 LoRA",
+			folder: "loras",
+			icon: "🟠",
+			models: widgetChoices(getWidget(node, LORA2_WIDGET)) || [],
+			keywords: [],
+			fallback: DEFAULT_MULTI_ANGLES_LORA,
+			description: "多视图角度一致性 LoRA。",
+			strengthWidgetName: LORA2_STRENGTH_WIDGET,
+		},
+		{
+			widget: LORA1_WIDGET,
+			label: "Lightning LoRA",
+			folder: "loras",
+			icon: "🟠",
+			models: widgetChoices(getWidget(node, LORA1_WIDGET)) || [],
+			keywords: [],
+			fallback: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+			description: "Qwen Image Edit 2511 加速 LoRA。",
+			strengthWidgetName: LORA1_STRENGTH_WIDGET,
+		},
+		{
+			widget: RMBG_WIDGET,
+			label: "RMBG1.4",
+			folder: "RMBG",
+			icon: "🟣",
+			models: widgetChoices(getWidget(node, RMBG_WIDGET)) || [],
+			keywords: ["rmbg", "1.4"],
+			fallback: DEFAULT_RMBG14_MODEL,
+			description: "人物资产分支使用的 RMBG 抠图模型。",
+		},
+		{
+			widget: CLIP_WIDGET,
+			label: "CLIP / VL",
+			folder: "text_encoders",
+			icon: "🟡",
+			models: widgetChoices(getWidget(node, CLIP_WIDGET)) || [],
+			keywords: ["qwen", "2.5", "vl"],
+			fallback: DEFAULT_QWEN2511_CLIP,
+			description: "Qwen Image Edit 2511 文本/视觉编码器。",
+		},
+		{
+			widget: VAE_WIDGET,
+			label: "VAE",
+			folder: "vae",
+			icon: "🔴",
+			models: widgetChoices(getWidget(node, VAE_WIDGET)) || [],
+			keywords: ["qwen", "image", "vae"],
+			fallback: DEFAULT_QWEN2511_VAE,
+			description: "Qwen Image VAE。",
+		},
+	];
+}
+
+function makeClickableModelTreeFile(node, widgetName, prefix, icon, fallback = "", afterApply = null, strengthWidgetName = "", popup = null) {
 	const widget = getWidget(node, widgetName);
 	const strengthWidget = strengthWidgetName ? getWidget(node, strengthWidgetName) : null;
 	if (widget && !String(widget.value || "").trim()) {
@@ -3060,25 +3131,26 @@ function makeClickableModelTreeFile(node, widgetName, prefix, icon, fallback = "
 		}
 	};
 	renderLine();
+	popup?.refreshers?.add(renderLine);
 	return host;
 }
 
-function makeModelTreeView(node) {
+function makeModelTreeView(node, popup = null) {
 	const root = document.createElement("div");
 	root.style.cssText = "display:flex;flex-direction:column;gap:1px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;overflow:auto;";
 	root.append(
 		modelTreeLine("", "📁", "models/"),
 		modelTreeLine("├─", "📁", "diffusion_models/"),
-		makeClickableModelTreeFile(node, UNET_WIDGET, "│　└─", "🟣", "", () => applyPresetForCurrentModel(node)),
+		makeClickableModelTreeFile(node, UNET_WIDGET, "│　└─", "🟣", "", () => applyPresetForCurrentModel(node), "", popup),
 		modelTreeLine("├─", "📁", "loras/"),
-		makeClickableModelTreeFile(node, LORA2_WIDGET, "│　└─", "🟠", DEFAULT_MULTI_ANGLES_LORA, null, LORA2_STRENGTH_WIDGET),
-		makeClickableModelTreeFile(node, LORA1_WIDGET, "│　└─", "🟠", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", null, LORA1_STRENGTH_WIDGET),
+		makeClickableModelTreeFile(node, LORA2_WIDGET, "│　└─", "🟠", DEFAULT_MULTI_ANGLES_LORA, null, LORA2_STRENGTH_WIDGET, popup),
+		makeClickableModelTreeFile(node, LORA1_WIDGET, "│　└─", "🟠", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", null, LORA1_STRENGTH_WIDGET, popup),
 		modelTreeLine("├─", "📁", "RMBG/"),
-		makeClickableModelTreeFile(node, RMBG_WIDGET, "│　└─", "🟣", DEFAULT_RMBG14_MODEL),
+		makeClickableModelTreeFile(node, RMBG_WIDGET, "│　└─", "🟣", DEFAULT_RMBG14_MODEL, null, "", popup),
 		modelTreeLine("├─", "📁", "text_encoders/"),
-		makeClickableModelTreeFile(node, CLIP_WIDGET, "│　└─", "🟡", DEFAULT_QWEN2511_CLIP),
+		makeClickableModelTreeFile(node, CLIP_WIDGET, "│　└─", "🟡", DEFAULT_QWEN2511_CLIP, null, "", popup),
 		modelTreeLine("├─", "📁", "vae/"),
-		makeClickableModelTreeFile(node, VAE_WIDGET, "│　└─", "🔴", DEFAULT_QWEN2511_VAE)
+		makeClickableModelTreeFile(node, VAE_WIDGET, "│　└─", "🔴", DEFAULT_QWEN2511_VAE, null, "", popup)
 	);
 	return root;
 }
@@ -3090,9 +3162,30 @@ function openModelFloatingPanel(node, anchor) {
 	}
 	const popup = makeFloatingPanel(node, "models", anchor, "🧠 模型");
 	popup.titleEl.appendChild(makeKeepModelHeaderButton(node));
-	popup.body.append(
-		makeModelTreeView(node)
-	);
+	const renderTree = () => {
+		popup.body.replaceChildren(
+			GJJ_Utils.createModelTreeView({
+				node,
+				entries: characterModelTreeEntries(node),
+				refresh: () => {
+					requestAnimationFrame(() => {
+						syncWidgetValuesCache(node);
+						renderLoraList(node);
+						updateFloatingButtonStates(node);
+						app.graph?.setDirtyCanvas?.(true, true);
+					});
+				},
+				onApply: (entry, value) => {
+					if (entry.widget === UNET_WIDGET) {
+						applyPresetForCurrentModel(node, true);
+					}
+					syncWidgetValuesCache(node);
+				},
+			})
+		);
+	};
+	popup.refresh = renderTree;
+	renderTree();
 	popup.reposition();
 }
 

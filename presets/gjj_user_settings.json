@@ -41,8 +41,8 @@
   },
   "character_library": {
     "matting_method": "RMBG1.4",
-    "multiview_unet": "qwen_image_edit_2511_fp8mixed.safetensors",
-    "multiview_lora_1": "QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    "multiview_unet": "qwen_image_edit_2511_int8_convrot.safetensors",
+    "multiview_lora_1": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
     "multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
     "annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors"
   },

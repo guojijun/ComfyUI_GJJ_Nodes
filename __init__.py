@@ -6,6 +6,7 @@ print("\033[1;92m" + r"""
 💛╚██████╔╝╚██████╔╝███████║ ╚██████╔╝╚██║ ╚██████╔╝╚██████╔╝██║ ╚████║💛
 💛 ╚═════╝  ╚═════╝ ╚══════╝  ╚═════╝  ╚═╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝💛
 """.strip() + "\033[0m")
+import traceback
 from .nodes import *
 WEB_DIRECTORY = "./js"
 def _serialize_help_value(value):
@@ -141,8 +142,8 @@ def _gjj_default_user_settings() -> dict:
 		},
 		"character_library": {
 			"matting_method": "RMBG1.4",
-			"multiview_unet": "qwen_image_edit_2511_fp8mixed.safetensors",
-			"multiview_lora_1": "QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+			"multiview_unet": "qwen_image_edit_2511_int8_convrot.safetensors",
+			"multiview_lora_1": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 			"multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
 			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
 		},
@@ -1291,7 +1292,7 @@ def _register_gjj_character_library_api():
 		return [base[index] if index < len(base) else f"视图{index + 1}" for index in range(count)]
 
 	def labels_for_multiview(count: int) -> list[str]:
-		base = ["大头照", "正面", "45度", "背面"]
+		base = ["侧面", "背面"]
 		return [base[index] if index < len(base) else f"视图{index + 1}" for index in range(count)]
 
 	def parse_view_labels(value) -> list[str]:
@@ -1362,6 +1363,8 @@ def _register_gjj_character_library_api():
 			view_rule = "左侧面视图，主体完整侧身"
 		elif "右侧" in text or "right" in lowered:
 			view_rule = "右侧面视图，主体完整侧身"
+		elif "侧" in text or "side" in lowered:
+			view_rule = "标准侧面视图，主体完整侧身"
 		elif "背" in text or "后" in text or "back" in lowered:
 			view_rule = "背面/后视图，主体背对镜头"
 		elif "底部仰视" in text:
@@ -1486,10 +1489,10 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🚀 生成多视图",
 					"items": [
-						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_fp8mixed.safetensors'}"},
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int8_convrot.safetensors'}"},
 						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
 						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
-						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
+						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
 						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
 				},
@@ -1748,6 +1751,12 @@ def _register_gjj_character_library_api():
 				requested_labels = parse_view_labels(fields.get("labels") or fields.get("views") or "")
 				prompt_labels = parse_view_labels(fields.get("prompt_labels") or "")
 				multiview_unet_override = str(fields.get("multiview_unet") or "").strip()
+				multiview_clip_override = str(fields.get("multiview_clip") or "").strip()
+				multiview_vae_override = str(fields.get("multiview_vae") or "").strip()
+				multiview_lora_1_override = str(fields.get("multiview_lora_1") or "").strip()
+				multiview_lora_2_override = str(fields.get("multiview_lora_2") or "").strip()
+				multiview_lora_3_override = str(fields.get("multiview_lora_3") or "").strip()
+				rmbg_model_override = str(fields.get("rmbg_model") or "").strip()
 				seed = int(fields.get("seed") or 0)
 			else:
 				data = await request.json()
@@ -1764,6 +1773,12 @@ def _register_gjj_character_library_api():
 				requested_labels = parse_view_labels(data.get("labels") or data.get("views") or "")
 				prompt_labels = parse_view_labels(data.get("prompt_labels") or "")
 				multiview_unet_override = str(data.get("multiview_unet") or "").strip()
+				multiview_clip_override = str(data.get("multiview_clip") or "").strip()
+				multiview_vae_override = str(data.get("multiview_vae") or "").strip()
+				multiview_lora_1_override = str(data.get("multiview_lora_1") or "").strip()
+				multiview_lora_2_override = str(data.get("multiview_lora_2") or "").strip()
+				multiview_lora_3_override = str(data.get("multiview_lora_3") or "").strip()
+				rmbg_model_override = str(data.get("rmbg_model") or "").strip()
 				seed = int(data.get("seed") or 0)
 			manifest = read_manifest(character_id)
 			manifest["name"] = name or manifest.get("name") or character_id
@@ -1798,12 +1813,15 @@ def _register_gjj_character_library_api():
 					DEFAULT_QWEN2511_LIGHTNING_LORA,
 					DEFAULT_QWEN2511_UNET,
 					GJJ_CharacterMultiViewStudio,
+					_is_qwen2511_unet_name,
+					_pick_qwen2511_unet_name,
 					_pick_available_lora_name,
 					_safe_filename_list,
 				)
 				from .nodes.common_utils.model_manager import (
 					gjjutils_find_model_list,
 					gjjutils_model_stem_without_quant,
+					gjjutils_resolve_model_by_extensionless_seed,
 				)
 				from .nodes.common_utils.model_family import (
 					gjjutils_match_model_family_preset,
@@ -1840,14 +1858,43 @@ def _register_gjj_character_library_api():
 				)
 			if base_prompt:
 				identity_prompt = f"{identity_prompt}\n{base_prompt}"
-			output_labels = requested_labels or ["大头照", "正面", "45度", "背面"]
+			output_labels = requested_labels or ["侧面", "背面"]
 			action_source_labels = prompt_labels if len(prompt_labels) == len(output_labels) else output_labels
+			def clean_multiview_prompt_label(value: str) -> str:
+				return re.sub(r"(?i)<\s*sks\s*>", "", str(value or "")).strip()
 			action_prompts = "\n".join([
-				str(label).strip() if str(label).strip().lower().startswith("<sks>") else multiview_prompt_for_label(label)
+				clean_multiview_prompt_label(label) if str(label).strip().lower().startswith("<sks>") else multiview_prompt_for_label(label)
 				for label in action_source_labels
 			])
 			lora_models = _safe_filename_list("loras") or []
 			character_settings = _gjj_section_settings("character_library")
+			def basename_seed(value: str) -> str:
+				return str(value or "").replace("\\", "/").split("/")[-1].strip()
+			def pick_model_any_subdir(folder_type: str, seed: str, available: list[str], fallback: str = "", extensions: tuple[str, ...] = ()) -> str:
+				exts = tuple(ext.lower() for ext in extensions)
+				resolved = gjjutils_resolve_model_by_extensionless_seed(seed, folder_type) if seed else ""
+				if resolved and (not exts or str(resolved).replace("\\", "/").lower().endswith(exts)):
+					return str(resolved)
+				resolved = gjjutils_resolve_model_by_extensionless_seed(basename_seed(seed), folder_type) if seed else ""
+				if resolved and (not exts or str(resolved).replace("\\", "/").lower().endswith(exts)):
+					return str(resolved)
+				picked = gjjutils_model_family_pick_model_name(seed, available, fallback, "basename") if seed else ""
+				if picked and (not exts or str(picked).replace("\\", "/").lower().endswith(exts)):
+					return picked
+				picked = gjjutils_model_family_pick_model_name(basename_seed(seed), available, fallback, "basename") if seed else ""
+				if picked and (not exts or str(picked).replace("\\", "/").lower().endswith(exts)):
+					return picked
+				return first_keyword_model(folder_type, basename_seed(seed) or seed, extensions)
+			def pick_lora_any_subdir(seed: str, fallback: str = "") -> str:
+				for candidate in (seed, basename_seed(seed), fallback, basename_seed(fallback)):
+					resolved = gjjutils_resolve_model_by_extensionless_seed(candidate, "loras") if candidate else ""
+					if resolved:
+						return str(resolved)
+					picked = gjjutils_model_family_pick_lora_name(candidate, lora_models, "", "basename") if candidate else ""
+					if picked:
+						return picked
+				picked = first_keyword_model("loras", basename_seed(seed) or seed or fallback, (".safetensors",))
+				return gjjutils_model_family_pick_lora_name(picked, lora_models, "", "basename") if picked else ""
 			def first_keyword_model(folder_type: str, seed: str, extensions: tuple[str, ...]) -> str:
 				keywords = [part for part in gjjutils_model_stem_without_quant(seed).split(" ") if part]
 				matches = gjjutils_find_model_list(keywords, folder_type, "AND") if keywords else []
@@ -1856,16 +1903,31 @@ def _register_gjj_character_library_api():
 					if str(match or "").replace("\\", "/").lower().endswith(exts):
 						return str(match)
 				return ""
-			unet_name = first_keyword_model("diffusion_models", str(character_settings.get("multiview_unet") or "qwen image edit 2511"), (".safetensors", ".gguf"))
 			available_unets = _safe_filename_list("diffusion_models") or []
+			unet_seed = str(character_settings.get("multiview_unet") or default_widget_value("unet_name", DEFAULT_QWEN2511_UNET))
+			unet_name = pick_model_any_subdir("diffusion_models", unet_seed, available_unets, DEFAULT_QWEN2511_UNET, (".safetensors", ".gguf"))
+			if not unet_name:
+				for candidate in available_unets:
+					if str(candidate or "").replace("\\", "/").split("/")[-1].lower() == "qwen_image_edit_2511_int8_convrot.safetensors":
+						unet_name = str(candidate)
+						break
 			if multiview_unet_override:
-				unet_name = gjjutils_model_family_pick_model_name(multiview_unet_override, available_unets, unet_name, "basename") or unet_name
+				unet_name = pick_model_any_subdir("diffusion_models", multiview_unet_override, available_unets, unet_name, (".safetensors", ".gguf")) or unet_name
+			if not _is_qwen2511_unet_name(unet_name):
+				unet_name = _pick_qwen2511_unet_name(available_unets) or unet_name
 			preset = gjjutils_match_model_family_preset(unet_name) or {}
 			has_preset = bool(preset)
-			lora_1_seed = str(preset.get("lora_1_name") if has_preset else (character_settings.get("multiview_lora_1") or "qwen lightning"))
-			lora_2_seed = str(preset.get("lora_2_name") if has_preset else (character_settings.get("multiview_lora_2") or "multiple angles"))
-			lora_1_name = gjjutils_model_family_pick_lora_name(lora_1_seed, lora_models, first_keyword_model("loras", lora_1_seed, (".safetensors",))) if lora_1_seed else ""
-			lora_2_name = gjjutils_model_family_pick_lora_name(lora_2_seed, lora_models, first_keyword_model("loras", lora_2_seed, (".safetensors",))) if lora_2_seed else ""
+			lora_1_seed = str(preset.get("lora_1_name") if has_preset else (character_settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA))
+			lora_2_seed = str(preset.get("lora_2_name") if has_preset else (character_settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA))
+			lora_1_name = pick_lora_any_subdir(lora_1_seed) if lora_1_seed else ""
+			lora_2_name = pick_lora_any_subdir(lora_2_seed) if lora_2_seed else ""
+			if multiview_lora_1_override and multiview_lora_1_override != "不使用":
+				lora_1_name = pick_lora_any_subdir(multiview_lora_1_override, lora_1_name) or lora_1_name
+			if multiview_lora_2_override and multiview_lora_2_override != "不使用":
+				lora_2_name = pick_lora_any_subdir(multiview_lora_2_override, lora_2_name) or lora_2_name
+			lora_3_name = ""
+			if multiview_lora_3_override and multiview_lora_3_override != "不使用":
+				lora_3_name = pick_lora_any_subdir(multiview_lora_3_override)
 			lora_1_strength = float(preset.get("lora_1_strength", 1.0) or 1.0)
 			lora_2_strength = float(preset.get("lora_2_strength", 1.0) or 1.0)
 			missing_models = []
@@ -1877,6 +1939,18 @@ def _register_gjj_character_library_api():
 				missing_models.append("多角度 LoRA")
 			if missing_models:
 				raise RuntimeError(f"生成多视图缺少模型：{'、'.join(missing_models)}。请在 🧠 面板选择关键词匹配到的模型。")
+			print(
+				"[GJJ][CharacterLibrary][Multiview] resolved models:\n"
+				f"  character_id: {character_id}\n"
+				f"  labels: {output_labels}\n"
+				f"  action_prompts:\n{action_prompts}\n"
+				f"  UNET: {unet_name}\n"
+				f"  CLIP override: {multiview_clip_override or '(auto qwen_2.5_vl)'}\n"
+				f"  VAE override: {multiview_vae_override or '(auto qwen_image_vae)'}\n"
+				f"  LoRA1: {lora_1_name} @ {lora_1_strength}\n"
+				f"  LoRA2: {lora_2_name} @ {lora_2_strength}\n"
+				f"  LoRA3: {lora_3_name or '(none)'}"
+			)
 
 			main_image = _pil_list_to_tensor([fit_character_reference_canvas(image, 1024, 1280)])
 			action_kwargs = {}
@@ -1902,8 +1976,13 @@ def _register_gjj_character_library_api():
 					lora_1_strength=lora_1_strength,
 					lora_2_name=lora_2_name,
 					lora_2_strength=lora_2_strength,
+					lora_3_name=lora_3_name,
+					lora_3_strength=1.0 if lora_3_name else 0.0,
 					seed=seed,
 					save_each_image=False,
+					clip_name=multiview_clip_override if multiview_clip_override != "不使用" else "",
+					vae_name=multiview_vae_override if multiview_vae_override != "不使用" else "",
+					rmbg_model_name=rmbg_model_override if rmbg_model_override != "不使用" else "",
 					prompt={},
 					extra_pnginfo={},
 					unique_id=context_unique_id,
@@ -1934,6 +2013,8 @@ def _register_gjj_character_library_api():
 				"character": enrich_manifest(read_manifest(character_id)),
 			})
 		except Exception as exc:
+			print("[GJJ][CharacterLibrary][Multiview][ERROR]")
+			print(traceback.format_exc())
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
 	@server.routes.post("/gjj/character_library/annotate_missing")
@@ -4136,10 +4217,10 @@ def _register_gjj_costume_library_api():
 				{
 					"name": "🚀 产品多视图",
 					"items": [
-						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_fp8mixed.safetensors'}"},
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int8_convrot.safetensors'}"},
 						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
 						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
-						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
+						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
 						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
 				},

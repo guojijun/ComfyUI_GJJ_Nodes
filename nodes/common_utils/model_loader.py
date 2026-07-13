@@ -467,9 +467,31 @@ def _load_unet_gguf(unet_name: str):
 
 def _clip_type_enum(name: str):
     """获取 CLIP 类型枚举值。"""
-    return getattr(
-        comfy.sd.CLIPType, str(name or "").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
-    )
+    normalized = _normalize_text(name).replace("-", "_").replace(" ", "_")
+    aliases = {
+        "stable_diffusion": "STABLE_DIFFUSION",
+        "sd": "STABLE_DIFFUSION",
+        "sd1": "STABLE_DIFFUSION",
+        "sdxl": "STABLE_DIFFUSION",
+        "qwen_image": "QWEN_IMAGE",
+        "qwenimage": "QWEN_IMAGE",
+        "hunyuan_image": "HUNYUAN_IMAGE",
+        "hunyuanimage": "HUNYUAN_IMAGE",
+        "longcat_image": "LONGCAT_IMAGE",
+        "longcatimage": "LONGCAT_IMAGE",
+        "boogu": "BOOGU",
+        "krea2": "KREA2",
+        "flux": "FLUX",
+        "flux2": "FLUX2",
+        "wan": "WAN",
+        "ltx": "LTXV",
+        "ltxv": "LTXV",
+        "hidream": "HIDREAM",
+        "lumina2": "LUMINA2",
+        "ideogram4": "IDEOGRAM4",
+    }
+    enum_name = aliases.get(normalized, str(name or "").strip().upper())
+    return getattr(comfy.sd.CLIPType, enum_name, comfy.sd.CLIPType.STABLE_DIFFUSION)
 
 
 def gjjutils_load_vae(vae_name: str):

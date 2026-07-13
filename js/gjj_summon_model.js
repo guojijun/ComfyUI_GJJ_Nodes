@@ -13,6 +13,7 @@ import { app } from "/scripts/app.js";
 	const MODEL_FIELD_RE = /模型|(^|[_\s-])(model(?:[_\s-]?name)?|ckpt|checkpoint|unet|diffusion|vae|clip|encoder|text[_\s-]*encoder|t5|bert|lora|controlnet|upscale|sam|yolo|bbox|gguf)($|[_\s-])/i;
 	const NON_MODEL_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta|sigma|cfg|steps?|seed|control[_\s-]*after[_\s-]*generate|after[_\s-]*generate|seed[_\s-]*control|width|height|size|batch|fps|frame|frames|start|end|count|percent|denoise|noise|guidance|shift|eta|temperature|top[_\s-]?[kp]|precision|dtype|quant(?:ization|ize)?|device|attention|norm|function|compile|backend|provider|algorithm|scheduler|format|mode|preset|cache|offload)($|[_\s-])/i;
 	const NODE_MODEL_WIDGET_ALLOWLIST = {
+		GJJ_CharacterMultiViewStudio: new Set(["unet_name", "clip_name", "vae_name", "rmbg_model_name", "lora_1_name", "lora_2_name", "lora_3_name"]),
 		GJJ_SeedVR2ImageUpscaler: new Set(["dit_model", "vae_model"]),
 	};
 	const STRENGTH_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta)($|[_\s-])/i;

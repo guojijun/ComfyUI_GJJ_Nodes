@@ -215,6 +215,204 @@ import { api } from "/scripts/api.js";
 		return ["ComfyUI/", ...renderModelTreeNode(root)].join("\n");
 	}
 
+	function normalizeModelText(value) {
+		return String(value || "").replace(/\\/g, "/").toLowerCase();
+	}
+
+	function displayModelFilename(value, fallback = "") {
+		const text = String(value || fallback || "").replace(/\\/g, "/").trim();
+		return text ? text.split("/").filter(Boolean).pop() || text : "未选择";
+	}
+
+	function modelSearchTokens(query) {
+		return String(query || "").toLowerCase().split(/[\s,，;；|/\\]+/).map((token) => token.trim()).filter(Boolean);
+	}
+
+	function modelNameScore(value, tokens, index) {
+		const text = normalizeModelText(value);
+		const suffixScore = text.endsWith(".safetensors") ? 0 : text.endsWith(".gguf") ? 1 : 2;
+		if (!tokens.length) return [suffixScore, index];
+		let positionScore = 0;
+		for (const token of tokens) {
+			const needle = normalizeModelText(token);
+			const found = text.indexOf(needle);
+			if (found < 0) return null;
+			positionScore += found;
+		}
+		return [suffixScore, positionScore, index];
+	}
+
+	function filteredControlOptions(control, current, query = "", limit = 80) {
+		const options = Array.isArray(control?.options) ? control.options : [];
+		const tokens = modelSearchTokens(query);
+		const seen = new Set();
+		const scored = [];
+		for (const [index, option] of options.entries()) {
+			const text = String(option || "").trim();
+			const key = normalizeModelText(text);
+			if (!text || seen.has(key)) continue;
+			seen.add(key);
+			const score = modelNameScore(text, tokens, index);
+			if (score) scored.push({ text, score });
+		}
+		scored.sort((a, b) => {
+			for (let index = 0; index < a.score.length; index += 1) {
+				if (a.score[index] !== b.score[index]) return a.score[index] - b.score[index];
+			}
+			return a.text.localeCompare(b.text, "zh-Hans-CN");
+		});
+		const result = scored.slice(0, limit).map((item) => item.text);
+		if (current && !result.includes(current) && (!tokens.length || modelNameScore(current, tokens, -1))) {
+			result.unshift(current);
+		}
+		return result;
+	}
+
+	function modelFileIcon(path) {
+		const text = normalizeModelText(path);
+		if (text.includes("/loras/")) return "🟠";
+		if (text.includes("/text_encoders/")) return "🟡";
+		if (text.includes("/vae/")) return "🔴";
+		return "🟣";
+	}
+
+	function findControlForModelItem(item, controls, values) {
+		const path = normalizeModelText(item?.path || item);
+		for (const control of controls || []) {
+			const current = normalizeModelText(values?.[control.key]);
+			if (current && (path.endsWith(current) || path.includes(`/${current}`))) return control;
+		}
+		if (path.includes("/text_encoders/")) return controls.find((control) => /clip|encoder/i.test(control.key));
+		if (path.includes("/diffusion_models/")) return controls.find((control) => /unet|diffusion/i.test(control.key));
+		if (path.includes("/loras/")) return controls.find((control) => /lora/i.test(control.key));
+		return null;
+	}
+
+	function modelTreeLine(prefix, icon, text, clickable = false) {
+		const row = document.createElement(clickable ? "button" : "div");
+		if (clickable) row.type = "button";
+		row.className = `gjj-sl-model-line${clickable ? " clickable" : ""}`;
+		row.textContent = `${prefix}${icon} ${text}`;
+		return row;
+	}
+
+	function makeModelChoicePanel(control, values, onApply) {
+		const wrap = document.createElement("div");
+		wrap.className = "gjj-sl-model-choice";
+		const search = document.createElement("input");
+		search.type = "text";
+		search.className = "gjj-sl-model-search";
+		search.placeholder = "输入关键词，自动使用第一个匹配模型";
+		const list = document.createElement("div");
+		list.className = "gjj-sl-model-options";
+		const render = (autoPick = false) => {
+			const current = String(values[control.key] || "");
+			const options = filteredControlOptions(control, current, search.value, 80);
+			if (autoPick && options.length) onApply(options[0]);
+			list.replaceChildren();
+			if (!options.length) {
+				const empty = document.createElement("div");
+				empty.className = "gjj-sl-model-empty";
+				empty.textContent = "没有匹配模型";
+				list.appendChild(empty);
+				return;
+			}
+			for (const option of options) {
+				const item = document.createElement("button");
+				item.type = "button";
+				item.className = "gjj-sl-model-option";
+				if (String(option || "") === String(values[control.key] || "")) item.classList.add("selected");
+				item.textContent = `${item.classList.contains("selected") ? "✓ " : ""}${displayModelFilename(option)}`;
+				item.title = String(option || "");
+				item.addEventListener("click", () => {
+					onApply(option);
+					render(false);
+				});
+				list.appendChild(item);
+			}
+		};
+		search.addEventListener("input", () => render(true));
+		search.addEventListener("keydown", (event) => {
+			if (event.key !== "Enter") return;
+			event.preventDefault();
+			const first = filteredControlOptions(control, values[control.key], search.value, 1)[0];
+			if (first != null) {
+				onApply(first);
+				render(false);
+			}
+		});
+		wrap.append(search, list);
+		render(false);
+		setTimeout(() => search.focus(), 0);
+		return wrap;
+	}
+
+	function makeClickableModelFile(item, prefix, control, values) {
+		const host = document.createElement("div");
+		let choicePanel = null;
+		const renderLine = () => {
+			const current = control ? String(values[control.key] || "") : "";
+			const displayValue = control && (/[/\\]/.test(current) || /\.(safetensors|gguf|ckpt|pt|pth|bin)$/i.test(current)) ? current : item?.path || item;
+			const name = displayModelFilename(displayValue);
+			const line = modelTreeLine(prefix, modelFileIcon(item?.path || item), name, Boolean(control));
+			line.title = String(control ? values[control.key] || item?.path || "" : item?.path || item || "");
+			if (control) {
+				line.addEventListener("click", () => {
+					if (choicePanel) {
+						choicePanel.remove();
+						choicePanel = null;
+						renderLine();
+						return;
+					}
+					choicePanel = makeModelChoicePanel(control, values, (value) => {
+						values[control.key] = String(value || "");
+						renderLine();
+					});
+					host.appendChild(choicePanel);
+					renderLine();
+				});
+			}
+			if (host.firstChild) host.replaceChild(line, host.firstChild);
+			else host.prepend(line);
+		};
+		renderLine();
+		return host;
+	}
+
+	function buildClickableModelTree(items, controls, values) {
+		const tree = document.createElement("div");
+		tree.className = "gjj-sl-model-tree";
+		tree.appendChild(modelTreeLine("", "📁", "models/"));
+		const folders = new Map();
+		for (const item of items || []) {
+			const parts = modelTreeParts(item?.path || item);
+			if (!parts.length || parts[0].toLowerCase() !== "models") continue;
+			const folder = parts.length > 2 ? parts[1] : "";
+			if (!folder) continue;
+			if (!folders.has(folder)) folders.set(folder, []);
+			folders.get(folder).push(item);
+		}
+		const folderNames = Array.from(folders.keys()).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+		if (!folderNames.length) {
+			for (const item of items || []) {
+				const path = String(item?.path || item || "").replace(/\\/g, "/");
+				const isFolder = Boolean(item?.folder || item?.directory || (path && !/\.[^/.]+$/.test(path)));
+				tree.appendChild(modelTreeLine("└─", isFolder ? "📁" : modelFileIcon(path), `${displayModelFilename(path)}${isFolder ? "/" : ""}`));
+			}
+			return tree;
+		}
+		for (const [folderIndex, folder] of folderNames.entries()) {
+			const isLastFolder = folderIndex === folderNames.length - 1;
+			tree.appendChild(modelTreeLine(isLastFolder ? "└─" : "├─", "📁", `${folder}/`));
+			const files = folders.get(folder) || [];
+			files.forEach((item, index) => {
+				const prefix = `${isLastFolder ? "　" : "│　"}${index === files.length - 1 ? "└─" : "├─"}`;
+				tree.appendChild(makeClickableModelFile(item, prefix, findControlForModelItem(item, controls, values), values));
+			});
+		}
+		return tree;
+	}
+
 	function stop(event) {
 		event?.preventDefault?.();
 		event?.stopImmediatePropagation?.();
@@ -325,7 +523,17 @@ import { api } from "/scripts/api.js";
 .gjj-sl-model-body{display:flex;flex-direction:column;gap:10px;padding:10px;}
 .gjj-sl-model-group{border:1px solid #2d4149;border-radius:8px;background:#131d22;padding:8px;}
 .gjj-sl-model-group-title{font-size:13px;font-weight:800;margin-bottom:6px;color:#f0faf4;}
-.gjj-sl-model-tree{margin:0;white-space:pre-wrap;color:#dce7e2;font-family:Consolas,"Microsoft YaHei",monospace;font-size:12px;line-height:1.55;}
+.gjj-sl-model-tree{display:flex;flex-direction:column;gap:1px;margin:0;padding:7px;border:1px solid #33454c;border-radius:8px;background:#0f171b;color:#dce7e2;font-family:Consolas,"Microsoft YaHei",monospace;font-size:12px;line-height:1.55;overflow:auto;}
+.gjj-sl-model-line{display:block;width:100%;border:0;background:transparent;color:#dce7e2;padding:2px 4px;border-radius:5px;text-align:left;font:12px/1.5 Consolas,"Microsoft YaHei",monospace;white-space:pre;box-sizing:border-box;}
+.gjj-sl-model-line.clickable{cursor:pointer;}
+.gjj-sl-model-line.clickable:hover{background:#17262d;}
+.gjj-sl-model-choice{display:flex;flex-direction:column;gap:5px;margin:3px 0 5px 26px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#11181c;}
+.gjj-sl-model-search{width:100%;height:28px;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:0 7px;box-sizing:border-box;font-size:12px;outline:none;}
+.gjj-sl-model-options{display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;}
+.gjj-sl-model-option{width:100%;display:block;text-align:left;background:#182127;color:#dce7e2;border:1px solid #33454c;border-radius:6px;padding:5px 7px;box-sizing:border-box;white-space:normal;word-break:break-all;cursor:pointer;font-size:12px;}
+.gjj-sl-model-option:hover{border-color:#6aa6b8;background:#1d2b32;}
+.gjj-sl-model-option.selected{border-color:#2f7d67;background:#18352f;}
+.gjj-sl-model-empty{color:#8da2ad;font-size:11px;padding:4px 2px;}
 .gjj-sl-empty{height:100%;display:flex;align-items:center;justify-content:center;color:#85979d;font-size:13px;text-align:center;padding:20px;}
 `;
 		document.head.appendChild(style);
@@ -675,63 +883,29 @@ import { api } from "/scripts/api.js";
 		title.textContent = data.title || "场景库依赖目录树";
 		const spacer = document.createElement("div");
 		spacer.className = "gjj-sl-spacer";
-		head.append(title, spacer, button("❌关闭", "关闭", "gjj-sl-btn", () => backdrop.remove()));
+		const values = { ...(data.settings || {}) };
+		const save = data.settings_section ? button("保存设置", "保存场景库模型设置", "gjj-sl-btn", async () => {
+			await apiJson("/gjj/user_settings", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ section: data.settings_section, values }),
+			});
+			setStatus("场景库模型设置已保存");
+			await showModelTree();
+		}) : null;
+		head.append(title, spacer);
+		if (save) head.appendChild(save);
+		head.appendChild(button("❌关闭", "关闭", "gjj-sl-btn", () => backdrop.remove()));
 		const body = document.createElement("div");
 		body.className = "gjj-sl-model-body";
-		if (data.settings_section && Array.isArray(data.controls) && data.controls.length) {
-			const settingsGroup = document.createElement("div");
-			settingsGroup.className = "gjj-sl-model-group";
-			const settingsTitle = document.createElement("div");
-			settingsTitle.className = "gjj-sl-model-group-title";
-			settingsTitle.textContent = "⚙️ 模型设置";
-			settingsGroup.appendChild(settingsTitle);
-			const values = { ...(data.settings || {}) };
-			for (const control of data.controls) {
-				const row = document.createElement("label");
-				row.style.cssText = "display:grid;grid-template-columns:150px minmax(0,1fr);align-items:center;gap:8px;margin:6px 0;color:#dce7e2;font:12px/1.35 sans-serif;";
-				const label = document.createElement("span");
-				label.textContent = control.label || control.key;
-				const select = document.createElement("select");
-				select.className = "gjj-sl-input";
-				select.style.cssText = "min-width:0;";
-				const current = String(values[control.key] || "");
-				const options = Array.isArray(control.options) ? control.options.slice() : [];
-				if (current && !options.includes(current)) options.unshift(current);
-				for (const optionValue of options) {
-					const option = document.createElement("option");
-					option.value = String(optionValue || "");
-					option.textContent = String(optionValue || "");
-					if (option.value === current) option.selected = true;
-					select.appendChild(option);
-				}
-				select.addEventListener("change", () => {
-					values[control.key] = select.value;
-				});
-				row.append(label, select);
-				settingsGroup.appendChild(row);
-			}
-			const save = button("保存设置", "保存场景库模型设置", "gjj-sl-btn", async () => {
-				await apiJson("/gjj/user_settings", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ section: data.settings_section, values }),
-				});
-				setStatus("场景库模型设置已保存");
-				await showModelTree();
-			});
-			settingsGroup.appendChild(save);
-			body.appendChild(settingsGroup);
-		}
+		const controls = Array.isArray(data.controls) ? data.controls : [];
 		for (const group of data.groups || []) {
 			const groupEl = document.createElement("div");
 			groupEl.className = "gjj-sl-model-group";
 			const groupTitle = document.createElement("div");
 			groupTitle.className = "gjj-sl-model-group-title";
 			groupTitle.textContent = group.name || "依赖";
-			const tree = document.createElement("pre");
-			tree.className = "gjj-sl-model-tree";
-			tree.textContent = buildModelTreeText(group.items || []);
-			groupEl.append(groupTitle, tree);
+			groupEl.append(groupTitle, buildClickableModelTree(group.items || [], controls, values));
 			body.appendChild(groupEl);
 		}
 		dialog.append(head, body);

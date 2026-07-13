@@ -800,6 +800,48 @@ import { app } from "/scripts/app.js";
 		return safeArray(app?.graph?._nodes).filter(Boolean);
 	}
 
+	function selectedGraphNodes() {
+		const result = new Set();
+		const all = new Set(graphNodes());
+		const add = (item, key = null) => {
+			if (item && typeof item === "object" && all.has(item)) {
+				result.add(item);
+				return;
+			}
+			const id = item?.id ?? (item !== true ? item : key);
+			if (id == null) return;
+			const node = app?.graph?.getNodeById?.(id);
+			if (node && all.has(node)) result.add(node);
+		};
+		const canvas = app?.canvas || {};
+		const selected = canvas.selected_nodes || canvas.selectedNodes || canvas._selected_nodes;
+		if (selected instanceof Set) {
+			for (const item of selected) add(item);
+		} else if (selected instanceof Map) {
+			for (const [key, item] of selected.entries()) add(item, key);
+		} else if (Array.isArray(selected)) {
+			for (const item of selected) add(item);
+		} else if (selected && typeof selected === "object") {
+			for (const [key, item] of Object.entries(selected)) add(item, key);
+		}
+		for (const node of all) {
+			if (node?.selected || node?.flags?.selected || node?.__selected || node?.is_selected) result.add(node);
+		}
+		return Array.from(result);
+	}
+
+	function nodeClassName(node) {
+		return String(node?.comfyClass || node?.type || "");
+	}
+
+	function hasSelectedGjjNodeWithoutMissingModel(missingNodes) {
+		const missingIds = new Set(safeArray(missingNodes).map((node) => String(node?.id ?? "")));
+		return selectedGraphNodes().some((node) => (
+			/^GJJ_/i.test(nodeClassName(node))
+			&& !missingIds.has(String(node?.id ?? ""))
+		));
+	}
+
 	function summonApi() {
 		return globalThis.GJJ_SummonModel || null;
 	}
@@ -1393,9 +1435,10 @@ import { app } from "/scripts/app.js";
 	function renderNotice(plan, options = {}) {
 		lastPlan = plan || emptyPlan();
 		lastModelNodes = missingModelNodes();
-		const modelCount = missingModelWidgetCount(lastModelNodes);
+		const visibleModelNodes = hasSelectedGjjNodeWithoutMissingModel(lastModelNodes) ? [] : lastModelNodes;
+		const modelCount = missingModelWidgetCount(visibleModelNodes);
 		if (!options.skipModelScan) {
-			scheduleModelSuggestionScan(modelCount ? lastModelNodes : []);
+			scheduleModelSuggestionScan(modelCount ? visibleModelNodes : []);
 		}
 		const repairableCount = safeArray(lastPlan.repairable).length;
 		const appliedCount = safeArray(lastPlan.appliedReplacements).length;

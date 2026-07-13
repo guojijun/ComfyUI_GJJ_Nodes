@@ -25,6 +25,7 @@ from .common_utils.text_tools import (
 from .common_utils.model_manager import (
 	gjjutils_find_model_list,
 	gjjutils_model_stem_without_quant,
+	gjjutils_resolve_model_by_extensionless_seed,
 )
 from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
@@ -313,10 +314,10 @@ DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetenso
 DEFAULT_QWEN2511_UNET = "qwen_image_edit_2511_fp8mixed.safetensors"
 DEFAULT_QWEN2511_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 DEFAULT_QWEN2511_VAE = "qwen_image_vae.safetensors"
-DEFAULT_QWEN2511_LIGHTNING_LORA = "QWEN\\lighting\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors"
+DEFAULT_QWEN2511_LIGHTNING_LORA = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+ACTION_MIGRATION_LORA_1 = "FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors"
 ACTION_MIGRATION_LORA_1_STRENGTH = 1.0
-ACTION_MIGRATION_LORA_2 = "QWEN\\2511\\edit_2511人景融合20.safetensors"
+ACTION_MIGRATION_LORA_2 = "edit_2511人景融合20.safetensors"
 ACTION_MIGRATION_LORA_2_STRENGTH = 1.0
 MAX_ACTION_REFERENCES = 9
 DEFAULT_ACTION_LINES = [
@@ -421,17 +422,17 @@ REQUIRED_MULTIVIEW_MODELS = [
 	},
 	{
 		"label": "Qwen 2511 Lightning LoRA",
-		"subdir": "models/loras/QWEN/lighting",
+		"subdir": "models/loras",
 		"filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 		"download_url": MODEL_DOWNLOAD_URL,
-		"description": "默认加速 LoRA；用于 4 步生成。",
+		"description": "默认加速 LoRA；可放在 models/loras 的任意子目录，用于 4 步生成。",
 	},
 	{
 		"label": "Qwen 2511 多角度 LoRA",
-		"subdir": "models/loras/QWEN/2511",
+		"subdir": "models/loras",
 		"filename": DEFAULT_MULTI_ANGLES_LORA,
 		"download_url": MODEL_DOWNLOAD_URL,
-		"description": "多视图角度一致性 LoRA。",
+		"description": "多视图角度一致性 LoRA；可放在 models/loras 的任意子目录。",
 	},
 	{
 		"label": "RMBG1.4 抠图模型",
@@ -463,13 +464,13 @@ MULTIVIEW_MODEL_TREE = [
 	},
 	{
 		"label": "Qwen 2511 Lightning LoRA",
-		"folder": "loras/QWEN/lighting",
+		"folder": "loras",
 		"filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 		"icon": "🟠",
 	},
 	{
 		"label": "Qwen 2511 多角度 LoRA",
-		"folder": "loras/QWEN/2511",
+		"folder": "loras",
 		"filename": DEFAULT_MULTI_ANGLES_LORA,
 		"icon": "🟠",
 	},
@@ -484,12 +485,12 @@ MULTIVIEW_MODEL_TREE = [
 OPTIONAL_ACTION_MODELS = [
 	{
 		"label": "FireRed 动作迁移 LoRA",
-		"value": "models/loras/QWEN/lighting/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors",
+		"value": f"models/loras/{ACTION_MIGRATION_LORA_1}",
 		"tooltip": "仅在接入动作图并启用动作迁移模式时自动使用。",
 	},
 	{
 		"label": "人景融合动作 LoRA",
-		"value": "models/loras/QWEN/2511/edit_2511人景融合20.safetensors",
+		"value": f"models/loras/{ACTION_MIGRATION_LORA_2}",
 		"tooltip": "仅在接入动作图并启用动作迁移模式时自动使用。",
 	},
 	{
@@ -895,6 +896,19 @@ def _pick_default_multiview_unet(unet_models: list[str]) -> str:
 	)
 
 
+def _resolve_model_any_subdir(folder_type: str, seed_name: str, extensions: list[str] | tuple[str, ...]) -> str:
+	"""按文件名在任意子目录解析模型，返回 ComfyUI 可加载的相对路径。"""
+	seed = str(seed_name or "").strip()
+	if not seed:
+		return ""
+	exts = tuple(str(ext or "").lower() for ext in extensions if str(ext or "").strip())
+	for candidate in (seed, seed.replace("\\", "/").split("/")[-1]):
+		resolved = gjjutils_resolve_model_by_extensionless_seed(candidate, folder_type)
+		if resolved and (not exts or str(resolved).replace("\\", "/").lower().endswith(exts)):
+			return str(resolved)
+	return _first_model_from_keywords(folder_type, seed, list(exts))
+
+
 def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 	preset = match_model_family(unet_name)
 	if preset is None:
@@ -935,13 +949,13 @@ def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallba
 				return candidate
 
 	for source in (preferred, fallback):
-		match = _first_model_from_keywords("loras", source, [".safetensors"])
+		match = _resolve_model_any_subdir("loras", source, [".safetensors"])
 		if match:
 			return match
 	return ""
 
 
-def _pick_default_model_name(candidates: list[str], preferred_name: str, fallback: str = "") -> str:
+def _pick_default_model_name(candidates: list[str], preferred_name: str, fallback: str = "", folder_type: str = "") -> str:
 	clean_candidates = [str(candidate or "").strip() for candidate in (candidates or []) if str(candidate or "").strip()]
 	for source in (preferred_name, fallback):
 		source_text = str(source or "").strip()
@@ -949,6 +963,9 @@ def _pick_default_model_name(candidates: list[str], preferred_name: str, fallbac
 			continue
 		if source_text in clean_candidates:
 			return source_text
+		resolved = _resolve_model_any_subdir(folder_type, source_text, [".safetensors", ".gguf"]) if folder_type else ""
+		if resolved and resolved in clean_candidates:
+			return resolved
 		source_base = source_text.replace("\\", "/").split("/")[-1].lower()
 		for candidate in clean_candidates:
 			if candidate.replace("\\", "/").split("/")[-1].lower() == source_base:
@@ -2095,9 +2112,9 @@ class GJJ_CharacterMultiViewStudio:
 		lora_models = _multiview_lora_models()
 		default_unet_name = _pick_default_multiview_unet(unet_models)
 		default_preset = _match_multiview_family(default_unet_name)
-		default_clip_name = _pick_default_model_name(clip_models, DEFAULT_QWEN2511_CLIP, DEFAULT_CLIP_NAME)
-		default_vae_name = _pick_default_model_name(vae_models, DEFAULT_QWEN2511_VAE, DEFAULT_VAE_NAME)
-		default_rmbg_name = _pick_default_model_name(rmbg_models, "rmbg1.4.safetensors")
+		default_clip_name = _pick_default_model_name(clip_models, DEFAULT_QWEN2511_CLIP, DEFAULT_CLIP_NAME, "text_encoders")
+		default_vae_name = _pick_default_model_name(vae_models, DEFAULT_QWEN2511_VAE, DEFAULT_VAE_NAME, "vae")
+		default_rmbg_name = _pick_default_model_name(rmbg_models, "rmbg1.4.safetensors", "", "RMBG")
 		return {
 			"required": {
 				"base_prompt": (
@@ -2340,6 +2357,10 @@ class GJJ_CharacterMultiViewStudio:
 		}
 
 	@classmethod
+	def VALIDATE_INPUTS(cls, **_kwargs):
+		return True
+
+	@classmethod
 	def IS_CHANGED(
 		cls,
 		main_image=None,
@@ -2558,7 +2579,7 @@ class GJJ_CharacterMultiViewStudio:
 			)
 		clean_clip_names: list[str] = []
 		for clip_name in resolved_clip_names:
-			resolved = _first_model_from_keywords(
+			resolved = _resolve_model_any_subdir(
 				"text_encoders",
 				clip_name,
 				[".safetensors"],
@@ -2567,14 +2588,14 @@ class GJJ_CharacterMultiViewStudio:
 				clean_clip_names.append(resolved)
 		resolved_clip_names = _dedupe_keep_order(clean_clip_names)
 		if not resolved_clip_names:
-			fallback_clip = _first_model_from_keywords(
+			fallback_clip = _resolve_model_any_subdir(
 				"text_encoders",
 				exposed_clip_name or DEFAULT_QWEN2511_CLIP,
 				[".safetensors"],
 			)
 			if fallback_clip:
 				resolved_clip_names.append(fallback_clip)
-		resolved_vae_name = _first_model_from_keywords(
+		resolved_vae_name = _resolve_model_any_subdir(
 			"vae",
 			str(visible_vae_name or preset.get("vae_name") or DEFAULT_QWEN2511_VAE),
 			[".safetensors"],
@@ -2925,13 +2946,16 @@ class GJJ_CharacterMultiViewStudio:
 		"""处理单张主图的多视图生成。"""
 		total_steps = 6 if bool(save_each_image) else 5
 		_send_status(unique_id, f"1/{total_steps} 检查模型配对并加载主链...")
-		resolved_unet_name = _first_model_from_keywords(
+		resolved_unet_name = _resolve_model_any_subdir(
 			"diffusion_models",
 			str(unet_name or DEFAULT_QWEN2511_UNET),
 			[".safetensors", ".gguf"],
 		)
 		if resolved_unet_name:
 			unet_name = resolved_unet_name
+		lora_1_name = _resolve_model_any_subdir("loras", lora_1_name, [".safetensors"]) or str(lora_1_name or "").strip()
+		lora_2_name = _resolve_model_any_subdir("loras", lora_2_name, [".safetensors"]) or str(lora_2_name or "").strip()
+		lora_3_name = _resolve_model_any_subdir("loras", lora_3_name, [".safetensors"]) or str(lora_3_name or "").strip()
 		preset, resolved_clip_names, resolved_clip_type, resolved_vae_name = self._resolve_generation_bundle(
 			unet_name,
 			clip_name or DEFAULT_QWEN2511_CLIP,
