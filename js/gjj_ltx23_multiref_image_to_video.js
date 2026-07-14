@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const NODE_CLASS = "GJJ_LTX23ImageToVideoMultiRef";
 const CONFIG_KEY = "gjj_ltx23_config";
@@ -11,6 +12,11 @@ const FIRST_SCENE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const SCENE_TYPE = "IMAGE";
 const FPS_SOCKET_TYPE = "INT,FLOAT";
 const MAX_SCENES = 20;
+const MULTI_IMAGE_LOADER_CLASS = "GJJ_MultiImageLoader";
+const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
+const STATUS_WIDGET = "gjj_ltx23_preview_panel";
+const LINKED_LOADER_PROP = "__gjj_ltx23_ref_loader_id";
+const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 
 const DEFAULT_CONFIG = {
   ltx_model_name: "",
@@ -32,6 +38,13 @@ const DEFAULT_CONFIG = {
   segmented_execution: true,
   segment_save_preset: "video/GJJ_LTX多图分段",
   segment_video_format: "video/h264-mp4",
+  ltx_video_vae_name: "",
+  ltx_audio_vae_name: "",
+  ltx_text_encoder_name: "",
+  ltx_text_projection_name: "",
+  ltx_latent_upscaler_name: "",
+  transition_lora_name: "",
+  size_source: "面板尺寸",
 };
 
 
@@ -47,6 +60,47 @@ const MAIN_WIDGET_KEYS = [
   "denoise_strength",
 ];
 const NUMERIC_WIDGET_KEYS = new Set(["segment_seconds", "width", "height", "fps", "seed", "denoise_strength"]);
+const HIDDEN_WIDGET_KEYS = new Set(MAIN_WIDGET_KEYS.filter(key => key !== "positive_prompt"));
+
+function getWidget(node, name) {
+  return node?.widgets?.find(widget => widget?.name === name) || null;
+}
+
+function setWidgetValue(widget, value) {
+  if (!widget) return;
+  widget.value = value;
+  widget.callback?.(value);
+}
+
+function setWidgetHidden(widget, hidden) {
+  if (!widget) return;
+  widget.hidden = Boolean(hidden);
+  widget.options ||= {};
+  if (hidden) {
+    widget.computeSize = () => [0, -4];
+    widget.getHeight = () => 0;
+    widget.type = widget.type || "hidden";
+    widget.options.hidden = true;
+    widget.options.display = "hidden";
+    widget.last_y = 0;
+    widget.y = 0;
+    widget.computedHeight = 0;
+    widget.margin_top = 0;
+  } else {
+    delete widget.options.hidden;
+    delete widget.options.display;
+  }
+  if (widget.element) widget.element.style.display = hidden ? "none" : "";
+  if (widget.inputEl) widget.inputEl.style.display = hidden ? "none" : "";
+}
+
+function syncConfigToNativeMainWidgets(node, cfg) {
+  for (const key of MAIN_WIDGET_KEYS) {
+    const widget = getWidget(node, key);
+    if (!widget || !(key in cfg)) continue;
+    widget.value = coerceMainWidgetValue(key, cfg[key]);
+  }
+}
 
 function coerceMainWidgetValue(key, value) {
   if (!NUMERIC_WIDGET_KEYS.has(key)) return value == null ? "" : String(value);
@@ -70,7 +124,7 @@ function writeConfigJson(node, cfg, markDirty = false) {
   if (!node.properties) node.properties = {};
   const json = JSON.stringify(cfg);
   node.properties[CONFIG_KEY] = json;
-  const hidden = node.widgets?.find(w => w?.name === "config_json");
+  const hidden = getWidget(node, "config_json");
   if (hidden) hidden.value = json;
   if (markDirty) {
     node.setDirtyCanvas?.(true, true);
@@ -130,6 +184,7 @@ function setConfig(node, next) {
   if (!node.properties) node.properties = {};
   const base = { ...getConfig(node), ...readNativeMainWidgetConfig(node) };
   const cfg = { ...base, ...next };
+  syncConfigToNativeMainWidgets(node, cfg);
   writeConfigJson(node, cfg, true);
   resizeNodeToFit(node);
 }
@@ -164,6 +219,351 @@ function ensureInput(node, name, type) {
   return input;
 }
 
+function refreshNode(node) {
+  node?.setDirtyCanvas?.(true, true);
+  app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function buildViewUrl(item, includePreviewFormat = true) {
+  if (!item?.filename) return "";
+  const previewFormat = includePreviewFormat && typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
+  const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : `&rand=${Date.now()}`;
+  return api.apiURL(
+    `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`,
+  );
+}
+
+function unwrapExecutedDetail(detail = {}) {
+  if (detail?.output && typeof detail.output === "object") return detail.output;
+  if (detail?.ui && typeof detail.ui === "object") return detail.ui;
+  return detail || {};
+}
+
+function firstArrayItem(...values) {
+  for (const value of values) {
+    if (Array.isArray(value) && value.length) return value[0];
+  }
+  return null;
+}
+
+function firstMediaItem(...values) {
+  for (const value of values) {
+    if (!value) continue;
+    if (Array.isArray(value)) {
+      const nested = firstMediaItem(...value);
+      if (nested) return nested;
+      continue;
+    }
+    if (typeof value === "object" && value.filename) return value;
+  }
+  return null;
+}
+
+function previewItemFromPath(detail = {}) {
+  const rawPath = firstArrayItem(detail.preview_main_path) ?? (typeof detail.preview_main_path === "string" ? detail.preview_main_path : "");
+  if (!rawPath) return null;
+  const cleanPath = String(rawPath).replaceAll("\\", "/");
+  const filename = cleanPath.split("/").pop() || "";
+  if (!filename) return null;
+  const outputIndex = cleanPath.toLowerCase().lastIndexOf("/output/");
+  const subfolder = outputIndex >= 0
+    ? cleanPath.slice(outputIndex + 8, Math.max(outputIndex + 8, cleanPath.length - filename.length - 1)).replace(/^\/+|\/+$/g, "")
+    : "";
+  return { filename, subfolder, type: "output" };
+}
+
+function firstPreviewItem(detail = {}) {
+  const output = unwrapExecutedDetail(detail);
+  return firstMediaItem(
+    output.preview_media,
+    output.preview_video,
+    output.gifs,
+    output.animated,
+    output.videos,
+    output.video,
+  ) || previewItemFromPath(output);
+}
+
+function isVideoPreview(item, detail = {}) {
+  const explicitFlag = Array.isArray(detail?.preview_is_video) ? detail.preview_is_video[0] : detail?.preview_is_video;
+  if (explicitFlag != null) return Boolean(explicitFlag);
+  const filename = String(item?.filename || "");
+  const ext = filename.includes(".") ? filename.split(".").pop().toLowerCase() : "";
+  return VIDEO_EXTENSIONS.has(ext);
+}
+
+function clearNativePreview(node) {
+  if (!node) return;
+  node.imgs = [];
+  node.imageIndex = null;
+  node.overIndex = null;
+  node.animatedImages = [];
+  node.videoContainer = null;
+  node.preview = null;
+  node.previews = null;
+  if (node.properties) {
+    delete node.properties.image;
+    delete node.properties.images;
+    delete node.properties.preview;
+    delete node.properties.previews;
+    delete node.properties.gifs;
+    delete node.properties.animated;
+  }
+  refreshNode(node);
+}
+
+function setStatus(node, detail = {}) {
+  const state = node?.__gjjLtxStatusPanel;
+  if (!state) return;
+  state.text.textContent = String(detail.text || "等待执行");
+  const progress = Number.isFinite(detail.progress)
+    ? Math.max(0, Math.min(100, Number(detail.progress) * 100))
+    : 0;
+  state.progressInner.style.width = `${progress}%`;
+  refreshNode(node);
+}
+
+function setVideoPreview(node, detail = {}) {
+  const state = node?.__gjjLtxStatusPanel;
+  if (!state) return;
+  const output = unwrapExecutedDetail(detail);
+  const item = firstPreviewItem(output);
+  const url = isVideoPreview(item, output) ? buildViewUrl(item, false) : "";
+  state.video.pause?.();
+  state.video.removeAttribute("src");
+  state.video.load?.();
+  if (!url) {
+    state.hasPreview = false;
+    state.previewWrap.style.display = "none";
+    resizeNodeToFit(node);
+    refreshNode(node);
+    return;
+  }
+  state.hasPreview = true;
+  state.previewWrap.style.display = "block";
+  state.video.src = url;
+  state.video.load?.();
+  const playPromise = state.video.play?.();
+  if (playPromise?.catch) playPromise.catch(() => {});
+  resizeNodeToFit(node);
+  refreshNode(node);
+}
+
+function configPreviewAspect(node) {
+  const cfg = getConfig(node);
+  const width = Number(cfg.width) || 16;
+  const height = Number(cfg.height) || 9;
+  return Math.max(0.1, Math.min(8, height / width));
+}
+
+function previewWidgetHeight(node, width) {
+  const state = node?.__gjjLtxStatusPanel;
+  if (!state?.hasPreview) return 44;
+  const panelWidth = Math.max(300, Number(width || node?.size?.[0] || 360)) - 20;
+  const previewWidth = Math.max(120, panelWidth - 16);
+  return Math.max(120, Math.round(previewWidth * (state.previewAspect || configPreviewAspect(node)))) + 44;
+}
+
+function setPreviewAspect(node, width, height) {
+  const state = node?.__gjjLtxStatusPanel;
+  if (!state) return;
+  const w = Number(width);
+  const h = Number(height);
+  const aspect = w > 0 && h > 0 ? Math.max(0.1, Math.min(8, h / w)) : configPreviewAspect(node);
+  state.previewAspect = aspect;
+  state.previewWrap.style.setProperty("--gjj-ltx-preview-aspect", `${Math.max(1, Math.round(w || 16))} / ${Math.max(1, Math.round(h || 9))}`);
+  resizeNodeToFit(node);
+  refreshNode(node);
+}
+
+function getGraphLinkById(graph, linkId) {
+  if (linkId == null) return null;
+  const links = graph?.links || app.graph?.links;
+  if (!links) return null;
+  if (Array.isArray(links)) return links.find(link => Number(link?.id) === Number(linkId)) || links[Number(linkId)] || null;
+  return links[linkId] || links[String(linkId)] || null;
+}
+
+function getGraphNodeById(graph, nodeId) {
+  return graph?.getNodeById?.(nodeId) || graph?._nodes_by_id?.[nodeId] || app.graph?.getNodeById?.(nodeId) || null;
+}
+
+function collectUpstreamNodeIds(node) {
+  const graph = node?.graph || app.graph;
+  const keep = new Set();
+  const visit = (current) => {
+    if (!Array.isArray(current?.inputs)) return;
+    for (const input of current.inputs) {
+      const link = getGraphLinkById(graph, input?.link);
+      const originId = linkField(link, "origin_id", 1);
+      if (originId == null || keep.has(String(originId))) continue;
+      keep.add(String(originId));
+      const originNode = getGraphNodeById(graph, originId);
+      if (originNode) visit(originNode);
+    }
+  };
+  visit(node);
+  return keep;
+}
+
+function isExecutionOutputNode(node) {
+  return Boolean(node?.constructor?.nodeData?.output_node || node?.nodeData?.output_node || node?.flags?.output);
+}
+
+async function queueOnlyCurrentNode(node) {
+  if (!node || !node.graph) return false;
+  const graph = node.graph || app.graph;
+  const allNodes = graph?._nodes || app.graph?._nodes || [];
+  const upstreamNodeIds = collectUpstreamNodeIds(node);
+  const savedModes = [];
+  const oldSelectedNodes = app.canvas?.selected_nodes;
+  const oldSelectedNode = app.canvas?.selected_node;
+  try {
+    for (const item of allNodes) {
+      if (!item || item === node) continue;
+      if (upstreamNodeIds.has(String(item.id))) continue;
+      if (isExecutionOutputNode(item)) {
+        savedModes.push([item, item.mode]);
+        item.mode = 2;
+      }
+    }
+    if (app.canvas) {
+      app.canvas.selected_nodes = {};
+      app.canvas.selected_nodes[node.id] = node;
+      app.canvas.selected_node = node;
+    }
+    syncNativeMainWidgets(node, false);
+    refreshNode(node);
+    if (typeof app.queuePrompt === "function") {
+      await app.queuePrompt(0, 1);
+      return true;
+    }
+    return false;
+  } finally {
+    for (const [item, mode] of savedModes) item.mode = mode;
+    if (app.canvas) {
+      app.canvas.selected_nodes = oldSelectedNodes;
+      app.canvas.selected_node = oldSelectedNode;
+    }
+    refreshNode(node);
+  }
+}
+
+async function runPreviewNode(node) {
+  if (node.__gjjLtxRunInFlight) return;
+  node.__gjjLtxRunInFlight = true;
+  refreshToolbarState(node);
+  clearNativePreview(node);
+  setStatus(node, { text: "正在提交本节点执行...", progress: 0.02 });
+  try {
+    const ok = await queueOnlyCurrentNode(node);
+    if (!ok) {
+      setStatus(node, { text: "当前 ComfyUI 前端不支持直接执行本节点。", progress: 0 });
+      node.__gjjLtxRunInFlight = false;
+      refreshToolbarState(node);
+    }
+  } catch (error) {
+    setStatus(node, { text: String(error?.message || error || "提交执行失败"), progress: 0 });
+    node.__gjjLtxRunInFlight = false;
+    refreshToolbarState(node);
+  }
+}
+
+function uploadUrl(path) {
+  return api?.apiURL ? api.apiURL(path) : path;
+}
+
+function normalizeUploadItem(data, file, subfolder = "GJJ") {
+  const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+  const cleanSubfolder = String(data?.subfolder ?? subfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!filename) return null;
+  const base = filename.includes("/") ? filename.split("/").pop() : filename;
+  const rawType = String(data?.type || "input").trim().toLowerCase();
+  const itemType = ["input", "temp", "output"].includes(rawType) ? rawType : "input";
+  return { filename: base, subfolder: cleanSubfolder, type: itemType };
+}
+
+async function uploadImageFile(file) {
+  const form = new FormData();
+  form.append("image", file, file.name);
+  const response = api?.fetchApi
+    ? await api.fetchApi(TEMP_UPLOAD_API_PATH, { method: "POST", body: form })
+    : await fetch(uploadUrl(TEMP_UPLOAD_API_PATH), { method: "POST", body: form });
+  if (!response?.ok) throw new Error(`上传失败：HTTP ${response?.status || "?"}`);
+  const data = await response.json().catch(() => ({}));
+  const item = Array.isArray(data?.items) ? data.items[0] : (Array.isArray(data?.images) ? data.images[0] : data);
+  return normalizeUploadItem(item, file, "GJJ");
+}
+
+function findLinkedReferenceLoader(node) {
+  const input = node?.inputs?.find(item => item?.name === "image_sequence") || node?.inputs?.[0];
+  const link = getGraphLinkById(node?.graph || app.graph, input?.link);
+  const originId = linkField(link, "origin_id", 1);
+  const source = getGraphNodeById(node?.graph || app.graph, originId);
+  if (source && String(source.comfyClass || source.type || "") === MULTI_IMAGE_LOADER_CLASS) return source;
+  const remembered = node?.properties?.[LINKED_LOADER_PROP];
+  const rememberedNode = remembered != null ? getGraphNodeById(node?.graph || app.graph, Number(remembered)) : null;
+  if (rememberedNode && String(rememberedNode.comfyClass || rememberedNode.type || "") === MULTI_IMAGE_LOADER_CLASS) return rememberedNode;
+  return null;
+}
+
+function ensureReferenceLoader(node) {
+  const existing = findLinkedReferenceLoader(node);
+  if (existing) return existing;
+  const loader = globalThis.LiteGraph?.createNode?.(MULTI_IMAGE_LOADER_CLASS);
+  if (!loader) throw new Error("无法创建 GJJ_MultiImageLoader。");
+  loader.pos = [
+    Number(node.pos?.[0] || 0) - 360,
+    Number(node.pos?.[1] || 0),
+  ];
+  loader.title = "📁 LTX参考图片";
+  app.graph?.add?.(loader);
+  node.properties ||= {};
+  node.properties[LINKED_LOADER_PROP] = loader.id;
+  const inputIndex = node.findInputSlot?.("image_sequence", false) ?? 0;
+  if (Number.isInteger(inputIndex) && inputIndex >= 0) {
+    if (node.inputs?.[inputIndex]?.link != null) node.disconnectInput?.(inputIndex);
+    loader.connect?.(0, node, inputIndex);
+  }
+  return loader;
+}
+
+function writeLoaderSelection(loader, items) {
+  const text = JSON.stringify(items || []);
+  loader.properties ||= {};
+  loader.properties.selected_images = text;
+  setWidgetValue(getWidget(loader, "selected_images") || loader.__gjjSelectedImagesWidget, text);
+  loader.__gjjMultiImageState ||= {};
+  loader.__gjjMultiImageState.selection = items || [];
+  loader.setDirtyCanvas?.(true, true);
+  app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function chooseReferenceImages(node) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.multiple = true;
+  input.onchange = async () => {
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    setStatus(node, { text: `正在导入 ${files.length} 张参考图...`, progress: 0.12 });
+    try {
+      const items = [];
+      for (const file of files) {
+        const item = await uploadImageFile(file);
+        if (item) items.push(item);
+      }
+      const loader = ensureReferenceLoader(node);
+      writeLoaderSelection(loader, items);
+      setStatus(node, { text: `已连接 ${items.length} 张参考图`, progress: 0 });
+      refreshNode(node);
+    } catch (error) {
+      setStatus(node, { text: String(error?.message || error || "参考图导入失败"), progress: 0 });
+    }
+  };
+  input.click();
+}
 
 function isImageLikeTypeText(type) {
   const text = String(type || "").toUpperCase();
@@ -481,6 +881,116 @@ async function fetchModels(node, select) {
   }
 }
 
+async function fetchModelFields() {
+  const res = await api.fetchApi("/gjj/ltx23/models");
+  const data = await res.json();
+  return Array.isArray(data.fields) ? data.fields : [];
+}
+
+function virtualModelWidget(node, field) {
+  node.__gjjLtxVirtualModelWidgets ||= {};
+  const key = String(field?.name || "");
+  if (!node.__gjjLtxVirtualModelWidgets[key]) {
+    node.__gjjLtxVirtualModelWidgets[key] = {
+      name: key,
+      type: "combo",
+      options: { values: [] },
+      get value() {
+        return getConfig(node)[key] || "";
+      },
+      set value(next) {
+        setConfig(node, { [key]: String(next || "") });
+      },
+      callback(next) {
+        setConfig(node, { [key]: String(next || "") });
+      },
+    };
+  }
+  const widget = node.__gjjLtxVirtualModelWidgets[key];
+  widget.options ||= {};
+  widget.options.values = Array.isArray(field?.models) ? [...field.models] : [];
+  const current = getConfig(node)[key] || field?.fallback || field?.filename || "";
+  if (current && !widget.options.values.includes(current)) widget.options.values.unshift(current);
+  return widget;
+}
+
+function modelTreeEntriesFromFields(node, fields) {
+  const icons = {
+    diffusion_models: "🧠",
+    vae: "🟩",
+    text_encoders: "📝",
+    latent_upscale_models: "🔍",
+    loras: "🧬",
+  };
+  return (fields || []).map((field) => {
+    const name = String(field?.name || "");
+    if (!name) return null;
+    return {
+      widget: name,
+      label: field.label || name,
+      folder: field.path || field.folder || "",
+      icon: icons[String(field.folder || "").replace(/^models[\\/]/, "")] || "🟣",
+      models: Array.isArray(field.models) ? field.models : [],
+      keywords: Array.isArray(field.keywords) ? field.keywords : [],
+      anyKeywords: Array.isArray(field.anyKeywords) ? field.anyKeywords : [],
+      fallback: field.fallback || field.filename || "",
+      description: field.description || "",
+      required: Boolean(field.required),
+      getWidget: () => virtualModelWidget(node, field),
+    };
+  }).filter(Boolean);
+}
+
+function modelGroupTitle(title, note = "") {
+  const wrap = document.createElement("div");
+  wrap.className = "gjj-ltx-model-title";
+  const label = document.createElement("div");
+  label.textContent = title;
+  const hint = document.createElement("div");
+  hint.textContent = note;
+  wrap.append(label, hint);
+  return wrap;
+}
+
+function showModelTreePanel(node, anchor) {
+  showFloatingPanel(node, anchor, "模型", (body) => {
+    body.style.gap = "9px";
+    const loading = document.createElement("div");
+    loading.textContent = "读取模型树...";
+    loading.style.cssText = "color:#9fb0b8;padding:4px 0;";
+    body.appendChild(loading);
+    fetchModelFields().then((fields) => {
+      body.replaceChildren();
+      if (!fields.length) {
+        const empty = document.createElement("div");
+        empty.textContent = "没有读取到模型配置。";
+        empty.style.cssText = "color:#fca5a5;padding:8px 0;";
+        body.appendChild(empty);
+        return;
+      }
+      const entries = modelTreeEntriesFromFields(node, fields);
+      body.appendChild(modelGroupTitle("🧠 LTX 2.3 模型树", "点击模型文件可搜索并切换"));
+      body.appendChild(GJJ_Utils.createModelTreeView({
+        node,
+        entries,
+        refresh: () => {
+          syncConfigToNativeMainWidgets(node, getConfig(node));
+          refreshNode(node);
+        },
+        onApply: (entry, value) => {
+          setConfig(node, { [entry.widget]: value });
+        },
+      }));
+    }).catch((error) => {
+      body.replaceChildren();
+      const fail = document.createElement("div");
+      fail.textContent = error?.message || "读取模型树失败";
+      fail.style.cssText = "color:#fca5a5;padding:8px 0;";
+      body.appendChild(fail);
+    });
+  }, { width: 580 });
+}
+
 async function openVideoDir(node) {
   const cfg = getConfig(node);
   try {
@@ -500,42 +1010,332 @@ async function openVideoDir(node) {
   }
 }
 
+function closeFloatingPanel(node) {
+  const panel = node?.__gjjLtxFloatingPanel;
+  if (!panel) return;
+  if (typeof panel.__gjjLtxClose === "function") panel.__gjjLtxClose();
+  else panel.remove?.();
+  if (node.__gjjLtxFloatingPanel === panel) node.__gjjLtxFloatingPanel = null;
+}
+
+function showFloatingPanel(node, anchor, title, build, options = {}) {
+  closeFloatingPanel(node);
+  const panel = document.createElement("div");
+  const panelWidth = options.width || 380;
+  panel.className = "gjj-ltx-floating";
+  panel.style.cssText = [
+    "position:fixed",
+    "z-index:100000",
+    `width:${panelWidth}px`,
+    "max-width:calc(100vw - 20px)",
+    "padding:8px",
+    "box-sizing:border-box",
+    "border:1px solid #49616b",
+    "border-radius:8px",
+    "background:#10181d",
+    "box-shadow:0 14px 34px rgba(0,0,0,.45)",
+    "color:#e4eef0",
+    "font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif",
+    "overflow:hidden",
+    "pointer-events:auto",
+  ].join(";");
+  stopCanvasEvents(panel);
+
+  const closePanel = () => closeFloatingPanel(node);
+  const outsidePointerDown = (event) => {
+    if (panel.contains(event.target) || anchor?.contains?.(event.target)) return;
+    closePanel();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") closePanel();
+  };
+  panel.__gjjLtxClose = () => {
+    document.removeEventListener("pointerdown", outsidePointerDown, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    panel.remove?.();
+    if (node.__gjjLtxFloatingPanel === panel) node.__gjjLtxFloatingPanel = null;
+  };
+
+  const rect = anchor?.getBoundingClientRect?.() || { left: 20, bottom: 20 };
+  panel.style.left = `${Math.max(10, Math.min(window.innerWidth - panelWidth - 10, Math.max(10, rect.left)))}px`;
+  panel.style.top = `${Math.min(window.innerHeight - 80, Math.max(10, rect.bottom + 6))}px`;
+
+  const head = document.createElement("div");
+  head.className = "gjj-ltx-float-head";
+  const headTitle = document.createElement("span");
+  headTitle.textContent = title;
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.textContent = "×";
+  closeButton.title = "关闭";
+  closeButton.className = "gjj-ltx-close";
+  closeButton.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closePanel();
+  };
+  head.append(headTitle, closeButton);
+
+  const body = document.createElement("div");
+  body.className = "gjj-ltx-float-body";
+  panel.append(head, body);
+  build(body);
+  document.body.appendChild(panel);
+  node.__gjjLtxFloatingPanel = panel;
+  setTimeout(() => {
+    document.addEventListener("pointerdown", outsidePointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+  }, 0);
+}
+
+function makeToolButton(text, title, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = text;
+  button.title = title;
+  button.className = "gjj-ltx-tool-btn";
+  button.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick(button);
+  };
+  return button;
+}
+
+function refreshToolbarState(node) {
+  const cfg = getConfig(node);
+  if (node.__gjjLtxSegmentButton) {
+    node.__gjjLtxSegmentButton.classList.toggle("active", Boolean(cfg.segmented_execution));
+  }
+  if (node.__gjjLtxTransitionButton) {
+    node.__gjjLtxTransitionButton.classList.toggle("active", Boolean(cfg.transition_enabled));
+  }
+  if (node.__gjjLtxRunButton) {
+    const running = Boolean(node.__gjjLtxRunInFlight);
+    node.__gjjLtxRunButton.disabled = running;
+    node.__gjjLtxRunButton.textContent = running ? "⏳" : "▶️";
+    node.__gjjLtxRunButton.title = running ? "正在执行本节点" : "只执行当前 LTX 节点，并在节点面板预览最终视频";
+    node.__gjjLtxRunButton.classList.toggle("active", running);
+  }
+}
+
+function randomizeSeed(node) {
+  const max = Number.MAX_SAFE_INTEGER;
+  setConfig(node, { seed: Math.floor(Math.random() * max) });
+}
+
+function panelRow(label, element) {
+  const row = document.createElement("label");
+  row.className = "gjj-ltx-float-row";
+  const span = document.createElement("span");
+  span.textContent = label;
+  element.style.minWidth = "0";
+  element.style.width = "100%";
+  element.style.maxWidth = "100%";
+  element.style.boxSizing = "border-box";
+  row.append(span, element);
+  return row;
+}
+
+function configInput(node, key, type = "text", options = {}) {
+  const input = document.createElement(type === "textarea" ? "textarea" : "input");
+  if (type !== "textarea") input.type = type;
+  const cfg = getConfig(node);
+  input.value = cfg[key] ?? "";
+  if (type === "textarea") input.rows = options.rows || 4;
+  if (options.step != null) input.step = options.step;
+  if (options.min != null) input.min = options.min;
+  if (options.max != null) input.max = options.max;
+  if (options.placeholder) input.placeholder = options.placeholder;
+  const commit = () => {
+    let value = input.value;
+    if (type === "number") value = Number(value);
+    setConfig(node, { [key]: value });
+    refreshToolbarState(node);
+  };
+  input.addEventListener("input", commit);
+  input.addEventListener("change", commit);
+  input.addEventListener("blur", commit);
+  return input;
+}
+
+function configSegmented(node, key, options) {
+  const wrap = document.createElement("div");
+  wrap.className = "gjj-ltx-segmented";
+  const refresh = () => {
+    const current = getConfig(node)[key] || options[0];
+    for (const button of wrap.querySelectorAll("button")) {
+      const active = button.dataset.value === current;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+  };
+  for (const value of options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.value = value;
+    button.textContent = value;
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfig(node, { [key]: value });
+      refresh();
+      refreshToolbarState(node);
+    };
+    wrap.appendChild(button);
+  }
+  refresh();
+  return wrap;
+}
+
+function configSliderNumber(node, key, options = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "gjj-ltx-slider-number";
+  const slider = document.createElement("input");
+  const number = document.createElement("input");
+  slider.type = "range";
+  number.type = "number";
+  const min = Number(options.min ?? 64);
+  const max = Number(options.max ?? 2048);
+  const hardMax = Number(options.hardMax ?? 8192);
+  const step = Number(options.step ?? 32);
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.step = String(step);
+  number.min = String(min);
+  number.max = String(hardMax);
+  number.step = String(step);
+  const cfg = getConfig(node);
+  const initial = Number(cfg[key] ?? options.defaultValue ?? min);
+  slider.value = String(Math.max(min, Math.min(max, Number.isFinite(initial) ? initial : min)));
+  number.value = String(Number.isFinite(initial) ? initial : min);
+  const commit = (source) => {
+    const raw = Number(source.value);
+    const value = Number.isFinite(raw) ? Math.max(min, Math.min(hardMax, Math.round(raw / step) * step)) : min;
+    number.value = String(value);
+    slider.value = String(Math.max(min, Math.min(max, value)));
+    setConfig(node, { [key]: value });
+    refreshToolbarState(node);
+  };
+  slider.addEventListener("input", () => commit(slider));
+  slider.addEventListener("change", () => commit(slider));
+  number.addEventListener("input", () => commit(number));
+  number.addEventListener("change", () => commit(number));
+  number.addEventListener("blur", () => commit(number));
+  wrap.append(slider, number);
+  return wrap;
+}
+
+function configCheckbox(node, key) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "gjj-ltx-toggle";
+  const refresh = () => {
+    const enabled = Boolean(getConfig(node)[key]);
+    button.textContent = enabled ? "开启" : "关闭";
+    button.classList.toggle("active", enabled);
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+  };
+  button.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setConfig(node, { [key]: !Boolean(getConfig(node)[key]) });
+    refresh();
+    refreshToolbarState(node);
+  };
+  refresh();
+  return button;
+}
+
+function configSelect(node, key, options) {
+  const select = document.createElement("select");
+  const cfg = getConfig(node);
+  const current = cfg[key] || "";
+  for (const item of [...new Set([current, ...options].filter(Boolean))]) {
+    const option = document.createElement("option");
+    option.value = item;
+    option.textContent = item;
+    select.appendChild(option);
+  }
+  select.value = current;
+  select.onchange = () => {
+    setConfig(node, { [key]: select.value });
+    refreshToolbarState(node);
+  };
+  return select;
+}
 
 function buildPanel(node) {
   const root = document.createElement("div");
   root.className = "gjj-ltx-clean";
   stopCanvasEvents(root);
 
-  const buttons = document.createElement("div");
-  buttons.className = "gjj-ltx-tab-buttons";
-  const segmentBtn = document.createElement("button");
-  segmentBtn.className = "gjj-ltx-tab-btn";
-  const segmentPanel = document.createElement("div");
-  segmentPanel.className = "gjj-ltx-section";
+  const tools = document.createElement("div");
+  tools.className = "gjj-ltx-toolbar";
 
-  function updateButtons() {
-    const cfg = getConfig(node);
-    segmentBtn.textContent = `${cfg.segmented_execution ? "✅" : "⬜"} 多图分段执行`;
-    segmentBtn.classList.toggle("active", !!cfg.segmented_execution);
-    segmentPanel.style.display = cfg.segmented_execution ? "block" : "none";
-    resizeNodeToFit(node);
-  }
-  segmentBtn.onclick = () => { setConfig(node, { segmented_execution: !getConfig(node).segmented_execution }); updateButtons(); };
-  buttons.append(segmentBtn);
-  root.appendChild(buttons);
+  const fileBtn = makeToolButton("📁", "打开参考图片并自动连接到本节点", () => chooseReferenceImages(node));
+  const modelBtn = makeToolButton("🧠", "模型树：主模型、VAE、文本编码器、Latent 放大和转场 LoRA", (button) => showModelTreePanel(node, button));
+  const negativeBtn = makeToolButton("🚫", "反向提示词", (button) => showFloatingPanel(node, button, "反向提示词", (body) => {
+    body.append(panelRow("反向", configInput(node, "negative_prompt", "textarea", { rows: 7 })));
+  }, { width: 460 }));
+  const sizeBtn = makeToolButton("📐", "尺寸设置", (button) => showFloatingPanel(node, button, "尺寸", (body) => {
+    body.append(
+      panelRow("视频尺寸来源", configSegmented(node, "size_source", ["面板尺寸", "原视频尺寸"])),
+      panelRow("宽度", configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32 })),
+      panelRow("高度", configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32 })),
+    );
+  }, { width: 460 }));
+  const timingBtn = makeToolButton("🎞️", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "时长", (body) => {
+    body.append(
+      panelRow("场景间隔", configInput(node, "segment_seconds", "number", { min: 0.1, max: 600, step: 0.1 })),
+      panelRow("帧率", configInput(node, "fps", "number", { min: 1, max: 120, step: 1 })),
+      panelRow("降噪", configInput(node, "denoise_strength", "number", { min: 0, max: 1, step: 0.01 })),
+    );
+  }));
+  const seedBtn = makeToolButton("🎲", "随机种子", (button) => {
+    randomizeSeed(node);
+    showFloatingPanel(node, button, "种子", (body) => {
+      body.append(panelRow("种子", configInput(node, "seed", "number", { min: 0, step: 1 })));
+    });
+  });
+  const transitionBtn = makeToolButton("🔁", "转场设置", (button) => showFloatingPanel(node, button, "转场", (body) => {
+    body.append(
+      panelRow("启用", configCheckbox(node, "transition_enabled")),
+      panelRow("曲线", configSelect(node, "transition_curve", ["前置过渡", "平滑过渡", "线性过渡", "后置过渡"])),
+      panelRow("尾段比例", configInput(node, "transition_early_tail_ratio", "number", { min: 0.1, max: 0.95, step: 0.05 })),
+      panelRow("隐式帧数", configInput(node, "transition_implicit_guide_count", "number", { min: 0, max: 4, step: 1 })),
+      panelRow("隐式强度", configInput(node, "transition_implicit_guide_strength", "number", { min: 0, max: 1, step: 0.01 })),
+      panelRow("尾段强度", configInput(node, "transition_early_tail_strength", "number", { min: 0, max: 1, step: 0.01 })),
+      panelRow("终帧强度", configInput(node, "transition_final_guide_strength", "number", { min: 0, max: 1, step: 0.01 })),
+      panelRow("LoRA序列", configInput(node, "transition_lora_switches", "text", { placeholder: "例如：1,0,1" })),
+    );
+  }, { width: 420 }));
+  const segmentBtn = makeToolButton("🧩", "多图分段与保存", (button) => showFloatingPanel(node, button, "分段", (body) => {
+    const openDirBtn = document.createElement("button");
+    openDirBtn.type = "button";
+    openDirBtn.className = "gjj-ltx-wide-button";
+    openDirBtn.textContent = "📁 打开视频所在目录";
+    openDirBtn.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openVideoDir(node);
+    };
+    body.append(
+      panelRow("分段执行", configCheckbox(node, "segmented_execution")),
+      panelRow("保存位置", configInput(node, "segment_save_preset", "text")),
+      panelRow("视频格式", configSelect(node, "segment_video_format", ["video/h264-mp4", "video/h265-mp4", "video/webm"])),
+      openDirBtn,
+    );
+  }, { width: 430 }));
+  const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  segmentPanel.appendChild(makeField(node, { label: "🧬 转场LoRA序列", key: "transition_lora_switches", type: "text", placeholder: "例如：1,0,1", tooltip: "🧬 每段是否启用转场 LoRA：1=启用，0=关闭；不填/越界=默认启用。" }));
-  segmentPanel.appendChild(makeField(node, { label: "📁 保存位置", key: "segment_save_preset", type: "text", tooltip: "📁 分段视频保存到 ComfyUI/output 下的相对目录，支持 {date}/{time}/{node}/{segment}/{start}/{end}。" }));
-  segmentPanel.appendChild(makeSelect(node, "🎞️ 视频格式", "segment_video_format", ["video/h264-mp4", "video/h265-mp4", "video/webm"]).row);
-  const openDirBtn = document.createElement("button");
-  openDirBtn.className = "gjj-ltx-open-dir";
-  openDirBtn.textContent = "📁 打开视频所在目录";
-  openDirBtn.title = "打开当前分段视频保存目录。默认：ComfyUI/output/video/GJJ_LTX多图分段";
-  openDirBtn.onclick = () => openVideoDir(node);
-  segmentPanel.appendChild(openDirBtn);
-  root.append(segmentPanel);
-
-  updateButtons();
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, segmentBtn, runBtn);
+  root.appendChild(tools);
+  node.__gjjLtxTransitionButton = transitionBtn;
+  node.__gjjLtxSegmentButton = segmentBtn;
+  node.__gjjLtxFileButton = fileBtn;
+  node.__gjjLtxRunButton = runBtn;
+  refreshToolbarState(node);
   requestAnimationFrame(() => resizeNodeToFit(node));
   return root;
 }
@@ -553,13 +1353,87 @@ function ensurePanel(node) {
   resizeNodeToFit(node);
 }
 
+function ensureStatusPanel(node) {
+  if (!isTarget(node)) return null;
+  if (node.__gjjLtxStatusPanel && node.widgets?.some(w => w.name === STATUS_WIDGET)) return node.__gjjLtxStatusPanel;
+
+  const wrap = document.createElement("div");
+  wrap.className = "gjj-ltx-status";
+  stopCanvasEvents(wrap);
+  const text = document.createElement("div");
+  text.className = "gjj-ltx-status-text";
+  text.textContent = "等待执行";
+  const progressOuter = document.createElement("div");
+  progressOuter.className = "gjj-ltx-progress";
+  const progressInner = document.createElement("div");
+  progressInner.className = "gjj-ltx-progress-inner";
+  progressOuter.appendChild(progressInner);
+  const previewWrap = document.createElement("div");
+  previewWrap.className = "gjj-ltx-preview";
+  previewWrap.style.display = "none";
+  previewWrap.style.setProperty("--gjj-ltx-preview-aspect", `${Math.max(1, Number(getConfig(node).width) || 16)} / ${Math.max(1, Number(getConfig(node).height) || 9)}`);
+  const video = document.createElement("video");
+  video.controls = true;
+  video.loop = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.className = "gjj-ltx-video";
+  for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+    video.addEventListener(eventName, (event) => event.stopPropagation());
+  }
+  video.addEventListener("loadedmetadata", () => setPreviewAspect(node, video.videoWidth, video.videoHeight));
+  previewWrap.appendChild(video);
+  wrap.append(text, progressOuter, previewWrap);
+
+  const state = { widget: null, wrap, text, progressInner, previewWrap, video, hasPreview: false, previewAspect: configPreviewAspect(node) };
+  const widget = node.addDOMWidget?.(STATUS_WIDGET, STATUS_WIDGET, wrap, {
+    serialize: false,
+    hideOnZoom: false,
+    getHeight: () => previewWidgetHeight(node),
+  });
+  if (widget) {
+    widget.serialize = false;
+    widget.computeSize = (width) => [Math.max(300, width || node.size?.[0] || 360) - 20, previewWidgetHeight(node, width)];
+  }
+  state.widget = widget;
+  node.__gjjLtxStatusPanel = state;
+  return state;
+}
+
+function applyCompactWidgets(node) {
+  setWidgetHidden(getWidget(node, "positive_prompt"), false);
+  for (const key of HIDDEN_WIDGET_KEYS) {
+    setWidgetHidden(getWidget(node, key), true);
+  }
+}
+
+function installExecutionPreviewHooks(node) {
+  if (node.__gjjLtxPreviewHooksInstalled) return;
+  node.__gjjLtxPreviewHooksInstalled = true;
+  const originalOnExecuted = node.onExecuted;
+  node.onExecuted = function (message, ...args) {
+    originalOnExecuted?.apply(this, [message, ...args]);
+    this.__gjjLtxRunInFlight = false;
+    setStatus(this, { text: "执行完成", progress: 1 });
+    setVideoPreview(this, message || {});
+    refreshToolbarState(this);
+  };
+  const originalOnExecutionError = node.onExecutionError;
+  node.onExecutionError = function (...args) {
+    originalOnExecutionError?.apply(this, args);
+    this.__gjjLtxRunInFlight = false;
+    setStatus(this, { text: "执行失败", progress: 0 });
+    refreshToolbarState(this);
+  };
+}
+
 function resizeNodeToFit(node) {
   requestAnimationFrame(() => {
     try {
       const size = node.computeSize?.();
       if (size && Array.isArray(size)) {
         const width = Math.max(node.size?.[0] || 360, 360);
-        const height = Math.max(size[1] + 10, 260);
+        const height = Math.max(size[1] + 8, 150);
         node.setSize?.([width, height]);
       }
       node.setDirtyCanvas?.(true, true);
@@ -572,7 +1446,7 @@ function injectStyles() {
   const style = document.createElement("style");
   style.id = "gjj-ltx-clean-style";
   style.textContent = `
-    .gjj-ltx-clean{box-sizing:border-box;width:100%;padding:6px 8px 4px;color:#d7dde6;font:12px/1.35 system-ui,"Microsoft YaHei",sans-serif;}
+    .gjj-ltx-clean{box-sizing:border-box;width:100%;padding:2px 8px 4px;color:#d7dde6;font:12px/1.35 system-ui,"Microsoft YaHei",sans-serif;}
     .gjj-ltx-title{font-weight:700;color:#9fe8ff;margin:0 0 6px;opacity:.9;}
     .gjj-ltx-row{display:grid;grid-template-columns:82px minmax(0,1fr);align-items:center;gap:6px;margin:5px 0;}
     .gjj-ltx-row span{color:#aeb8c8;white-space:nowrap;}
@@ -586,6 +1460,36 @@ function injectStyles() {
     .gjj-ltx-subpanel{border:1px solid rgba(125,245,255,.18);border-radius:10px;padding:5px 7px;margin:6px 0;background:rgba(10,25,30,.35);}
     .gjj-ltx-open-dir{width:100%;margin:6px 0 2px;border:1px solid rgba(125,245,255,.45);border-radius:8px;background:#12313a;color:#dffcff;padding:6px 8px;font-weight:700;cursor:pointer;}
     .gjj-ltx-open-dir:hover{background:#0b756d;border-color:#5dfff1;}
+    .gjj-ltx-toolbar{display:flex;gap:4px;align-items:center;flex-wrap:wrap;width:100%;box-sizing:border-box;pointer-events:auto;}
+    .gjj-ltx-tool-btn{width:28px;height:24px;border:1px solid #3f5660;border-radius:6px;background:#172228;color:#e7f0ec;cursor:pointer;padding:0;font-size:14px;line-height:20px;}
+    .gjj-ltx-tool-btn:hover{border-color:#6fb9ff;background:#1b3038;}
+    .gjj-ltx-tool-btn.active{background:#124332;border-color:#55a986;color:#ecfff7;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);}
+    .gjj-ltx-floating input,.gjj-ltx-floating select,.gjj-ltx-floating textarea{box-sizing:border-box;background:#0b1115;color:#e7f3f3;border:1px solid #354952;border-radius:5px;padding:5px 6px;font:12px system-ui,"Microsoft YaHei",sans-serif;outline:none;}
+    .gjj-ltx-floating textarea{resize:vertical;min-height:74px;}
+    .gjj-ltx-float-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:700;margin-bottom:7px;color:#f3faf8;}
+    .gjj-ltx-close{width:22px;height:22px;border:1px solid #40535b;border-radius:6px;background:#172228;color:#dce7e2;cursor:pointer;padding:0;line-height:18px;}
+    .gjj-ltx-float-body{display:flex;flex-direction:column;gap:7px;min-width:0;overflow:hidden;}
+    .gjj-ltx-float-row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;align-items:center;white-space:nowrap;width:100%;min-width:0;box-sizing:border-box;overflow:hidden;}
+    .gjj-ltx-float-row span{color:#b9c9cd;white-space:nowrap;overflow:hidden;text-overflow:clip;min-width:0;}
+    .gjj-ltx-segmented{display:flex;align-items:center;gap:8px;min-width:0;}
+    .gjj-ltx-segmented button{height:30px;border:1px solid #40535b;border-radius:8px;background:#172228;color:#dce7e2;cursor:pointer;padding:0 12px;font-size:12px;font-weight:700;white-space:nowrap;}
+    .gjj-ltx-segmented button.active{background:#1b8aca;border-color:#83d4ff;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);}
+    .gjj-ltx-slider-number{display:grid;grid-template-columns:minmax(0,1fr) 88px;gap:8px;align-items:center;min-width:0;}
+    .gjj-ltx-slider-number input[type="range"]{width:100%;height:22px;padding:0;border:0;background:transparent;accent-color:#42bdf1;}
+    .gjj-ltx-slider-number input[type="number"]{height:32px;text-align:center;}
+    .gjj-ltx-toggle{width:92px;height:28px;border:1px solid #40535c;border-radius:14px;background:#121920;color:#91a3aa;font-weight:700;cursor:pointer;padding:0 12px;}
+    .gjj-ltx-toggle.active{background:#1668c7;border-color:#78c4ff;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);}
+    .gjj-ltx-wide-button{height:28px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:700;}
+    .gjj-ltx-wide-button:hover{border-color:#6fb9ff;background:#1f3440;}
+    .gjj-ltx-status{box-sizing:border-box;width:100%;padding:5px 8px 6px;color:#cbd8dd;font:12px/1.35 system-ui,"Microsoft YaHei",sans-serif;}
+    .gjj-ltx-status-text{height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#aebfc6;}
+    .gjj-ltx-progress{height:3px;margin-top:4px;border-radius:999px;background:#26343a;overflow:hidden;}
+    .gjj-ltx-progress-inner{height:100%;width:0%;background:linear-gradient(90deg,#72c1ff,#7ed6a7);transition:width 120ms ease;}
+    .gjj-ltx-preview{width:100%;aspect-ratio:var(--gjj-ltx-preview-aspect,16/9);margin-top:7px;border:1px solid #31434d;border-radius:6px;overflow:hidden;background:#05090c;}
+    .gjj-ltx-video{display:block;width:100%;height:100%;object-fit:contain;background:#05090c;}
+    .gjj-ltx-model-title{display:flex;align-items:baseline;gap:8px;margin:2px 0 0;}
+    .gjj-ltx-model-title div:first-child{color:#eef7f2;font-weight:700;}
+    .gjj-ltx-model-title div:last-child{color:#9fb0b8;font-size:12px;}
   `;
   document.head.appendChild(style);
 }
@@ -596,7 +1500,11 @@ function stabilize(node) {
   normalizeInputs(node);
   wireNativeMainWidgets(node);
   syncNativeMainWidgets(node, false);
+  applyCompactWidgets(node);
   ensurePanel(node);
+  ensureStatusPanel(node);
+  installExecutionPreviewHooks(node);
+  refreshToolbarState(node);
   repairLinks(node);
 }
 

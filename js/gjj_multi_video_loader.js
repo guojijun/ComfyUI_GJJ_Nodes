@@ -466,6 +466,24 @@ function imageDataToUrl(item) {
 	return api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`);
 }
 
+function mediaDataToUrl(item) {
+	if (!item?.filename) return "";
+	if (isVideoPreviewItem(item)) {
+		const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
+		return api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}${randParam}`);
+	}
+	return imageDataToUrl(item);
+}
+
+function isVideoPreviewItem(item) {
+	if (!item?.filename) return false;
+	const format = String(item?.format || "").toLowerCase();
+	if (format === "image/gif") return false;
+	if (String(item?.media_type || "").toLowerCase() === "video") return true;
+	if (format.startsWith("video/")) return true;
+	return /\.(mp4|mov|m4v|webm|avi|mkv|wmv|flv)$/i.test(String(item.filename || ""));
+}
+
 async function fetchMediaMeta(item) {
 	if (!item?.filename) return item || null;
 	const hasUsableMeta = Number(item.width || 0) > 0 && Number(item.height || 0) > 0 && Number(item.fps || 0) > 0;
@@ -1635,6 +1653,7 @@ function renderExecutedPreview(node) {
 	grid.replaceChildren();
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index];
+		const isVideo = isVideoPreviewItem(item);
 		const wrap = document.createElement("div");
 		wrap.title = `${item?.filename || `帧 ${index + 1}`}`;
 		wrap.style.cssText = [
@@ -1648,10 +1667,17 @@ function renderExecutedPreview(node) {
 			"box-sizing:border-box",
 		].join(";");
 
-		const image = document.createElement("img");
-		image.src = imageDataToUrl(item);
-		image.draggable = false;
-		image.style.cssText = isSequencePreview
+		const media = document.createElement(isVideo ? "video" : "img");
+		media.src = mediaDataToUrl(item);
+		media.draggable = false;
+		if (isVideo) {
+			media.muted = true;
+			media.loop = true;
+			media.playsInline = true;
+			media.controls = true;
+			media.preload = "metadata";
+		}
+		media.style.cssText = isSequencePreview
 			? "width:100%;height:auto;max-height:280px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;"
 			: "width:100%;height:64px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;";
 
@@ -1711,17 +1737,23 @@ function renderExecutedPreview(node) {
 				"z-index:9999",
 				"cursor:zoom-out",
 			].join(";");
-			const zoomedImage = document.createElement("img");
-			zoomedImage.src = imageDataToUrl(item);
-			zoomedImage.draggable = false;
-			zoomedImage.style.cssText = "max-width:90vw;max-height:90vh;object-contain;border-radius:8px;";
-			zoomedImage.addEventListener("click", (e) => e.stopPropagation());
-			modal.appendChild(zoomedImage);
+			const zoomedMedia = document.createElement(isVideo ? "video" : "img");
+			zoomedMedia.src = mediaDataToUrl(item);
+			zoomedMedia.draggable = false;
+			if (isVideo) {
+				zoomedMedia.controls = true;
+				zoomedMedia.autoplay = true;
+				zoomedMedia.loop = true;
+				zoomedMedia.playsInline = true;
+			}
+			zoomedMedia.style.cssText = "max-width:90vw;max-height:90vh;object-contain;border-radius:8px;";
+			zoomedMedia.addEventListener("click", (e) => e.stopPropagation());
+			modal.appendChild(zoomedMedia);
 			modal.addEventListener("click", () => modal.remove());
 			document.body.appendChild(modal);
 		});
 
-		wrap.appendChild(image);
+		wrap.appendChild(media);
 		wrap.appendChild(deleteButton);
 		wrap.appendChild(zoomButton);
 		grid.appendChild(wrap);

@@ -236,9 +236,40 @@ def _lookup_tokens(text: str) -> list[str]:
 def _safe_filename_list(category: str) -> list[str]:
 	_ensure_runtime_dependencies()
 	try:
-		return list(folder_paths.get_filename_list(category))
+		names = list(folder_paths.get_filename_list(category))
+		if category == "diffusion_models":
+			try:
+				names.extend(list(folder_paths.get_filename_list("unet_gguf")))
+			except Exception:
+				pass
+		if category == "text_encoders":
+			try:
+				names.extend(list(folder_paths.get_filename_list("clip_gguf")))
+			except Exception:
+				pass
+		seen: set[str] = set()
+		out: list[str] = []
+		for name in names:
+			key = str(name).replace("\\", "/").lower()
+			if not key or key in seen:
+				continue
+			seen.add(key)
+			out.append(str(name))
+		return out
 	except Exception:
 		return []
+
+
+def _get_full_path_any(categories: Iterable[str], name: Any) -> str:
+	_ensure_runtime_dependencies()
+	for category in categories:
+		try:
+			path = folder_paths.get_full_path(category, str(name or ""))
+		except Exception:
+			path = ""
+		if path:
+			return path
+	return ""
 
 
 def _pick_available_name(preferred: str, available: Iterable[str]) -> str:
@@ -262,7 +293,8 @@ def _pick_first_candidate(category: str, candidates: Iterable[str], label: str, 
     for candidate in candidates:
         resolved = _pick_available_name(candidate, available)
         if resolved:
-            full_path = folder_paths.get_full_path(category, resolved)
+            extra_categories = (category, "unet_gguf") if category == "diffusion_models" else ((category, "clip_gguf") if category == "text_encoders" else (category,))
+            full_path = _get_full_path_any(extra_categories, resolved)
             if full_path:
                 # ========== 彩色输出：成功找到模型 ==========
                 print(f"\033[93m\033[1m[✓] 成功加载 {label}\033[0m")
@@ -354,7 +386,7 @@ def _find_auto_transition_lora_name() -> tuple[str, str]:
 	return name, full_path
 
 
-def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool) -> tuple[str, bool, str, str]:
+def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool, preferred_name: Any = "") -> tuple[str, bool, str, str]:
 	"""若首尾帧分支需要，自动把转场 lora 注入 lora_chain_config。返回 (prepared_config, enabled, lora_name, lora_path)。"""
 	items = parse_lora_data(lora_chain_config)
 	if not items:
@@ -373,7 +405,15 @@ def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool) 
 			item["strength"] = 1.0
 			break
 	if (not enabled) and enable_auto:
-		auto_name, auto_path = _find_auto_transition_lora_name()
+		preferred_text = str(preferred_name or "").strip()
+		if preferred_text:
+			auto_name = preferred_text
+			try:
+				auto_path = folder_paths.get_full_path("loras", auto_name) or ""
+			except Exception:
+				auto_path = ""
+		else:
+			auto_name, auto_path = _find_auto_transition_lora_name()
 		if auto_name:
 			items.append({"name": auto_name, "strength": 1.0, "enabled": True})
 			enabled = True
@@ -1127,7 +1167,7 @@ def _load_ltx_text_encoder_with_internal_gemma(text_encoder_name: str, ckpt_name
 	except Exception as exc:
 		raise RuntimeError(f"内置 LTXVGemmaCLIPModelLoader：{exc}") from exc
 
-def _load_ltx_text_encoder_with_dual_clip(text_encoder_name: str) -> Any:
+def _load_ltx_text_encoder_with_dual_clip(text_encoder_name: str, text_projection_name: Any = "") -> Any:
 	"""按参考工作流优先使用 DualCLIPLoader：Gemma 主体 + LTX 文本投影。"""
 	try:
 		core_nodes = importlib.import_module("nodes")
@@ -1136,11 +1176,12 @@ def _load_ltx_text_encoder_with_dual_clip(text_encoder_name: str) -> Any:
 			raise RuntimeError("当前 ComfyUI 没有 DualCLIPLoader")
 		projection_name = _pick_optional_candidate(
 			"text_encoders",
-			(
+			tuple(x for x in (
+				str(text_projection_name or "").strip(),
 				"ltx-2.3_text_projection_bf16.safetensors",
 				"ltx2.3_text_projection_bf16.safetensors",
 				"text_projection_bf16",
-			),
+			) if x),
 		)
 		if not projection_name:
 			raise RuntimeError("未找到 ltx-2.3_text_projection_bf16.safetensors")
@@ -1163,7 +1204,35 @@ def _load_ltx_text_encoder_with_dual_clip(text_encoder_name: str) -> Any:
 		raise RuntimeError(f"DualCLIPLoader：{exc}") from exc
 
 
-def _load_ltx_text_encoder(text_encoder_name: str, ckpt_name: str):
+def _load_ltx_text_encoder_with_gguf_dual_clip(text_encoder_name: str, text_projection_name: Any = "") -> Any:
+	"""Load Gemma GGUF + LTX text projection through the bundled GGUF DualCLIP loader."""
+	projection_name = _pick_optional_candidate(
+		"text_encoders",
+		tuple(x for x in (
+			str(text_projection_name or "").strip(),
+			"ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+			"ltx-2.3_text_projection_bf16.safetensors",
+			"ltx2.3_text_projection_bf16.safetensors",
+			"text_projection_bf16",
+		) if x),
+	)
+	if not projection_name:
+		raise RuntimeError("未找到 LTX GGUF 文本投影/connector 模型。")
+	try:
+		try:
+			gguf_runtime = importlib.import_module("..vendor.gjj_gguf_runtime", __package__)
+		except Exception:
+			gguf_runtime = importlib.import_module("vendor.gjj_gguf_runtime")
+		clip = gguf_runtime.load_dual_clip_gguf(text_encoder_name, projection_name, "ltxv", "default")
+		if clip is None:
+			raise RuntimeError("GGUF DualCLIP 返回空 CLIP")
+		print(f"[GJJ LTX2.3] 已使用内置 GGUF DualCLIP：{text_encoder_name} + {projection_name}")
+		return clip
+	except Exception as exc:
+		raise RuntimeError(f"内置 GGUF DualCLIP：{exc}") from exc
+
+
+def _load_ltx_text_encoder(text_encoder_name: str, ckpt_name: str, text_projection_name: Any = ""):
 	print(f"[GJJ LTX2.3] runtime patch: {GJJ_LTX23_RUNTIME_PATCH_VERSION}")
 	_ensure_runtime_dependencies()
 	"""加载 LTX-2.3 Gemma 文本编码器。
@@ -1174,10 +1243,16 @@ def _load_ltx_text_encoder(text_encoder_name: str, ckpt_name: str):
 	- 不再让裸 model.safetensors 抢先命中 models/clip/model.safetensors。
 	"""
 	attempt_errors: list[str] = []
+	lower_name = str(text_encoder_name or "").lower().replace("\\", "/")
+	if lower_name.endswith(".gguf"):
+		try:
+			return _load_ltx_text_encoder_with_gguf_dual_clip(text_encoder_name, text_projection_name)
+		except Exception as exc:
+			raise RuntimeError("LTX GGUF 文本编码器必须使用双 CLIP 加载失败：" + str(exc)) from exc
 
 	def _try_dual(name: str) -> Any | None:
 		try:
-			clip = _load_ltx_text_encoder_with_dual_clip(name)
+			clip = _load_ltx_text_encoder_with_dual_clip(name, text_projection_name)
 			if clip is not None:
 				# 参考工作流的 DualCLIPLoader 返回的 LTXV CLIP 会在真正 encode/load_model 时
 				# 懒加载/绑定投影层。这里不能像旧 LTXAVTextEncoderLoader 一样提前检查
@@ -1200,12 +1275,16 @@ def _load_ltx_text_encoder(text_encoder_name: str, ckpt_name: str):
 		return None
 
 	# 1) 如果当前选择的是参考工作流的扁平 Gemma safetensors，先走 DualCLIPLoader。
-	lower_name = str(text_encoder_name or "").lower().replace("\\", "/")
 	is_flat_safetensors = lower_name.endswith(".safetensors") and "/" not in lower_name and "model.safetensors" not in lower_name
 	if is_flat_safetensors:
 		clip = _try_dual(text_encoder_name)
 		if clip is not None:
 			return clip
+		raise RuntimeError(
+			"扁平 Gemma safetensors 必须使用 DualCLIPLoader 加载，但双 CLIP 加载失败："
+			+ "；".join(attempt_errors[-6:])
+			+ "。请在 🧠 模型树选择 gemma_3_12b... 和 ltx-2.3_text_projection...。"
+		)
 
 	# 2) 尝试目录型 Gemma。只放明确目录结构候选，不再放裸 model.safetensors。
 	internal_candidates: list[str] = []
@@ -2331,6 +2410,51 @@ def _save_segment_video_preview(
 	return payload
 
 
+def _save_final_video_preview(
+	*,
+	frames: torch.Tensor,
+	audio: dict[str, Any] | None,
+	fps: float,
+	save_preset: Any,
+	format_name: Any,
+	unique_id: Any,
+	output_width: int,
+	output_height: int,
+) -> dict[str, Any]:
+	prefix = _format_segment_save_prefix(save_preset, unique_id, 0, 0, max(0, int(frames.shape[0]) - 1))
+	prefix = prefix.replace("/段00_场景00-", "/最终视频_帧00-")
+	resolved_format = _supported_segment_video_format(format_name)
+	saved = combine_video(
+		images=frames,
+		frame_rate=float(fps),
+		loop_count=0,
+		filename_prefix=prefix,
+		format_name=resolved_format,
+		pingpong=False,
+		save_output=True,
+		audio=audio,
+		unique_id=None,
+	)
+	ui = saved.get("ui", {}) if isinstance(saved, dict) else {}
+	media_items = ui.get("preview_media") or ui.get("images") or []
+	media_item = dict(media_items[0]) if media_items else {}
+	main_path = ""
+	raw_path = ui.get("preview_main_path")
+	if isinstance(raw_path, (list, tuple)) and raw_path:
+		main_path = str(raw_path[0] or "")
+	elif isinstance(raw_path, str):
+		main_path = raw_path
+	return {
+		"label": "最终视频",
+		"path": main_path,
+		"media": media_item,
+		"width": int(output_width),
+		"height": int(output_height),
+		"frame_count": int(frames.shape[0]),
+		"format": resolved_format,
+	}
+
+
 def _resolve_output_dimension(value: int | None, fallback: int) -> int:
 	try:
 		numeric = int(value) if value is not None else 0
@@ -2662,6 +2786,12 @@ def run_ltx23_multiref_video(
 	segment_video_format: Any = DEFAULT_SEGMENT_VIDEO_FORMAT,
 	transition_options: Any = None,
 	denoise_strength: Any = DEFAULT_DENOISE_STRENGTH,
+	video_vae_name: Any = "",
+	audio_vae_name: Any = "",
+	text_encoder_name: Any = "",
+	text_projection_name: Any = "",
+	latent_upscaler_name: Any = "",
+	transition_lora_name: Any = "",
 	branch_debug: Any = None,
 	unique_id: Any = None,
 ):
@@ -2706,7 +2836,7 @@ def run_ltx23_multiref_video(
 	global_transition_lora_enabled_by_switch = _resolve_transition_lora_switch_any(segment_switch_text, segment_count_for_switch)
 	auto_enable_transition_lora = (visual_scene_count >= 2) and bool(global_transition_lora_enabled_by_switch)
 	prepared_lora_chain_source = lora_chain_config if global_transition_lora_enabled_by_switch else _strip_transition_lora_from_chain(lora_chain_config)
-	prepared_lora_chain_config, transition_lora_enabled, auto_transition_lora_name, auto_transition_lora_path = _ensure_transition_lora_in_chain(prepared_lora_chain_source, auto_enable_transition_lora)
+	prepared_lora_chain_config, transition_lora_enabled, auto_transition_lora_name, auto_transition_lora_path = _ensure_transition_lora_in_chain(prepared_lora_chain_source, auto_enable_transition_lora, transition_lora_name)
 	prepared_lora_chain_config, transition_lora_enabled2, transition_strength_changed = _prepare_ltx_lora_chain_config(prepared_lora_chain_config)
 	transition_lora_enabled = bool(global_transition_lora_enabled_by_switch and (transition_lora_enabled or transition_lora_enabled2))
 	# prompt 是否添加 zhuanchang 改到 _render_once 内按段处理；这里仅记录全局是否加载 LoRA。
@@ -2747,10 +2877,10 @@ def run_ltx23_multiref_video(
 			if not available_ckpts:
 				candidate_text = " / ".join(str(item) for item in ckpt_candidates)
 				raise RuntimeError(f"未找到LTX 主模型，候选项：{candidate_text}")
-			resolved_video_vae = _pick_first_candidate("vae",("video_vae",), "LTX 视频 VAE")
-			resolved_audio_vae = _pick_first_candidate("vae",("audio_vae",), "LTX 音频 VAE")
-			resolved_text_encoder = _pick_first_candidate("text_encoders",("gemma_3_12B_it_fp8_e4m3fn.safetensors", "gemma_3_12B_it.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj", "gemma_3_12B_it"), "LTX 文本编码器")
-			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models",("ltx-2.3-spatial-upscaler",), "LTX latent 放大模型")
+			resolved_video_vae = _pick_first_candidate("vae", tuple(x for x in (str(video_vae_name or "").strip(), "video_vae") if x), "LTX 视频 VAE")
+			resolved_audio_vae = _pick_first_candidate("vae", tuple(x for x in (str(audio_vae_name or "").strip(), "audio_vae") if x), "LTX 音频 VAE")
+			resolved_text_encoder = _pick_first_candidate("text_encoders", tuple(x for x in (str(text_encoder_name or "").strip(), "gemma_3_12B_it_fp8_e4m3fn.safetensors", "gemma_3_12B_it.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj", "gemma_3_12B_it") if x), "LTX 文本编码器")
+			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models", tuple(x for x in (str(latent_upscaler_name or "").strip(), "ltx-2.3-spatial-upscaler") if x), "LTX latent 放大模型")
 
 			model = None
 			resolved_ckpt = ""
@@ -2774,7 +2904,7 @@ def run_ltx23_multiref_video(
 						pass
 			if model is None:
 				raise RuntimeError("未能加载可用的 LTX 主模型：" + "；".join(model_errors[-6:]))
-			clip = _load_ltx_text_encoder(resolved_text_encoder, resolved_ckpt)
+			clip = _load_ltx_text_encoder(resolved_text_encoder, resolved_ckpt, text_projection_name)
 			video_vae = _load_video_vae(resolved_video_vae)
 			audio_vae = _load_audio_vae(resolved_audio_vae)
 			latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0]
@@ -3355,8 +3485,22 @@ def run_ltx23_multiref_video(
 			output_height = int(combined_frames.shape[1])
 			_send_status(unique_id, f"完成：{route_label}（音频分段 {len(segment_frames)} 段）/ 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / 外部音频驱动")
 			_send_status(unique_id, f"最终输出尺寸：{output_width}x{output_height}")
+			final_preview = _save_final_video_preview(
+				frames=combined_frames,
+				audio=combined_audio,
+				fps=fps,
+				save_preset=segment_save_preset,
+				format_name=segment_video_format,
+				unique_id=unique_id,
+				output_width=output_width,
+				output_height=output_height,
+			)
 			return {
 				"ui": {
+					"preview_main_path": (final_preview.get("path") or "",),
+					"preview_media": (final_preview.get("media") or {},),
+					"preview_is_video": (True,),
+					"final_video": (final_preview,),
 					"segment_videos": segment_previews,
 					"preview_segments": segment_previews,
 				},
@@ -3434,8 +3578,22 @@ def run_ltx23_multiref_video(
 			output_height = int(combined_frames.shape[1])
 			_send_status(unique_id, f"完成：{route_label}（分段执行 {segment_count} 段）/ 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
 			_send_status(unique_id, f"最终输出尺寸：{output_width}x{output_height}")
+			final_preview = _save_final_video_preview(
+				frames=combined_frames,
+				audio=combined_audio,
+				fps=fps,
+				save_preset=segment_save_preset,
+				format_name=segment_video_format,
+				unique_id=unique_id,
+				output_width=output_width,
+				output_height=output_height,
+			)
 			return {
 				"ui": {
+					"preview_main_path": (final_preview.get("path") or "",),
+					"preview_media": (final_preview.get("media") or {},),
+					"preview_is_video": (True,),
+					"final_video": (final_preview,),
 					"segment_videos": segment_previews,
 					"preview_segments": segment_previews,
 				},
@@ -3467,7 +3625,25 @@ def run_ltx23_multiref_video(
 			audio_label = "静音输出"
 		_send_status(unique_id, f"完成：{route_label} / 有效场景 {visual_scene_count} 张 / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
 		_send_status(unique_id, f"最终输出尺寸：{result['output_width']}x{result['output_height']}")
-		return (result["video"], result["frames"])
+		final_preview = _save_final_video_preview(
+			frames=result["frames"],
+			audio=result["audio"],
+			fps=fps,
+			save_preset=segment_save_preset,
+			format_name=segment_video_format,
+			unique_id=unique_id,
+			output_width=result["output_width"],
+			output_height=result["output_height"],
+		)
+		return {
+			"ui": {
+				"preview_main_path": (final_preview.get("path") or "",),
+				"preview_media": (final_preview.get("media") or {},),
+				"preview_is_video": (True,),
+				"final_video": (final_preview,),
+			},
+			"result": (result["video"], result["frames"]),
+		}
 
 	try:
 		return _execute()

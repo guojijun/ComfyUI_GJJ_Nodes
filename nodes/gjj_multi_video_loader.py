@@ -581,6 +581,25 @@ def resolve_input_video_path(entry: dict[str, str]) -> Path:
     return candidate
 
 
+def selected_video_preview_entries(selected: list[dict[str, str]]) -> list[dict[str, Any]]:
+    previews: list[dict[str, Any]] = []
+    for entry in selected:
+        filename = str(entry.get("filename") or "").strip()
+        if not filename:
+            continue
+        media_type = str(entry.get("type") or "input").strip().lower() or "input"
+        suffix = Path(filename).suffix.lower().lstrip(".")
+        is_gif = suffix == "gif"
+        previews.append({
+            "filename": filename,
+            "subfolder": str(entry.get("subfolder") or "").strip().replace("\\", "/"),
+            "type": "temp" if media_type == "temp" else "input",
+            "format": "image/gif" if is_gif else f"video/{suffix}",
+            "media_type": "image" if is_gif else "video",
+        })
+    return previews
+
+
 def empty_image_tensor() -> torch.Tensor:
     return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
@@ -1602,8 +1621,8 @@ class GJJ_MultiVideoLoader:
         final_width = int(batch_output.shape[2]) if int(batch_output.ndim) == 4 else 0
         final_height = int(batch_output.shape[1]) if int(batch_output.ndim) == 4 else 0
 
-        preview_entries: list[dict[str, Any]] = []
-        if selected_count != 1 and int(batch_output.shape[0]) > 0:
+        preview_entries: list[dict[str, Any]] = selected_video_preview_entries(selected) if selected_count > 0 else []
+        if not preview_entries and int(batch_output.shape[0]) > 0:
             preview_tensor = batch_output
             preview_fps = max(1.0, float(output_fps or _effective_output_fps(source_fps, frame_stride_val)))
             preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
@@ -1657,7 +1676,7 @@ class GJJ_MultiVideoLoader:
                 result.append(optional_values[key])
 
         ui_payload = {
-            "preview_images": [] if selected_count == 1 else preview_entries,
+            "preview_images": preview_entries,
             "video_count": [selected_count],
             "frame_count": [int(batch_output.shape[0])],
             "source_fps": [float(source_fps)],

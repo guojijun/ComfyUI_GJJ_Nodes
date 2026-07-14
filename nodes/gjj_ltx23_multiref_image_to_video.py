@@ -631,19 +631,18 @@ def _scene_image_size(value: Any) -> tuple[int, int] | None:
 
 
 def _resolve_target_size_from_config_and_scenes(config: dict[str, Any], raw_scene_images: list[Any]) -> tuple[int, int, str]:
-    """Clean v40：INPUT_IS_LIST 会让旧节点/新节点的宽高字段有时回到默认 1280x720。
-    如果当前宽高仍是默认值，而输入图已经是明确尺寸，则自动用输入图尺寸作为目标。
-    用户手动设置了非默认宽高时仍以面板为准。
-    """
+    """按面板选择解析目标尺寸。"""
     cfg_w = _ceil_to_multiple(config.get("width"), 8, 64)
     cfg_h = _ceil_to_multiple(config.get("height"), 8, 64)
-    if raw_scene_images and int(cfg_w) == int(DEFAULT_WIDTH) and int(cfg_h) == int(DEFAULT_HEIGHT):
+    size_source = str(config.get("size_source") or "面板尺寸")
+    if raw_scene_images and size_source == "原视频尺寸":
         for image in raw_scene_images:
             size = _scene_image_size(image)
             if size:
                 w, h = size
-                return _ceil_to_multiple(w, 8, 64), _ceil_to_multiple(h, 8, 64), f"输入图自动尺寸 {w}x{h}"
-    return cfg_w, cfg_h, "面板宽高"
+                return _ceil_to_multiple(w, 8, 64), _ceil_to_multiple(h, 8, 64), f"原视频尺寸 {w}x{h}"
+        return cfg_w, cfg_h, "原视频尺寸不可用，回退面板尺寸"
+    return cfg_w, cfg_h, "面板尺寸"
 
 
 def _looks_like_scene_payload(value: Any) -> bool:
@@ -844,7 +843,7 @@ def _normalize_model_match_text(value: Any) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
 
-def _ltx_model_priority(name: Any) -> tuple[int, str]:
+def _ltx_model_priority(name: Any) -> tuple[int, int, str]:
     """主模型排序优先级。
 
     用户要求：
@@ -855,14 +854,37 @@ def _ltx_model_priority(name: Any) -> tuple[int, str]:
     """
     text = str(name or "")
     norm = _normalize_model_match_text(text)
+    lower = text.lower()
+    ext_priority = 1 if lower.replace("\\", "/").endswith(".gguf") else 0
 
     if "ltx2322b" in norm:
-        return (0, text.lower())
+        return (0, ext_priority, lower)
     if "ltx23" in norm:
-        return (1, text.lower())
+        return (1, ext_priority, lower)
     if "ltx" in norm:
-        return (2, text.lower())
-    return (9, text.lower())
+        return (2, ext_priority, lower)
+    return (9, ext_priority, lower)
+
+
+def _filename_list(category: str) -> list[str]:
+    try:
+        import folder_paths  # type: ignore
+        return [str(name) for name in folder_paths.get_filename_list(category)]
+    except Exception:
+        return []
+
+
+def _dedupe_names(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for name in group:
+            key = str(name).replace("\\", "/").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(str(name))
+    return out
 
 
 def _ltx_checkpoint_options() -> list[str]:
@@ -871,11 +893,7 @@ def _ltx_checkpoint_options() -> list[str]:
     LTX 2.3 主模型是 diffusion_models，不是 checkpoints。
     列表排序：ltx-2.3-22b 优先，然后其它 ltx23，最后普通 ltx。
     """
-    try:
-        import folder_paths  # type: ignore
-        names = list(folder_paths.get_filename_list("diffusion_models"))
-    except Exception:
-        names = []
+    names = _dedupe_names(_filename_list("diffusion_models"), _filename_list("unet_gguf"))
     filtered = [str(name) for name in names if "ltx" in str(name).lower()]
     filtered = sorted(filtered, key=_ltx_model_priority)
     return filtered or ["ltx-2.3-22b"]
@@ -884,6 +902,132 @@ def _ltx_checkpoint_options() -> list[str]:
 def _default_ltx_checkpoint() -> str:
     options = _ltx_checkpoint_options()
     return options[0] if options else "ltx-2.3-22b"
+
+
+def _model_options(category: str, keywords: tuple[str, ...] = (), any_keywords: tuple[str, ...] = ()) -> list[str]:
+    names = _filename_list(category)
+    if keywords or any_keywords:
+        def keep(name: str) -> bool:
+            text = _normalize_model_match_text(name)
+            if keywords and not all(_normalize_model_match_text(item) in text for item in keywords):
+                return False
+            if any_keywords and not any(_normalize_model_match_text(item) in text for item in any_keywords):
+                return False
+            return True
+        names = [name for name in names if keep(name)]
+    return sorted(names, key=lambda item: item.lower())
+
+
+def _safetensors_first_key(name: Any) -> tuple[int, str]:
+    text = str(name or "")
+    lower = text.lower().replace("\\", "/")
+    return (1 if lower.endswith(".gguf") else 0, lower)
+
+
+def _first_or_default(items: list[str], default: str) -> str:
+    return items[0] if items else default
+
+
+def _ltx_model_fields() -> list[dict[str, Any]]:
+    ltx_models = _ltx_checkpoint_options()
+    video_vaes = _model_options("vae", any_keywords=("video_vae", "ltx23_video", "ltx_video"))
+    audio_vaes = _model_options("vae", any_keywords=("audio_vae", "ltx23_audio", "ltx_audio"))
+    text_encoders = sorted(
+        _dedupe_names(
+            _model_options("text_encoders", any_keywords=("gemma_3_12b", "gemma-3-12b")),
+            _model_options("clip_gguf", any_keywords=("gemma_3_12b", "gemma-3-12b", "gemma")),
+        ),
+        key=_safetensors_first_key,
+    )
+    text_projections = _model_options("text_encoders", any_keywords=("ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"))
+    latent_upscalers = _model_options("latent_upscale_models", any_keywords=("ltx-2.3-spatial-upscaler", "ltx23", "ltx"))
+    transition_loras = _model_options("loras", any_keywords=("ltx2.3-transition", "ltx23transition", "zhuanchang"))
+    return [
+        {
+            "name": "ltx_model_name",
+            "label": "LTX 2.3 主模型",
+            "folder": "diffusion_models",
+            "path": "models/diffusion_models",
+            "models": ltx_models,
+            "keywords": ["ltx"],
+            "fallback": _default_ltx_checkpoint(),
+            "filename": "ltx-2.3-22b.safetensors",
+            "required": True,
+            "description": "LTX 2.3 主扩散模型；优先使用 ltx-2.3-22b，其次可选 ltx23 / ltx 模型。",
+        },
+        {
+            "name": "ltx_video_vae_name",
+            "label": "LTX 视频 VAE",
+            "folder": "vae",
+            "path": "models/vae",
+            "models": video_vaes,
+            "anyKeywords": ["video_vae", "ltx23_video", "ltx_video"],
+            "fallback": _first_or_default(video_vaes, "LTX23_video_vae_bf16.safetensors"),
+            "filename": "LTX23_video_vae_bf16.safetensors",
+            "required": True,
+            "description": "LTX 视频 VAE，用于视频 latent 解码与图像预处理。",
+        },
+        {
+            "name": "ltx_audio_vae_name",
+            "label": "LTX 音频 VAE",
+            "folder": "vae",
+            "path": "models/vae",
+            "models": audio_vaes,
+            "anyKeywords": ["audio_vae", "ltx23_audio", "ltx_audio"],
+            "fallback": _first_or_default(audio_vaes, "LTX23_audio_vae_bf16.safetensors"),
+            "filename": "LTX23_audio_vae_bf16.safetensors",
+            "required": True,
+            "description": "LTX 音频 VAE，用于 LTX 音频条件与音频解码。",
+        },
+        {
+            "name": "ltx_text_encoder_name",
+            "label": "Gemma 文本编码器",
+            "folder": "text_encoders",
+            "path": "models/text_encoders",
+            "models": text_encoders,
+            "anyKeywords": ["gemma_3_12b", "gemma-3-12b"],
+            "fallback": _first_or_default(text_encoders, "gemma_3_12B_it_fp8_e4m3fn.safetensors"),
+            "filename": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+            "required": True,
+            "description": "LTX 2.3 使用的 Gemma 3 12B 文本编码器；扁平 safetensors 会与 LTX 文本投影组成 DualCLIP。",
+        },
+        {
+            "name": "ltx_text_projection_name",
+            "label": "LTX 文本投影",
+            "folder": "text_encoders",
+            "path": "models/text_encoders",
+            "models": text_projections,
+            "anyKeywords": ["ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"],
+            "fallback": _first_or_default(text_projections, "ltx-2.3_text_projection_bf16.safetensors"),
+            "filename": "ltx-2.3_text_projection_bf16.safetensors",
+            "required": True,
+            "description": "DualCLIPLoader 的第二个 CLIP/connector；扁平 Gemma safetensors 与 Gemma GGUF 都会和它组成双 CLIP。",
+        },
+        {
+            "name": "ltx_latent_upscaler_name",
+            "label": "Latent 放大模型",
+            "folder": "latent_upscale_models",
+            "path": "models/latent_upscale_models",
+            "models": latent_upscalers,
+            "anyKeywords": ["ltx-2.3-spatial-upscaler", "ltx23", "ltx"],
+            "fallback": _first_or_default(latent_upscalers, "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+            "filename": "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            "required": True,
+            "description": "LTX latent 空间放大模型，用于生成后 latent upscale。",
+        },
+        {
+            "name": "transition_lora_name",
+            "label": "转场 LoRA",
+            "folder": "loras",
+            "path": "models/loras",
+            "models": transition_loras,
+            "anyKeywords": ["ltx2.3-transition", "ltx23transition", "zhuanchang"],
+            "fallback": _first_or_default(transition_loras, "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors"),
+            "filename": "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors",
+            "required": False,
+            "description": "多图/首尾帧转场自动注入的 LoRA；触发词 zhuanchang 会按段自动处理。",
+        },
+    ]
 
 
 SECTION_PROPERTY_NAMES = (
@@ -1010,7 +1154,8 @@ async def _gjj_ltx23_open_video_dir_endpoint(request):
 
 
 async def _gjj_ltx23_models_endpoint(request):
-    return _json_response({"models": _ltx_checkpoint_options(), "default": _default_ltx_checkpoint()})
+    fields = _ltx_model_fields()
+    return _json_response({"models": _ltx_checkpoint_options(), "default": _default_ltx_checkpoint(), "fields": fields})
 
 
 try:
@@ -1044,6 +1189,13 @@ def _clean_config_defaults() -> dict[str, Any]:
         "segment_save_preset": SEGMENT_SAVE_PRESETS[0],
         "segment_video_format": DEFAULT_SEGMENT_VIDEO_FORMAT,
         "transition_lora_switches": "",
+        "ltx_video_vae_name": "",
+        "ltx_audio_vae_name": "",
+        "ltx_text_encoder_name": "",
+        "ltx_text_projection_name": "",
+        "ltx_latent_upscaler_name": "",
+        "transition_lora_name": "",
+        "size_source": "面板尺寸",
     }
 
 
@@ -1154,6 +1306,19 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
     config["segment_save_preset"] = str(config.get("segment_save_preset") or SEGMENT_SAVE_PRESETS[0])
     config["segment_video_format"] = str(config.get("segment_video_format") or DEFAULT_SEGMENT_VIDEO_FORMAT)
     config["transition_lora_switches"] = str(config.get("transition_lora_switches") or "").strip()
+    config["ltx_video_vae_name"] = str(config.get("ltx_video_vae_name") or "").strip()
+    config["ltx_audio_vae_name"] = str(config.get("ltx_audio_vae_name") or "").strip()
+    config["ltx_text_encoder_name"] = str(config.get("ltx_text_encoder_name") or "").strip()
+    if config["ltx_text_encoder_name"] and "gemma" in config["ltx_text_encoder_name"].lower() and "gemma_3_12b" not in config["ltx_text_encoder_name"].lower() and "gemma-3-12b" not in config["ltx_text_encoder_name"].lower():
+        config["ltx_text_encoder_name"] = ""
+    config["ltx_text_projection_name"] = str(config.get("ltx_text_projection_name") or "").strip()
+    if "embeddings_connectors" in config["ltx_text_projection_name"].lower():
+        config["ltx_text_projection_name"] = ""
+    config["ltx_latent_upscaler_name"] = str(config.get("ltx_latent_upscaler_name") or "").strip()
+    config["transition_lora_name"] = str(config.get("transition_lora_name") or "").strip()
+    config["size_source"] = str(config.get("size_source") or "面板尺寸").strip()
+    if config["size_source"] not in ("面板尺寸", "原视频尺寸"):
+        config["size_source"] = "面板尺寸"
     return config
 
 
@@ -1214,6 +1379,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
 """
     CATEGORY = "GJJ"
     FUNCTION = "generate"
+    OUTPUT_NODE = True
     DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"
     SEARCH_ALIASES = ["SSL","ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO", "IMAGE")
@@ -1552,6 +1718,12 @@ class GJJ_LTX23ImageToVideoMultiRef:
             segment_video_format=config["segment_video_format"],
             transition_options=transition_options,
             denoise_strength=config["denoise_strength"],
+            video_vae_name=config["ltx_video_vae_name"],
+            audio_vae_name=config["ltx_audio_vae_name"],
+            text_encoder_name=config["ltx_text_encoder_name"],
+            text_projection_name=config["ltx_text_projection_name"],
+            latent_upscaler_name=config["ltx_latent_upscaler_name"],
+            transition_lora_name=config["transition_lora_name"],
             branch_debug={
                 "route_key": route_key,
                 "route_label": route_label,
