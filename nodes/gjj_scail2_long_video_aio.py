@@ -63,6 +63,7 @@ REF_REMOVE_BG_API_PATH = "/gjj/scail2_long_video_aio/remove_background_reference
 AUDIO_UPLOAD_API_PATH = "/gjj/scail2_long_video_aio/upload_audio"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".webm"}
 DEFAULT_NEGATIVE_PROMPT = "(worst quality, low quality, normal quality:1.3), (blurry, out of focus, pixelated, jpeg artifacts, noise, grainy:1.2), (text, watermark, logo, signature, subtitle, border, qr code:1.3), (bad anatomy, bad hands, malformed fingers, extra digits, missing digits, fused fingers, extra limbs, missing limbs, deformed body:1.2), (facial distortion, cross-eyed, asymmetric face, plastic skin, uncanny valley:1.2), (flickering, frame jitter, color flickering, inconsistent lighting, overexposed, underexposed, motion distortion, unnatural movement, rigid movement:1.3), (duplicate characters, extra people, floating objects, wrong background, style drift, 3d render, cartoon, cgi if unwanted:1.1), ugly, disfigured, mutated, morbid, gore"
+NO_LORA_TOKENS = {"不使用", "不使用lora", "不使用 lora", "no lora", "none", "off", "disable", "disabled", "🚫 不使用 lora"}
 
 
 def _progress(unique_id: Any, message: str, progress: float | None = None, **extra: Any) -> None:
@@ -98,6 +99,44 @@ def _json_text(value: Any, fallback: str = "[]") -> str:
         return json.dumps(value, ensure_ascii=False)
     text = str(value or "").strip()
     return text if text else fallback
+
+
+def _reference_items_from_json(value: Any) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(_json_text(value, "[]"))
+    except Exception:
+        data = []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict) and str(item.get("filename") or "").strip()]
+
+
+def _reference_item_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    filename = str(item.get("filename") or "").replace("\\", "/").strip()
+    subfolder = str(item.get("subfolder") or "").replace("\\", "/").strip("/")
+    if "/" in filename:
+        parts = [part for part in filename.split("/") if part]
+        filename = parts.pop() if parts else filename
+        from_filename = "/".join(parts)
+        subfolder = "/".join(part for part in (subfolder, from_filename) if part)
+    clean_subfolder = "/".join(part for part in subfolder.split("/") if part and part not in {".", ".."})
+    return (str(item.get("type") or "input").strip() or "input", clean_subfolder, filename)
+
+
+def _merge_reference_items(*groups: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        items = group if isinstance(group, list) else []
+        for item in items:
+            if not isinstance(item, dict) or not str(item.get("filename") or "").strip():
+                continue
+            key = _reference_item_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(item))
+    return merged
 
 
 def _reference_pad_color(kwargs: dict[str, Any]) -> str:
@@ -376,6 +415,8 @@ def _resolve_relative_model_choice(selected: Any, path: str, keywords: tuple[str
     if not candidates:
         return ""
     raw = str(selected or "").strip().replace("\\", "/").strip("/")
+    if raw.lower() in NO_LORA_TOKENS:
+        return ""
     raw_base = raw.rsplit("/", 1)[-1].lower()
     if raw:
         for candidate in candidates:
@@ -432,21 +473,21 @@ def _model_field(name: str, label: str, folder: str, path: str, keywords: list[s
 
 async def _get_scail2_aio_models(request):
     fields = [
-        _model_field("model_file", "SCAIL模型", "diffusion_models", "models/diffusion_models", ["wan", "scail"], [".safetensors", ".gguf"], "SCAIL-2 主扩散模型；文件名建议同时包含 wan 和 scail。", True),
-        _model_field("vae_file", "VAE", "vae", "models/vae", ["wan", "2.1", "vae"], [".safetensors"], "Wan 2.1 视频 VAE，用于条件编码、续段锚定解码和最终视频帧解码。", True),
-        _model_field("text_encoder_file", "T5", "text_encoders", "models/text_encoders", ["umt5", "xxl"], [".safetensors"], "Wan T5 文本编码器，用于正向提示词和负向提示词编码。", True),
-        _model_field("clip_vision_file", "CLIP Vision", "clip_vision", "models/clip_vision", ["clip", "vision"], [".safetensors"], "CLIP Vision 参考图编码器，用于增强参考图语义一致性。", True),
-        _model_field("accel_lora_file", "加速LoRA", "loras", "models/loras", ["wan", "lightx2v"], [".safetensors"], "LightX2V 加速 LoRA；开启“使用加速LoRA”时叠加。"),
-        _model_field("dpo_lora_file", "DPO LoRA", "loras", "models/loras", ["scail", "dpo"], [".safetensors"], "SCAIL-2 DPO 修正 LoRA，可增强动作迁移/人物替换效果。"),
-        _model_field("slop_bounce_lora_file", "Slop Bounce", "loras", "models/loras", ["slop", "bounce"], [".safetensors"], "弹跳 LoRA，不变脸方向；可留空禁用。"),
-        _model_field("sam3_checkpoint", "SAM3", "checkpoints", "models/checkpoints", ["sam3.1", "multiplex"], [".safetensors"], "SAM3.1 Multiplex checkpoint，用于目标跟踪并生成 SCAIL-2 彩色身份遮罩。", True),
-        _model_field("multiview_unet", "多视图主模型", "diffusion_models", "models/diffusion_models", ["qwen", "image", "edit", "2511"], [".safetensors", ".gguf"], "【生成多视图】按 GJJ_CharacterMultiViewStudio 的 2511 链路使用 Qwen Image Edit 主模型。"),
-        _model_field("multiview_clip", "多视图CLIP", "text_encoders", "models/text_encoders", ["qwen", "2.5", "vl"], [".safetensors", ".gguf"], "【生成多视图】2511 链路使用的 Qwen 2.5 VL 文本/视觉编码器。"),
-        _model_field("multiview_vae", "多视图VAE", "vae", "models/vae", ["qwen", "image", "vae"], [".safetensors"], "【生成多视图】2511 链路使用的 Qwen Image VAE。"),
-        _model_field("multiview_lora_1", "多视图Lightning LoRA", "loras", "models/loras", ["qwen", "lightning"], [".safetensors"], "【生成多视图】2511 链路使用的 Lightning / 加速 LoRA。"),
-        _model_field("multiview_lora_2", "多角度LoRA", "loras", "models/loras", ["multiple", "angles"], [".safetensors"], "【生成多视图】2511 链路使用的多角度一致性 LoRA。"),
-        _model_field("multiview_lora_3", "多视图第3 LoRA", "loras", "models/loras", ["qwen", "edit"], [".safetensors"], "【生成多视图】可选第3组微调模型；留空表示不使用。"),
-        _model_field("rmbg_model", "RMBG抠图模型", "RMBG", "models/RMBG", ["rmbg", "1.4"], [".safetensors", ".pth"], "【去背景/拼接】GJJ_CharacterMultiViewStudio 人物资产分支、批量去背景与 GJJ_RemoveBgStitch 拼接图片使用的 RMBG1.4 模型。"),
+        _model_field("model_file", "SCAIL2基本 / SCAIL模型", "diffusion_models", "models/diffusion_models", ["wan", "scail"], [".safetensors", ".gguf"], "【SCAIL2基本模型】SCAIL-2 主扩散模型；文件名建议同时包含 wan 和 scail。", True),
+        _model_field("vae_file", "SCAIL2基本 / VAE", "vae", "models/vae", ["wan", "2.1", "vae"], [".safetensors"], "【SCAIL2基本模型】Wan 2.1 视频 VAE，用于条件编码、续段锚定解码和最终视频帧解码。", True),
+        _model_field("text_encoder_file", "SCAIL2基本 / T5", "text_encoders", "models/text_encoders", ["umt5", "xxl"], [".safetensors"], "【SCAIL2基本模型】Wan T5 文本编码器，用于正向提示词和负向提示词编码。", True),
+        _model_field("clip_vision_file", "SCAIL2基本 / CLIP Vision", "clip_vision", "models/clip_vision", ["clip", "vision"], [".safetensors"], "【SCAIL2基本模型】CLIP Vision 参考图编码器，用于增强参考图语义一致性。", True),
+        _model_field("accel_lora_file", "SCAIL2基本 / 加速LoRA", "loras", "models/loras", ["wan", "lightx2v"], [".safetensors"], "【SCAIL2基本模型】LightX2V 加速 LoRA；开启“使用加速LoRA”时叠加，也可选择“不使用 LoRA”。"),
+        _model_field("dpo_lora_file", "SCAIL2基本 / DPO LoRA", "loras", "models/loras", ["scail", "dpo"], [".safetensors"], "【SCAIL2基本模型】SCAIL-2 DPO 修正 LoRA，可增强动作迁移/人物替换效果，也可选择“不使用 LoRA”。"),
+        _model_field("slop_bounce_lora_file", "SCAIL2基本 / Slop Bounce", "loras", "models/loras", ["slop", "bounce"], [".safetensors"], "【SCAIL2基本模型】弹跳 LoRA，不变脸方向，也可选择“不使用 LoRA”。"),
+        _model_field("sam3_checkpoint", "SCAIL2基本 / SAM3", "checkpoints", "models/checkpoints", ["sam3.1", "multiplex"], [".safetensors"], "【SCAIL2基本模型】SAM3.1 Multiplex checkpoint，用于目标跟踪并生成 SCAIL-2 彩色身份遮罩。", True),
+        _model_field("multiview_unet", "可选多视图 / 主模型", "diffusion_models", "models/diffusion_models", ["qwen", "image", "edit", "2511"], [".safetensors", ".gguf"], "【可选多视图/多角度模型】按 GJJ_CharacterMultiViewStudio 的 2511 链路使用 Qwen Image Edit 主模型。"),
+        _model_field("multiview_clip", "可选多视图 / CLIP", "text_encoders", "models/text_encoders", ["qwen", "2.5", "vl"], [".safetensors", ".gguf"], "【可选多视图/多角度模型】2511 链路使用的 Qwen 2.5 VL 文本/视觉编码器。"),
+        _model_field("multiview_vae", "可选多视图 / VAE", "vae", "models/vae", ["qwen", "image", "vae"], [".safetensors"], "【可选多视图/多角度模型】2511 链路使用的 Qwen Image VAE。"),
+        _model_field("multiview_lora_1", "可选多视图 / Lightning LoRA", "loras", "models/loras", ["qwen", "lightning"], [".safetensors"], "【可选多视图/多角度模型】2511 链路使用的 Lightning / 加速 LoRA，也可选择“不使用 LoRA”。"),
+        _model_field("multiview_lora_2", "可选多视图 / 多角度LoRA", "loras", "models/loras", ["multiple", "angles"], [".safetensors"], "【可选多视图/多角度模型】2511 链路使用的多角度一致性 LoRA，也可选择“不使用 LoRA”。"),
+        _model_field("multiview_lora_3", "可选多视图 / 第3 LoRA", "loras", "models/loras", ["qwen", "edit"], [".safetensors"], "【可选多视图/多角度模型】可选第3组微调模型，也可选择“不使用 LoRA”。"),
+        _model_field("rmbg_model", "可选多视图 / RMBG抠图模型", "RMBG", "models/RMBG", ["rmbg", "1.4"], [".safetensors", ".pth"], "【可选多视图/多角度模型】GJJ_CharacterMultiViewStudio 人物资产分支、批量去背景与 GJJ_RemoveBgStitch 拼接图片使用的 RMBG1.4 模型。"),
     ]
     return web.json_response({
         "ok": True,
@@ -604,105 +645,105 @@ class GJJ_SCAIL2LongVideoAIO:
         "model_tree_priority": "static",
         "model_tree": [
             {
-                "label": "包含 wan + scail 的 SCAIL 主模型",
+                "label": "【SCAIL2基本模型】包含 wan + scail 的 SCAIL 主模型",
                 "path": "models/diffusion_models",
                 "filename": "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors",
                 "required": True,
                 "description": "SCAIL-2 主扩散模型。🧠 浮窗里的“SCAIL模型”会按关键词 wan + scail 从 diffusion_models 中过滤；也支持同目录下 .gguf 候选。",
             },
             {
-                "label": "文件名包含 wan + 2.1 + vae 的 VAE",
+                "label": "【SCAIL2基本模型】文件名包含 wan + 2.1 + vae 的 VAE",
                 "path": "models/vae",
                 "filename": "wan_2.1_vae.safetensors",
                 "required": True,
                 "description": "Wan 2.1 视频 VAE，用于 SCAIL 条件编码、续段锚定解码和最终视频帧解码。",
             },
             {
-                "label": "文件名包含 umt5 + xxl 的 T5 文本编码器",
+                "label": "【SCAIL2基本模型】文件名包含 umt5 + xxl 的 T5 文本编码器",
                 "path": "models/text_encoders",
                 "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
                 "required": True,
                 "description": "Wan T5 文本编码器，用于正向提示词和负向提示词编码。默认提示词为空时可配合“条件零化”输出稳定空负向条件。",
             },
             {
-                "label": "文件名包含 clip + vision 的 CLIP Vision",
+                "label": "【SCAIL2基本模型】文件名包含 clip + vision 的 CLIP Vision",
                 "path": "models/clip_vision",
                 "filename": "clip_vision_h.safetensors",
                 "required": True,
                 "description": "CLIP Vision 参考图编码器。连接或选择参考图时用于增强参考图语义一致性；运行时不可用会自动跳过 CLIP Vision 条件。",
             },
             {
-                "label": "文件名包含 wan + lightx2v 的加速 LoRA",
+                "label": "【SCAIL2基本模型】文件名包含 wan + lightx2v 的加速 LoRA",
                 "path": "models/loras",
                 "filename": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
                 "required": False,
-                "description": "LightX2V 加速 LoRA。默认开启“使用加速LoRA”；关闭后只加载 SCAIL 主模型，不叠加该 LoRA。",
+                "description": "LightX2V 加速 LoRA。默认开启“使用加速LoRA”；关闭开关或在 🧠 列表选择“不使用 LoRA”后不叠加该 LoRA。",
             },
             {
-                "label": "文件名包含 scail + dpo 的 DPO LoRA",
+                "label": "【SCAIL2基本模型】文件名包含 scail + dpo 的 DPO LoRA",
                 "path": "models/loras",
                 "filename": "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
                 "required": False,
-                "description": "SCAIL-2 DPO LoRA，用于增强 SCAIL2 动作迁移/人物替换效果；作为外接 LoRA 配置叠加到主模型。",
+                "description": "SCAIL-2 DPO LoRA，用于增强 SCAIL2 动作迁移/人物替换效果；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
             {
-                "label": "文件名包含 slop + bounce 的 LoRA",
+                "label": "【SCAIL2基本模型】文件名包含 slop + bounce 的 LoRA",
                 "path": "models/loras",
                 "filename": "i2v_slop_bounce.safetensors",
                 "required": False,
-                "description": "Slop Bounce 弹跳 LoRA，关键词 wan / i2v / slop / bounce；作为外接 LoRA 配置叠加到主模型。",
+                "description": "Slop Bounce 弹跳 LoRA，关键词 wan / i2v / slop / bounce；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
             {
-                "label": "多视图 / 多角度主模型",
+                "label": "【可选多视图/多角度模型】主模型",
                 "path": "models/diffusion_models",
                 "filename": "qwen_image_edit_2511_int8_convrot.safetensors",
                 "required": False,
                 "description": "导演台“生成多视图”调用 GJJ_CharacterMultiViewStudio 时使用的 Qwen Image Edit 2511 主模型。",
             },
             {
-                "label": "多视图 CLIP 文本编码器",
+                "label": "【可选多视图/多角度模型】CLIP 文本编码器",
                 "path": "models/text_encoders",
                 "filename": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
                 "required": False,
                 "description": "2511 多视图生成使用的 Qwen 2.5 VL 文本/视觉编码器；留空时会按 GJJ_CharacterMultiViewStudio 的模型族规则自动匹配。",
             },
             {
-                "label": "多视图 VAE",
+                "label": "【可选多视图/多角度模型】VAE",
                 "path": "models/vae",
                 "filename": "qwen_image_vae.safetensors",
                 "required": False,
                 "description": "2511 多视图生成使用的 Qwen Image VAE；留空时会按 GJJ_CharacterMultiViewStudio 的模型族规则自动匹配。",
             },
             {
-                "label": "多视图 Lightning / 加速 LoRA",
+                "label": "【可选多视图/多角度模型】Lightning / 加速 LoRA",
                 "path": "models/loras",
                 "filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
                 "required": False,
-                "description": "多视图生成第1组 LoRA，通常用于加速或适配当前编辑模型。",
+                "description": "多视图生成第1组 LoRA，通常用于加速或适配当前编辑模型；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
             {
-                "label": "多角度 LoRA",
+                "label": "【可选多视图/多角度模型】多角度 LoRA",
                 "path": "models/loras",
                 "filename": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
                 "required": False,
-                "description": "多视图生成第2组 LoRA，用于角色/产品的多角度一致性。",
+                "description": "多视图生成第2组 LoRA，用于角色/产品的多角度一致性；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
             {
-                "label": "RMBG1.4 去背景 / 拼接模型",
+                "label": "【可选多视图/多角度模型】RMBG1.4 去背景 / 拼接模型",
                 "path": "models/RMBG",
                 "filename": "rmbg1.4.safetensors",
                 "required": False,
                 "description": "去背景、拼接图片，以及多视图人物资产分支调用 RMBG1.4 时使用。",
             },
             {
-                "label": "文件名包含 sam3 + multiplex 的 checkpoint",
+                "label": "【SCAIL2基本模型】文件名包含 sam3 + multiplex 的 checkpoint",
                 "path": "models/checkpoints",
                 "filename": "sam3.1_multiplex.safetensors",
                 "required": True,
                 "description": "SAM3.1 Multiplex checkpoint，用于内部双通道目标跟踪并生成 SCAIL-2 彩色身份遮罩。",
             },
             {
-                "label": "中英翻译模型包",
+                "label": "【SCAIL2基本模型】中英翻译模型包",
                 "path": "models/translation",
                 "filename": "opus-mt-zh-en.safetensors",
                 "required": True,
@@ -1256,6 +1297,7 @@ class GJJ_SCAIL2LongVideoAIO:
             data = {}
         if not isinstance(data, dict):
             data = {}
+        selected_refs = _reference_items_from_json(kwargs.get("selected_reference_json"))
         scenes = data.get("scenes")
         if not isinstance(scenes, list) or not scenes:
             return {
@@ -1268,10 +1310,18 @@ class GJJ_SCAIL2LongVideoAIO:
                     "source_start_frame": 1,
                     "source_end_frame": max(1, int(total_frames)),
                     "prompt": str(kwargs.get("positive_prompt") or ""),
-                    "references": json.loads(_json_text(kwargs.get("selected_reference_json"), "[]")),
+                    "references": selected_refs,
                     "video": None,
                 }],
             }
+        scene_ref_union = _merge_reference_items(*[
+            scene.get("references") if isinstance(scene, dict) and isinstance(scene.get("references"), list) else []
+            for scene in scenes
+        ])
+        saved_refs = _merge_reference_items(data.get("references") if isinstance(data.get("references"), list) else scene_ref_union)
+        saved_ref_keys = {_reference_item_key(item) for item in saved_refs}
+        added_selected_refs = [item for item in selected_refs if _reference_item_key(item) not in saved_ref_keys]
+        fallback_refs = _merge_reference_items(saved_refs, selected_refs)
         normalized = []
         for index, scene in enumerate(scenes, start=1):
             if not isinstance(scene, dict):
@@ -1281,6 +1331,8 @@ class GJJ_SCAIL2LongVideoAIO:
             length = end - start + 1
             source_start = max(1, int(scene.get("source_start_frame") or start))
             source_end = max(source_start, int(scene.get("source_end_frame") or (source_start + length - 1)))
+            scene_refs = scene.get("references") if isinstance(scene.get("references"), list) else []
+            scene_refs = _merge_reference_items(scene_refs, added_selected_refs) if scene_refs else fallback_refs
             normalized.append({
                 **scene,
                 "index": index,
@@ -1289,7 +1341,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 "source_start_frame": source_start,
                 "source_end_frame": source_end,
                 "prompt": str(scene.get("prompt") or kwargs.get("positive_prompt") or ""),
-                "references": scene.get("references") if isinstance(scene.get("references"), list) else [],
+                "references": scene_refs,
             })
         if not normalized:
             return self._director_plan({**kwargs, "director_storyboard_json": "{}"}, total_frames, fps)

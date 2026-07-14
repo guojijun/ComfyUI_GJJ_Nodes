@@ -1061,14 +1061,19 @@ export class GJJ_Utils {
             .filter(Boolean);
         const keywords = Array.from(entry?.keywords || []).map((item) => GJJ_Utils._modelTreeKey(item)).filter(Boolean);
         const anyKeywords = Array.from(entry?.anyKeywords || entry?.any_keywords || []).map((item) => GJJ_Utils._modelTreeKey(item)).filter(Boolean);
+        const noModelLabel = String(entry?.noModelLabel || entry?.noneLabel || "").trim();
+        const noModelValue = String(entry?.noModelValue || noModelLabel || "").trim();
+        const noModelMatches = noModelLabel && (!terms.length || terms.every((term) => GJJ_Utils._modelTreeKey(noModelLabel).includes(term)));
         const all = GJJ_Utils._modelTreeChoices(entry, widget);
-        return all.filter((name) => {
+        const filtered = all.filter((name) => {
             const key = GJJ_Utils._modelTreeKey(name);
             if (keywords.length && !keywords.every((keyword) => key.includes(keyword))) return false;
             if (anyKeywords.length && !anyKeywords.some((keyword) => key.includes(keyword))) return false;
             if (terms.length && !terms.every((term) => key.includes(term))) return false;
             return true;
-        }).slice(0, Math.max(1, Number(limit || 80)));
+        });
+        if (noModelMatches && noModelValue && !filtered.includes(noModelValue)) filtered.unshift(noModelValue);
+        return filtered.slice(0, Math.max(1, Number(limit || 80)));
     }
 
     static _modelTreeSetWidgetValue(widget, value, entry, node) {
@@ -1277,9 +1282,11 @@ export class GJJ_Utils {
         const renderLine = () => {
             const current = String(widget?.value || "").trim();
             const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || entry?.filename || "").trim();
+            const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
+            const isNoModel = Boolean(noModelValue && current === noModelValue);
             const choices = GJJ_Utils._modelTreeChoices(entry, widget);
             const hasCandidates = GJJ_Utils._modelTreeFilteredChoices(entry, widget, "", 1).length > 0;
-            const currentMissing = Boolean(current && choices.length && !choices.includes(current));
+            const currentMissing = Boolean(current && !isNoModel && choices.length && !choices.includes(current));
             const missing = currentMissing || (!current && !hasCandidates && !!fallback);
             const value = current || fallback;
             const filename = missing ? value : GJJ_Utils._modelTreeFilename(value);

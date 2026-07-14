@@ -166,8 +166,7 @@ def _safe_import_node_module(module_name):
             print(line)
         print(f"{YELLOW}[GJJ] {BOLD}提示:{RESET} 安装完成后请重启 ComfyUI 服务器")
         print(f"{RED}{'=' * 80}{RESET}\n")
-        # 只打印简化的错误信息，不显示完整堆栈
-        # traceback.print_exc()
+        traceback.print_exc()
         return None
 
 

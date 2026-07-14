@@ -30,6 +30,35 @@ const PREVIEW_HEIGHT = 230;
 const BUTTON_SIZE = 28;
 const BUTTON_GAP = 2;
 const BUTTON_Y = 132;
+const NO_LORA_LABEL = "🚫 不使用 LoRA";
+const NO_LORA_VALUES = new Set(["", "不使用", "不使用LoRA", "不使用 LoRA", NO_LORA_LABEL]);
+const BASE_MODEL_WIDGETS = new Set([
+	"model_file",
+	"vae_file",
+	"text_encoder_file",
+	"clip_vision_file",
+	"accel_lora_file",
+	"dpo_lora_file",
+	"slop_bounce_lora_file",
+	"sam3_checkpoint",
+]);
+const MULTIVIEW_MODEL_WIDGETS = new Set([
+	"multiview_unet",
+	"multiview_clip",
+	"multiview_vae",
+	"multiview_lora_1",
+	"multiview_lora_2",
+	"multiview_lora_3",
+	"rmbg_model",
+]);
+const OPTIONAL_LORA_WIDGETS = new Set([
+	"accel_lora_file",
+	"dpo_lora_file",
+	"slop_bounce_lora_file",
+	"multiview_lora_1",
+	"multiview_lora_2",
+	"multiview_lora_3",
+]);
 
 const BUTTONS = [
 	["video", "🎬", "导入/选择原视频"],
@@ -263,6 +292,10 @@ function setWidget(node, name, value) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function isNoLoraValue(value) {
+	return NO_LORA_VALUES.has(String(value || "").trim());
+}
+
 function sanitizeWidgetValues(node) {
 	const numberDefaults = {
 		width: [512, 320, 2048],
@@ -395,6 +428,18 @@ async function fetchVideoMeta(item) {
 function mediaItemKey(item) {
 	const normalized = normalizeMediaItem(item);
 	return `${normalized.type || "input"}|${normalized.subfolder || ""}|${normalized.filename || ""}`;
+}
+
+function mergeMediaItems(...lists) {
+	const merged = [];
+	const seen = new Set();
+	for (const item of normalizeMediaItems(lists.flat())) {
+		const key = mediaItemKey(item);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		merged.push(item);
+	}
+	return merged;
 }
 
 function mediaItemFromViewUrl(text) {
@@ -1709,9 +1754,32 @@ function modelTreeEntriesFromFields(fields) {
 				fallback: MODEL_FIELD_FALLBACKS[name] || merged.preferred_name || merged.filename || "",
 				description: merged.description || "",
 				required: Boolean(merged.required),
+				noModelLabel: OPTIONAL_LORA_WIDGETS.has(name) ? NO_LORA_LABEL : "",
+				noModelValue: OPTIONAL_LORA_WIDGETS.has(name) ? NO_LORA_LABEL : "",
 			};
 		})
 		.filter(Boolean);
+}
+
+function modelGroupTitle(title, note = "") {
+	const wrap = document.createElement("div");
+	wrap.style.cssText = "display:flex;align-items:baseline;gap:8px;margin:2px 0 0;";
+	const label = document.createElement("div");
+	label.textContent = title;
+	label.style.cssText = "color:#eef7f2;font-weight:700;";
+	wrap.appendChild(label);
+	if (note) {
+		const hint = document.createElement("div");
+		hint.textContent = note;
+		hint.style.cssText = "color:#9fb0b8;font-size:12px;";
+		wrap.appendChild(hint);
+	}
+	return wrap;
+}
+
+function modelEntriesForGroup(entries, group) {
+	const names = group === "multiview" ? MULTIVIEW_MODEL_WIDGETS : BASE_MODEL_WIDGETS;
+	return entries.filter((entry) => names.has(String(entry?.widget || "")));
 }
 
 function openModelPopup(node) {
@@ -1748,17 +1816,24 @@ function openModelPopup(node) {
 			panel.appendChild(empty);
 			return;
 		}
-		panel.appendChild(GJJ_Utils.createModelTreeView({
-			node,
-			entries: modelTreeEntriesFromFields(fields),
-			refresh: () => {
-				updateDomToolbarState(node);
-				app.graph?.setDirtyCanvas?.(true, true);
-			},
-			onApply: (entry, value) => {
-				setWidget(node, entry.widget, value);
-			},
-		}));
+		const entries = modelTreeEntriesFromFields(fields);
+		const refresh = () => {
+			updateDomToolbarState(node);
+			app.graph?.setDirtyCanvas?.(true, true);
+		};
+		const onApply = (entry, value) => {
+			setWidget(node, entry.widget, value);
+		};
+		const baseEntries = modelEntriesForGroup(entries, "base");
+		const multiviewEntries = modelEntriesForGroup(entries, "multiview");
+		if (baseEntries.length) {
+			panel.appendChild(modelGroupTitle("🧠 SCAIL2 基本模型", "生成长视频会使用这一组"));
+			panel.appendChild(GJJ_Utils.createModelTreeView({ node, entries: baseEntries, refresh, onApply }));
+		}
+		if (multiviewEntries.length) {
+			panel.appendChild(modelGroupTitle("可选：多视图 / 多角度模型", "只在导演台里生成多视图参考图时使用"));
+			panel.appendChild(GJJ_Utils.createModelTreeView({ node, entries: multiviewEntries, refresh, onApply }));
+		}
 	}).catch((error) => {
 		panel.replaceChildren();
 		const fail = document.createElement("div");
@@ -1774,13 +1849,18 @@ function directorPlan(node) {
 	const refs = selectedItems(node, "selected_reference_json");
 	const audios = selectedItems(node, "selected_audio_json");
 	const total = Math.max(1, Number(current.total_frames || getWidget(node, "max_frames", 0) || 121));
+	const sceneRefUnion = mergeMediaItems(...(Array.isArray(current.scenes) ? current.scenes.map((scene) => scene?.references || []) : []));
+	const savedRefs = Array.isArray(current.references) ? normalizeMediaItems(current.references) : sceneRefUnion;
+	const savedRefKeys = new Set(savedRefs.map(mediaItemKey));
+	const addedMainRefs = refs.filter((ref) => !savedRefKeys.has(mediaItemKey(ref)));
+	const hadMainRefDrift = addedMainRefs.length > 0;
 	const scenes = Array.isArray(current.scenes)
 		? current.scenes
 		: [{ start_frame: 1, end_frame: total, prompt: getWidget(node, "positive_prompt", ""), references: refs }];
-	return {
+	const plan = {
 		videos,
 		audios,
-		references: refs,
+		references: mergeMediaItems(savedRefs, refs),
 		fps: Number(current.fps || getWidget(node, "frame_rate", 8) || 8),
 		total_frames: total,
 		scenes: scenes.map((scene, index) => ({
@@ -1790,10 +1870,12 @@ function directorPlan(node) {
 			source_start_frame: Math.max(1, Number(scene.source_start_frame || scene.start_frame || 1)),
 			source_end_frame: Math.max(1, Number(scene.source_end_frame || scene.end_frame || scene.start_frame || total)),
 			prompt: String(scene.prompt || ""),
-			references: Array.isArray(scene.references) ? scene.references : refs,
+			references: mergeMediaItems(Array.isArray(scene.references) ? scene.references : [], addedMainRefs.length ? addedMainRefs : (!Array.isArray(scene.references) ? refs : [])),
 			video: scene.video ? normalizeMediaItem(scene.video) : (videos[index] || videos[0] || null),
 		})),
 	};
+	if (hadMainRefDrift) Object.defineProperty(plan, "__references_synced", { value: true });
+	return plan;
 }
 
 function saveDirectorPlan(node, plan) {
@@ -1809,6 +1891,7 @@ function openDirector(node) {
 	wrap.style.height = "720px";
 	wrap.tabIndex = -1;
 	const plan = directorPlan(node);
+	if (plan.__references_synced) saveDirectorPlan(node, plan);
 	const video = document.createElement("video");
 	video.controls = true;
 	video.style.cssText = "width:100%;height:260px;background:#05090b;border:1px solid #30434d;border-radius:6px;object-fit:contain;";
@@ -3668,7 +3751,7 @@ function openDirector(node) {
 				if (name === "multiview_unet" && value && !/qwen.*image.*edit.*2511|firered.*image.*edit/i.test(value)) continue;
 				if (name === "multiview_clip" && value && !/qwen[_-]?2\.?5.*vl|qwen25vl/i.test(value)) continue;
 				if (name === "multiview_vae" && value && !/qwen[_-]?image[_-]?vae/i.test(value)) continue;
-				if (value && value !== "不使用") form.append(name, value);
+				if (value && !isNoLoraValue(value)) form.append(name, value);
 			}
 			if (actionBlob) {
 				for (let index = 0; index < options.labels.length; index += 1) {
