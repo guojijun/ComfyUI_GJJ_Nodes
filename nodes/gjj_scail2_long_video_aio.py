@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover - ComfyUI provides this at runtime.
 log = logging.getLogger(__name__)
 
 NODE_NAME = "GJJ_SCAIL2LongVideoAIO"
-NODE_DISPLAY_NAME = "🎬 SCAIL2 超长视频零依赖单节点"
+NODE_DISPLAY_NAME = "🎬 SCAIL2 超长视频导演台单节点(一键生成)"
 
 VIDEO_INPUT_TYPE = "VIDEO,IMAGE"
 REFERENCE_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
@@ -64,6 +64,8 @@ AUDIO_UPLOAD_API_PATH = "/gjj/scail2_long_video_aio/upload_audio"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".webm"}
 DEFAULT_NEGATIVE_PROMPT = "(worst quality, low quality, normal quality:1.3), (blurry, out of focus, pixelated, jpeg artifacts, noise, grainy:1.2), (text, watermark, logo, signature, subtitle, border, qr code:1.3), (bad anatomy, bad hands, malformed fingers, extra digits, missing digits, fused fingers, extra limbs, missing limbs, deformed body:1.2), (facial distortion, cross-eyed, asymmetric face, plastic skin, uncanny valley:1.2), (flickering, frame jitter, color flickering, inconsistent lighting, overexposed, underexposed, motion distortion, unnatural movement, rigid movement:1.3), (duplicate characters, extra people, floating objects, wrong background, style drift, 3d render, cartoon, cgi if unwanted:1.1), ugly, disfigured, mutated, morbid, gore"
 NO_LORA_TOKENS = {"不使用", "不使用lora", "不使用 lora", "no lora", "none", "off", "disable", "disabled", "🚫 不使用 lora"}
+DEFAULT_QWEN2511_LIGHTNING_LORA = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 
 
 def _progress(unique_id: Any, message: str, progress: float | None = None, **extra: Any) -> None:
@@ -1041,11 +1043,11 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "multiview_lora_1": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图LoRA 1"},
+                    {"default": DEFAULT_QWEN2511_LIGHTNING_LORA, "hidden": True, "display": "hidden", "display_name": "多视图LoRA 1"},
                 ),
                 "multiview_lora_2": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "多视图LoRA 2"},
+                    {"default": DEFAULT_MULTI_ANGLES_LORA, "hidden": True, "display": "hidden", "display_name": "多视图LoRA 2"},
                 ),
                 "multiview_lora_3": (
                     "STRING",

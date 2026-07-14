@@ -780,6 +780,8 @@ function hasDeclaredModelInfo(meta) {
 		"modelTree",
 		"models_tree",
 		"modelsTree",
+		"model_tree_text",
+		"modelTreeText",
 		"models",
 		"model",
 		"required_models",
@@ -968,9 +970,17 @@ function declaredModelEntries(meta) {
 }
 
 function declaredModelTreeEntries(meta) {
-	const declared = meta?.help?.model_tree || meta?.help?.modelTree || meta?.help?.models_tree || meta?.help?.modelsTree;
+	const declaredValues = [
+		meta?.help?.model_tree,
+		meta?.help?.modelTree,
+		meta?.help?.models_tree,
+		meta?.help?.modelsTree,
+	].filter((value) => value !== undefined && value !== null && value !== false && value !== "");
 	const missingDeclared = meta?.help?.missing_models || meta?.help?.missingModels;
 	const normalizeItem = (item, fallbackLabel = "模型") => {
+		if (item === true) {
+			return null;
+		}
 		if (typeof item === "string") {
 			const value = item.trim();
 			return value ? { label: fallbackLabel, value, tooltip: "" } : null;
@@ -1005,18 +1015,32 @@ function declaredModelTreeEntries(meta) {
 		}
 		return [];
 	};
-	if (Array.isArray(declared)) {
-		return [...declared.map((item) => normalizeItem(item)).filter(Boolean), ...normalizeMany(missingDeclared)];
+	const entries = [];
+	for (const declared of declaredValues) {
+		if (Array.isArray(declared)) {
+			entries.push(...declared.map((item) => normalizeItem(item)).filter(Boolean));
+			continue;
+		}
+		if (declared && typeof declared === "object") {
+			entries.push(...Object.entries(declared)
+				.map(([label, value]) => (typeof value === "string" ? normalizeItem(value, label) : normalizeItem({ label, ...(value || {}) }, label)))
+				.filter(Boolean));
+		}
 	}
-	if (declared && typeof declared === "object") {
-		return [
-			...Object.entries(declared)
-			.map(([label, value]) => (typeof value === "string" ? normalizeItem(value, label) : normalizeItem({ label, ...(value || {}) }, label)))
-			.filter(Boolean),
-			...normalizeMany(missingDeclared),
-		];
-	}
-	return normalizeMany(missingDeclared);
+	entries.push(...normalizeMany(missingDeclared));
+	const seen = new Set();
+	return entries.filter((entry) => {
+		const key = [
+			entry.folder,
+			entry.value,
+			entry.label,
+			entry.kind,
+			entry.icon,
+		].map((item) => String(item || "")).join("\n");
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 }
 
 function pushUniqueModelEntry(entries, entry) {
@@ -1694,6 +1718,23 @@ function createModelHelpTextContent(text, downloadUrl = DEFAULT_MODEL_DOWNLOAD_U
 	return wrap;
 }
 
+function createModelHelpCombinedContent(items, text, emptyText, downloadUrl = DEFAULT_MODEL_DOWNLOAD_URL) {
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-help-model-content gjj-help-model-tree";
+	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
+	if (Array.isArray(items) && items.length) {
+		wrap.appendChild(createModelTreeDom(modelTreeItems(items), emptyText || "未选择模型文件"));
+	}
+	const cleanText = String(text || "").trim();
+	if (cleanText) {
+		const pre = document.createElement("pre");
+		pre.className = "gjj-help-model-tree-pre";
+		pre.textContent = decorateModelTreeText(cleanText);
+		wrap.appendChild(pre);
+	}
+	return wrap;
+}
+
 function clipPromptEncodeFallbackDescription() {
 	return "CLIP 编码统一面板：CLIP 输入，正面/负面提示词在一个面板里编辑；翻译只是可选增强，缺少本地翻译模型时仍会用原文正常编码。";
 }
@@ -2001,15 +2042,10 @@ function showHelpDialog(node) {
 	).trim();
 	const modelDownloadUrl = DEFAULT_MODEL_DOWNLOAD_URL;
 	const localModelTreeText = String(meta?.help?.model_tree_text || meta?.help?.modelTreeText || "").trim();
-	if (localModelTreeText) {
+	if (modelEntries.length || localModelTreeText) {
 		body.appendChild(createHelpSection(
 			"用到的模型",
-			createModelHelpTextContent(localModelTreeText, modelDownloadUrl)
-		));
-	} else if (modelEntries.length) {
-		body.appendChild(createHelpSection(
-			"用到的模型",
-			createModelHelpContent(modelEntries, "", modelDownloadUrl)
+			createModelHelpCombinedContent(modelEntries, localModelTreeText, "", modelDownloadUrl)
 		));
 	} else if (modelDownloadInfo || hasDeclaredModelInfo(meta)) {
 		body.appendChild(createHelpSection("用到的模型", createModelDownloadLink(modelDownloadUrl)));

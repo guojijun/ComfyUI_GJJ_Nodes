@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "分层",
+    "search_text": "",
     "page_size": 12,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -123,5 +123,8 @@
   "region_crop": {
     "total_pixels": 30,
     "align_multiple": 8
+  },
+  "execution_timer": {
+    "position": null
   }
 }

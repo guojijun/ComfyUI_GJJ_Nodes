@@ -55,9 +55,11 @@ const OPTIONAL_LORA_WIDGETS = new Set([
 	"accel_lora_file",
 	"dpo_lora_file",
 	"slop_bounce_lora_file",
+	"multiview_lora_3",
+]);
+const DEFAULT_MULTIVIEW_LORA_WIDGETS = new Set([
 	"multiview_lora_1",
 	"multiview_lora_2",
-	"multiview_lora_3",
 ]);
 
 const BUTTONS = [
@@ -352,6 +354,11 @@ function sanitizeWidgetValues(node) {
 		if (!item) continue;
 		const text = String(item.value || "").trim();
 		if (!text.startsWith("[") && !text.startsWith("{")) item.value = fallback;
+	}
+	for (const name of DEFAULT_MULTIVIEW_LORA_WIDGETS) {
+		const item = widget(node, name);
+		const fallback = MODEL_FIELD_FALLBACKS[name] || "";
+		if (item && fallback && isNoLoraValue(item.value)) item.value = fallback;
 	}
 }
 

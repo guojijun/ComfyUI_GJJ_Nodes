@@ -106,6 +106,30 @@ const MODEL_SETTINGS_BUTTON_STYLES = {
 		color: "#f5f3ff",
 	},
 };
+const SIZE_SOURCE_BUTTON_STYLES = {
+	input: {
+		bg: "linear-gradient(135deg, #065f46, #16a34a)",
+		hover: "linear-gradient(135deg, #16a34a, #22c55e)",
+		border: "#34d399",
+		color: "#ecfdf5",
+		label: "原图尺寸",
+		title: "当前使用第一个输入图的原始尺寸；宽度和高度由输入图接管。",
+	},
+	panel: {
+		bg: "linear-gradient(135deg, #075985, #2563eb)",
+		hover: "linear-gradient(135deg, #2563eb, #38bdf8)",
+		border: "#38bdf8",
+		color: "#e0f2fe",
+		label: "面板尺寸",
+		title: "当前使用面板宽度和高度。",
+	},
+	open: {
+		bg: "linear-gradient(135deg, #4b5563, #64748b)",
+		hover: "linear-gradient(135deg, #4b5563, #64748b)",
+		border: "#94a3b8",
+		color: "#ffffff",
+	},
+};
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
 const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
@@ -744,25 +768,20 @@ function applyInputSizeButtonState(node) {
 	}
 	const open = sizeSettingsOpen(node);
 	const enabled = inputSizeSyncEnabled(node);
+	const sourceStyle = enabled ? SIZE_SOURCE_BUTTON_STYLES.input : SIZE_SOURCE_BUTTON_STYLES.panel;
 	button.style.display = "flex";
 	button.textContent = "📐";
 	button.title = [
 		open ? "关闭尺寸浮动窗口。" : "打开尺寸浮动窗口。",
-		enabled ? "输入图尺寸同步：开。" : "输入图尺寸同步：关。",
+		`尺寸来源：${sourceStyle.label}。`,
+		sourceStyle.title,
 	].join("\n");
 	button.classList.toggle("on", open);
-	button.style.borderColor = open ? "#94a3b8" : enabled ? "#22c55e" : "#64748b";
-	button.style.color = open || enabled ? "#ecfdf5" : "#cbd5e1";
-	const background = open
-		? "linear-gradient(135deg, #4b5563, #64748b)"
-		: enabled
-			? "linear-gradient(135deg, #065f46, #16a34a)"
-			: "linear-gradient(135deg, #1f2933, #374151)";
-	const hoverBackground = open
-		? background
-		: enabled
-			? "linear-gradient(135deg, #16a34a, #22c55e)"
-			: "linear-gradient(135deg, #374151, #4b5563)";
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	button.style.borderColor = open ? SIZE_SOURCE_BUTTON_STYLES.open.border : sourceStyle.border;
+	button.style.color = open ? SIZE_SOURCE_BUTTON_STYLES.open.color : sourceStyle.color;
+	const background = open ? SIZE_SOURCE_BUTTON_STYLES.open.bg : sourceStyle.bg;
+	const hoverBackground = open ? SIZE_SOURCE_BUTTON_STYLES.open.hover : sourceStyle.hover;
 	button.style.background = background;
 	button.__gjjLazyDefaultBg = background;
 	button.__gjjLazyHoverBg = hoverBackground;
@@ -1145,12 +1164,20 @@ function setInputSizeSyncEnabled(node, enabled) {
 	if (!value) {
 		delete node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY];
 	}
+	applySizeDimensionAvailability(node);
 	applyInputSizeButtonState(node);
 	if (value) {
 		void syncSizeFromPrimaryInput(node);
 	}
 	node.graph?.change?.();
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function applySizeDimensionAvailability(node) {
+	const enabled = !inputSizeSyncEnabled(node);
+	for (const name of ["width", "height"]) {
+		setWidgetEnabled(getWidget(node, name), enabled);
+	}
 }
 
 function seedRandomEnabled(node) {
@@ -1494,6 +1521,7 @@ function applySettingsVisibility(node) {
 		}
 		setLazyWidgetHidden(widget, true);
 	}
+	applySizeDimensionAvailability(node);
 	setDomWidgetHidden(node.__gjjLoraWidget, null, true);
 	syncFloatingPanels(node);
 	updateModelSettingsButtonState(node);
@@ -2035,6 +2063,147 @@ function renderFloatingPanelControls(node, body, names) {
 	}
 }
 
+function numericWidgetBounds(widget, fallbackMin, fallbackMax, fallbackStep) {
+	const options = widget?.options || {};
+	const min = Number.isFinite(Number(options.min)) ? Number(options.min) : fallbackMin;
+	const max = Number.isFinite(Number(options.max)) ? Number(options.max) : fallbackMax;
+	const step = Number.isFinite(Number(options.step)) ? Number(options.step) : fallbackStep;
+	return { min, max, step: Math.max(1, step) };
+}
+
+function createSizeSourceControl(node) {
+	const wrap = document.createElement("div");
+	wrap.dataset.widgetName = USE_INPUT_IMAGE_SIZE_WIDGET_NAME;
+	wrap.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0;width:100%";
+	const choices = [
+		{ enabled: true, label: "原图尺寸", title: "使用第一个输入图的真实宽高，宽度和高度不可手动修改。" },
+		{ enabled: false, label: "面板尺寸", title: "使用下面的宽度和高度滑条。" },
+	];
+	for (const choice of choices) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = choice.label;
+		button.title = choice.title;
+		button.style.cssText = [
+			"height:34px",
+			"min-width:0",
+			"border:1px solid #41535b",
+			"border-radius:6px",
+			"background:#11181c",
+			"color:#dce7e2",
+			"cursor:pointer",
+			"font-size:14px",
+			"font-weight:800",
+			"padding:0 10px",
+		].join(";");
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			setInputSizeSyncEnabled(node, choice.enabled);
+			syncFloatingPanels(node);
+		});
+		wrap.appendChild(button);
+	}
+	wrap.__gjjRefresh = () => {
+		const enabled = inputSizeSyncEnabled(node);
+		for (const button of wrap.querySelectorAll("button")) {
+			const active = (button.textContent === "原图尺寸") === enabled;
+			const style = button.textContent === "原图尺寸" ? SIZE_SOURCE_BUTTON_STYLES.input : SIZE_SOURCE_BUTTON_STYLES.panel;
+			button.style.background = active ? style.bg : "#11181c";
+			button.style.borderColor = active ? style.border : "#41535b";
+			button.style.color = active ? style.color : "#dce7e2";
+			button.setAttribute("aria-pressed", active ? "true" : "false");
+		}
+	};
+	wrap.__gjjRefresh();
+	return wrap;
+}
+
+function createSliderControl(node, name, { disabledWhenInputSize = false } = {}) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return null;
+	}
+	const { min, max, step } = numericWidgetBounds(widget, name === "batch_size" ? 1 : 64, name === "batch_size" ? 64 : 8192, name === "batch_size" ? 1 : 8);
+	const row = document.createElement("div");
+	row.dataset.widgetName = name;
+	row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center;font-size:12px;color:#c7d5d8";
+	const label = document.createElement("label");
+	label.textContent = widgetDisplayLabel(widget, name);
+	label.style.cssText = "grid-column:1 / span 1;color:#9fd4c3;font-weight:700";
+	const value = document.createElement("input");
+	value.type = "number";
+	value.min = String(min);
+	value.max = String(max);
+	value.step = String(step);
+	value.style.cssText = "grid-column:2;width:74px;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:4px 6px;text-align:right;font-size:12px;font-weight:800";
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = String(min);
+	slider.max = String(max);
+	slider.step = String(step);
+	slider.style.cssText = "grid-column:1 / span 2;width:100%;accent-color:#52c2a4;cursor:pointer";
+	const commit = (raw) => {
+		const current = getWidget(node, name);
+		if (!current) return;
+		const next = coerceParamValue(name, raw, node);
+		setWidgetValue(current, next);
+		if (Array.isArray(node.widgets_values)) {
+			const index = getWidgetIndex(node, name);
+			if (index >= 0) node.widgets_values[index] = next;
+		}
+		writeLiveParamSnapshot(node);
+		node.graph?.change?.();
+		app.graph?.setDirtyCanvas?.(true, true);
+	};
+	const onInput = (event) => {
+		value.value = event.target.value;
+		commit(event.target.value);
+	};
+	const onNumberInput = (event) => {
+		const numeric = Math.min(max, Math.max(min, Number(event.target.value || min)));
+		const rounded = Math.round(numeric / step) * step;
+		const next = String(Math.min(max, Math.max(min, rounded)));
+		value.value = next;
+		slider.value = next;
+		commit(next);
+	};
+	slider.addEventListener("input", onInput);
+	value.addEventListener("change", onNumberInput);
+	row.append(label, value, slider);
+	row.__gjjRefresh = () => {
+		const current = getWidget(node, name);
+		if (!current) return;
+		const next = String(coerceParamValue(name, current.value, node));
+		value.value = next;
+		slider.value = next;
+		const disabled = disabledWhenInputSize && inputSizeSyncEnabled(node);
+		row.style.opacity = disabled ? "0.45" : "1";
+		label.style.color = disabled ? "#70838a" : "#9fd4c3";
+		value.disabled = disabled;
+		slider.disabled = disabled;
+		value.style.cursor = disabled ? "not-allowed" : "text";
+		slider.style.cursor = disabled ? "not-allowed" : "pointer";
+		value.style.background = disabled ? "#182027" : "#11181c";
+		value.style.color = disabled ? "#7b8d95" : "#dce7e2";
+	};
+	row.__gjjRefresh();
+	return row;
+}
+
+function renderSizePanelControls(node, body) {
+	body.replaceChildren();
+	const source = createSizeSourceControl(node);
+	body.appendChild(source);
+	for (const name of ["width", "height", "batch_size"]) {
+		const control = createSliderControl(node, name, { disabledWhenInputSize: name === "width" || name === "height" });
+		if (control) {
+			control.__gjjRefresh?.();
+			body.appendChild(control);
+		}
+	}
+}
+
 function lazyModelTreeEntries(node) {
 	const useCheckpoint = checkpointModelSourceEnabled(node);
 	if (useCheckpoint) {
@@ -2152,7 +2321,7 @@ function syncFloatingPanels(node) {
 		}
 		node.__gjjLoraContainer.style.display = modelOpen ? "flex" : "none";
 	}
-	renderFloatingPanelControls(node, size.body, Array.from(SIZE_PANEL_WIDGETS));
+	renderSizePanelControls(node, size.body);
 	renderFloatingPanelControls(node, other.body, Array.from(OTHER_PANEL_WIDGETS));
 
 	model.panel.style.display = modelOpen ? "flex" : "none";
