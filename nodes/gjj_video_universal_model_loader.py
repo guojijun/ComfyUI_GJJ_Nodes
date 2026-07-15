@@ -416,6 +416,19 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("low_lora", "Low LoRA名称", "loras", "name", ["Bernini-R","lightx2v","low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
+    "wan22_Dancer": {
+        "label": "Wan2.2 Dancer 舞蹈视频生成",
+        "clip_type": "wan",
+        "slots": [
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "dancer","global"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan","dancer","local"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["lightx2v", "i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["lightx2v","i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
+        ],
+    },
     "wan22_bernini_s2v": {
         "label": "Bernini-R S2V 音频驱动",
         "clip_type": "wan",

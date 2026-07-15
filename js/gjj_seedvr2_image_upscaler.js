@@ -23,7 +23,6 @@ const BOOLEAN_WIDGETS = [
 ];
 const BOOLEAN_WIDGET_NAMES = new Set(BOOLEAN_WIDGETS.map((item) => item.name));
 const HIDDEN_SETTING_WIDGETS = [
-	COMMON_VIDEO_HEIGHT_WIDGET,
 	RESOLUTION_WIDGET,
 	"max_resolution",
 	"seed",
@@ -42,6 +41,10 @@ const HIDDEN_SETTING_WIDGETS = [
 	"color_correction",
 	"input_noise_scale",
 	"latent_noise_scale",
+];
+const LEGACY_HIDDEN_SETTING_WIDGETS = [
+	COMMON_VIDEO_HEIGHT_WIDGET,
+	...HIDDEN_SETTING_WIDGETS,
 ];
 const REQUIRED_WIDGET_ORDER = [
 	COMMON_VIDEO_HEIGHT_WIDGET,
@@ -70,9 +73,9 @@ const REQUIRED_WIDGET_ORDER = [
 	"enable_debug",
 ];
 const SETTING_LABELS = {
-	common_video_height: "常用视频高度",
-	resolution: "目标分辨率",
-	max_resolution: "最大分辨率",
+	common_video_height: "目标短边预设",
+	resolution: "目标短边",
+	max_resolution: "最长边上限",
 	seed: "随机种子",
 	control_after_generate: "种子生成后控制",
 	dit_model: "放大主模型",
@@ -267,6 +270,8 @@ function restoreSerializedValues(node, serializedNode) {
 		}
 	} else if (values.length === HIDDEN_SETTING_WIDGETS.length) {
 		names = HIDDEN_SETTING_WIDGETS;
+	} else if (values.length === LEGACY_HIDDEN_SETTING_WIDGETS.length) {
+		names = LEGACY_HIDDEN_SETTING_WIDGETS;
 	} else if (values.length === REQUIRED_WIDGET_ORDER.length + 1 && values[0] === undefined) {
 		values = values.slice(1);
 		names = REQUIRED_WIDGET_ORDER;

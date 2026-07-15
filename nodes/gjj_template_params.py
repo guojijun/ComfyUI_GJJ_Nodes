@@ -708,22 +708,84 @@ def _parse_choice_group_directive(raw: Any) -> tuple[str, list[dict[str, str]], 
     return label, options, tooltip
 
 
-def _selected_prompt_group_lines(fields: list[dict[str, Any]], value_map: dict[str, Any]) -> list[str]:
+def _prompt_group_selection_text(group: dict[str, Any], value_map: dict[str, Any]) -> str:
+    key = str(group.get("key") or "")
+    raw_value = value_map.get(key, value_map.get(group.get("label"), group.get("default", "")))
+    selected = _coerce_enum_value(raw_value, list(group.get("options", [])))
+    selected_values = selected if isinstance(selected, list) else [selected]
+    return "、".join(_normalize_text(item).strip() for item in selected_values if _normalize_text(item).strip())
+
+
+def _prompt_group_lookup(
+    fields: list[dict[str, Any]],
+    prompt_field: dict[str, Any],
+    value_map: dict[str, Any],
+) -> dict[str, tuple[dict[str, Any], str]]:
+    by_key = {str(field.get("key") or ""): field for field in fields}
+    lookup: dict[str, tuple[dict[str, Any], str]] = {}
+    for key in prompt_field.get("prompt_group_keys") or []:
+        group = by_key.get(str(key or ""))
+        if not group:
+            continue
+        text = _prompt_group_selection_text(group, value_map)
+        if not text:
+            continue
+        names = [
+            group.get("key"),
+            group.get("label"),
+            group.get("broadcast_key"),
+            *(group.get("broadcast_keys") or []),
+        ]
+        for name in names:
+            normalized = _normalize_text(name).strip()
+            if normalized:
+                lookup[normalized] = (group, text)
+    return lookup
+
+
+def _replace_prompt_variables(
+    text: Any,
+    fields: list[dict[str, Any]],
+    prompt_field: dict[str, Any],
+    value_map: dict[str, Any],
+) -> tuple[str, set[str]]:
+    lookup = _prompt_group_lookup(fields, prompt_field, value_map)
+    used_keys: set[str] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        item = lookup.get(match.group(1).strip())
+        if not item:
+            return match.group(0)
+        group, value_text = item
+        used_keys.add(str(group.get("key") or ""))
+        return value_text
+
+    return re.sub(r"[｛{]\s*([^{}｛｝]+?)\s*[｝}]", replace, _normalize_text(text)), used_keys
+
+
+def _selected_prompt_group_lines(
+    fields: list[dict[str, Any]],
+    value_map: dict[str, Any],
+    prompt_field: dict[str, Any] | None = None,
+    excluded_keys: set[str] | None = None,
+) -> list[str]:
     lines: list[str] = []
     by_key = {str(field.get("key") or ""): field for field in fields}
-    for field in fields:
-        if not field.get("template_prompt"):
+    prompt_fields = [prompt_field] if prompt_field else [field for field in fields if field.get("template_prompt")]
+    excluded_keys = excluded_keys or set()
+    for field in prompt_fields:
+        if not field:
             continue
         for key in field.get("prompt_group_keys") or []:
+            if str(key or "") in excluded_keys:
+                continue
             group = by_key.get(str(key or ""))
             if not group:
                 continue
-            raw_value = value_map.get(key, value_map.get(group.get("label"), group.get("default", "")))
-            selected = _coerce_enum_value(raw_value, list(group.get("options", [])))
             label = _normalize_text(group.get("label")).strip()
-            selected_values = selected if isinstance(selected, list) else [selected]
-            for item in selected_values:
-                if label and item:
+            text = _prompt_group_selection_text(group, value_map)
+            for item in [part for part in text.split("、") if part]:
+                if label:
                     lines.append(f"{label}：{item}")
     return lines
 
@@ -922,6 +984,52 @@ def _parse_bool_spec(default_text: Any) -> tuple[bool | None, dict[str, str] | N
         "true_label": true_label or "开启",
         "false_label": false_label or "关闭",
     }
+
+
+def _parse_slider_spec(default_text: Any) -> dict[str, float] | None:
+    raw = _normalize_text(default_text).strip()
+    if not (raw.startswith("<") and raw.endswith(">")):
+        return None
+    inner = raw[1:-1].strip()
+    if not inner:
+        return None
+    parts = _split_enum_options(inner)
+    if len(parts) == 4 and all(_is_number_text(part) for part in parts):
+        min_value, max_value, step_value, default_value = (float(part) for part in parts)
+        return {
+            "min": min_value,
+            "max": max_value,
+            "step": step_value,
+            "default": default_value,
+        }
+
+    spec: dict[str, float] = {}
+    for part in parts:
+        match = re.fullmatch(
+            r"(?is)\s*(min|max|step|default)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*",
+            _normalize_text(part),
+        )
+        if not match:
+            return None
+        spec[match.group(1).lower()] = float(match.group(2))
+    if not all(key in spec for key in ("min", "max", "step", "default")):
+        return None
+    return spec
+
+
+def _slider_outputs_float(slider: dict[str, Any] | None) -> bool:
+    if not slider:
+        return False
+    for key in ("min", "max", "step", "default"):
+        value = slider.get(key)
+        if isinstance(value, float) and not value.is_integer():
+            return True
+    return False
+
+
+def _format_slider_default(slider: dict[str, Any]) -> str:
+    value = float(slider.get("default", 0))
+    return str(value) if _slider_outputs_float(slider) else str(int(round(value)))
 
 
 def parse_value(value: Any) -> Any:
@@ -1242,12 +1350,17 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
         key = _make_unique_template_key(key_source, len(fields), seen)
         broadcast_key_list = _unique_broadcast_keys([*broadcast_keys, key]) if broadcast_keys else []
         bool_default, bool_labels = _parse_bool_spec(default_text)
-        enum_options = [] if bool_labels else _parse_enum_options(default_text, tooltip)
-        value = bool_default if bool_labels else (_option_value(enum_options[0]) if enum_options else parse_value(default_text))
+        slider_spec = None if bool_labels else _parse_slider_spec(default_text)
+        enum_options = [] if bool_labels or slider_spec else _parse_enum_options(default_text, tooltip)
+        value = (
+            bool_default
+            if bool_labels
+            else (slider_spec["default"] if slider_spec else (_option_value(enum_options[0]) if enum_options else parse_value(default_text)))
+        )
         default_value = (
             ("true" if bool_default else "false")
             if bool_labels
-            else (_option_value(enum_options[0]) if enum_options else (value if isinstance(value, str) and _is_string_literal_text(default_text) else default_text))
+            else (_format_slider_default(slider_spec) if slider_spec else (_option_value(enum_options[0]) if enum_options else (value if isinstance(value, str) and _is_string_literal_text(default_text) else default_text)))
         )
         field = {
             "key": key,
@@ -1258,12 +1371,20 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
             "default": default_value,
             "value": value,
             "socket_type": socket_type,
-            "type": "BOOLEAN" if bool_labels else ("ENUM" if enum_options else (socket_type or _infer_type(value))),
+            "type": (
+                "BOOLEAN"
+                if bool_labels
+                else (socket_type or ("FLOAT" if _slider_outputs_float(slider_spec) else "INT"))
+                if slider_spec
+                else ("ENUM" if enum_options else (socket_type or _infer_type(value)))
+            ),
             "options": enum_options,
             "tooltip": tooltip,
         }
         if bool_labels:
             field["bool_labels"] = bool_labels
+        if slider_spec:
+            field["slider"] = slider_spec
         fields.append(field)
         if len(fields) >= MAX_OUTPUTS:
             break
@@ -1358,7 +1479,8 @@ class GJJ_TemplateParams:
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
             default_value = field.get("default", "")
             if field.get("template_prompt"):
-                outputs.append(_join_prompt_parts([default_value, *_selected_prompt_group_lines(fields, value_map)]))
+                prompt_text, used_keys = _replace_prompt_variables(default_value, fields, field, value_map)
+                outputs.append(_join_prompt_parts([prompt_text, *_selected_prompt_group_lines(fields, value_map, field, used_keys)]))
                 continue
             if field.get("type") == "BOOLEAN" and field.get("bool_labels"):
                 outputs.append(_coerce_bool_value(raw_value, field.get("bool_labels") or {}))

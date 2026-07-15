@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "ltx",
+    "search_text": "",
     "page_size": 12,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -126,5 +126,8 @@
   },
   "execution_timer": {
     "position": null
+  },
+  "text_merge": {
+    "template_text": "{文本1}{文本2}"
   }
 }

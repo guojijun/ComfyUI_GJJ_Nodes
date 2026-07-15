@@ -26,6 +26,7 @@ MODEL_CATEGORY = "seedvr2"
 MODEL_SUBDIR = "models/seedvr2"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
+GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 COMMON_VIDEO_HEIGHT_OPTIONS = [
     "手动输入",
     "480",
@@ -121,7 +122,7 @@ def _list_seedvr2_folder_models() -> list[str]:
         if not text:
             continue
         lower = text.lower()
-        if not lower.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
+        if not lower.endswith((".safetensors", ".gguf", ".ckpt", ".pt", ".pth", ".bin")):
             continue
         key = lower.replace("\\", "/")
         if key in seen:
@@ -242,6 +243,53 @@ _GJJ_HELP = build_node_help_payload(
         "notice_level": _ENVIRONMENT_REPORT.get("notice_level", "ok"),
     },
 )
+
+
+def _is_gguf_model(value: Any) -> bool:
+    return str(value or "").replace("\\", "/").lower().endswith(".gguf")
+
+
+def _raise_gguf_dependency_missing(model_names: list[str], unique_id=None, original_error: Any = "") -> None:
+    names = "、".join(str(name) for name in model_names if str(name or "").strip()) or "GGUF 模型"
+    report = build_dependency_model_report(
+        node_name=NODE_DISPLAY_NAME,
+        missing_dependencies=[
+            {
+                "module_name": "gguf",
+                "package_name": GGUF_PACKAGE_SPEC,
+                "display_name": GGUF_PACKAGE_SPEC,
+                "description": "只有读取 .gguf SeedVR2 模型时需要；safetensors 模型不需要此依赖。",
+            }
+        ],
+        install_packages=[GGUF_PACKAGE_SPEC],
+        description=(
+            f"当前选择了 GGUF 模型：{names}\n"
+            "如改用 safetensors / int4_convrot / int8_convrot 模型，则不需要安装 gguf。"
+        ),
+        original_error=str(original_error or ""),
+        model_download_url=MODEL_DOWNLOAD_URL,
+    )
+    report["warning_message"] = f"⚠️检测到 GGUF 模型但缺少 gguf 依赖：{names}"
+    report["copy_label"] = "📋 复制安装 gguf 依赖命令"
+    print_dependency_model_report(report, title="GJJ SeedVR2 GGUF 依赖缺失")
+    send_dependency_model_notice(report, unique_id=unique_id)
+    err = RuntimeError(
+        f"检测到 GGUF 模型，但当前 ComfyUI Python 缺少 gguf 依赖。\n"
+        f"模型：{names}\n"
+        f"请安装 {GGUF_PACKAGE_SPEC} 后重启 ComfyUI，或改用非 GGUF 模型。"
+    )
+    setattr(err, "gjj_report", report)
+    raise err
+
+
+def _ensure_gguf_dependency_for_selected_models(dit_model: Any, vae_model: Any, unique_id=None) -> None:
+    gguf_models = [str(name) for name in (dit_model, vae_model) if _is_gguf_model(name)]
+    if not gguf_models:
+        return
+    try:
+        importlib.import_module("gguf")
+    except Exception as exc:
+        _raise_gguf_dependency_missing(gguf_models, unique_id=unique_id, original_error=exc)
 
 
 def _get_local_device_list(include_none: bool = False, include_cpu: bool = False) -> list[str]:
@@ -535,25 +583,25 @@ class GJJ_SeedVR2ImageUpscaler:
         result = {
             "required": {
                 "common_video_height": (COMMON_VIDEO_HEIGHT_OPTIONS, {
-                    "default": "1080",
-                    "display_name": "常用视频高度",
-                    "tooltip": "常用视频高度快速选择。选中后会覆盖目标分辨率；选“手动输入”时使用右侧手填值。",
+                    "default": "手动输入",
+                    "display_name": "目标短边预设",
+                    "tooltip": "兼容旧工作流的快捷预设。新节点默认使用“手动输入”，由目标短边字段决定输出尺寸。",
                 }),
                 "resolution": ("INT", {
                     "default": 1080,
                     "min": 16,
                     "max": 16384,
                     "step": 2,
-                    "display_name": "目标分辨率",
-                    "tooltip": "按最短边目标分辨率放大，并自动保持原图比例。",
+                    "display_name": "目标短边",
+                    "tooltip": "输出图像的目标短边尺寸，自动保持原图比例。",
                 }),
                 "max_resolution": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 16384,
                     "step": 2,
-                    "display_name": "最大分辨率",
-                    "tooltip": "限制放大后任一边的最大值；0 表示不限制。",
+                    "display_name": "最长边上限",
+                    "tooltip": "限制输出图像任一边的最大尺寸；0 表示不限制。",
                 }),
                 "seed": ("INT", {
                     "default": 42,
@@ -731,6 +779,8 @@ class GJJ_SeedVR2ImageUpscaler:
         if media is None:
             media = kwargs.get("video", None)
 
+        _ensure_gguf_dependency_for_selected_models(dit_model, vae_model, unique_id=unique_id)
+
         try:
             api = _get_seedvr2_api()
         except Exception as exc:
@@ -739,13 +789,6 @@ class GJJ_SeedVR2ImageUpscaler:
             _raise_seedvr2_runtime_error(original, unique_id=unique_id)
         Debug = api["Debug"]
         debug = Debug(enabled=enable_debug)
-
-        selected_common_height = str(common_video_height or "手动输入").strip()
-        if selected_common_height and selected_common_height != "手动输入":
-            try:
-                resolution = int(selected_common_height)
-            except Exception:
-                pass
 
         if (blocks_to_swap > 0 or swap_io_components) and model_offload_device == "none":
             raise RuntimeError("启用模块交换或 IO 组件卸载时，请同时设置“模型卸载设备”。")

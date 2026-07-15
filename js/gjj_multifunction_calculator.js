@@ -804,25 +804,46 @@ function applyResultOutputTypes(node) {
 	if (preset?.resultType) {
 		return;
 	}
-	const resultType = String(node?.__gjjCalculatorResultType || "");
-	const pairType = String(node?.__gjjCalculatorPairType || "");
-	if (node?.outputs?.[0] && ["INT", "FLOAT", "STRING"].includes(resultType)) {
+	const currentFormula = normalizeCalculatorFormula(getFormula(node));
+	const actualTypeIsFresh = normalizeCalculatorFormula(node?.__gjjCalculatorResultFormula || "") === currentFormula;
+	const predictedType = predictedResultTypeFromFormula(currentFormula);
+	const resultType = actualTypeIsFresh ? String(node?.__gjjCalculatorResultType || "") : "";
+	const pairType = actualTypeIsFresh ? String(node?.__gjjCalculatorPairType || "") : "";
+	const displayType = ["INT", "FLOAT", "STRING"].includes(resultType) ? resultType : predictedType;
+	const displayPairType = ["INT", "FLOAT", "STRING"].includes(pairType) ? pairType : predictedPairTypeFromResultType(displayType);
+	if (node?.outputs?.[0] && ["INT", "FLOAT", "STRING", "INT,FLOAT"].includes(displayType)) {
 		const output = node.outputs[0];
-		output.type = resultType;
-		output.name = `自动结果 ${resultType}`;
+		output.type = displayType;
+		output.name = `自动结果 ${displayType}`;
 		output.label = output.name;
 		output.display_name = output.name;
 		output.localized_name = output.name;
+	} else if (node?.outputs?.[0]) {
+		const output = node.outputs[0];
+		const def = OUTPUT_DEFS[0];
+		output.type = def.type;
+		output.name = def.name;
+		output.label = def.name;
+		output.display_name = def.name;
+		output.localized_name = def.name;
 	}
 	const visibleDefs = getVisibleOutputDefs(node);
 	const pairSlot = visibleDefs.findIndex((def) => def.property === SHOW_INT_OUTPUT_PROPERTY);
-	if (pairSlot >= 0 && node?.outputs?.[pairSlot] && ["INT", "FLOAT", "STRING"].includes(pairType)) {
+	if (pairSlot >= 0 && node?.outputs?.[pairSlot] && ["INT", "FLOAT", "STRING"].includes(displayPairType)) {
 		const output = node.outputs[pairSlot];
-		output.type = pairType;
-		output.name = pairType === "INT" ? "互转结果 INT" : (pairType === "FLOAT" ? "互转结果 FLOAT" : "断行结果 STRING");
+		output.type = displayPairType;
+		output.name = displayPairType === "INT" ? "互转结果 INT" : (displayPairType === "FLOAT" ? "互转结果 FLOAT" : "断行结果 STRING");
 		output.label = output.name;
 		output.display_name = output.name;
 		output.localized_name = output.name;
+	} else if (pairSlot >= 0 && node?.outputs?.[pairSlot]) {
+		const output = node.outputs[pairSlot];
+		const def = visibleDefs[pairSlot];
+		output.type = def.type;
+		output.name = def.name;
+		output.label = def.name;
+		output.display_name = def.name;
+		output.localized_name = def.name;
 	}
 }
 
@@ -893,6 +914,28 @@ function updateAdvancedVisibility(node) {
 
 function getFormula(node) {
 	return String(getWidget(node, FORMULA_WIDGET)?.value || "");
+}
+
+function normalizeCalculatorFormula(text) {
+	return String(text || "").trim().replace(/×/g, "*").replace(/÷/g, "/").replace(/％/g, "%");
+}
+
+function predictedResultTypeFromFormula(text) {
+	const formula = normalizeCalculatorFormula(text);
+	if (!formula) return "";
+	if (/^(?:int|floor|ceil|round)\s*\(/i.test(formula)) return "INT";
+	if (/^float\s*\(/i.test(formula)) return "FLOAT";
+	if (/^["']/.test(formula) || /[^\s]+\s*\+\s*["']|["']\s*\+/.test(formula)) return "STRING";
+	if (/(^|[^/])\/(?!\/)/.test(formula)) return "FLOAT";
+	if (/[\+\-\*%]|\/\//.test(formula)) return "INT,FLOAT";
+	return "";
+}
+
+function predictedPairTypeFromResultType(resultType) {
+	if (resultType === "FLOAT") return "INT";
+	if (resultType === "INT") return "FLOAT";
+	if (resultType === "STRING") return "STRING";
+	return "";
 }
 
 function setFormula(node, formula, selectionStart = null, selectionEnd = null, validateNow = false) {
@@ -1174,6 +1217,9 @@ function updateResultPreview(node, value = null) {
 function showCalculatorError(node, message) {
 	const text = String(message || "公式计算失败，请检查输入。");
 	node.__gjjCalculatorLastResult = null;
+	node.__gjjCalculatorResultType = "";
+	node.__gjjCalculatorPairType = "";
+	node.__gjjCalculatorResultFormula = "";
 	updateResultPreview(node);
 	const target = node.__gjjCalculatorResultText || node.__gjjCalculatorFormulaText;
 	if (target) {
@@ -1188,6 +1234,10 @@ function showCalculatorError(node, message) {
 
 function invalidateResultPreview(node) {
 	node.__gjjCalculatorLastResult = null;
+	node.__gjjCalculatorResultType = "";
+	node.__gjjCalculatorPairType = "";
+	node.__gjjCalculatorResultFormula = "";
+	applyResultOutputTypes(node);
 	updateResultPreview(node);
 }
 
@@ -1557,6 +1607,7 @@ function patchExecution(node) {
 			this.__gjjCalculatorLastResult = message.calculator_result[0];
 			this.__gjjCalculatorResultType = String(message?.calculator_result_type?.[0] || "");
 			this.__gjjCalculatorPairType = String(message?.calculator_pair_type?.[0] || "");
+			this.__gjjCalculatorResultFormula = normalizeCalculatorFormula(message?.calculator_formula?.[0] ?? getFormula(this));
 			applyResultOutputTypes(this);
 			updateResultPreview(this, message.calculator_result[0]);
 			const typeText = this.__gjjCalculatorResultType || "AUTO";

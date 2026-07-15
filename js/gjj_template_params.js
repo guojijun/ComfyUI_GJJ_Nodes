@@ -1601,17 +1601,52 @@ function parseChoiceGroupDirective(raw) {
 	};
 }
 
-function selectedPromptGroupLines(fields, values) {
+function promptGroupSelectionText(group, values) {
+	const rawValue = values?.[group.key] ?? values?.[group.label] ?? group.default ?? "";
+	const selected = normalizeEnumSelection(group, rawValue);
+	return selected.filter((item) => String(item ?? "").trim()).join("、");
+}
+
+function promptGroupLookup(fields, promptField, values) {
+	const byKey = new Map((fields || []).map((field) => [String(field?.key || ""), field]));
+	const lookup = new Map();
+	for (const key of promptField?.prompt_group_keys || []) {
+		const group = byKey.get(String(key || ""));
+		if (!group) continue;
+		const text = promptGroupSelectionText(group, values);
+		if (!text) continue;
+		for (const name of [group.key, group.label, group.broadcast_key, ...(group.broadcast_keys || [])]) {
+			const normalized = String(name || "").trim();
+			if (normalized) lookup.set(normalized, { group, text });
+		}
+	}
+	return lookup;
+}
+
+function replacePromptVariables(text, fields, promptField, values) {
+	const lookup = promptGroupLookup(fields, promptField, values);
+	const usedKeys = new Set();
+	const nextText = String(text ?? "").replace(/[｛{]\s*([^{}｛｝]+?)\s*[｝}]/g, (match, name) => {
+		const item = lookup.get(String(name || "").trim());
+		if (!item) return match;
+		usedKeys.add(String(item.group.key || ""));
+		return item.text;
+	});
+	return { text: nextText, usedKeys };
+}
+
+function selectedPromptGroupLines(fields, values, promptField = null, excludedKeys = new Set()) {
 	const byKey = new Map((fields || []).map((field) => [String(field?.key || ""), field]));
 	const lines = [];
-	for (const field of fields || []) {
-		if (!field?.template_prompt) continue;
-		for (const key of field.prompt_group_keys || []) {
+	const promptFields = promptField ? [promptField] : (fields || []).filter((field) => field?.template_prompt);
+	for (const field of promptFields) {
+		for (const key of field?.prompt_group_keys || []) {
+			if (excludedKeys.has(String(key || ""))) continue;
 			const group = byKey.get(String(key || ""));
 			if (!group) continue;
-			const rawValue = values?.[group.key] ?? values?.[group.label] ?? group.default ?? "";
-			const selected = normalizeEnumSelection(group, rawValue);
-			for (const item of selected) {
+			const text = promptGroupSelectionText(group, values);
+			if (!text) continue;
+			for (const item of text.split("、").filter(Boolean)) {
 				if (group.label && item) lines.push(`${group.label}：${item}`);
 			}
 		}
@@ -1621,7 +1656,10 @@ function selectedPromptGroupLines(fields, values) {
 
 function combinedPromptValue(field, fields, values) {
 	const base = field?.template_prompt ? field.default : (values?.[field.key] ?? values?.[field.label] ?? field.default ?? "");
-	return joinPromptParts([base, ...selectedPromptGroupLines(fields, values)]);
+	const replaced = field?.template_prompt
+		? replacePromptVariables(base, fields, field, values)
+		: { text: base, usedKeys: new Set() };
+	return joinPromptParts([replaced.text, ...selectedPromptGroupLines(fields, values, field, replaced.usedKeys)]);
 }
 
 function splitPipePair(text) {
@@ -1756,6 +1794,33 @@ function parseEnumOptions(defaultText, tooltip = "") {
 	return splitEnumOptions(inner).map((item) => parseOptionItem(item)).filter((item) => optionValue(item));
 }
 
+function parseSliderSpec(defaultText) {
+	const raw = String(defaultText || "").trim();
+	if (!raw.startsWith("<") || !raw.endsWith(">")) return null;
+	const inner = raw.slice(1, -1).trim();
+	if (!inner) return null;
+	const parts = splitEnumOptions(inner);
+	if (parts.length === 4 && parts.every((part) => isNumberText(part))) {
+		const [min, max, step, defaultValue] = parts.map((part) => Number.parseFloat(part));
+		return Number.isFinite(min) && Number.isFinite(max) && Number.isFinite(step) && Number.isFinite(defaultValue)
+			? { min, max, step, default: defaultValue }
+			: null;
+	}
+	const spec = {};
+	for (const part of parts) {
+		const match = String(part || "").trim().match(/^(min|max|step|default)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$/i);
+		if (!match) return null;
+		spec[match[1].toLowerCase()] = Number.parseFloat(match[2]);
+	}
+	if (!["min", "max", "step", "default"].every((key) => Number.isFinite(spec[key]))) return null;
+	return spec;
+}
+
+function sliderOutputsFloat(slider) {
+	return [slider?.min, slider?.max, slider?.step, slider?.default]
+		.some((value) => !Number.isInteger(Number(value)));
+}
+
 function parseBoolSpec(defaultText) {
 	const raw = String(defaultText || "").trim();
 	const brace = raw.match(/^\s*(true|false|yes|no|on|off|1|0|是|否|开|关)?\s*[{｛]\s*([\s\S]*?)\s*[}｝]\s*$/i);
@@ -1867,11 +1932,14 @@ function parseTemplate(template) {
 		const { value: defaultText, tooltip } = splitValueAndTooltip(match[2].trim());
 		if (!label) continue;
 		const boolSpec = parseBoolSpec(defaultText);
-		const enumOptions = boolSpec ? [] : parseEnumOptions(defaultText, tooltip);
-		const value = boolSpec ? boolSpec.defaultValue : (enumOptions.length ? optionValue(enumOptions[0]) : parseValue(defaultText));
+		const sliderSpec = boolSpec ? null : parseSliderSpec(defaultText);
+		const enumOptions = boolSpec || sliderSpec ? [] : parseEnumOptions(defaultText, tooltip);
+		const value = boolSpec
+			? boolSpec.defaultValue
+			: (sliderSpec ? sliderSpec.default : (enumOptions.length ? optionValue(enumOptions[0]) : parseValue(defaultText)));
 		const defaultValue = boolSpec
 			? (boolSpec.defaultValue ? "true" : "false")
-			: (enumOptions.length ? optionValue(enumOptions[0]) : (typeof value === "string" && isStringLiteralText(defaultText) ? value : defaultText));
+			: (sliderSpec ? String(sliderSpec.default) : (enumOptions.length ? optionValue(enumOptions[0]) : (typeof value === "string" && isStringLiteralText(defaultText) ? value : defaultText)));
 		const key = makeUniqueKey(keySource, fields.length, seen);
 		const broadcastKeyList = broadcastKeys.length ? uniqueBroadcastKeys([...broadcastKeys, key]) : [];
 		const field = {
@@ -1883,10 +1951,11 @@ function parseTemplate(template) {
 			default: defaultValue,
 			tooltip,
 			socket_type: socketType,
-			type: boolSpec ? "BOOLEAN" : (enumOptions.length ? "ENUM" : (socketType || inferType(value))),
+			type: boolSpec ? "BOOLEAN" : (sliderSpec ? (socketType || (sliderOutputsFloat(sliderSpec) ? "FLOAT" : "INT")) : (enumOptions.length ? "ENUM" : (socketType || inferType(value)))),
 			options: enumOptions,
 		};
 		if (boolSpec) field.bool_labels = boolSpec.labels;
+		if (sliderSpec) field.slider = sliderSpec;
 		fields.push(field);
 		if (fields.length >= MAX_OUTPUTS) break;
 	}
@@ -2118,6 +2187,7 @@ function makeFieldSignature(field) {
 		String(field?.type ?? ""),
 		JSON.stringify(Array.isArray(field?.options) ? field.options : []),
 		JSON.stringify(field?.bool_labels || {}),
+		JSON.stringify(field?.slider || {}),
 		String(field?.tooltip ?? ""),
 	].join("\u0001");
 }
@@ -2561,6 +2631,79 @@ function buildCompactPromptGroupForField(node, field, values) {
 	return wrap;
 }
 
+function clampSliderValue(value, slider) {
+	let number = Number.parseFloat(value);
+	const min = Number(slider?.min);
+	const max = Number(slider?.max);
+	const fallback = Number(slider?.default);
+	if (!Number.isFinite(number)) number = Number.isFinite(fallback) ? fallback : 0;
+	if (Number.isFinite(min)) number = Math.max(min, number);
+	if (Number.isFinite(max)) number = Math.min(max, number);
+	if (!sliderOutputsFloat(slider)) return String(Math.round(number));
+	return String(number);
+}
+
+function buildSliderForField(node, field, values) {
+	const slider = field?.slider || null;
+	if (!slider) return null;
+
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-template-param-row gjj-template-param-row-slider";
+	const label = buildFieldLabel(node, field, field.type || "FLOAT");
+
+	const box = document.createElement("div");
+	box.className = "gjj-template-param-slider";
+	box.title = field.tooltip || `范围：${slider.min} - ${slider.max}，步长：${slider.step}`;
+
+	const range = document.createElement("input");
+	range.type = "range";
+	range.className = "gjj-template-param-slider-range";
+	range.min = String(slider.min);
+	range.max = String(slider.max);
+	range.step = String(slider.step);
+
+	const number = document.createElement("input");
+	number.type = "number";
+	number.className = "gjj-template-param-input gjj-template-param-slider-number";
+	number.min = String(slider.min);
+	number.max = String(slider.max);
+	number.step = String(slider.step);
+	number.title = box.title;
+
+	const commit = (nextValue) => {
+		const text = clampSliderValue(nextValue, slider);
+		values[field.key] = text;
+		range.value = text;
+		number.value = text;
+		saveFieldValue(node, field, values, text);
+	};
+
+	const initial = clampSliderValue(values[field.key] ?? field.default ?? slider.default, slider);
+	values[field.key] = initial;
+	range.value = initial;
+	number.value = initial;
+
+	for (const input of [range, number]) {
+		input.addEventListener("pointerdown", (event) => event.stopPropagation());
+		input.addEventListener("mousedown", (event) => event.stopPropagation());
+		input.addEventListener("input", () => commit(input.value));
+		input.addEventListener("change", () => commit(input.value));
+	}
+
+	box.append(range, number);
+	wrap.append(label, box);
+	node.__gjjTemplateParamsRows.set(field.key, {
+		get value() { return String(values[field.key] ?? field.default ?? slider.default ?? ""); },
+		set value(next) {
+			const text = clampSliderValue(next, slider);
+			values[field.key] = text;
+			range.value = text;
+			number.value = text;
+		},
+	});
+	return wrap;
+}
+
 function shouldUseMultilineText(field, value, isMedia) {
 	if (isMedia || field?.type !== "STRING") return false;
 	const text = String(value ?? field?.default ?? "");
@@ -2613,6 +2756,10 @@ function buildInputForField(node, field, values, options = {}) {
 	if (field?.type === "ENUM") {
 		const enumRow = buildEnumSelectForField(node, field, values);
 		if (enumRow) return enumRow;
+	}
+	if (field?.slider) {
+		const sliderRow = buildSliderForField(node, field, values);
+		if (sliderRow) return sliderRow;
 	}
 
 	const isImage = field.type === "IMAGE";
@@ -2856,6 +3003,9 @@ function buildDom(node) {
 		.gjj-template-param-enum-button { min-width:34px; max-width:100%; flex:0 0 auto; width:auto; height:26px; padding:2px 8px; border:1px solid #33464e; border-radius:7px; outline:none; background:#24282b; color:#cdd5d8; font-size:12px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-enum-button.active, .gjj-template-param-enum-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; font-weight:700; }
 		.gjj-template-param-enum-button:hover { filter:brightness(1.12); border-color:#6aa6b8; }
+		.gjj-template-param-slider { display:grid; grid-template-columns:minmax(0,1fr) 72px; gap:7px; align-items:center; min-width:0; width:100%; }
+		.gjj-template-param-slider-range { width:100%; min-width:0; accent-color:#6aa6b8; }
+		.gjj-template-param-slider-number { height:28px; padding:3px 6px; text-align:right; }
 		.gjj-template-param-prompt-group { display:flex; align-items:center; gap:4px; flex-wrap:wrap; min-width:0; width:100%; padding:0; }
 		.gjj-template-param-prompt-group-label { flex:0 0 auto; color:#9fb2b9; font-size:11px; font-weight:700; line-height:22px; white-space:nowrap; }
 		.gjj-template-param-prompt-group-button { flex:0 0 auto; min-width:0; width:auto; height:22px; padding:1px 8px; border-radius:6px; font-size:11px; line-height:1; }
