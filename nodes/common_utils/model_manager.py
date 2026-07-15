@@ -333,6 +333,50 @@ def gjjutils_find_model_list(
     return matched
 
 
+def gjjutils_model_search_state(
+    keyword: str | list[str] | tuple[str, ...],
+    folder_type: str | list[str] | tuple[str, ...],
+    default_model: str,
+    match_mode: str = "AND",
+) -> dict[str, Any]:
+    """Search model folders and return the real choices plus fallback state.
+
+    ``models`` contains filesystem search results only. When no result exists,
+    ``value`` uses ``default_model`` and ``missing`` is true so the frontend can
+    display that preset in red without treating it as an installed model.
+    """
+    folder_types = [folder_type] if isinstance(folder_type, str) else list(folder_type or [])
+    matches: list[str] = []
+    seen: set[str] = set()
+    for current_folder in folder_types:
+        folder_name = str(current_folder or "").strip()
+        if not folder_name:
+            continue
+        for model_name in gjjutils_find_model_list(keyword, folder_name, match_mode):
+            text = str(model_name or "").strip()
+            key = text.replace("\\", "/").lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            matches.append(text)
+
+    default_name = str(default_model or "").strip()
+    default_key = gjjutils_normalize_text(default_name)
+    matches.sort(
+        key=lambda name: (
+            0 if default_key and default_key in gjjutils_normalize_text(name) else 1,
+            str(name).lower(),
+        )
+    )
+    missing = not matches and bool(default_name)
+    return {
+        "models": matches,
+        "value": matches[0] if matches else default_name,
+        "default_model": default_name,
+        "missing": missing,
+    }
+
+
 _GJJ_MODEL_EXT_RE = re.compile(r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|engine|torchscript)$", re.IGNORECASE)
 _GJJ_QUANT_TOKEN_RE = re.compile(
     r"(?i)(^|[_\-. ])("

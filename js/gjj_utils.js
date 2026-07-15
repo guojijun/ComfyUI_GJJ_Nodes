@@ -1029,6 +1029,22 @@ export class GJJ_Utils {
             .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
     }
 
+    static _modelTreeMissingDefault(entry) {
+        return Boolean(entry?.missingDefault || entry?.missing_default || entry?.missing);
+    }
+
+    static _modelTreeDefaultModel(entry) {
+        const explicit = String(entry?.defaultModel || entry?.default_model || "").trim();
+        const filename = String(entry?.filename || "").trim();
+        const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || "").trim();
+        return explicit || filename || fallback;
+    }
+
+    static _modelTreeFallback(entry) {
+        const fallback = String(entry?.fallback || entry?.preferred_name || "").trim();
+        return fallback || GJJ_Utils._modelTreeDefaultModel(entry);
+    }
+
     static _modelTreeWidget(node, entry) {
         if (typeof entry?.getWidget === "function") return entry.getWidget(entry.widget || entry.widgetName || entry.name);
         return GJJ_Utils.getWidget(node, entry?.widget || entry?.widgetName || entry?.name);
@@ -1040,7 +1056,7 @@ export class GJJ_Utils {
     }
 
     static _modelTreeChoices(entry, widget) {
-        const raw = Array.isArray(entry?.models) && entry.models.length
+        const raw = Array.isArray(entry?.models)
             ? entry.models
             : GJJ_Utils._modelTreeWidgetChoices(widget);
         const seen = new Set();
@@ -1053,7 +1069,18 @@ export class GJJ_Utils {
             });
     }
 
-    static _modelTreeFilteredChoices(entry, widget, query = "", limit = 80) {
+    static _modelTreeIsDefaultPlaceholder(entry, name) {
+        const defaultModel = GJJ_Utils._modelTreeDefaultModel(entry);
+        if (!defaultModel || !name) return false;
+        const text = String(name || "").trim();
+        if (GJJ_Utils._modelTreeMissingDefault(entry)) {
+            return GJJ_Utils._modelTreeKey(text) === GJJ_Utils._modelTreeKey(defaultModel);
+        }
+        if (text === defaultModel) return false;
+        return GJJ_Utils._modelTreeKey(text) === GJJ_Utils._modelTreeKey(defaultModel);
+    }
+
+    static _modelTreeSearchChoices(entry, widget, query = "", limit = 80) {
         const terms = String(query || "")
             .toLowerCase()
             .split(/[\s,，|/\\]+/)
@@ -1066,6 +1093,7 @@ export class GJJ_Utils {
         const noModelMatches = noModelLabel && (!terms.length || terms.every((term) => GJJ_Utils._modelTreeKey(noModelLabel).includes(term)));
         const all = GJJ_Utils._modelTreeChoices(entry, widget);
         const filtered = all.filter((name) => {
+            if (GJJ_Utils._modelTreeIsDefaultPlaceholder(entry, name)) return false;
             const key = GJJ_Utils._modelTreeKey(name);
             if (keywords.length && !keywords.every((keyword) => key.includes(keyword))) return false;
             if (anyKeywords.length && !anyKeywords.some((keyword) => key.includes(keyword))) return false;
@@ -1075,6 +1103,28 @@ export class GJJ_Utils {
         if (noModelMatches && noModelValue && !filtered.includes(noModelValue)) filtered.unshift(noModelValue);
         return filtered.slice(0, Math.max(1, Number(limit || 80)));
     }
+
+    static _modelTreeFilteredChoices(entry, widget, query = "", limit = 80) {
+        return GJJ_Utils._modelTreeSearchChoices(entry, widget, query, limit);
+    }
+
+    static _modelTreeState(entry, widget) {
+        const current = String(widget?.value || "").trim();
+        const defaultModel = GJJ_Utils._modelTreeDefaultModel(entry);
+        const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
+        const isNoModel = Boolean(noModelValue && current === noModelValue);
+        const choices = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 10000);
+        const hasCandidates = choices.length > 0;
+        const currentAvailable = Boolean(current && !isNoModel && choices.includes(current));
+        const currentIsDefault = GJJ_Utils._modelTreeIsDefaultPlaceholder(entry, current)
+            || Boolean(current && defaultModel && GJJ_Utils._modelTreeKey(current) === GJJ_Utils._modelTreeKey(defaultModel));
+        const currentMissing = Boolean(current && !isNoModel && !currentAvailable);
+        const missingDefault = GJJ_Utils._modelTreeMissingDefault(entry) || (!hasCandidates && !!defaultModel);
+        const missing = missingDefault || (currentMissing && currentIsDefault);
+        const value = missingDefault ? defaultModel : (currentAvailable ? current : (choices[0] || current || defaultModel));
+        return { current, fallback: defaultModel, choices, hasCandidates, missingDefault, currentMissing, missing, value };
+    }
+
 
     static _modelTreeSetWidgetValue(widget, value, entry, node) {
         if (!widget || value == null) return;
@@ -1192,7 +1242,7 @@ export class GJJ_Utils {
             if (autoPick && options.length) onApply(options[0]);
             list.replaceChildren();
             if (!options.length) {
-                const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || entry?.filename || "").trim();
+                const fallback = GJJ_Utils._modelTreeFallback(entry);
                 const empty = document.createElement("div");
                 empty.style.cssText = "color:#ff6b72;font-size:12px;padding:4px 2px;line-height:1.35;word-break:break-all;";
                 empty.title = entry?.description || entry?.tooltip || "";
@@ -1272,23 +1322,15 @@ export class GJJ_Utils {
         const strengthWidget = entry?.strengthWidget || entry?.strengthWidgetName
             ? GJJ_Utils.getWidget(node, entry.strengthWidget || entry.strengthWidgetName)
             : null;
-        const candidates = GJJ_Utils._modelTreeFilteredChoices(entry, widget, "", 1);
         const autoSelect = entry?.autoSelect !== false;
-        if (autoSelect && widget && !String(widget.value || "").trim() && candidates.length) {
-            GJJ_Utils._modelTreeSetWidgetValue(widget, candidates[0], entry, node);
+        const initialState = GJJ_Utils._modelTreeState(entry, widget);
+        if (autoSelect && widget && initialState.hasCandidates && (!initialState.current || initialState.currentMissing || initialState.missing)) {
+            GJJ_Utils._modelTreeSetWidgetValue(widget, initialState.choices[0], entry, node);
         }
         const host = document.createElement("div");
         let choicePanel = null;
         const renderLine = () => {
-            const current = String(widget?.value || "").trim();
-            const fallback = String(entry?.fallback || entry?.defaultModel || entry?.preferred_name || entry?.filename || "").trim();
-            const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
-            const isNoModel = Boolean(noModelValue && current === noModelValue);
-            const choices = GJJ_Utils._modelTreeChoices(entry, widget);
-            const hasCandidates = GJJ_Utils._modelTreeFilteredChoices(entry, widget, "", 1).length > 0;
-            const currentMissing = Boolean(current && !isNoModel && choices.length && !choices.includes(current));
-            const missing = currentMissing || (!current && !hasCandidates && !!fallback);
-            const value = current || fallback;
+            const { currentMissing, missing, value } = GJJ_Utils._modelTreeState(entry, widget);
             const filename = missing ? value : GJJ_Utils._modelTreeFilename(value);
             const icon = entry?.icon || "🟣";
             const prefix = entry?.prefix || "│　└─";

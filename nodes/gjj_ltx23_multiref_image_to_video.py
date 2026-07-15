@@ -15,6 +15,7 @@ from .common_utils.dependency_checker import (
     get_site_packages,
     DEFAULT_PYPI,
 )
+from .common_utils.model_manager import gjjutils_model_search_state
 
 # 运行时依赖检查（零依赖导入模式，使用 importlib 安全检查）
 try:
@@ -71,6 +72,7 @@ DEFAULT_FPS = 24
 DEFAULT_SEED = 483811081311996
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
+DEFAULT_LTX_CHECKPOINT = "ltx-2.3-22b"
 DEFAULT_FRAME_TRIM_START_VIDEO = 2
 DEFAULT_FRAME_TRIM_START_AUDIO = 3
 SCENE_BATCH_INPUT_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
@@ -942,21 +944,35 @@ def _dedupe_names(*groups: list[str]) -> list[str]:
     return out
 
 
-def _ltx_checkpoint_options() -> list[str]:
+def _ltx_checkpoint_state() -> dict[str, Any]:
     """Return diffusion model names containing "ltx" case-insensitively.
 
     LTX 2.3 主模型是 diffusion_models，不是 checkpoints。
     列表排序：ltx-2.3-22b 优先，然后其它 ltx23，最后普通 ltx。
     """
-    names = _dedupe_names(_filename_list("diffusion_models"), _filename_list("unet_gguf"))
-    filtered = [str(name) for name in names if "ltx" in str(name).lower()]
-    filtered = sorted(filtered, key=_ltx_model_priority)
-    return filtered or ["ltx-2.3-22b"]
+    state = gjjutils_model_search_state(
+        "ltx",
+        ("diffusion_models", "unet_gguf"),
+        DEFAULT_LTX_CHECKPOINT,
+    )
+    models = sorted(state["models"], key=_ltx_model_priority)
+    return {
+        **state,
+        "models": models,
+        "value": models[0] if models else state["default_model"],
+    }
+
+
+def _real_ltx_checkpoint_options() -> list[str]:
+    return list(_ltx_checkpoint_state()["models"])
+
+
+def _ltx_checkpoint_options() -> list[str]:
+    return _real_ltx_checkpoint_options() or [DEFAULT_LTX_CHECKPOINT]
 
 
 def _default_ltx_checkpoint() -> str:
-    options = _ltx_checkpoint_options()
-    return options[0] if options else "ltx-2.3-22b"
+    return str(_ltx_checkpoint_state()["value"])
 
 
 def _model_options(category: str, keywords: tuple[str, ...] = (), any_keywords: tuple[str, ...] = ()) -> list[str]:
@@ -979,114 +995,151 @@ def _safetensors_first_key(name: Any) -> tuple[int, str]:
     return (1 if lower.endswith(".gguf") else 0, lower)
 
 
-def _first_or_default(items: list[str], default: str) -> str:
-    return items[0] if items else default
-
-
 def _ltx_model_fields() -> list[dict[str, Any]]:
-    ltx_models = _ltx_checkpoint_options()
-    video_vaes = _model_options("vae", any_keywords=("video_vae", "ltx23_video", "ltx_video"))
-    audio_vaes = _model_options("vae", any_keywords=("audio_vae", "ltx23_audio", "ltx_audio"))
-    text_encoders = sorted(
-        _dedupe_names(
-            _model_options("text_encoders", any_keywords=("gemma_3_12b", "gemma-3-12b")),
-            _model_options("clip_gguf", any_keywords=("gemma_3_12b", "gemma-3-12b", "gemma")),
-        ),
-        key=_safetensors_first_key,
+    ltx_state = _ltx_checkpoint_state()
+    video_vae_state = gjjutils_model_search_state(
+        ("video_vae", "ltx23_video", "ltx_video"),
+        "vae",
+        "LTX23_video_vae_bf16.safetensors",
+        "OR",
     )
-    text_projections = _model_options("text_encoders", any_keywords=("ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"))
-    latent_upscalers = _model_options("latent_upscale_models", any_keywords=("ltx-2.3-spatial-upscaler", "ltx23", "ltx"))
+    audio_vae_state = gjjutils_model_search_state(
+        ("audio_vae", "ltx23_audio", "ltx_audio"),
+        "vae",
+        "LTX23_audio_vae_bf16.safetensors",
+        "OR",
+    )
+    text_encoder_state = gjjutils_model_search_state(
+        ("gemma_3_12b", "gemma-3-12b", "gemma"),
+        ("text_encoders", "clip_gguf"),
+        "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+        "OR",
+    )
+    text_encoder_state["models"] = sorted(text_encoder_state["models"], key=_safetensors_first_key)
+    if text_encoder_state["models"]:
+        text_encoder_state["value"] = text_encoder_state["models"][0]
+    text_projection_state = gjjutils_model_search_state(
+        ("ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"),
+        "text_encoders",
+        "ltx-2.3_text_projection_bf16.safetensors",
+        "OR",
+    )
+    latent_upscaler_state = gjjutils_model_search_state(
+        ("ltx-2.3-spatial-upscaler", "ltx23", "ltx"),
+        "latent_upscale_models",
+        "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+        "OR",
+    )
+    transition_lora_state = gjjutils_model_search_state(
+        ("ltx2.3-transition", "ltx23transition", "zhuanchang"),
+        "loras",
+        "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors",
+        "OR",
+    )
     test_loras = _model_options("loras")
-    transition_loras = _model_options("loras", any_keywords=("ltx2.3-transition", "ltx23transition", "zhuanchang"))
     return [
         {
             "name": "ltx_model_name",
             "label": "LTX 2.3 主模型",
             "folder": "diffusion_models",
             "path": "models/diffusion_models",
-            "models": ltx_models,
-            "modelInfo": _ltx_model_info(ltx_models),
+            "models": ltx_state["models"],
+            "modelInfo": _ltx_model_info(ltx_state["models"]),
             "keywords": ["ltx"],
-            "fallback": _default_ltx_checkpoint(),
+            "fallback": ltx_state["value"],
             "filename": "ltx-2.3-22b.safetensors",
             "required": True,
             "description": "LTX 2.3 主扩散模型；优先使用 ltx-2.3-22b，其次可选 ltx23 / ltx 模型。",
+            "defaultModel": ltx_state["default_model"],
+            "missingDefault": ltx_state["missing"],
         },
         {
             "name": "ltx_video_vae_name",
             "label": "LTX 视频 VAE",
             "folder": "vae",
             "path": "models/vae",
-            "models": video_vaes,
+            "models": video_vae_state["models"],
             "anyKeywords": ["video_vae", "ltx23_video", "ltx_video"],
-            "fallback": _first_or_default(video_vaes, "LTX23_video_vae_bf16.safetensors"),
+            "fallback": video_vae_state["value"],
             "filename": "LTX23_video_vae_bf16.safetensors",
             "required": True,
             "description": "LTX 视频 VAE，用于视频 latent 解码与图像预处理。",
+            "defaultModel": video_vae_state["default_model"],
+            "missingDefault": video_vae_state["missing"],
         },
         {
             "name": "ltx_audio_vae_name",
             "label": "LTX 音频 VAE",
             "folder": "vae",
             "path": "models/vae",
-            "models": audio_vaes,
+            "models": audio_vae_state["models"],
             "anyKeywords": ["audio_vae", "ltx23_audio", "ltx_audio"],
-            "fallback": _first_or_default(audio_vaes, "LTX23_audio_vae_bf16.safetensors"),
+            "fallback": audio_vae_state["value"],
             "filename": "LTX23_audio_vae_bf16.safetensors",
             "required": True,
             "description": "LTX 音频 VAE，用于 LTX 音频条件与音频解码。",
+            "defaultModel": audio_vae_state["default_model"],
+            "missingDefault": audio_vae_state["missing"],
         },
         {
             "name": "ltx_text_encoder_name",
             "label": "Gemma 文本编码器",
             "folder": "text_encoders",
             "path": "models/text_encoders",
-            "models": text_encoders,
+            "models": text_encoder_state["models"],
             "anyKeywords": ["gemma_3_12b", "gemma-3-12b"],
-            "fallback": _first_or_default(text_encoders, "gemma_3_12B_it_fp8_e4m3fn.safetensors"),
+            "fallback": text_encoder_state["value"],
             "filename": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
             "required": True,
             "description": "LTX 2.3 使用的 Gemma 3 12B 文本编码器；扁平 safetensors 会与 LTX 文本投影组成 DualCLIP。",
+            "defaultModel": text_encoder_state["default_model"],
+            "missingDefault": text_encoder_state["missing"],
         },
         {
             "name": "ltx_text_projection_name",
             "label": "LTX 文本投影",
             "folder": "text_encoders",
             "path": "models/text_encoders",
-            "models": text_projections,
+            "models": text_projection_state["models"],
             "anyKeywords": ["ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"],
-            "fallback": _first_or_default(text_projections, "ltx-2.3_text_projection_bf16.safetensors"),
+            "fallback": text_projection_state["value"],
             "filename": "ltx-2.3_text_projection_bf16.safetensors",
             "required": True,
             "description": "DualCLIPLoader 的第二个 CLIP/connector；扁平 Gemma safetensors 与 Gemma GGUF 都会和它组成双 CLIP。",
+            "defaultModel": text_projection_state["default_model"],
+            "missingDefault": text_projection_state["missing"],
         },
         {
             "name": "ltx_latent_upscaler_name",
             "label": "Latent 放大模型",
             "folder": "latent_upscale_models",
             "path": "models/latent_upscale_models",
-            "models": latent_upscalers,
+            "models": latent_upscaler_state["models"],
             "anyKeywords": ["ltx-2.3-spatial-upscaler", "ltx23", "ltx"],
-            "fallback": _first_or_default(latent_upscalers, "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"),
+            "fallback": latent_upscaler_state["value"],
             "filename": "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
             "required": True,
             "description": "LTX latent 空间放大模型，用于生成后 latent upscale。",
+            "defaultModel": latent_upscaler_state["default_model"],
+            "missingDefault": latent_upscaler_state["missing"],
         },
         {
             "name": "transition_lora_name",
             "label": "转场 LoRA",
             "folder": "loras",
             "path": "models/loras",
-            "models": transition_loras,
-            "modelInfo": _category_model_info("loras", transition_loras),
+            "models": transition_lora_state["models"],
+            "modelInfo": _category_model_info("loras", transition_lora_state["models"]),
             "anyKeywords": ["ltx2.3-transition", "ltx23transition", "zhuanchang"],
-            "fallback": _first_or_default(transition_loras, "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors"),
+            "fallback": transition_lora_state["value"],
             "filename": "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors",
             "enableKey": "transition_lora_enabled",
             "strengthKey": "transition_lora_strength",
             "strengthDefault": 1.0,
             "required": False,
             "description": "多图/首尾帧转场自动注入的 LoRA；触发词 zhuanchang 会按段自动处理。",
+            "defaultModel": transition_lora_state["default_model"],
+            "missingDefault": transition_lora_state["missing"],
         },
         {
             "name": "test_lora_name",

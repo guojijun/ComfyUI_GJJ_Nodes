@@ -1065,8 +1065,6 @@ function virtualModelWidget(node, field) {
   const widget = node.__gjjLtxVirtualModelWidgets[key];
   widget.options ||= {};
   widget.options.values = Array.isArray(field?.models) ? [...field.models] : [];
-  const current = getConfig(node)[key] || field?.fallback || field?.filename || "";
-  if (current && !widget.options.values.includes(current)) widget.options.values.unshift(current);
   return widget;
 }
 
@@ -1089,13 +1087,16 @@ function modelTreeEntriesFromFields(node, fields) {
       models: Array.isArray(field.models) ? field.models : [],
       keywords: Array.isArray(field.keywords) ? field.keywords : [],
       anyKeywords: Array.isArray(field.anyKeywords) ? field.anyKeywords : [],
-      fallback: field.fallback || field.filename || "",
+      fallback: field.fallback || "",
       description: field.description || "",
       enableKey: field.enableKey || field.enable_key || "",
       strengthKey: field.strengthKey || field.strength_key || "",
       strengthDefault: Number(field.strengthDefault ?? field.strength_default ?? 1.0),
       required: Boolean(field.required),
       getWidget: () => virtualModelWidget(node, field),
+      filename: field.filename || "",
+      defaultModel: field.defaultModel || field.default_model || field.fallback || field.filename || "",
+      missingDefault: GJJ_Utils._modelTreeMissingDefault(field),
     };
   }).filter(Boolean);
 }
