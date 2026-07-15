@@ -17,6 +17,8 @@ const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
 const STATUS_WIDGET = "gjj_ltx23_preview_panel";
 const LINKED_LOADER_PROP = "__gjj_ltx23_ref_loader_id";
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
+const CONVROT_STATUS_API = "/gjj/ltx23/convrot_w4a4_status";
+const CONVROT_INSTALL_API = "/gjj/ltx23/install_comfy_kitchen";
 
 const DEFAULT_CONFIG = {
   ltx_model_name: "",
@@ -44,6 +46,11 @@ const DEFAULT_CONFIG = {
   ltx_text_projection_name: "",
   ltx_latent_upscaler_name: "",
   transition_lora_name: "",
+  transition_lora_enabled: true,
+  transition_lora_strength: 1.0,
+  test_lora_name: "",
+  test_lora_enabled: false,
+  test_lora_strength: 1.0,
   size_source: "面板尺寸",
 };
 
@@ -186,6 +193,7 @@ function setConfig(node, next) {
   const cfg = { ...base, ...next };
   syncConfigToNativeMainWidgets(node, cfg);
   writeConfigJson(node, cfg, true);
+  if (Object.prototype.hasOwnProperty.call(next || {}, "ltx_model_name")) scheduleConvrotSupportCheck(node);
   resizeNodeToFit(node);
 }
 
@@ -887,6 +895,154 @@ async function fetchModelFields() {
   return Array.isArray(data.fields) ? data.fields : [];
 }
 
+function looksLikeInt4ConvrotModel(value) {
+  const text = String(value || "").toLowerCase();
+  return text.includes("int4_convrot") || text.includes("convrot_w4a4") || text.includes("w4a4");
+}
+
+async function fetchConvrotStatus() {
+  const res = await api.fetchApi(CONVROT_STATUS_API);
+  return await res.json();
+}
+
+function convrotNoticeData(status) {
+  const installCommand = String(status?.install_command || "");
+  const current = status?.version ? `当前 comfy_kitchen：${status.version}` : "当前 comfy_kitchen：未检测到可用版本";
+  const coreHint = status?.comfy_has_w4a4
+    ? "ComfyUI 核心已注册 convrot_w4a4。"
+    : "当前 ComfyUI 核心未注册 convrot_w4a4；只安装 comfy_kitchen 不一定能解决，需要更新 ComfyUI 或切到支持 W4A4 的环境。";
+  return {
+    warning_message: "⚠️ 当前运行环境还不能加载 INT4 ConvRot：需要重启生效，并且 ComfyUI 核心也必须支持 W4A4。",
+    panel_message: [
+      "检测到当前 LTX 主模型选择了 int4_convrot / convrot_w4a4。",
+      "",
+      current,
+      `需要：${status?.required || "comfy_kitchen==0.2.18"}`,
+      coreHint,
+      "",
+      "如果你刚安装过 0.2.18 但这里仍显示 0.2.16，说明当前 ComfyUI 进程还没重启。",
+      "重启后若仍提示核心未注册 convrot_w4a4，就不是安装包问题，而是当前 ComfyUI 核心不支持 W4A4。",
+    ].join("\n"),
+    install_command: installCommand,
+    copy_text: installCommand,
+    copy_label: "📋 复制 comfy_kitchen 0.2.18 安装命令（仍需重启/核心支持）",
+    notice_level: "error",
+  };
+}
+
+function applyConvrotDependencyNotice(node, status) {
+  if (!node || !looksLikeInt4ConvrotModel(getConfig(node).ltx_model_name) || status?.supported) {
+    clearConvrotDependencyNotice(node);
+    return;
+  }
+  const notice = globalThis.GJJ_CommonDependencyModelNotice;
+  if (notice?.applyNotice) {
+    notice.applyNotice(node, convrotNoticeData(status), { detailed: true, dismissible: false });
+    node.__gjjLtxConvrotNoticeActive = true;
+  }
+}
+
+function clearConvrotDependencyNotice(node) {
+  if (!node?.__gjjLtxConvrotNoticeActive) return;
+  const notice = globalThis.GJJ_CommonDependencyModelNotice;
+  if (notice?.applyNotice) {
+    notice.applyNotice(node, {
+      warning_message: "",
+      panel_message: "",
+      copy_text: "",
+      copy_label: "",
+      notice_level: "",
+    }, { detailed: false, dismissible: false });
+  } else if (node.__gjjDependencyNotice?.root) {
+    node.__gjjDependencyNotice.root.style.display = "none";
+  }
+  node.__gjjLtxConvrotNoticeActive = false;
+}
+
+function scheduleConvrotSupportCheck(node) {
+  if (!node || !looksLikeInt4ConvrotModel(getConfig(node).ltx_model_name)) {
+    clearConvrotDependencyNotice(node);
+    return;
+  }
+  clearTimeout(node.__gjjLtxConvrotCheckTimer);
+  node.__gjjLtxConvrotCheckTimer = setTimeout(async () => {
+    try {
+      const status = await fetchConvrotStatus();
+      node.__gjjLtxConvrotStatus = status;
+      applyConvrotDependencyNotice(node, status);
+    } catch (error) {
+      console.warn("[GJJ LTX2.3] convrot_w4a4 status check failed", error);
+    }
+  }, 120);
+}
+
+function setConvrotPanelState(node, root, status, stateText) {
+  const selected = looksLikeInt4ConvrotModel(getConfig(node).ltx_model_name);
+  root.style.display = selected ? "" : "none";
+  if (!selected) return;
+  const supported = Boolean(status?.supported);
+  const text = root.querySelector(".gjj-ltx-convrot-text");
+  const button = root.querySelector("button");
+  const coreHint = status && !status.comfy_has_w4a4 ? "；ComfyUI 核心也需支持 convrot_w4a4" : "";
+  root.dataset.supported = supported ? "true" : "false";
+  if (text) {
+    text.textContent = stateText || (supported
+      ? `INT4 ConvRot 可用：comfy_kitchen ${status?.version || ""}`
+      : `当前运行环境还不能加载 INT4 ConvRot。若刚安装 0.2.18，需要重启；若核心未注册 W4A4，则需更新 ComfyUI 或换支持环境${coreHint}`);
+  }
+  if (button) {
+    button.style.display = supported ? "none" : "";
+    button.disabled = false;
+    button.textContent = "安装/重装 comfy_kitchen 0.2.18";
+  }
+}
+
+function createConvrotInstallPanel(node) {
+  const root = document.createElement("div");
+  root.className = "gjj-ltx-convrot-panel";
+  root.style.display = "none";
+  const text = document.createElement("div");
+  text.className = "gjj-ltx-convrot-text";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "安装/重装 comfy_kitchen 0.2.18";
+  button.title = "在当前 ComfyUI Python 中安装 comfy_kitchen==0.2.18。安装后需要重启；ComfyUI 核心仍需支持 convrot_w4a4。";
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    button.disabled = true;
+    button.textContent = "安装中...";
+    text.textContent = "正在安装 comfy_kitchen 0.2.18，请稍等。";
+    try {
+      const res = await api.fetchApi(CONVROT_INSTALL_API, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (data?.ok) {
+        text.textContent = data?.status?.comfy_has_w4a4
+          ? "安装完成。请重启 ComfyUI 后再加载 INT4 ConvRot 模型。"
+          : "安装完成。请先重启 ComfyUI；重启后若仍提示核心未注册 convrot_w4a4，请更新 ComfyUI 或切换到支持 W4A4 的环境。";
+        button.textContent = "已安装，重启 ComfyUI";
+        applyConvrotDependencyNotice(node, { ...(data.status || {}), supported: false });
+      } else {
+        text.textContent = `安装失败：${data?.error || data?.output || "请复制安装命令手动执行"}`;
+        button.textContent = "重试安装";
+        button.disabled = false;
+      }
+    } catch (error) {
+      text.textContent = `安装失败：${error?.message || error}`;
+      button.textContent = "重试安装";
+      button.disabled = false;
+    }
+    refreshNode(node);
+  });
+  root.append(text, button);
+  fetchConvrotStatus().then((status) => {
+    node.__gjjLtxConvrotStatus = status;
+    setConvrotPanelState(node, root, status);
+    applyConvrotDependencyNotice(node, status);
+  }).catch(() => setConvrotPanelState(node, root, null, "无法检测 INT4 ConvRot 环境，必要时请手动安装 comfy_kitchen 0.2.18。"));
+  return root;
+}
+
 function virtualModelWidget(node, field) {
   node.__gjjLtxVirtualModelWidgets ||= {};
   const key = String(field?.name || "");
@@ -935,6 +1091,9 @@ function modelTreeEntriesFromFields(node, fields) {
       anyKeywords: Array.isArray(field.anyKeywords) ? field.anyKeywords : [],
       fallback: field.fallback || field.filename || "",
       description: field.description || "",
+      enableKey: field.enableKey || field.enable_key || "",
+      strengthKey: field.strengthKey || field.strength_key || "",
+      strengthDefault: Number(field.strengthDefault ?? field.strength_default ?? 1.0),
       required: Boolean(field.required),
       getWidget: () => virtualModelWidget(node, field),
     };
@@ -950,6 +1109,78 @@ function modelGroupTitle(title, note = "") {
   hint.textContent = note;
   wrap.append(label, hint);
   return wrap;
+}
+
+function createLoraInlineControls(node, entry) {
+  const enableKey = entry?.enableKey || "";
+  const strengthKey = entry?.strengthKey || "";
+  if (!enableKey && !strengthKey) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "gjj-ltx-lora-inline-controls";
+  let strength = null;
+  const refresh = () => {
+    const enabled = enableKey ? Boolean(getConfig(node)[enableKey]) : true;
+    wrap.classList.toggle("is-off", !enabled);
+    const toggle = wrap.querySelector(".gjj-ltx-lora-emoji-toggle");
+    if (toggle) {
+      toggle.textContent = enabled ? "🟢" : "⚪";
+      toggle.title = enabled ? "LoRA 已启用，点击关闭" : "LoRA 已关闭，点击启用";
+      toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    }
+    if (strength) strength.disabled = !enabled;
+  };
+  if (enableKey) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "gjj-ltx-lora-emoji-toggle";
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfig(node, { [enableKey]: !Boolean(getConfig(node)[enableKey]) });
+      refresh();
+      refreshToolbarState(node);
+    });
+    wrap.appendChild(toggle);
+  }
+  if (strengthKey) {
+    strength = configInput(node, strengthKey, "number", { min: -10, max: 10, step: 0.05 });
+    strength.className = `${strength.className || ""} gjj-ltx-lora-strength`.trim();
+    if (strength.value === "") strength.value = String(entry.strengthDefault ?? 1.0);
+    wrap.appendChild(strength);
+  }
+  refresh();
+  return wrap;
+}
+
+function createLtxModelTreeView(node, entries, callbacks = {}) {
+  const root = document.createElement("div");
+  root.style.cssText = "display:flex;flex-direction:column;gap:1px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;overflow:auto;";
+  const folderMap = new Map();
+  for (const entry of entries || []) {
+    const folder = GJJ_Utils._modelTreeFolder(entry?.folder || entry?.path || entry?.directory || "");
+    if (!folderMap.has(folder)) folderMap.set(folder, []);
+    folderMap.get(folder).push(entry);
+  }
+  const { row: rootLine } = GJJ_Utils._modelTreeLine("", "📁", "models/");
+  root.appendChild(rootLine);
+  Array.from(folderMap.keys()).forEach((folder, folderIndex, folders) => {
+    const folderPrefix = folderIndex === folders.length - 1 ? "└─" : "├─";
+    const { row: folderLine } = GJJ_Utils._modelTreeLine(folderPrefix, "📁", `${folder || "models"}/`);
+    root.appendChild(folderLine);
+    const items = folderMap.get(folder) || [];
+    items.forEach((entry, index) => {
+      const branch = index === items.length - 1 ? "└─" : "├─";
+      const host = GJJ_Utils._modelTreeFileNode(node, { ...entry, prefix: `│　${branch}` }, callbacks);
+      const inline = createLoraInlineControls(node, entry);
+      if (inline && host.firstElementChild) {
+        const row = host.firstElementChild;
+        row.style.gridTemplateColumns = "minmax(0,1fr) 118px 24px";
+        row.insertBefore(inline, row.lastElementChild);
+      }
+      root.appendChild(host);
+    });
+  });
+  return root;
 }
 
 function showModelTreePanel(node, anchor) {
@@ -970,12 +1201,14 @@ function showModelTreePanel(node, anchor) {
       }
       const entries = modelTreeEntriesFromFields(node, fields);
       body.appendChild(modelGroupTitle("🧠 LTX 2.3 模型树", "点击模型文件可搜索并切换"));
-      body.appendChild(GJJ_Utils.createModelTreeView({
+      body.appendChild(createConvrotInstallPanel(node));
+      body.appendChild(createLtxModelTreeView(node, entries, {
         node,
         entries,
         refresh: () => {
           syncConfigToNativeMainWidgets(node, getConfig(node));
           refreshNode(node);
+          scheduleConvrotSupportCheck(node);
         },
         onApply: (entry, value) => {
           setConfig(node, { [entry.widget]: value });
@@ -1199,19 +1432,21 @@ function configSliderNumber(node, key, options = {}) {
   const max = Number(options.max ?? 2048);
   const hardMax = Number(options.hardMax ?? 8192);
   const step = Number(options.step ?? 32);
+  const inputStep = Number(options.inputStep ?? step);
   slider.min = String(min);
   slider.max = String(max);
   slider.step = String(step);
   number.min = String(min);
   number.max = String(hardMax);
-  number.step = String(step);
+  number.step = String(inputStep);
   const cfg = getConfig(node);
   const initial = Number(cfg[key] ?? options.defaultValue ?? min);
   slider.value = String(Math.max(min, Math.min(max, Number.isFinite(initial) ? initial : min)));
   number.value = String(Number.isFinite(initial) ? initial : min);
   const commit = (source) => {
     const raw = Number(source.value);
-    const value = Number.isFinite(raw) ? Math.max(min, Math.min(hardMax, Math.round(raw / step) * step)) : min;
+    const alignStep = source === number ? inputStep : step;
+    const value = Number.isFinite(raw) ? Math.max(min, Math.min(hardMax, Math.round(raw / alignStep) * alignStep)) : min;
     number.value = String(value);
     slider.value = String(Math.max(min, Math.min(max, value)));
     setConfig(node, { [key]: value });
@@ -1219,9 +1454,14 @@ function configSliderNumber(node, key, options = {}) {
   };
   slider.addEventListener("input", () => commit(slider));
   slider.addEventListener("change", () => commit(slider));
-  number.addEventListener("input", () => commit(number));
   number.addEventListener("change", () => commit(number));
   number.addEventListener("blur", () => commit(number));
+  number.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commit(number);
+    number.blur();
+  });
   wrap.append(slider, number);
   return wrap;
 }
@@ -1265,6 +1505,271 @@ function configSelect(node, key, options) {
   return select;
 }
 
+function formatModelFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const digits = index >= 3 ? 1 : 0;
+  return `${size.toFixed(digits)} ${units[index]}`;
+}
+
+function normalizeModelTestEntries(models, infoItems = []) {
+  const infoMap = new Map();
+  for (const item of Array.isArray(infoItems) ? infoItems : []) {
+    const name = String(item?.name || "");
+    if (!name) continue;
+    infoMap.set(name, Number(item?.size || item?.bytes || 0));
+  }
+  return [...new Set((models || []).filter(Boolean).map(String))].map((name) => ({
+    name,
+    size: Number(infoMap.get(name) || 0),
+  }));
+}
+
+function sortModelTestEntries(entries, sortMode = "name") {
+  const list = [...entries];
+  if (sortMode === "size") {
+    return list.sort((a, b) => {
+      const bySize = Number(b.size || 0) - Number(a.size || 0);
+      return bySize || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    });
+  }
+  return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function renderModelTestChoices(listRoot, models, selected, query = "", sortMode = "name") {
+  const q = String(query || "").trim().toLowerCase();
+  listRoot.replaceChildren();
+  const filtered = sortModelTestEntries(models, sortMode).filter((item) => !q || String(item.name).toLowerCase().includes(q));
+  for (const item of filtered) {
+    const label = document.createElement("label");
+    label.className = "gjj-ltx-model-test-choice";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.modelName = item.name;
+    input.checked = selected.has(item.name);
+    input.addEventListener("change", () => {
+      if (input.checked) selected.add(item.name);
+      else selected.delete(item.name);
+    });
+    const span = document.createElement("span");
+    span.className = "gjj-ltx-model-test-name";
+    span.textContent = item.name;
+    const size = document.createElement("span");
+    size.className = "gjj-ltx-model-test-size";
+    size.textContent = formatModelFileSize(item.size);
+    label.append(input, span, size);
+    listRoot.appendChild(label);
+  }
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "gjj-ltx-model-test-empty";
+    empty.textContent = "没有匹配的模型";
+    listRoot.appendChild(empty);
+  }
+}
+
+async function queueModelTestBatch(node, items, statusEl, button, mode = "model") {
+  if (!items.length) {
+    if (statusEl) statusEl.textContent = "请先选择至少一个模型。";
+    return;
+  }
+  const original = getConfig(node);
+  const originalModel = original.ltx_model_name;
+  const originalTestLora = original.test_lora_name;
+  const originalTestLoraEnabled = Boolean(original.test_lora_enabled ?? DEFAULT_CONFIG.test_lora_enabled);
+  const originalPreset = original.segment_save_preset;
+  const fixedSeed = Number(original.seed || DEFAULT_CONFIG.seed || 0);
+  const isLoraMode = mode === "lora";
+  const testPreset = isLoraMode ? "video/GJJ_LTX模型测试/{lora}_{elapsed}" : "video/GJJ_LTX模型测试/{model}_{elapsed}";
+  button.disabled = true;
+  try {
+    for (let index = 0; index < items.length; index += 1) {
+      const itemName = items[index];
+      if (statusEl) statusEl.textContent = `正在加入队列 ${index + 1}/${items.length}：${itemName}`;
+      const nextConfig = {
+        seed: fixedSeed,
+        ltx_model_name: originalModel,
+        segment_save_preset: testPreset,
+      };
+      if (isLoraMode) {
+        nextConfig.ltx_model_name = originalModel;
+        nextConfig.test_lora_name = itemName;
+        nextConfig.test_lora_enabled = true;
+      } else {
+        nextConfig.ltx_model_name = itemName;
+        nextConfig.test_lora_name = originalTestLora;
+        nextConfig.test_lora_enabled = false;
+      }
+      setConfig(node, nextConfig);
+      syncNativeMainWidgets(node, false);
+      await queueOnlyCurrentNode(node);
+    }
+    if (statusEl) statusEl.textContent = `已加入队列：${items.length} 个${isLoraMode ? " LoRA" : "模型"}。固定随机种：${fixedSeed}。`;
+    setStatus(node, { text: `已加入${isLoraMode ? "LoRA" : "模型"}测试队列：${items.length} 个`, progress: 0.04 });
+  } catch (error) {
+    if (statusEl) statusEl.textContent = `加入队列失败：${error?.message || error}`;
+    setStatus(node, { text: `模型测试队列失败：${error?.message || error}`, progress: 0 });
+  } finally {
+    setConfig(node, {
+      ltx_model_name: originalModel,
+      test_lora_name: originalTestLora,
+      test_lora_enabled: originalTestLoraEnabled,
+      segment_save_preset: originalPreset,
+      seed: original.seed,
+    });
+    button.disabled = false;
+    refreshToolbarState(node);
+  }
+}
+
+function showModelTestPanel(node, anchor) {
+  showFloatingPanel(node, anchor, "模型测试", (body) => {
+    body.style.gap = "8px";
+    const note = document.createElement("div");
+    note.className = "gjj-ltx-model-test-note";
+    note.textContent = "选择测试对象，逐个加入队列。测试会固定当前随机种，输出保存到 video/GJJ_LTX模型测试。";
+    const modeBar = document.createElement("div");
+    modeBar.className = "gjj-ltx-model-test-mode";
+    const modelModeBtn = document.createElement("button");
+    modelModeBtn.type = "button";
+    modelModeBtn.textContent = "主模型";
+    const loraModeBtn = document.createElement("button");
+    loraModeBtn.type = "button";
+    loraModeBtn.textContent = "LoRA";
+    modeBar.append(modelModeBtn, loraModeBtn);
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "搜索模型";
+    search.className = "gjj-ltx-model-test-search";
+    const sortBar = document.createElement("div");
+    sortBar.className = "gjj-ltx-model-test-sort";
+    const sortLabel = document.createElement("span");
+    sortLabel.textContent = "排序";
+    const sortByName = document.createElement("button");
+    sortByName.type = "button";
+    sortByName.textContent = "文件名";
+    const sortBySize = document.createElement("button");
+    sortBySize.type = "button";
+    sortBySize.textContent = "大小";
+    sortBar.append(sortLabel, sortByName, sortBySize);
+    const actions = document.createElement("div");
+    actions.className = "gjj-ltx-model-test-actions";
+    const selectVisible = document.createElement("button");
+    selectVisible.type = "button";
+    selectVisible.textContent = "选择当前列表";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "清空";
+    const list = document.createElement("div");
+    list.className = "gjj-ltx-model-test-list";
+    const status = document.createElement("div");
+    status.className = "gjj-ltx-model-test-status";
+    status.textContent = "读取模型列表...";
+    const queue = document.createElement("button");
+    queue.type = "button";
+    queue.className = "gjj-ltx-wide-button";
+    queue.textContent = "加入队列";
+    queue.disabled = true;
+    actions.append(selectVisible, clear);
+    body.append(note, modeBar, search, sortBar, actions, list, queue, status);
+
+    fetchModelFields().then((fields) => {
+      const main = fields.find((field) => String(field?.name || "") === "ltx_model_name") || {};
+      const lora = fields.find((field) => String(field?.name || "") === "test_lora_name") || {};
+      const cfg = getConfig(node);
+      const current = getConfig(node).ltx_model_name || main.fallback || "";
+      const currentLora = cfg.test_lora_name || lora.fallback || "";
+      const modelNames = [...new Set([current, ...(Array.isArray(main.models) ? main.models : [])].filter(Boolean))];
+      const loraNames = [...new Set([currentLora, ...(Array.isArray(lora.models) ? lora.models : [])].filter(Boolean))];
+      const entriesByMode = {
+        model: normalizeModelTestEntries(modelNames, main.modelInfo || main.model_info || []),
+        lora: normalizeModelTestEntries(loraNames, lora.modelInfo || lora.model_info || []),
+      };
+      const selectedByMode = {
+        model: new Set(current ? [current] : []),
+        lora: new Set(),
+      };
+      let testMode = "model";
+      let sortMode = "name";
+      const currentEntries = () => entriesByMode[testMode] || [];
+      const currentSelected = () => selectedByMode[testMode] || selectedByMode.model;
+      const syncSortButtons = () => {
+        sortByName.classList.toggle("is-active", sortMode === "name");
+        sortBySize.classList.toggle("is-active", sortMode === "size");
+      };
+      const syncModeButtons = () => {
+        modelModeBtn.classList.toggle("is-active", testMode === "model");
+        loraModeBtn.classList.toggle("is-active", testMode === "lora");
+      };
+      const refresh = () => {
+        syncSortButtons();
+        syncModeButtons();
+        search.placeholder = testMode === "lora" ? "搜索 LoRA" : "搜索模型";
+        renderModelTestChoices(list, currentEntries(), currentSelected(), search.value, sortMode);
+        const fixedSeed = Number(getConfig(node).seed || DEFAULT_CONFIG.seed || 0);
+        status.textContent = `勾选要测试的${testMode === "lora" ? " LoRA" : "模型"}。固定随机种：${fixedSeed}`;
+      };
+      search.addEventListener("input", refresh);
+      modelModeBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        testMode = "model";
+        refresh();
+      });
+      loraModeBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        testMode = "lora";
+        if (!String(search.value || "").trim()) search.value = "ltx";
+        refresh();
+      });
+      sortByName.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        sortMode = "name";
+        refresh();
+      });
+      sortBySize.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        sortMode = "size";
+        refresh();
+      });
+      selectVisible.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const q = String(search.value || "").trim().toLowerCase();
+        for (const item of currentEntries()) {
+          if (!q || String(item.name).toLowerCase().includes(q)) currentSelected().add(item.name);
+        }
+        refresh();
+      });
+      clear.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        currentSelected().clear();
+        refresh();
+      });
+      queue.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        queueModelTestBatch(node, [...currentSelected()], status, queue, testMode);
+      });
+      queue.disabled = false;
+      refresh();
+    }).catch((error) => {
+      status.textContent = `读取模型列表失败：${error?.message || error}`;
+    });
+  }, { width: 620 });
+}
+
 function buildPanel(node) {
   const root = document.createElement("div");
   root.className = "gjj-ltx-clean";
@@ -1281,8 +1786,8 @@ function buildPanel(node) {
   const sizeBtn = makeToolButton("📐", "尺寸设置", (button) => showFloatingPanel(node, button, "尺寸", (body) => {
     body.append(
       panelRow("视频尺寸来源", configSegmented(node, "size_source", ["面板尺寸", "原视频尺寸"])),
-      panelRow("宽度", configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32 })),
-      panelRow("高度", configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32 })),
+      panelRow("宽度", configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 })),
+      panelRow("高度", configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 })),
     );
   }, { width: 460 }));
   const timingBtn = makeToolButton("🎞️", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "时长", (body) => {
@@ -1327,9 +1832,10 @@ function buildPanel(node) {
       openDirBtn,
     );
   }, { width: 430 }));
+  const testBtn = makeToolButton("🧪", "选择多个主模型加入队列测试；视频文件名包含模型名和耗时", (button) => showModelTestPanel(node, button));
   const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, segmentBtn, runBtn);
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, segmentBtn, testBtn, runBtn);
   root.appendChild(tools);
   node.__gjjLtxTransitionButton = transitionBtn;
   node.__gjjLtxSegmentButton = segmentBtn;
@@ -1490,6 +1996,34 @@ function injectStyles() {
     .gjj-ltx-model-title{display:flex;align-items:baseline;gap:8px;margin:2px 0 0;}
     .gjj-ltx-model-title div:first-child{color:#eef7f2;font-weight:700;}
     .gjj-ltx-model-title div:last-child{color:#9fb0b8;font-size:12px;}
+    .gjj-ltx-lora-inline-controls{display:grid;grid-template-columns:28px 82px;gap:6px;align-items:center;min-width:0;}
+    .gjj-ltx-lora-inline-controls.is-off{opacity:.45;filter:grayscale(1);}
+    .gjj-ltx-lora-emoji-toggle{width:26px;height:22px;border:1px solid #3d535d;border-radius:5px;background:#17242a;color:#e7f3f3;cursor:pointer;padding:0;font-size:13px;line-height:18px;}
+    .gjj-ltx-lora-inline-controls.is-off .gjj-ltx-lora-emoji-toggle{background:#11181c;color:#7f8b91;border-color:#2d3a40;}
+    .gjj-ltx-lora-strength{width:82px!important;height:24px;text-align:center;padding:3px 5px!important;}
+    .gjj-ltx-lora-strength:disabled{cursor:not-allowed;color:#879197;background:#10171b;border-color:#2b3940;}
+    .gjj-ltx-convrot-panel{display:flex;flex-direction:column;gap:7px;border:1px solid #8a5b1d;border-radius:7px;background:#21170b;color:#ffe7bd;padding:8px;white-space:normal;}
+    .gjj-ltx-convrot-panel[data-supported="true"]{border-color:#2f7356;background:#10241c;color:#d8ffe9;}
+    .gjj-ltx-convrot-text{font-size:12px;line-height:1.42;overflow-wrap:anywhere;}
+    .gjj-ltx-convrot-panel button{height:28px;border:1px solid #d85a5a;border-radius:6px;background:#bf3434;color:#fff4f4;font-weight:700;cursor:pointer;}
+    .gjj-ltx-convrot-panel button:disabled{opacity:.72;cursor:default;}
+    .gjj-ltx-model-test-note{color:#b9c9cd;line-height:1.45;white-space:normal;}
+    .gjj-ltx-model-test-mode{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+    .gjj-ltx-model-test-mode button{height:28px;border:1px solid #40535b;border-radius:6px;background:#152229;color:#dce7e2;cursor:pointer;font-size:12px;font-weight:700;}
+    .gjj-ltx-model-test-mode button.is-active{border-color:#5f91a8;background:#213743;color:#ffffff;}
+    .gjj-ltx-model-test-search{height:30px;width:100%;}
+    .gjj-ltx-model-test-sort{display:flex;align-items:center;gap:7px;color:#9fb0b8;font-size:12px;}
+    .gjj-ltx-model-test-sort button{height:26px;border:1px solid #40535b;border-radius:6px;background:#152229;color:#dce7e2;cursor:pointer;padding:0 9px;font-size:12px;font-weight:700;}
+    .gjj-ltx-model-test-sort button.is-active{border-color:#5f91a8;background:#213743;color:#ffffff;}
+    .gjj-ltx-model-test-actions{display:flex;gap:8px;}
+    .gjj-ltx-model-test-actions button{height:28px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-size:12px;font-weight:700;}
+    .gjj-ltx-model-test-list{display:flex;flex-direction:column;gap:4px;max-height:320px;overflow:auto;border:1px solid #2c3d45;border-radius:7px;background:#0b1115;padding:6px;}
+    .gjj-ltx-model-test-choice{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:start;gap:6px;min-height:24px;padding:3px 4px;border-radius:5px;color:#e6f1ef;white-space:normal;cursor:pointer;}
+    .gjj-ltx-model-test-choice:hover{background:#17242b;}
+    .gjj-ltx-model-test-choice input{margin-top:2px;}
+    .gjj-ltx-model-test-name{overflow-wrap:anywhere;line-height:1.35;}
+    .gjj-ltx-model-test-size{color:#9fb0b8;font-size:12px;line-height:1.35;white-space:nowrap;text-align:right;}
+    .gjj-ltx-model-test-empty,.gjj-ltx-model-test-status{color:#9fb0b8;line-height:1.4;white-space:normal;overflow-wrap:anywhere;}
   `;
   document.head.appendChild(style);
 }
@@ -1505,6 +2039,7 @@ function stabilize(node) {
   ensureStatusPanel(node);
   installExecutionPreviewHooks(node);
   refreshToolbarState(node);
+  scheduleConvrotSupportCheck(node);
   repairLinks(node);
 }
 

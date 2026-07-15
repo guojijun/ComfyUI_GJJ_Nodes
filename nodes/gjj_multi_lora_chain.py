@@ -611,12 +611,14 @@ def load_standard_lora_patches(model: Any, clip: Any, lora_state: dict[str, Any]
         root_logger.removeHandler(missing_capture)
 
     if missing_capture.missing_keys:
-        preview = "\n".join(missing_capture.missing_keys[:12])
-        remaining = len(missing_capture.missing_keys) - 12
-        suffix = f"\n... 另有 {remaining} 个 key 未加载" if remaining > 0 else ""
-        raise RuntimeError(
-            "LoRA 存在未加载权重 key，请检查当前底模与 LoRA 是否完全兼容：\n"
-            f"{preview}{suffix}"
+        preview = ", ".join(missing_capture.missing_keys[:8])
+        remaining = len(missing_capture.missing_keys) - 8
+        suffix = f"，另有 {remaining} 个 key" if remaining > 0 else ""
+        LOGGER.warning(
+            "LoRA skipped %s unmatched key(s)%s: %s",
+            len(missing_capture.missing_keys),
+            suffix,
+            preview,
         )
     return loaded_patches
 

@@ -12,6 +12,8 @@ from typing import Any
 from .common_utils.dependency_checker import (
     load_dependency_at_runtime,
     get_pip_install_command_text,
+    get_site_packages,
+    DEFAULT_PYPI,
 )
 
 # 运行时依赖检查（零依赖导入模式，使用 importlib 安全检查）
@@ -690,6 +692,27 @@ def _lora_chain_has_transition_lora(value: Any) -> bool:
     return any(walk(item) for item in candidates)
 
 
+def _append_test_lora_to_chain(lora_chain_config: Any, test_lora_name: Any, strength: Any = 1.0, enabled: Any = True) -> str:
+    name = str(test_lora_name or "").strip()
+    raw = _unwrap_single_value(lora_chain_config)
+    if not name or not _safe_bool(enabled, True):
+        return str(raw or "")
+    resolved_strength = _safe_float(strength, 1.0, -10.0, 10.0)
+    if abs(resolved_strength) < 1e-8:
+        return str(raw or "")
+    items: list[dict[str, Any]] = []
+    text = str(raw or "").strip()
+    if text:
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                items = [dict(item) for item in parsed if isinstance(item, dict)]
+        except Exception:
+            items = []
+    items.append({"enabled": True, "name": name, "strength": resolved_strength})
+    return json.dumps(items, ensure_ascii=False)
+
+
 def _pop_miswired_scene_payloads(kwargs: dict[str, Any]) -> list[Any]:
     """兼容旧节点/错位连线：图片线误连到 LoRA 或音频口时，转移到场景输入。
     这样能避开 lora_chain_config received_type(GJJ_BATCH_IMAGE,IMAGE) 的校验/执行错位。
@@ -874,6 +897,38 @@ def _filename_list(category: str) -> list[str]:
         return []
 
 
+def _model_file_size(category: str, name: Any) -> int | None:
+    text = str(name or "").strip()
+    if not text:
+        return None
+    try:
+        import folder_paths  # type: ignore
+        path = None
+        try:
+            path = folder_paths.get_full_path(category, text)
+        except Exception:
+            path = None
+        if not path:
+            return None
+        return int(Path(path).stat().st_size)
+    except Exception:
+        return None
+
+
+def _ltx_model_info(models: list[str] | None = None) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for name in models or _ltx_checkpoint_options():
+        size = _model_file_size("diffusion_models", name)
+        if size is None:
+            size = _model_file_size("unet_gguf", name)
+        entries.append({"name": str(name), "size": int(size or 0)})
+    return entries
+
+
+def _category_model_info(category: str, models: list[str]) -> list[dict[str, Any]]:
+    return [{"name": str(name), "size": int(_model_file_size(category, name) or 0)} for name in models]
+
+
 def _dedupe_names(*groups: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -941,6 +996,7 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
     )
     text_projections = _model_options("text_encoders", any_keywords=("ltx-2.3_text_projection", "ltx2.3_text_projection", "text_projection"))
     latent_upscalers = _model_options("latent_upscale_models", any_keywords=("ltx-2.3-spatial-upscaler", "ltx23", "ltx"))
+    test_loras = _model_options("loras")
     transition_loras = _model_options("loras", any_keywords=("ltx2.3-transition", "ltx23transition", "zhuanchang"))
     return [
         {
@@ -949,6 +1005,7 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
             "folder": "diffusion_models",
             "path": "models/diffusion_models",
             "models": ltx_models,
+            "modelInfo": _ltx_model_info(ltx_models),
             "keywords": ["ltx"],
             "fallback": _default_ltx_checkpoint(),
             "filename": "ltx-2.3-22b.safetensors",
@@ -1021,11 +1078,31 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
             "folder": "loras",
             "path": "models/loras",
             "models": transition_loras,
+            "modelInfo": _category_model_info("loras", transition_loras),
             "anyKeywords": ["ltx2.3-transition", "ltx23transition", "zhuanchang"],
             "fallback": _first_or_default(transition_loras, "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors"),
             "filename": "ltx2.3-transition-转场-强度1-触发词-zhuanchang.safetensors",
+            "enableKey": "transition_lora_enabled",
+            "strengthKey": "transition_lora_strength",
+            "strengthDefault": 1.0,
             "required": False,
             "description": "多图/首尾帧转场自动注入的 LoRA；触发词 zhuanchang 会按段自动处理。",
+        },
+        {
+            "name": "test_lora_name",
+            "label": "测试 LoRA",
+            "folder": "loras",
+            "path": "models/loras",
+            "models": test_loras,
+            "modelInfo": _category_model_info("loras", test_loras),
+            "anyKeywords": ["ltx", "ltx2.3", "ltx23"],
+            "fallback": "",
+            "filename": "",
+            "enableKey": "test_lora_enabled",
+            "strengthKey": "test_lora_strength",
+            "strengthDefault": 1.0,
+            "required": False,
+            "description": "🧪 批量 LoRA 测试专用；不会覆盖转场 LoRA 设置。",
         },
     ]
 
@@ -1086,6 +1163,52 @@ def _json_response(payload: dict[str, Any]):
         return web.json_response(payload)
     except Exception:
         return payload
+
+
+def _comfy_kitchen_install_command_text() -> str:
+    return (
+        f'& "{sys.executable}" -m pip install "comfy_kitchen==0.2.18" '
+        f'-i {DEFAULT_PYPI} --upgrade --force-reinstall --ignore-installed '
+        f'--target "{get_site_packages()}"'
+    )
+
+
+def _comfy_kitchen_convrot_w4a4_status() -> dict[str, Any]:
+    version = ""
+    package_file = ""
+    kitchen_has_w4a4 = False
+    comfy_has_w4a4 = False
+    error = ""
+    try:
+        try:
+            import importlib.metadata as importlib_metadata
+            version = str(importlib_metadata.version("comfy_kitchen") or "")
+        except Exception:
+            version = ""
+        ck = importlib.import_module("comfy_kitchen")
+        package_file = str(getattr(ck, "__file__", "") or "")
+        kitchen_has_w4a4 = bool(getattr(ck, "quantize_convrot_w4a4_weight", None))
+    except Exception as exc:
+        error = str(exc)
+    try:
+        quant_ops = importlib.import_module("comfy.quant_ops")
+        comfy_has_w4a4 = "convrot_w4a4" in getattr(quant_ops, "QUANT_ALGOS", {})
+    except Exception as exc:
+        if not error:
+            error = str(exc)
+    package_spec = "comfy_kitchen==0.2.18"
+    return {
+        "ok": True,
+        "supported": bool(kitchen_has_w4a4 and comfy_has_w4a4),
+        "kitchen_has_w4a4": kitchen_has_w4a4,
+        "comfy_has_w4a4": comfy_has_w4a4,
+        "version": version,
+        "package_file": package_file,
+        "required": package_spec,
+        "python": sys.executable,
+        "install_command": _comfy_kitchen_install_command_text(),
+        "error": error,
+    }
 
 
 
@@ -1155,7 +1278,59 @@ async def _gjj_ltx23_open_video_dir_endpoint(request):
 
 async def _gjj_ltx23_models_endpoint(request):
     fields = _ltx_model_fields()
-    return _json_response({"models": _ltx_checkpoint_options(), "default": _default_ltx_checkpoint(), "fields": fields})
+    models = _ltx_checkpoint_options()
+    return _json_response({
+        "models": models,
+        "modelInfo": _ltx_model_info(models),
+        "default": _default_ltx_checkpoint(),
+        "fields": fields,
+    })
+
+
+async def _gjj_ltx23_convrot_status_endpoint(request):
+    return _json_response(_comfy_kitchen_convrot_w4a4_status())
+
+
+async def _gjj_ltx23_install_comfy_kitchen_endpoint(request):
+    package_spec = "comfy_kitchen==0.2.18"
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        package_spec,
+        "-i",
+        DEFAULT_PYPI,
+        "--upgrade",
+        "--force-reinstall",
+        "--ignore-installed",
+        "--target",
+        get_site_packages(),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(Path(sys.executable).resolve().parent),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        return _json_response({
+            "ok": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "command": " ".join(f'"{part}"' if " " in str(part) else str(part) for part in cmd),
+            "output": output[-6000:],
+            "restart_required": completed.returncode == 0,
+            "status": _comfy_kitchen_convrot_w4a4_status(),
+        })
+    except Exception as exc:
+        return _json_response({
+            "ok": False,
+            "error": str(exc),
+            "command": _comfy_kitchen_install_command_text(),
+            "restart_required": False,
+        })
 
 
 try:
@@ -1163,6 +1338,8 @@ try:
     if getattr(PromptServer, "instance", None) is not None:
         PromptServer.instance.routes.get("/gjj/ltx23/models")(_gjj_ltx23_models_endpoint)
         PromptServer.instance.routes.post("/gjj/ltx23/open_video_dir")(_gjj_ltx23_open_video_dir_endpoint)
+        PromptServer.instance.routes.get("/gjj/ltx23/convrot_w4a4_status")(_gjj_ltx23_convrot_status_endpoint)
+        PromptServer.instance.routes.post("/gjj/ltx23/install_comfy_kitchen")(_gjj_ltx23_install_comfy_kitchen_endpoint)
 except Exception:
     pass
 
@@ -1195,6 +1372,11 @@ def _clean_config_defaults() -> dict[str, Any]:
         "ltx_text_projection_name": "",
         "ltx_latent_upscaler_name": "",
         "transition_lora_name": "",
+        "transition_lora_enabled": True,
+        "transition_lora_strength": 1.0,
+        "test_lora_name": "",
+        "test_lora_enabled": False,
+        "test_lora_strength": 1.0,
         "size_source": "面板尺寸",
     }
 
@@ -1316,6 +1498,11 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
         config["ltx_text_projection_name"] = ""
     config["ltx_latent_upscaler_name"] = str(config.get("ltx_latent_upscaler_name") or "").strip()
     config["transition_lora_name"] = str(config.get("transition_lora_name") or "").strip()
+    config["transition_lora_enabled"] = _safe_bool(config.get("transition_lora_enabled"), True)
+    config["transition_lora_strength"] = _safe_float(config.get("transition_lora_strength"), 1.0, -10.0, 10.0)
+    config["test_lora_name"] = str(config.get("test_lora_name") or "").strip()
+    config["test_lora_enabled"] = _safe_bool(config.get("test_lora_enabled"), False)
+    config["test_lora_strength"] = _safe_float(config.get("test_lora_strength"), 1.0, -10.0, 10.0)
     config["size_source"] = str(config.get("size_source") or "面板尺寸").strip()
     if config["size_source"] not in ("面板尺寸", "原视频尺寸"):
         config["size_source"] = "面板尺寸"
@@ -1666,9 +1853,18 @@ class GJJ_LTX23ImageToVideoMultiRef:
         )
         mode = MODE_AUDIO_CONDITIONED if has_input_audio else MODE_GENERATED_AUDIO
         frame_trim_start = 0 if scene_images else (DEFAULT_FRAME_TRIM_START_AUDIO if has_input_audio else DEFAULT_FRAME_TRIM_START_VIDEO)
-        lora_value_for_transition = _unwrap_single_value(kwargs.get("lora_chain_config", ""))
-        transition_lora_detected = _lora_chain_has_transition_lora(lora_value_for_transition)
-        transition_enabled_effective = (bool(config["transition_enabled"]) or transition_lora_detected) and len(scene_images) >= 2
+        lora_chain_config_for_run = _append_test_lora_to_chain(
+            kwargs.get("lora_chain_config", ""),
+            config.get("test_lora_name", ""),
+            config.get("test_lora_strength", 1.0),
+            config.get("test_lora_enabled", False),
+        )
+        transition_lora_strength = float(config.get("transition_lora_strength", 1.0) or 0.0)
+        is_first_last_lora_scene = (not has_input_audio) and len(scene_images) >= 2
+        transition_lora_name_for_run = config["transition_lora_name"] if is_first_last_lora_scene and config.get("transition_lora_enabled", True) and abs(transition_lora_strength) >= 1e-8 else ""
+        lora_value_for_transition = _unwrap_single_value(lora_chain_config_for_run)
+        transition_lora_detected = is_first_last_lora_scene and bool(config.get("transition_lora_enabled", True)) and _lora_chain_has_transition_lora(lora_value_for_transition)
+        transition_enabled_effective = is_first_last_lora_scene and (bool(config["transition_enabled"]) or transition_lora_detected or bool(transition_lora_name_for_run))
         transition_options = {
             "enabled": transition_enabled_effective,
             "curve": str(config["transition_curve"] or TRANSITION_CURVES[0]),
@@ -1710,7 +1906,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
             seed=config["seed"],
             duration_seconds=duration_seconds,
             input_audio=input_audio,
-            lora_chain_config=_unwrap_single_value(kwargs.get("lora_chain_config", "")),
+            lora_chain_config=lora_chain_config_for_run,
             decode_generated_audio=bool(resolved_payload["decode_generated_audio"]),
             frame_trim_start=frame_trim_start,
             segmented_execution=bool(config["segmented_execution"]),
@@ -1723,7 +1919,10 @@ class GJJ_LTX23ImageToVideoMultiRef:
             text_encoder_name=config["ltx_text_encoder_name"],
             text_projection_name=config["ltx_text_projection_name"],
             latent_upscaler_name=config["ltx_latent_upscaler_name"],
-            transition_lora_name=config["transition_lora_name"],
+            transition_lora_name=transition_lora_name_for_run,
+            transition_lora_enabled=config.get("transition_lora_enabled", True),
+            transition_lora_strength=transition_lora_strength,
+            test_lora_name=config["test_lora_name"],
             branch_debug={
                 "route_key": route_key,
                 "route_label": route_label,

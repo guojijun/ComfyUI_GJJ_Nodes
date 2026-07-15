@@ -11,6 +11,7 @@ import json
 import math
 import re
 import sys
+import time
 import types
 
 # 零依赖导入模式：本文件在 ComfyUI 扫描节点时不再顶层导入 torch / comfy / comfy_extras / nodes。
@@ -386,11 +387,31 @@ def _find_auto_transition_lora_name() -> tuple[str, str]:
 	return name, full_path
 
 
-def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool, preferred_name: Any = "") -> tuple[str, bool, str, str]:
+def _transition_lora_strength_value(value: Any) -> float:
+	try:
+		numeric = float(value)
+	except Exception:
+		numeric = 1.0
+	return max(-10.0, min(10.0, numeric))
+
+
+def _transition_lora_enabled_value(value: Any) -> bool:
+	if isinstance(value, bool):
+		return value
+	text = str(value or "").strip().lower()
+	if text in ("false", "0", "no", "n", "off"):
+		return False
+	if text in ("true", "1", "yes", "y", "on"):
+		return True
+	return True
+
+
+def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool, preferred_name: Any = "", strength: Any = 1.0) -> tuple[str, bool, str, str]:
 	"""若首尾帧分支需要，自动把转场 lora 注入 lora_chain_config。返回 (prepared_config, enabled, lora_name, lora_path)。"""
 	items = parse_lora_data(lora_chain_config)
 	if not items:
 		items = []
+	resolved_strength = _transition_lora_strength_value(strength)
 	auto_name = ""
 	auto_path = ""
 	enabled = False
@@ -402,7 +423,7 @@ def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool, 
 				auto_path = folder_paths.get_full_path("loras", auto_name) or ""
 			except Exception:
 				auto_path = ""
-			item["strength"] = 1.0
+			item["strength"] = resolved_strength
 			break
 	if (not enabled) and enable_auto:
 		preferred_text = str(preferred_name or "").strip()
@@ -415,16 +436,17 @@ def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool, 
 		else:
 			auto_name, auto_path = _find_auto_transition_lora_name()
 		if auto_name:
-			items.append({"name": auto_name, "strength": 1.0, "enabled": True})
+			items.append({"name": auto_name, "strength": resolved_strength, "enabled": True})
 			enabled = True
 	prepared = normalize_lora_chain_data(json.dumps(items, ensure_ascii=False)) if items else normalize_lora_chain_data(lora_chain_config)
 	return prepared, enabled, auto_name, auto_path
 
 
-def _prepare_ltx_lora_chain_config(lora_chain_config: Any) -> tuple[str, bool, bool]:
+def _prepare_ltx_lora_chain_config(lora_chain_config: Any, transition_lora_strength: Any = 1.0) -> tuple[str, bool, bool]:
 	items = parse_lora_data(lora_chain_config)
 	if not items:
 		return normalize_lora_chain_data(lora_chain_config), False, False
+	resolved_transition_strength = _transition_lora_strength_value(transition_lora_strength)
 	changed_strength = False
 	transition_enabled = False
 	prepared: list[dict[str, Any]] = []
@@ -438,9 +460,9 @@ def _prepare_ltx_lora_chain_config(lora_chain_config: Any) -> tuple[str, bool, b
 				current_strength = float(copied.get("strength", 1.0))
 			except Exception:
 				current_strength = 1.0
-			if abs(current_strength - 1.0) > 1e-6:
+			if abs(current_strength - resolved_transition_strength) > 1e-6:
 				changed_strength = True
-			copied["strength"] = 1.0
+			copied["strength"] = resolved_transition_strength
 		prepared.append(copied)
 	return normalize_lora_chain_data(json.dumps(prepared, ensure_ascii=False)), transition_enabled, changed_strength
 
@@ -2310,9 +2332,40 @@ def _supported_segment_video_format(format_name: Any) -> str:
 	return DEFAULT_SEGMENT_VIDEO_FORMAT
 
 
-def _format_segment_save_prefix(preset: Any, unique_id: Any, segment_index: int, start_index: int, end_index: int) -> str:
+def _safe_name_token(value: Any, fallback: str = "model") -> str:
+	text = str(value or "").replace("\\", "/").split("/")[-1].strip()
+	text = re.sub(r"\.(safetensors|ckpt|pt2?|pth|bin|gguf)$", "", text, flags=re.IGNORECASE)
+	text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", text).strip("._-")
+	return text[:120] or fallback
+
+
+def _format_elapsed_token(seconds: Any) -> str:
+	try:
+		total = max(0, int(round(float(seconds))))
+	except Exception:
+		total = 0
+	hours, rem = divmod(total, 3600)
+	minutes, secs = divmod(rem, 60)
+	if hours:
+		return f"{hours}h{minutes:02d}m{secs:02d}s"
+	if minutes:
+		return f"{minutes}m{secs:02d}s"
+	return f"{secs}s"
+
+
+def _format_segment_save_prefix(
+	preset: Any,
+	unique_id: Any,
+	segment_index: int,
+	start_index: int,
+	end_index: int,
+	model_name: Any = "",
+	lora_name: Any = "",
+	elapsed_seconds: Any = None,
+) -> str:
 	now = datetime.datetime.now()
 	base = str(preset or "").strip() or "video/GJJ_LTX多图分段"
+	inline_name = "{model}" in base or "{lora}" in base or "{elapsed}" in base
 	replacements = {
 		"{date}": now.strftime("%Y%m%d"),
 		"{time}": now.strftime("%H%M%S"),
@@ -2320,13 +2373,17 @@ def _format_segment_save_prefix(preset: Any, unique_id: Any, segment_index: int,
 		"{segment}": f"{int(segment_index):02d}",
 		"{start}": f"{int(start_index):02d}",
 		"{end}": f"{int(end_index):02d}",
+		"{model}": _safe_name_token(model_name, "ltx_model"),
+		"{lora}": _safe_name_token(lora_name, "lora"),
+		"{elapsed}": _format_elapsed_token(0 if elapsed_seconds is None else elapsed_seconds),
 	}
 	for key, value in replacements.items():
 		base = base.replace(key, value)
 	base = base.replace("\\", "/").strip("/")
 	if not base:
 		base = "video/GJJ_LTX多图分段"
-	return f"{base}/段{int(segment_index):02d}_场景{int(start_index):02d}-{int(end_index):02d}"
+	separator = "_" if inline_name else "/"
+	return f"{base}{separator}段{int(segment_index):02d}_场景{int(start_index):02d}-{int(end_index):02d}"
 
 
 def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[str, Any] | None:
@@ -2372,8 +2429,11 @@ def _save_segment_video_preview(
 	end_index: int,
 	output_width: int,
 	output_height: int,
+	model_name: Any = "",
+	lora_name: Any = "",
+	elapsed_seconds: Any = None,
 ) -> dict[str, Any]:
-	prefix = _format_segment_save_prefix(save_preset, unique_id, segment_index, start_index, end_index)
+	prefix = _format_segment_save_prefix(save_preset, unique_id, segment_index, start_index, end_index, model_name, lora_name, elapsed_seconds)
 	resolved_format = _supported_segment_video_format(format_name)
 	saved = combine_video(
 		images=frames,
@@ -2420,9 +2480,12 @@ def _save_final_video_preview(
 	unique_id: Any,
 	output_width: int,
 	output_height: int,
+	model_name: Any = "",
+	lora_name: Any = "",
+	elapsed_seconds: Any = None,
 ) -> dict[str, Any]:
-	prefix = _format_segment_save_prefix(save_preset, unique_id, 0, 0, max(0, int(frames.shape[0]) - 1))
-	prefix = prefix.replace("/段00_场景00-", "/最终视频_帧00-")
+	prefix = _format_segment_save_prefix(save_preset, unique_id, 0, 0, max(0, int(frames.shape[0]) - 1), model_name, lora_name, elapsed_seconds)
+	prefix = re.sub(r"([/_])段00_场景00-", r"\1最终视频_帧00-", prefix)
 	resolved_format = _supported_segment_video_format(format_name)
 	saved = combine_video(
 		images=frames,
@@ -2792,10 +2855,14 @@ def run_ltx23_multiref_video(
 	text_projection_name: Any = "",
 	latent_upscaler_name: Any = "",
 	transition_lora_name: Any = "",
+	transition_lora_enabled: Any = True,
+	transition_lora_strength: Any = 1.0,
+	test_lora_name: Any = "",
 	branch_debug: Any = None,
 	unique_id: Any = None,
 ):
 	_ensure_runtime_dependencies()
+	run_started_at = time.perf_counter()
 	prompt_text = str(positive_prompt or "").strip() or "电影感视频，主体自然运动，镜头稳定，细节清晰。"
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
@@ -2824,21 +2891,21 @@ def run_ltx23_multiref_video(
 		route_label = "首尾帧"
 	else:
 		route_label = _resolve_visual_route_label(main_image, base_guide_images)
-	# Clean v40：多图模式也需要转场 LoRA。
-	# 之前只在 exactly 2 张图的“首尾帧”分支自动启用，>=3 张多图分段时没有自动加载转场 LoRA，
-	# 所以多图转场会明显不如双图丝滑。
+	# 转场 LoRA 只给图像首尾帧段用；多图会逐段按相邻两图首尾帧执行，数字人/音频流程不启用。
 	segment_switch_text = ""
 	try:
 		segment_switch_text = str(_resolve_transition_options(transition_options).get("lora_switches") or "").strip()
 	except Exception:
 		segment_switch_text = ""
+	is_first_last_lora_scene = mode != MODE_AUDIO_CONDITIONED and visual_scene_count >= 2
+	panel_transition_lora_enabled = _transition_lora_enabled_value(transition_lora_enabled)
 	segment_count_for_switch = max(1, visual_scene_count - 1) if visual_scene_count >= 2 else 1
 	global_transition_lora_enabled_by_switch = _resolve_transition_lora_switch_any(segment_switch_text, segment_count_for_switch)
-	auto_enable_transition_lora = (visual_scene_count >= 2) and bool(global_transition_lora_enabled_by_switch)
-	prepared_lora_chain_source = lora_chain_config if global_transition_lora_enabled_by_switch else _strip_transition_lora_from_chain(lora_chain_config)
-	prepared_lora_chain_config, transition_lora_enabled, auto_transition_lora_name, auto_transition_lora_path = _ensure_transition_lora_in_chain(prepared_lora_chain_source, auto_enable_transition_lora, transition_lora_name)
-	prepared_lora_chain_config, transition_lora_enabled2, transition_strength_changed = _prepare_ltx_lora_chain_config(prepared_lora_chain_config)
-	transition_lora_enabled = bool(global_transition_lora_enabled_by_switch and (transition_lora_enabled or transition_lora_enabled2))
+	auto_enable_transition_lora = is_first_last_lora_scene and bool(global_transition_lora_enabled_by_switch) and panel_transition_lora_enabled
+	prepared_lora_chain_source = lora_chain_config if is_first_last_lora_scene and global_transition_lora_enabled_by_switch and panel_transition_lora_enabled else _strip_transition_lora_from_chain(lora_chain_config)
+	prepared_lora_chain_config, transition_lora_enabled, auto_transition_lora_name, auto_transition_lora_path = _ensure_transition_lora_in_chain(prepared_lora_chain_source, auto_enable_transition_lora, transition_lora_name, transition_lora_strength)
+	prepared_lora_chain_config, transition_lora_enabled2, transition_strength_changed = _prepare_ltx_lora_chain_config(prepared_lora_chain_config, transition_lora_strength)
+	transition_lora_enabled = bool(is_first_last_lora_scene and global_transition_lora_enabled_by_switch and panel_transition_lora_enabled and (transition_lora_enabled or transition_lora_enabled2))
 	# prompt 是否添加 zhuanchang 改到 _render_once 内按段处理；这里仅记录全局是否加载 LoRA。
 	transition_trigger_added = False
 	try:
@@ -3471,6 +3538,9 @@ def run_ltx23_multiref_video(
 					end_index=segment_start_frame + max(0, segment_output_frames - 1),
 					output_width=result["output_width"],
 					output_height=result["output_height"],
+					model_name=checkpoint_name,
+					lora_name=test_lora_name,
+					elapsed_seconds=time.perf_counter() - run_started_at,
 				)
 				segment_start_frame += max(0, segment_output_frames - 1)
 				segment_previews.append(preview)
@@ -3494,6 +3564,9 @@ def run_ltx23_multiref_video(
 				unique_id=unique_id,
 				output_width=output_width,
 				output_height=output_height,
+				model_name=checkpoint_name,
+				lora_name=test_lora_name,
+				elapsed_seconds=time.perf_counter() - run_started_at,
 			)
 			return {
 				"ui": {
@@ -3565,6 +3638,9 @@ def run_ltx23_multiref_video(
 					end_index=segment_index + 1,
 					output_width=result["output_width"],
 					output_height=result["output_height"],
+					model_name=checkpoint_name,
+					lora_name=test_lora_name,
+					elapsed_seconds=time.perf_counter() - run_started_at,
 				)
 				segment_previews.append(preview)
 				_send_status(unique_id, f"已保存第 {segment_index} 段（共 {segment_count} 段）：{preview.get('path') or '输出文件'}")
@@ -3587,6 +3663,9 @@ def run_ltx23_multiref_video(
 				unique_id=unique_id,
 				output_width=output_width,
 				output_height=output_height,
+				model_name=checkpoint_name,
+				lora_name=test_lora_name,
+				elapsed_seconds=time.perf_counter() - run_started_at,
 			)
 			return {
 				"ui": {
@@ -3634,6 +3713,9 @@ def run_ltx23_multiref_video(
 			unique_id=unique_id,
 			output_width=result["output_width"],
 			output_height=result["output_height"],
+			model_name=checkpoint_name,
+			lora_name=test_lora_name,
+			elapsed_seconds=time.perf_counter() - run_started_at,
 		)
 		return {
 			"ui": {

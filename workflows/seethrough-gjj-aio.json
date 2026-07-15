@@ -1,0 +1,96 @@
+{
+  "id": "seethrough-gjj-aio-workflow",
+  "revision": 0,
+  "last_node_id": 3,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [-820, -120],
+      "size": [315, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "COMBO", "link": null, "widget": {"name": "image"}},
+        {"name": "upload", "type": "IMAGEUPLOAD", "link": null, "widget": {"name": "upload"}}
+      ],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [1]},
+        {"name": "MASK", "type": "MASK", "links": null}
+      ],
+      "properties": {"Node name for S&R": "LoadImage"},
+      "widgets_values": ["example.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "GJJ_SeeThroughAIO",
+      "pos": [-410, -120],
+      "size": [420, 420],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "image", "type": "IMAGE", "link": 1},
+        {"name": "layerdiff_bundle", "type": "COMBO", "link": null, "widget": {"name": "layerdiff_bundle"}},
+        {"name": "depth_bundle", "type": "COMBO", "link": null, "widget": {"name": "depth_bundle"}},
+        {"name": "seed", "type": "INT", "link": null, "widget": {"name": "seed"}},
+        {"name": "resolution", "type": "INT", "link": null, "widget": {"name": "resolution"}},
+        {"name": "steps", "type": "INT", "link": null, "widget": {"name": "steps"}},
+        {"name": "resolution_depth", "type": "INT", "link": null, "widget": {"name": "resolution_depth"}},
+        {"name": "tblr_split", "type": "BOOLEAN", "link": null, "widget": {"name": "tblr_split"}},
+        {"name": "use_lama", "type": "BOOLEAN", "link": null, "widget": {"name": "use_lama"}},
+        {"name": "cache_tag_embeds", "type": "BOOLEAN", "link": null, "widget": {"name": "cache_tag_embeds"}},
+        {"name": "group_offload", "type": "BOOLEAN", "link": null, "widget": {"name": "group_offload"}},
+        {"name": "keep_model_loaded", "type": "BOOLEAN", "link": null, "widget": {"name": "keep_model_loaded"}},
+        {"name": "filename_prefix", "type": "STRING", "link": null, "widget": {"name": "filename_prefix"}}
+      ],
+      "outputs": [
+        {"name": "PSD路径", "type": "STRING", "links": null},
+        {"name": "预览图", "type": "IMAGE", "links": [2]},
+        {"name": "图层批次", "type": "IMAGE", "links": null}
+      ],
+      "properties": {"Node name for S&R": "GJJ_SeeThroughAIO"},
+      "widgets_values": [
+        "seethroughv0.0.2_layerdiff3d.safetensors",
+        "seethroughv0.0.1_marigold.safetensors",
+        882882473,
+        1024,
+        30,
+        -1,
+        true,
+        true,
+        true,
+        false,
+        false,
+        "seethrough"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "PreviewImage",
+      "pos": [90, -90],
+      "size": [300, 320],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "images", "type": "IMAGE", "link": 2}
+      ],
+      "outputs": [
+        {"name": "images", "type": "IMAGE", "links": null}
+      ],
+      "properties": {"Node name for S&R": "PreviewImage"},
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 2, 1, 3, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {"ds": {"scale": 1, "offset": [900, 260]}},
+  "version": 0.4
+}
