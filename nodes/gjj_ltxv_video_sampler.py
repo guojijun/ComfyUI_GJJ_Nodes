@@ -304,8 +304,10 @@ class _RandomNoise:
 def _concat_av_latent(video_latent: dict[str, Any], audio_latent: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(video_latent, dict) or "samples" not in video_latent:
         raise RuntimeError("LTX视频采样器：视频 latent 输入缺少 samples。")
-    if not isinstance(audio_latent, dict) or "samples" not in audio_latent:
-        raise RuntimeError("LTX视频采样器：音频 latent 输入缺少 samples。")
+    if not _has_usable_audio_latent(audio_latent):
+        output = dict(video_latent)
+        output["gjj_video_only"] = True
+        return output
 
     output = {}
     output.update(video_latent)
@@ -322,6 +324,19 @@ def _concat_av_latent(video_latent: dict[str, Any], audio_latent: dict[str, Any]
 
     output["samples"] = comfy.nested_tensor.NestedTensor((video_latent["samples"], audio_latent["samples"]))
     return output
+
+
+def _has_usable_audio_latent(audio_latent: Any) -> bool:
+    if not isinstance(audio_latent, dict):
+        return False
+    samples = audio_latent.get("samples")
+    if not isinstance(samples, torch.Tensor):
+        return False
+    if samples.numel() <= 0:
+        return False
+    if samples.ndim >= 3 and int(samples.shape[2]) <= 0:
+        return False
+    return True
 
 
 def _cleanup_cuda() -> None:
@@ -532,7 +547,8 @@ class GJJ_LTXVVideoSampler:
         guider.set_conds(positive, negative)
         guider.set_cfg(cfg)
 
-        _send_status(unique_id, "3/5 合并音视频 Latent...", 0.32)
+        use_audio_branch = _has_usable_audio_latent(audio_latent)
+        _send_status(unique_id, "3/5 合并音视频 Latent..." if use_audio_branch else "3/5 检测为无音频，切换纯视频 Latent 分支...", 0.32)
         latent = _concat_av_latent(video_latent, audio_latent)
         latent_image = comfy.sample.fix_empty_latent_channels(
             guider.model_patcher,

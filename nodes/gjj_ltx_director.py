@@ -921,6 +921,8 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
     samples = latent["samples"]
     latent_frames = samples.shape[2]
     tokens_per_frame = (samples.shape[3] // patch_size[1]) * (samples.shape[4] // patch_size[2])
+    if latent_frames <= 0 or tokens_per_frame <= 0:
+        raise ValueError(f"LTX导演时间线收到无效视频潜空间尺寸：{tuple(samples.shape)}。请检查时长和外部 Latent。")
 
     parsed_lengths = None
     if segment_lengths.strip():
@@ -944,6 +946,10 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
     )
 
     q_token_idx = build_segments(token_ranges, effective_lengths, epsilon, None)
+    if not q_token_idx:
+        log.info("[PromptRelay] No effective local prompt frames after clipping. Using prompt encoding without attention mask.")
+        return model.clone(), conditioning
+
     mask_fn = create_mask_fn(q_token_idx, tokens_per_frame, latent_frames)
 
     patched = model.clone()
@@ -1234,6 +1240,11 @@ class GJJLTXDirector(io.ComfyNode):
                 if not (isinstance(seg, dict) and seg.get("gjjUpstream"))
             ]
             tdata["segments"] = [*manual_segments, *runtime_segments]
+            if not str(local_prompts or "").strip():
+                fallback_prompt = str(global_prompt or tdata.get("global_prompt", "") or "video").strip() or "video"
+                local_prompts = "|".join(fallback_prompt for _ in runtime_segments)
+            if not str(segment_lengths or "").strip():
+                segment_lengths = ",".join(str(max(1, int(seg.get("length", 1)))) for seg in runtime_segments)
             log.info("[LTXDirector] 使用运行时上游素材刷新时间线：%d 个图片片段。", len(runtime_segments))
 
         if isinstance(tdata, dict):
@@ -1442,13 +1453,16 @@ class GJJLTXDirector(io.ComfyNode):
         audio_latent = {}
 
         if audio_vae is not None:
+            class _UseEmptyAudioLatent(Exception):
+                pass
+
             # Helper to generate empty latent
             def get_empty_latent():
                 # Support both raw AudioVAE objects and ComfyUI VAE wrappers.
                 inner = getattr(audio_vae, "first_stage_model", audio_vae)
                 z_channels = audio_vae.latent_channels
                 audio_freq = inner.latent_frequency_bins
-                num_audio_latents = inner.num_of_latents_from_frames(ltxv_length, float(frame_rate))
+                num_audio_latents = max(1, int(inner.num_of_latents_from_frames(ltxv_length, float(frame_rate))))
                 audio_latents = torch.zeros(
                     (1, z_channels, num_audio_latents, audio_freq),
                     device=comfy.model_management.intermediate_device(),
@@ -1477,8 +1491,12 @@ class GJJLTXDirector(io.ComfyNode):
                                 "sample_rate": audio_out["sample_rate"],
                             })
 
-                        if latent_samples.numel() == 0:
-                            raise ValueError("Encoded audio latent is empty (0 elements).")
+                        if latent_samples.numel() == 0 or latent_samples.shape[2] <= 0:
+                            log.warning(
+                                "[PromptRelay] Encoded audio latent is empty; falling back to a safe empty audio latent."
+                            )
+                            audio_latent = get_empty_latent()
+                            raise _UseEmptyAudioLatent
 
                         # 2. Create a 3D gap mask [B, F, H] to avoid accidental broadcasting to the 5D video latent
                         # which also has 128 channels. A 4D audio mask [1, 128, F, H] confuses ComfyUI's KSampler
@@ -1552,6 +1570,8 @@ class GJJLTXDirector(io.ComfyNode):
                         log.info("[PromptRelay] Generated custom audio latent with dynamic noise mask.")
                     else:
                         raise ValueError("No audio waveform to encode.")
+                except _UseEmptyAudioLatent:
+                    pass
                 except Exception as e:
                     log.error("[PromptRelay] Failed to generate custom audio latent: %s", e)
                     raise e

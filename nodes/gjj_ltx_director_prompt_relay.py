@@ -8,6 +8,8 @@ log = logging.getLogger(__name__)
 def build_temporal_cost(q_token_idx, Lq, Lk, device, dtype, tokens_per_frame):
     """Gaussian penalty matrix [Lq, Lk] for video cross-attention (integer frame indexing)."""
     offset = torch.zeros(Lq, Lk, device=device, dtype=dtype)
+    if Lq <= 0 or Lk <= 0 or tokens_per_frame <= 0:
+        return offset
     query_frames = torch.arange(Lq, device=device, dtype=torch.long) // tokens_per_frame
 
     for seg in q_token_idx:
@@ -23,6 +25,8 @@ def build_temporal_cost(q_token_idx, Lq, Lk, device, dtype, tokens_per_frame):
 def build_temporal_cost_scaled(q_token_idx, Lq, Lk, device, dtype, latent_frames, is_audio=False):
     """Penalty matrix for queries that don't map to integer frames (e.g. LTXAV audio tokens)."""
     offset = torch.zeros(Lq, Lk, device=device, dtype=dtype)
+    if Lq <= 0 or Lk <= 0 or latent_frames <= 0:
+        return offset
     query_frames = torch.arange(Lq, device=device, dtype=torch.float32) * latent_frames / Lq
 
     for seg in q_token_idx:
@@ -49,8 +53,15 @@ def create_mask_fn(q_token_idx, fallback_tokens_per_frame, latent_frames):
     without first materializing q/k projections — required so PromptRelay can
     wrap an existing cross-attn forward (e.g. KJNodes NAG) instead of replacing it.
     """
+    valid_segments = [
+        seg for seg in q_token_idx
+        if isinstance(seg.get("local_token_idx"), torch.Tensor) and seg["local_token_idx"].numel() > 0
+    ]
+    if not valid_segments or latent_frames <= 0:
+        return lambda *args, **kwargs: None
+
     cache = {}
-    max_token_idx = max(int(seg["local_token_idx"].max().item()) for seg in q_token_idx) + 1
+    max_token_idx = max(int(seg["local_token_idx"].max().item()) for seg in valid_segments) + 1
 
     def mask_fn(Lq, Lk, dtype, device, transformer_options):
         if Lq == Lk:
@@ -87,9 +98,9 @@ def create_mask_fn(q_token_idx, fallback_tokens_per_frame, latent_frames):
         key = (Lq, Lk, mode, device)
         if key not in cache:
             if mode == "video":
-                cost = build_temporal_cost(q_token_idx, Lq, Lk, device, dtype, video_tpf)
+                cost = build_temporal_cost(valid_segments, Lq, Lk, device, dtype, video_tpf)
             else:
-                cost = build_temporal_cost_scaled(q_token_idx, Lq, Lk, device, dtype, latent_frames, is_audio=is_audio)
+                cost = build_temporal_cost_scaled(valid_segments, Lq, Lk, device, dtype, latent_frames, is_audio=is_audio)
             cache[key] = -cost
 
         return cache[key].to(dtype)

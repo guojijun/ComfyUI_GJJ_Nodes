@@ -86,11 +86,197 @@ app.registerExtension({
         const LONG_PRESS_MS = 1500;
 
         // --- 辅助函数 ---
-        function getSelectedNodes() {
-            return Object.values(app.canvas?.selected_nodes || {});
+        function getGraphNodeById(id) {
+            if (id == null) return null;
+            const graph = app.graph || app.canvas?.graph;
+            try {
+                const node = graph?.getNodeById?.(id);
+                if (node) return node;
+            } catch (_) {}
+            const nodesById = graph?._nodes_by_id;
+            if (nodesById instanceof Map) {
+                return nodesById.get(id) || nodesById.get(String(id)) || null;
+            }
+            return nodesById?.[id]
+                || nodesById?.[String(id)]
+                || graph?._nodes?.find((node) => String(node?.id) === String(id))
+                || null;
         }
-        function beginChange() { app.canvas.graph.beforeChange(); }
-        function endChange()   { app.canvas.graph.afterChange(); app.canvas.draw(true, true); }
+
+        function isUsableNode(node) {
+            return !!node
+                && typeof node === "object"
+                && Number.isFinite(Number(node.pos?.[0]))
+                && Number.isFinite(Number(node.pos?.[1]))
+                && Number.isFinite(Number(node.size?.[0]))
+                && Number.isFinite(Number(node.size?.[1]));
+        }
+
+        function getSelectedNodes() {
+            const result = new Set();
+            const add = (value, key = null) => {
+                const candidates = [
+                    value,
+                    value?.node,
+                    getGraphNodeById(value?.id),
+                    value !== true && typeof value !== "object" ? getGraphNodeById(value) : null,
+                    getGraphNodeById(key),
+                ];
+                for (const node of candidates) {
+                    if (isUsableNode(node)) {
+                        result.add(node);
+                        return;
+                    }
+                }
+            };
+            const collect = (value) => {
+                if (!value) return;
+                if (value instanceof Set) {
+                    for (const item of value) add(item);
+                } else if (value instanceof Map) {
+                    for (const [key, item] of value.entries()) add(item, key);
+                } else if (Array.isArray(value)) {
+                    for (const item of value) add(item);
+                } else if (typeof value === "object") {
+                    for (const [key, item] of Object.entries(value)) add(item, key);
+                }
+            };
+
+            const canvas = app.canvas;
+            collect(canvas?.selected_nodes);
+            collect(canvas?.selectedNodes);
+            collect(canvas?.selected_items);
+            collect(canvas?.selectedItems);
+            collect(canvas?.selection);
+            collect(canvas?._selected_nodes);
+            try { collect(window?.LiteGraph?.active_canvas?.selected_nodes); } catch (_) {}
+            if (result.size === 0) {
+                for (const node of app.graph?._nodes || []) {
+                    if (node?.selected || node?.flags?.selected || node?.__selected || node?.is_selected) add(node);
+                }
+            }
+            return [...result];
+        }
+
+        function assignIndexedPosition(target, x, y) {
+            if (!target || typeof target !== "object") return false;
+            if (typeof target.set === "function") {
+                try {
+                    target.set.length >= 2 ? target.set(x, y) : target.set([x, y]);
+                    return true;
+                } catch (_) {}
+            }
+            try {
+                if (0 in target || 1 in target || Array.isArray(target)) {
+                    target[0] = x;
+                    target[1] = y;
+                    return true;
+                }
+                if ("x" in target || "y" in target) {
+                    target.x = x;
+                    target.y = y;
+                    return true;
+                }
+            } catch (_) {}
+            return false;
+        }
+
+        function setNodePosition(node, x, y) {
+            if (!node) return;
+            const nextX = Math.round(Number(x) || 0);
+            const nextY = Math.round(Number(y) || 0);
+            const oldPos = node.pos;
+            try { node.pos = [nextX, nextY]; } catch (_) {}
+            assignIndexedPosition(oldPos, nextX, nextY);
+            assignIndexedPosition(node.pos, nextX, nextY);
+            assignIndexedPosition(node.position, nextX, nextY);
+            assignIndexedPosition(node._pos, nextX, nextY);
+            assignIndexedPosition(node.layout?.position, nextX, nextY);
+            assignIndexedPosition(node._layout?.position, nextX, nextY);
+            assignIndexedPosition(node.comfyLayout?.position, nextX, nextY);
+            if (typeof node.setPosition === "function") {
+                try {
+                    node.setPosition.length >= 2
+                        ? node.setPosition(nextX, nextY)
+                        : node.setPosition([nextX, nextY]);
+                } catch (_) {}
+            }
+            try { node.pos = [nextX, nextY]; } catch (_) {}
+            assignIndexedPosition(node.pos, nextX, nextY);
+            assignIndexedPosition(node.position, nextX, nextY);
+            assignIndexedPosition(node._pos, nextX, nextY);
+            assignIndexedPosition(node.layout?.position, nextX, nextY);
+            assignIndexedPosition(node._layout?.position, nextX, nextY);
+            assignIndexedPosition(node.comfyLayout?.position, nextX, nextY);
+        }
+
+        function setNodeX(node, x) {
+            setNodePosition(node, x, node.pos[1]);
+        }
+
+        function setNodeY(node, y) {
+            setNodePosition(node, node.pos[0], y);
+        }
+
+        function setNodeSize(node, width, height) {
+            if (!node) return;
+            const nextWidth = Math.max(1, Math.round(Number(width) || 1));
+            const nextHeight = Math.max(1, Math.round(Number(height) || 1));
+            const oldSize = node.size;
+            try { node.size = [nextWidth, nextHeight]; } catch (_) {}
+            assignIndexedPosition(oldSize, nextWidth, nextHeight);
+            assignIndexedPosition(node.size, nextWidth, nextHeight);
+            assignIndexedPosition(node._size, nextWidth, nextHeight);
+            assignIndexedPosition(node.layout?.size, nextWidth, nextHeight);
+            assignIndexedPosition(node._layout?.size, nextWidth, nextHeight);
+            assignIndexedPosition(node.comfyLayout?.size, nextWidth, nextHeight);
+            if (typeof node.setSize === "function") {
+                try {
+                    node.setSize.length >= 2
+                        ? node.setSize(nextWidth, nextHeight)
+                        : node.setSize([nextWidth, nextHeight]);
+                } catch (_) {}
+            }
+            try { node.size = [nextWidth, nextHeight]; } catch (_) {}
+            assignIndexedPosition(node.size, nextWidth, nextHeight);
+            assignIndexedPosition(node._size, nextWidth, nextHeight);
+            assignIndexedPosition(node.layout?.size, nextWidth, nextHeight);
+            assignIndexedPosition(node._layout?.size, nextWidth, nextHeight);
+            assignIndexedPosition(node.comfyLayout?.size, nextWidth, nextHeight);
+        }
+
+        function beginChange() {
+            const graphs = new Set([app.graph, app.canvas?.graph].filter(Boolean));
+            for (const graph of graphs) {
+                try { graph.beforeChange?.(); } catch (_) {}
+            }
+        }
+        function drawChangedNodes(nodes = getSelectedNodes()) {
+            const canvas = app.canvas;
+            const graphs = new Set([app.graph, canvas?.graph].filter(Boolean));
+            for (const node of nodes || []) {
+                try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+                try { node.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+            }
+            for (const graph of graphs) {
+                try { graph.setDirtyCanvas?.(true, true); } catch (_) {}
+            }
+            try { canvas?.setDirty?.(true, true); } catch (_) {}
+            try { canvas && (canvas.dirty_canvas = true); } catch (_) {}
+            try { canvas && (canvas.dirty_bgcanvas = true); } catch (_) {}
+            try { canvas?.draw?.(true, true); } catch (_) {}
+        }
+        function endChange(nodes = getSelectedNodes()) {
+            const graphs = new Set([app.graph, app.canvas?.graph].filter(Boolean));
+            for (const graph of graphs) {
+                try { graph.afterChange?.(); } catch (_) {}
+                try { graph.change?.(); } catch (_) {}
+            }
+            drawChangedNodes(nodes);
+            if (typeof requestAnimationFrame === "function") {
+                requestAnimationFrame(() => drawChangedNodes(nodes));
+            }
+        }
         function getLeftmost(nodes) {
             return nodes.reduce((a, n) => (n.pos[0] < a.pos[0] ? n : a), nodes[0]);
         }
@@ -132,8 +318,8 @@ app.registerExtension({
             if (nodes.length < 2) return;
             beginChange();
             const anchor = getTopmost(nodes);
-            nodes.forEach(n => { n.pos[0] = anchor.pos[0]; });
-            endChange();
+            nodes.forEach(n => setNodeX(n, anchor.pos[0]));
+            endChange(nodes);
         }
         function alignRight() {
             const nodes = getSelectedNodes();
@@ -141,16 +327,16 @@ app.registerExtension({
             beginChange();
             const anchor = getTopmost(nodes);
             const tx = anchor.pos[0] + anchor.size[0];
-            nodes.forEach(n => { n.pos[0] = tx - n.size[0]; });
-            endChange();
+            nodes.forEach(n => setNodeX(n, tx - n.size[0]));
+            endChange(nodes);
         }
         function alignTop() {
             const nodes = getSelectedNodes();
             if (nodes.length < 2) return;
             beginChange();
             const anchor = getLeftmost(nodes);
-            nodes.forEach(n => { n.pos[1] = anchor.pos[1]; });
-            endChange();
+            nodes.forEach(n => setNodeY(n, anchor.pos[1]));
+            endChange(nodes);
         }
         function alignBottom() {
             const nodes = getSelectedNodes();
@@ -158,8 +344,8 @@ app.registerExtension({
             beginChange();
             const anchor = getLeftmost(nodes);
             const ty = anchor.pos[1] + anchor.size[1];
-            nodes.forEach(n => { n.pos[1] = ty - n.size[1]; });
-            endChange();
+            nodes.forEach(n => setNodeY(n, ty - n.size[1]));
+            endChange(nodes);
         }
         function alignHCenter() {
             const nodes = getSelectedNodes();
@@ -167,8 +353,8 @@ app.registerExtension({
             beginChange();
             const anchor = getTopmost(nodes);
             const cx = anchor.pos[0] + anchor.size[0] / 2;
-            nodes.forEach(n => { n.pos[0] = cx - n.size[0] / 2; });
-            endChange();
+            nodes.forEach(n => setNodeX(n, cx - n.size[0] / 2));
+            endChange(nodes);
         }
         function alignVCenter() {
             const nodes = getSelectedNodes();
@@ -176,8 +362,8 @@ app.registerExtension({
             beginChange();
             const anchor = getLeftmost(nodes);
             const cy = anchor.pos[1] + anchor.size[1] / 2;
-            nodes.forEach(n => { n.pos[1] = cy - n.size[1] / 2; });
-            endChange();
+            nodes.forEach(n => setNodeY(n, cy - n.size[1] / 2));
+            endChange(nodes);
         }
 
         // --- 4个区域分布功能 ---
@@ -190,7 +376,7 @@ app.registerExtension({
             beginChange();
             const anchor = getTopmost(nodes);
             const targetCX = anchor.pos[0] + anchor.size[0] / 2;
-            nodes.forEach(n => { n.pos[0] = targetCX - n.size[0] / 2; });
+            nodes.forEach(n => setNodeX(n, targetCX - n.size[0] / 2));
 
             const sorted = [...nodes].sort((a, b) => a.pos[1] - b.pos[1]);
             const minY = sorted[0].pos[1];
@@ -198,8 +384,8 @@ app.registerExtension({
             const totalH = sorted.reduce((a, n) => a + n.size[1], 0);
             const gap = (maxY - minY - totalH) / (sorted.length - 1);
             let y = minY;
-            sorted.forEach(n => { n.pos[1] = y; y += n.size[1] + gap; });
-            endChange();
+            sorted.forEach(n => { setNodeY(n, y); y += n.size[1] + gap; });
+            endChange(nodes);
         }
         // 右侧区域：水平居中(以最上面节点为锚) + 垂直固定间距堆叠(最上节点不动)
         function distVRightAnchor() {
@@ -209,12 +395,12 @@ app.registerExtension({
             const anchor = getTopmost(nodes);
             const targetCX = anchor.pos[0] + anchor.size[0] / 2;
             const startY = anchor.pos[1];
-            nodes.forEach(n => { n.pos[0] = targetCX - n.size[0] / 2; });
+            nodes.forEach(n => setNodeX(n, targetCX - n.size[0] / 2));
 
             const sorted = [...nodes].sort((a, b) => a.pos[1] - b.pos[1]);
             let y = startY;
-            sorted.forEach(n => { n.pos[1] = y; y += n.size[1] + V_GAP; });
-            endChange();
+            sorted.forEach(n => { setNodeY(n, y); y += n.size[1] + V_GAP; });
+            endChange(nodes);
         }
         // 上侧区域：垂直居中(以最左侧节点为锚) + 水平等距分布(两端不动)
         function distHTopAnchor() {
@@ -223,7 +409,7 @@ app.registerExtension({
             beginChange();
             const anchor = getLeftmost(nodes);
             const targetCY = anchor.pos[1] + anchor.size[1] / 2;
-            nodes.forEach(n => { n.pos[1] = targetCY - n.size[1] / 2; });
+            nodes.forEach(n => setNodeY(n, targetCY - n.size[1] / 2));
 
             const sorted = [...nodes].sort((a, b) => a.pos[0] - b.pos[0]);
             const minX = sorted[0].pos[0];
@@ -231,8 +417,8 @@ app.registerExtension({
             const totalW = sorted.reduce((a, n) => a + n.size[0], 0);
             const gap = (maxX - minX - totalW) / (sorted.length - 1);
             let x = minX;
-            sorted.forEach(n => { n.pos[0] = x; x += n.size[0] + gap; });
-            endChange();
+            sorted.forEach(n => { setNodeX(n, x); x += n.size[0] + gap; });
+            endChange(nodes);
         }
         // 下侧区域：垂直居中(以最左侧节点为锚) + 水平固定间距(最左节点不动)
         function distHBottomAnchor() {
@@ -241,13 +427,13 @@ app.registerExtension({
             beginChange();
             const anchor = getLeftmost(nodes);
             const targetCY = anchor.pos[1] + anchor.size[1] / 2;
-            nodes.forEach(n => { n.pos[1] = targetCY - n.size[1] / 2; });
+            nodes.forEach(n => setNodeY(n, targetCY - n.size[1] / 2));
 
             const sorted = [...nodes].sort((a, b) => a.pos[0] - b.pos[0]);
             const startX = anchor.pos[0];
             let x = startX;
-            sorted.forEach(n => { n.pos[0] = x; x += n.size[0] + H_GAP; });
-            endChange();
+            sorted.forEach(n => { setNodeX(n, x); x += n.size[0] + H_GAP; });
+            endChange(nodes);
         }
 
         const ALIGN_FN = {
@@ -289,19 +475,19 @@ app.registerExtension({
                 const maxW = Math.max(...nodes.map(n => n.size[0]));
                 nodes.forEach(n => {
                     const cx = n.pos[0] + n.size[0] / 2;
-                    n.size[0] = maxW;
-                    n.pos[0] = cx - maxW / 2;
+                    setNodeSize(n, maxW, n.size[1]);
+                    setNodeX(n, cx - maxW / 2);
                 });
             } else {
                 // 左右分布 → 等高，以最高的节点为锚点（只加高不加窄）
                 const maxH = Math.max(...nodes.map(n => n.size[1]));
                 nodes.forEach(n => {
                     const cy = n.pos[1] + n.size[1] / 2;
-                    n.size[1] = maxH;
-                    n.pos[1] = cy - maxH / 2;
+                    setNodeSize(n, n.size[0], maxH);
+                    setNodeY(n, cy - maxH / 2);
                 });
             }
-            endChange();
+            endChange(nodes);
         }
 
         // 强制等宽（左右拖）
@@ -312,10 +498,10 @@ app.registerExtension({
             const maxW = Math.max(...nodes.map(n => n.size[0]));
             nodes.forEach(n => {
                 const cx = n.pos[0] + n.size[0] / 2;
-                n.size[0] = maxW;
-                n.pos[0] = cx - maxW / 2;
+                setNodeSize(n, maxW, n.size[1]);
+                setNodeX(n, cx - maxW / 2);
             });
-            endChange();
+            endChange(nodes);
         }
 
         // 强制等高（上下拖）
@@ -326,10 +512,10 @@ app.registerExtension({
             const maxH = Math.max(...nodes.map(n => n.size[1]));
             nodes.forEach(n => {
                 const cy = n.pos[1] + n.size[1] / 2;
-                n.size[1] = maxH;
-                n.pos[1] = cy - maxH / 2;
+                setNodeSize(n, n.size[0], maxH);
+                setNodeY(n, cy - maxH / 2);
             });
-            endChange();
+            endChange(nodes);
         }
 
         function autoArrange() {
@@ -467,13 +653,12 @@ app.registerExtension({
                 let y = adjustedStartY;
                 const lx = layerXs.get(d) || 0;
                 list.forEach(n => {
-                    n.pos[0] = lx;
-                    n.pos[1] = y;
+                    setNodePosition(n, lx, y);
                     y += n.size[1] + V_GAP;
                 });
             });
 
-            endChange();
+            endChange(nodes);
         }
 
         // --- 主题颜色应用 ---

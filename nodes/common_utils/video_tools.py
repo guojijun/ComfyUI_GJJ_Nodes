@@ -226,6 +226,11 @@ class gjjutils_LTXVConcatAVLatent:
         """
         import comfy.nested_tensor
 
+        if not _has_usable_audio_latent(audio_latent):
+            output = dict(video_latent)
+            output["gjj_video_only"] = True
+            return (output,)
+
         output = {}
         output.update(video_latent)
         output.update(audio_latent)
@@ -241,6 +246,19 @@ class gjjutils_LTXVConcatAVLatent:
 
         output["samples"] = comfy.nested_tensor.NestedTensor((video_latent["samples"], audio_latent["samples"]))
         return (output,)
+
+
+def _has_usable_audio_latent(audio_latent: Any) -> bool:
+    if not isinstance(audio_latent, dict):
+        return False
+    samples = audio_latent.get("samples")
+    if not isinstance(samples, torch.Tensor):
+        return False
+    if samples.numel() <= 0:
+        return False
+    if samples.ndim >= 3 and int(samples.shape[2]) <= 0:
+        return False
+    return True
 
 
 class gjjutils_LTXVSeparateAVLatent:
@@ -261,6 +279,14 @@ class gjjutils_LTXVSeparateAVLatent:
         Returns:
                 (video_latent, audio_latent) 元组
         """
+        if av_latent.get("gjj_video_only"):
+            video_latent = av_latent.copy()
+            audio_latent = av_latent.copy()
+            audio_latent.pop("samples", None)
+            audio_latent["type"] = "audio"
+            audio_latent["gjj_empty_audio"] = True
+            return video_latent, audio_latent
+
         samples = av_latent["samples"]
         if hasattr(samples, "unbind"):
             latents = samples.unbind()
