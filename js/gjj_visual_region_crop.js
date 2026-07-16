@@ -14,8 +14,12 @@ const SELECTED_VIDEO_PROPERTY = "selected_video";
 const UPLOAD_API = "/gjj/visual_region_crop/upload";
 const META_API = "/gjj/visual_region_crop/meta";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+const INTERNAL_WIDGETS = new Set([CROP_WIDGET, SELECTED_VIDEO_WIDGET, PREVIEW_FRAME_WIDGET, PREVIEW_WIDTH_WIDGET]);
 const ALIGN = 64;
 const MIN_CROP_SIZE = 256;
+const HANDLE_DRAW_RADIUS = 6;
+const HANDLE_HIT_RADIUS = 30;
+const EDGE_HIT_RADIUS = 22;
 const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
 const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const OUTPUT_DEFS = [
@@ -228,9 +232,24 @@ function hideWidget(node, name) {
 	const w = widget(node, name);
 	if (!w) return;
 	GJJ_Utils.hideWidget(w);
+	w.serialize = true;
+	w.serializeValue = () => w.value;
 	w.options ||= {};
 	w.options.hidden = true;
 	w.options.display = "hidden";
+}
+
+function removeInternalInputSockets(node) {
+	if (typeof GJJ_Utils.removeHiddenInputSockets === "function") {
+		GJJ_Utils.removeHiddenInputSockets(node, INTERNAL_WIDGETS);
+		return;
+	}
+	if (!Array.isArray(node?.inputs)) return;
+	for (let index = node.inputs.length - 1; index >= 0; index--) {
+		if (!inputMatchesName(node.inputs[index], MEDIA_INPUT) && INTERNAL_WIDGETS.has(String(node.inputs[index]?.name || ""))) {
+			node.inputs.splice(index, 1);
+		}
+	}
 }
 
 function parseJson(text, fallback = {}) {
@@ -356,6 +375,23 @@ function syncVideoFrame(state) {
 	const nextTime = Math.max(0, Math.min(duration, target));
 	if (Math.abs(Number(state.video.currentTime || 0) - nextTime) <= 0.035) return;
 	try { state.video.currentTime = nextTime; } catch (_) {}
+}
+
+function applyVideoElementMeta(node, state) {
+	if (!state?.video || !state.videoReady) return false;
+	const duration = positiveNumber(state.video.duration);
+	const fps = positiveNumber(state.videoItem?.fps || state.selectedVideo?.fps);
+	if (!(duration > 0 && fps > 0)) return false;
+	const frames = Math.max(1, Math.round(duration * fps));
+	if (frames <= positiveNumber(state.data?.frame_count, 1)) return false;
+	const savedData = parseJson(widgetValue(node, CROP_WIDGET, ""), state.data || {});
+	state.data = normalizeData(savedData, state.video.videoWidth || state.data.source_width, state.video.videoHeight || state.data.source_height, frames);
+	state.frame = clamp(state.frame, 0, state.data.frame_count - 1);
+	if (state.selectedVideo) state.selectedVideo.frames = frames;
+	if (state.videoItem) state.videoItem.frames = frames;
+	setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
+	syncPreviewFrameWidget(node, state);
+	return true;
 }
 
 function syncPreviewFrameWidget(node, state) {
@@ -770,6 +806,7 @@ function syncSelectedVideo(node, item) {
 	const value = item?.filename ? JSON.stringify(item) : "";
 	node.properties ||= {};
 	node.properties[SELECTED_VIDEO_PROPERTY] = value;
+	removeInternalInputSockets(node);
 	setWidgetValue(node, SELECTED_VIDEO_WIDGET, value);
 	const state = ensureState(node);
 	state.selectedVideo = item?.filename ? item : null;
@@ -887,7 +924,7 @@ function ensureWidget(node) {
 
 	const style = document.createElement("style");
 	style.textContent = `
-		.gjj-visual-crop canvas { display:block; max-width:100%; height:auto; border:1px solid #30464f; border-radius:8px; background:#06090c; cursor:crosshair; box-sizing:border-box; }
+		.gjj-visual-crop canvas { display:block; max-width:100%; height:auto; border:1px solid #30464f; border-radius:8px; background:#06090c; cursor:crosshair; box-sizing:border-box; touch-action:none; user-select:none; }
 		.gjj-visual-crop-toolbar { display:flex; flex-wrap:wrap; gap:5px; align-items:center; min-width:0; width:100%; }
 		.gjj-visual-crop-toolbar .frame-label { flex:0 0 auto; }
 		.gjj-visual-crop-toolbar input[type="number"] { width:58px; height:24px; box-sizing:border-box; border:1px solid #33464e; border-radius:6px; background:#20282d; color:#ecf4f2; padding:1px 4px; }
@@ -941,6 +978,38 @@ function ensureWidget(node) {
 	endButton.type = "button";
 	endButton.textContent = "⏭";
 	endButton.title = "将当前帧设为最终输出结束帧；尾帧按 8n+1 锁定。";
+	const prevFrameButton = document.createElement("button");
+	prevFrameButton.type = "button";
+	prevFrameButton.textContent = "👈";
+	prevFrameButton.title = "向前一帧";
+	const nextFrameButton = document.createElement("button");
+	nextFrameButton.type = "button";
+	nextFrameButton.textContent = "👉";
+	nextFrameButton.title = "向后一帧";
+	const moveUpButton = document.createElement("button");
+	moveUpButton.type = "button";
+	moveUpButton.textContent = "⬆";
+	moveUpButton.title = "裁切框向上微调；按住 Shift 点击移动 16 像素";
+	const moveDownButton = document.createElement("button");
+	moveDownButton.type = "button";
+	moveDownButton.textContent = "⬇";
+	moveDownButton.title = "裁切框向下微调；按住 Shift 点击移动 16 像素";
+	const moveLeftButton = document.createElement("button");
+	moveLeftButton.type = "button";
+	moveLeftButton.textContent = "⬅";
+	moveLeftButton.title = "裁切框向左微调；按住 Shift 点击移动 16 像素";
+	const moveRightButton = document.createElement("button");
+	moveRightButton.type = "button";
+	moveRightButton.textContent = "➡";
+	moveRightButton.title = "裁切框向右微调；按住 Shift 点击移动 16 像素";
+	const scaleUpButton = document.createElement("button");
+	scaleUpButton.type = "button";
+	scaleUpButton.textContent = "➕";
+	scaleUpButton.title = "裁切框等比放大";
+	const scaleDownButton = document.createElement("button");
+	scaleDownButton.type = "button";
+	scaleDownButton.textContent = "－";
+	scaleDownButton.title = "裁切框等比缩小";
 	const centerButton = document.createElement("button");
 	centerButton.type = "button";
 	centerButton.textContent = "居中";
@@ -962,14 +1031,58 @@ function ensureWidget(node) {
 	fileInput.accept = "video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv,.wmv,.flv,.mpeg,.mpg,.gif";
 	fileInput.style.display = "none";
 	sliderRow.append(slider, sliderMarks);
-	toolbar.append(browseButton, refreshButton, frameLabel, frameInput, startButton, endButton, keyButton, deleteButton, centerButton, outputButton);
+	toolbar.append(
+		browseButton,
+		refreshButton,
+		frameLabel,
+		frameInput,
+		prevFrameButton,
+		nextFrameButton,
+		startButton,
+		endButton,
+		keyButton,
+		deleteButton,
+		moveUpButton,
+		moveDownButton,
+		moveLeftButton,
+		moveRightButton,
+		scaleDownButton,
+		scaleUpButton,
+		centerButton,
+		outputButton
+	);
 
 	const info = document.createElement("div");
 	info.className = "gjj-visual-crop-info";
 	info.textContent = "执行节点后显示源媒体预览；拖动框体移动，拖动四角控制点调整宽高，最小 256。";
 
 	wrap.append(style, canvas, sliderRow, toolbar, info, fileInput);
-	for (const el of [wrap, canvas, sliderRow, toolbar, slider, sliderMarks, frameInput, startButton, endButton, keyButton, deleteButton, centerButton, browseButton, refreshButton, outputButton, fileInput]) {
+	for (const el of [
+		wrap,
+		canvas,
+		sliderRow,
+		toolbar,
+		slider,
+		sliderMarks,
+		frameInput,
+		startButton,
+		endButton,
+		prevFrameButton,
+		nextFrameButton,
+		keyButton,
+		deleteButton,
+		moveUpButton,
+		moveDownButton,
+		moveLeftButton,
+		moveRightButton,
+		scaleUpButton,
+		scaleDownButton,
+		centerButton,
+		browseButton,
+		refreshButton,
+		outputButton,
+		fileInput,
+	]) {
 		for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "contextmenu"]) {
 			el.addEventListener(eventName, (event) => event.stopPropagation());
 		}
@@ -984,8 +1097,16 @@ function ensureWidget(node) {
 		frameInput,
 		startButton,
 		endButton,
+		prevFrameButton,
+		nextFrameButton,
 		keyButton,
 		deleteButton,
+		moveUpButton,
+		moveDownButton,
+		moveLeftButton,
+		moveRightButton,
+		scaleUpButton,
+		scaleDownButton,
 		centerButton,
 		browseButton,
 		refreshButton,
@@ -1014,11 +1135,13 @@ function ensureWidget(node) {
 	const draw = () => drawState(node, state);
 	state.video.addEventListener("loadedmetadata", () => {
 		state.videoReady = true;
+		applyVideoElementMeta(node, state);
 		syncVideoFrame(state);
 		draw();
 	});
 	state.video.addEventListener("loadeddata", () => {
 		state.videoReady = true;
+		applyVideoElementMeta(node, state);
 		draw();
 	});
 	state.video.addEventListener("seeked", draw);
@@ -1031,12 +1154,12 @@ function ensureWidget(node) {
 		draw();
 	};
 
-	const commit = () => {
+	const commit = ({ refreshLayout = true } = {}) => {
 		state.data = normalizeData(state.data);
 		setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
 		syncPreviewFrameWidget(node, state);
 		draw();
-		GJJ_Utils.refreshNode(node, { preserveWidth: true, minWidth: 360 });
+		if (refreshLayout) GJJ_Utils.refreshNode(node, { preserveWidth: true, minWidth: 360 });
 	};
 
 	const setFrame = (value) => {
@@ -1088,6 +1211,14 @@ function ensureWidget(node) {
 		setFrame(frameInput.value);
 		scheduleExternalPreviewRefresh(node, 0);
 	});
+	prevFrameButton.addEventListener("click", () => {
+		setFrame(state.frame);
+		scheduleExternalPreviewRefresh(node, 0);
+	});
+	nextFrameButton.addEventListener("click", () => {
+		setFrame(state.frame + 2);
+		scheduleExternalPreviewRefresh(node, 0);
+	});
 	startButton.addEventListener("click", () => {
 		setRangeStart(state.data, state.frame);
 		commit();
@@ -1104,6 +1235,48 @@ function ensureWidget(node) {
 		removeKeyframe(state.data, state.frame);
 		commit();
 	});
+	const nudge = (dx, dy, event) => {
+		const step = event?.shiftKey ? 16 : 1;
+		const rect = interpolatedRect(state.data, state.frame);
+		const x = clamp(rect.x + dx * step, 0, state.data.source_width - rect.width);
+		const y = clamp(rect.y + dy * step, 0, state.data.source_height - rect.height);
+		setKeyframe(state.data, state.frame, { x, y });
+		commit();
+	};
+	moveUpButton.addEventListener("click", (event) => nudge(0, -1, event));
+	moveDownButton.addEventListener("click", (event) => nudge(0, 1, event));
+	moveLeftButton.addEventListener("click", (event) => nudge(-1, 0, event));
+	moveRightButton.addEventListener("click", (event) => nudge(1, 0, event));
+	const scaleCrop = (direction) => {
+		const rect = interpolatedRect(state.data, state.frame);
+		const centerX = rect.x + rect.width / 2;
+		const centerY = rect.y + rect.height / 2;
+		const ratio = rect.height / Math.max(1, rect.width);
+		const widthDelta = direction > 0 ? ALIGN : -ALIGN;
+		let nextW = alignDown(rect.width + widthDelta, state.data.source_width);
+		let nextH = alignDown(nextW * ratio, state.data.source_height);
+		if (nextH === rect.height && nextW === rect.width && direction < 0) {
+			nextH = alignDown(rect.height - ALIGN, state.data.source_height);
+			nextW = alignDown(nextH / Math.max(ratio, 1e-6), state.data.source_width);
+		}
+		if (nextH > state.data.source_height) {
+			nextH = alignDown(state.data.source_height, state.data.source_height);
+			nextW = alignDown(nextH / Math.max(ratio, 1e-6), state.data.source_width);
+		}
+		if (nextW > state.data.source_width) {
+			nextW = alignDown(state.data.source_width, state.data.source_width);
+			nextH = alignDown(nextW * ratio, state.data.source_height);
+		}
+		state.data.width = nextW;
+		state.data.height = nextH;
+		setKeyframe(state.data, state.frame, {
+			x: clamp(Math.round(centerX - nextW / 2), 0, state.data.source_width - nextW),
+			y: clamp(Math.round(centerY - nextH / 2), 0, state.data.source_height - nextH),
+		});
+		commit();
+	};
+	scaleUpButton.addEventListener("click", () => scaleCrop(1));
+	scaleDownButton.addEventListener("click", () => scaleCrop(-1));
 	centerButton.addEventListener("click", () => {
 		setKeyframe(state.data, state.frame, {
 			x: Math.round((state.data.source_width - state.data.width) / 2),
@@ -1138,6 +1311,7 @@ function ensureWidget(node) {
 		const hit = hitTest(state, event);
 		if (!hit) return;
 		event.preventDefault();
+		event.stopPropagation();
 		try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
 		const rect = interpolatedRect(state.data, state.frame);
 		setKeyframe(state.data, state.frame, rect);
@@ -1146,6 +1320,7 @@ function ensureWidget(node) {
 			start: pointerSourcePoint(state, event),
 			rect: { ...rect },
 		};
+		canvas.style.cursor = hit === "move" ? "grabbing" : `${hit}-resize`;
 	});
 	canvas.addEventListener("pointermove", (event) => {
 		if (!state.drag) {
@@ -1158,11 +1333,16 @@ function ensureWidget(node) {
 		const dx = current.x - state.drag.start.x;
 		const dy = current.y - state.drag.start.y;
 		applyDrag(state, dx, dy);
-		commit();
+		commit({ refreshLayout: false });
 	});
 	canvas.addEventListener("pointerup", (event) => {
+		const wasDragging = Boolean(state.drag);
 		state.drag = null;
 		try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
+		if (wasDragging) {
+			commit();
+			setDirty(node);
+		}
 	});
 	canvas.addEventListener("pointerleave", () => {
 		if (!state.drag) canvas.style.cursor = "crosshair";
@@ -1213,6 +1393,8 @@ function drawState(node, state) {
 	state.canvas.style.height = `${cssH}px`;
 	state.canvas.width = Math.round(cssW * dpr);
 	state.canvas.height = Math.round(cssH * dpr);
+	state.drawCssWidth = cssW;
+	state.drawCssHeight = cssH;
 	const ctx = state.ctx;
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 	ctx.clearRect(0, 0, cssW, cssH);
@@ -1261,7 +1443,7 @@ function drawState(node, state) {
 		ctx.strokeStyle = "#143a2b";
 		ctx.lineWidth = 1;
 		ctx.beginPath();
-		ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+		ctx.arc(point.x, point.y, HANDLE_DRAW_RADIUS, 0, Math.PI * 2);
 		ctx.fill();
 		ctx.stroke();
 	}
@@ -1297,15 +1479,21 @@ function handlePoints(x, y, w, h) {
 
 function canvasPoint(state, event) {
 	const rect = state.canvas.getBoundingClientRect();
+	const drawWidth = positiveNumber(state.drawCssWidth, state.canvas.width / Math.max(1, window.devicePixelRatio || 1));
+	const drawHeight = positiveNumber(state.drawCssHeight, state.canvas.height / Math.max(1, window.devicePixelRatio || 1));
+	const scaleX = drawWidth / Math.max(1, rect.width);
+	const scaleY = drawHeight / Math.max(1, rect.height);
 	return {
-		x: event.clientX - rect.left,
-		y: event.clientY - rect.top,
+		x: (event.clientX - rect.left) * scaleX,
+		y: (event.clientY - rect.top) * scaleY,
+		width: drawWidth,
+		height: drawHeight,
 	};
 }
 
 function pointerSourcePoint(state, event) {
 	const p = canvasPoint(state, event);
-	const scale = state.canvas.clientWidth / Math.max(1, state.data.source_width);
+	const scale = p.width / Math.max(1, state.data.source_width);
 	return {
 		x: Math.round(p.x / scale),
 		y: Math.round(p.y / scale),
@@ -1313,17 +1501,17 @@ function pointerSourcePoint(state, event) {
 }
 
 function hitTest(state, event) {
-	const scale = state.canvas.clientWidth / Math.max(1, state.data.source_width);
 	const p = canvasPoint(state, event);
+	const scale = p.width / Math.max(1, state.data.source_width);
 	const rect = interpolatedRect(state.data, state.frame);
 	const x = rect.x * scale;
 	const y = rect.y * scale;
 	const w = rect.width * scale;
 	const h = rect.height * scale;
 	for (const point of handlePoints(x, y, w, h)) {
-		if (Math.hypot(p.x - point.x, p.y - point.y) <= 20) return point.name;
+		if (Math.hypot(p.x - point.x, p.y - point.y) <= HANDLE_HIT_RADIUS) return point.name;
 	}
-	const edge = 16;
+	const edge = EDGE_HIT_RADIUS;
 	const insideY = p.y >= y - edge && p.y <= y + h + edge;
 	const insideX = p.x >= x - edge && p.x <= x + w + edge;
 	if (insideY && Math.abs(p.x - x) <= edge) return "w";
@@ -1394,6 +1582,7 @@ function applyExecutedMessage(node, message) {
 function stabilize(node) {
 	if (!node || !TARGET_NODES.has(node.comfyClass)) return;
 	clearNativePreview(node);
+	removeInternalInputSockets(node);
 	hideWidget(node, PREVIEW_WIDTH_WIDGET);
 	hideWidget(node, CROP_WIDGET);
 	hideWidget(node, SELECTED_VIDEO_WIDGET);

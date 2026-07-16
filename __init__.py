@@ -110,7 +110,7 @@ def _gjj_default_user_settings() -> dict:
 			"sort_mode": "mtime_desc",
 			"filter_mode": "openable",
 			"search_text": "",
-			"page_size": 12,
+			"page_size": 8,
 		},
 		"workflow_title": {
 			"font": "",
@@ -207,9 +207,9 @@ def _gjj_workflow_screenshot_settings() -> dict:
 	if not isinstance(section, dict):
 		section = {}
 	try:
-		page_size = int(section.get("page_size") or 12)
+		page_size = int(section.get("page_size") or 8)
 	except Exception:
-		page_size = 12
+		page_size = 8
 	page_size = max(1, min(100, page_size))
 	return {
 		"directory": str(section.get("directory") or ""),
@@ -465,7 +465,7 @@ def _register_gjj_workflow_screenshot_api():
 				"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
 				"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "openable",
 				"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
-				"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 12,
+				"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 8,
 			},
 		})
 
@@ -526,7 +526,7 @@ def _register_gjj_workflow_screenshot_api():
 					"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
 					"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "openable",
 					"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
-					"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 12,
+					"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 8,
 				},
 				"items": items,
 			})

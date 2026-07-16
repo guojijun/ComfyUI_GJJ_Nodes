@@ -22,8 +22,9 @@ NODE_NAME = "GJJ_SeedVR2ImageUpscaler"
 NODE_DISPLAY_NAME = "GJJ · 🔍 SeedVR2图像视频放大器"
 DEFAULT_DIT_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
-MODEL_CATEGORY = "seedvr2"
-MODEL_SUBDIR = "models/seedvr2"
+MODEL_CATEGORY = "SEEDVR2"
+LEGACY_MODEL_CATEGORY = "seedvr2"
+MODEL_SUBDIR = "models/SEEDVR2"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
@@ -69,7 +70,7 @@ except ImportError:
 
 SEEDVR2_MODEL_TREE = """ComfyUI/
 └── models/
-    └── seedvr2/
+    └── SEEDVR2/
         ├── seedvr2_ema_3b_fp8_e4m3fn.safetensors  或可模糊匹配的 SeedVR2 主模型
         └── ema_vae_fp16.safetensors                或可模糊匹配的 SeedVR2 VAE
 """
@@ -104,7 +105,9 @@ def _missing_runtime_specs() -> list[dict[str, str]]:
 
 def _ensure_seedvr2_model_folder() -> None:
     try:
-        folder_paths.add_model_folder_path(MODEL_CATEGORY, str(Path(folder_paths.models_dir) / MODEL_CATEGORY))
+        model_dir = Path(folder_paths.models_dir) / MODEL_CATEGORY
+        folder_paths.add_model_folder_path(MODEL_CATEGORY, str(model_dir))
+        folder_paths.add_model_folder_path(LEGACY_MODEL_CATEGORY, str(model_dir))
     except Exception:
         pass
 
@@ -184,7 +187,7 @@ _GJJ_HELP = build_node_help_payload(
             "label": "SeedVR2 主模型",
             "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
             "required": True,
-            "description": "下拉列表会去扩展名与量化标记后在 models/seedvr2 深度搜索，优先取匹配项。",
+            "description": "下拉列表会去扩展名与量化标记后在 models/SEEDVR2 深度搜索，优先取匹配项。",
         },
         {
             "label": "SeedVR2 VAE",
@@ -214,14 +217,14 @@ _GJJ_HELP = build_node_help_payload(
                 "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
                 "folder": MODEL_CATEGORY,
                 "required": True,
-                "match_rule": "去扩展名、去量化标记后在 models/seedvr2 含子目录中大小写不敏感搜索。",
+                "match_rule": "去扩展名、去量化标记后在 models/SEEDVR2 含子目录中大小写不敏感搜索。",
             },
             {
                 "label": "SeedVR2 VAE",
                 "path": f"{MODEL_SUBDIR}/ema_vae_fp16.safetensors",
                 "folder": MODEL_CATEGORY,
                 "required": True,
-                "match_rule": "去扩展名、去量化标记后在 models/seedvr2 含子目录中大小写不敏感搜索。",
+                "match_rule": "去扩展名、去量化标记后在 models/SEEDVR2 含子目录中大小写不敏感搜索。",
             },
         ],
         "依赖信息": [
@@ -614,12 +617,12 @@ class GJJ_SeedVR2ImageUpscaler:
                 "dit_model": (dit_models, {
                     "default": _default_model_choice(DEFAULT_DIT_MODEL),
                     "display_name": "放大主模型",
-                    "tooltip": "SeedVR2 主超分模型。会按去扩展名、去量化标记后的名称在 models/seedvr2 深度搜索，列表第一项作为默认。",
+                    "tooltip": "SeedVR2 主超分模型。会按去扩展名、去量化标记后的名称在 models/SEEDVR2 深度搜索，列表第一项作为默认。",
                 }),
                 "vae_model": (vae_models, {
                     "default": _default_model_choice(DEFAULT_VAE_MODEL),
                     "display_name": "解码模型",
-                    "tooltip": "SeedVR2 编码/解码模型。会按去扩展名、去量化标记后的名称在 models/seedvr2 深度搜索，列表第一项作为默认。",
+                    "tooltip": "SeedVR2 编码/解码模型。会按去扩展名、去量化标记后的名称在 models/SEEDVR2 深度搜索，列表第一项作为默认。",
                 }),
                 "device": (devices, {
                     "default": preferred_device,
@@ -852,9 +855,9 @@ class GJJ_SeedVR2ImageUpscaler:
         if (dit_root is None) != (vae_root is None) or (dit_root is not None and vae_root is not None and dit_root != vae_root):
             missing = []
             if dit_root is None:
-                missing.append(make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "未在 models/seedvr2 中找到主模型。"))
+                missing.append(make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "未在 models/SEEDVR2 中找到主模型。"))
             if vae_root is None:
-                missing.append(make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "未在 models/seedvr2 中找到 VAE。"))
+                missing.append(make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "未在 models/SEEDVR2 中找到 VAE。"))
             if not missing:
                 missing = [
                     make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "主模型与 VAE 不在同一个模型根目录。"),
@@ -863,7 +866,7 @@ class GJJ_SeedVR2ImageUpscaler:
             raise_dependency_model_error(
                 node_name=NODE_DISPLAY_NAME,
                 missing_models=missing,
-                description="本地 SeedVR2 模式要求主模型和 VAE 都能在 models/seedvr2（含子目录）中解析到，并位于同一个模型根目录。",
+                description="本地 SeedVR2 模式要求主模型和 VAE 都能在 models/SEEDVR2（含子目录）中解析到，并位于同一个模型根目录。",
                 unique_id=unique_id,
                 copy_text=MODEL_SUBDIR,
                 copy_label="📋 复制模型目录",
@@ -881,7 +884,7 @@ class GJJ_SeedVR2ImageUpscaler:
                 raise_dependency_model_error(
                     node_name=NODE_DISPLAY_NAME,
                     missing_models=missing,
-                    description="请把 SeedVR2 模型放到 models/seedvr2，可放在子目录中；节点会按去扩展名、去量化信息后的名称做大小写不敏感搜索。",
+                    description="请把 SeedVR2 模型放到 models/SEEDVR2，可放在子目录中；节点会按去扩展名、去量化信息后的名称做大小写不敏感搜索。",
                     original_error=str(exc),
                     unique_id=unique_id,
                     copy_text=MODEL_SUBDIR,

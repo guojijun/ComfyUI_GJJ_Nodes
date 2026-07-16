@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ MIN_CROP_SIZE = 256
 VIDEO_UPLOAD_API_PATH = "/gjj/visual_region_crop/upload"
 VIDEO_META_API_PATH = "/gjj/visual_region_crop/meta"
 UPLOAD_SUBFOLDER = "gjj_visual_region_crop"
+EXTERNAL_SUBFOLDER = "gjj_visual_region_crop/external"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg", ".gif"}
 _VIDEO_FRAME_CACHE: dict[str, tuple[tuple[int, int], torch.Tensor, float]] = {}
 
@@ -127,10 +130,56 @@ def _view_entry_from_path(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _copy_external_video_to_input(path: Path) -> Path:
+    try:
+        source = path.resolve()
+    except Exception:
+        source = path
+    input_dir = _input_dir()
+    target_dir = input_dir / EXTERNAL_SUBFOLDER
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        stat = source.stat()
+        digest_source = f"{source}:{stat.st_mtime_ns}:{stat.st_size}"
+    except Exception:
+        digest_source = str(source)
+    digest = hashlib.sha1(digest_source.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    safe_name = _safe_filename(source.name)
+    target = target_dir / f"{Path(safe_name).stem}_{digest}{Path(safe_name).suffix}"
+    if not target.exists():
+        shutil.copy2(source, target)
+    return target.resolve()
+
+
+def _view_entry_from_any_video_path(path: Path) -> dict[str, Any] | None:
+    entry = _view_entry_from_path(path)
+    if entry is not None:
+        return entry
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return None
+    if not resolved.exists() or resolved.suffix.lower() not in VIDEO_EXTENSIONS:
+        return None
+    return _view_entry_from_path(_copy_external_video_to_input(resolved))
+
+
+def _path_for_decode(path: Path) -> Path | None:
+    if _view_entry_from_path(path) is not None:
+        return path
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return None
+    if not resolved.exists() or resolved.suffix.lower() not in VIDEO_EXTENSIONS:
+        return None
+    return _copy_external_video_to_input(resolved)
+
+
 def _source_video_entry(media: Any, selected_video: Any = "", extra_pnginfo: Any = None, unique_id: Any = None) -> dict[str, Any] | None:
     path = _source_path_from_media(media)
     if path is not None:
-        return _view_entry_from_path(path)
+        return _view_entry_from_any_video_path(path)
     if media is not None:
         return None
     entry = recover_selected_video(selected_video, extra_pnginfo, unique_id)
@@ -203,6 +252,18 @@ def _video_from_file(path: Path):
         return VideoFromFile(str(path))
 
 
+def _get_ffmpeg_path() -> str:
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        if Path(ffmpeg).exists():
+            return str(ffmpeg)
+    except Exception:
+        pass
+    return "ffmpeg"
+
+
 def _normalize_bhwc(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
@@ -223,6 +284,11 @@ def _media_to_frames(media: Any, selected_video: Any = "", extra_pnginfo: Any = 
     if tensor is not None:
         return _normalize_bhwc(tensor)
     if media is not None:
+        path = _source_path_from_media(media)
+        if path is not None:
+            decode_path = _path_for_decode(path)
+            if decode_path is not None:
+                return _decode_video_path(decode_path)
         raise RuntimeError(f"可视化区域裁切无法读取输入媒体：{type(media).__name__}。")
 
     entry = recover_selected_video(selected_video, extra_pnginfo, unique_id)
@@ -231,12 +297,77 @@ def _media_to_frames(media: Any, selected_video: Any = "", extra_pnginfo: Any = 
     return _decode_video_path(resolve_input_video_path(entry))
 
 
+def _media_to_video_path(media: Any, selected_video: Any = "", extra_pnginfo: Any = None, unique_id: Any = None) -> Path | None:
+    path = _source_path_from_media(media)
+    if path is not None:
+        return _path_for_decode(path)
+    if media is not None:
+        return None
+    entry = recover_selected_video(selected_video, extra_pnginfo, unique_id)
+    if not entry:
+        return None
+    return resolve_input_video_path(entry)
+
+
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
     except Exception:
         return default
     return result if np.isfinite(result) else default
+
+
+def _ratio_to_float(value: Any, default: float = 0.0) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    if "/" in text:
+        left, right = text.split("/", 1)
+        denominator = _as_float(right, 0.0)
+        return _as_float(left, 0.0) / denominator if denominator else default
+    return _as_float(text, default)
+
+
+def _ffprobe_video_meta(path: Path) -> dict[str, Any]:
+    try:
+        ffmpeg = Path(_get_ffmpeg_path())
+        ffprobe = ffmpeg.with_name("ffprobe.exe" if ffmpeg.suffix.lower() == ".exe" else "ffprobe")
+        ffprobe_cmd = str(ffprobe) if ffprobe.exists() else "ffprobe"
+        proc = subprocess.run(
+            [
+                ffprobe_cmd,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,nb_read_frames,duration:format=duration",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=8,
+        )
+        if proc.returncode != 0:
+            return {}
+        payload = json.loads(proc.stdout or "{}")
+        stream = (payload.get("streams") or [{}])[0]
+        fmt = payload.get("format") or {}
+        fps = _ratio_to_float(stream.get("avg_frame_rate")) or _ratio_to_float(stream.get("r_frame_rate"))
+        duration = _as_float(stream.get("duration"), 0.0) or _as_float(fmt.get("duration"), 0.0)
+        frames = max(_as_int(stream.get("nb_frames"), 0), _as_int(stream.get("nb_read_frames"), 0))
+        estimated_frames = max(0, int(round(fps * duration))) if fps > 0 and duration > 0 else 0
+        frames = max(frames, estimated_frames)
+        return {
+            "width": _as_int(stream.get("width"), 0),
+            "height": _as_int(stream.get("height"), 0),
+            "frames": int(frames),
+            "fps": float(fps or 0.0),
+            "duration": float(duration or 0.0),
+        }
+    except Exception:
+        return {}
 
 
 def parse_selected_video(raw_value: Any) -> dict[str, str] | None:
@@ -324,6 +455,9 @@ def resolve_input_video_path(entry: dict[str, str]) -> Path:
 
 
 def _video_meta(path: Path) -> dict[str, Any]:
+    probed = _ffprobe_video_meta(path)
+    if probed.get("width") and probed.get("height"):
+        return probed
     video = _video_from_file(path)
     width = height = frame_count = 0
     fps = duration = 0.0
@@ -350,6 +484,65 @@ def _video_meta(path: Path) -> dict[str, Any]:
         "fps": float(fps or 0.0),
         "duration": float(duration or 0.0),
     }
+
+
+def _raw_frame_to_tensor(raw_frame: bytes, width: int, height: int) -> torch.Tensor:
+    expected = int(width) * int(height) * 3
+    if len(raw_frame) < expected:
+        raise RuntimeError("FFmpeg 输出帧数据不完整。")
+    array = np.frombuffer(raw_frame[:expected], dtype=np.uint8).reshape(int(height), int(width), 3)
+    return torch.from_numpy(array.copy()).float().div_(255.0).unsqueeze(0).contiguous()
+
+
+def _stream_video_range(path: Path, start_frame: int, frame_count: int, width: int, height: int, fps: float):
+    if frame_count <= 0:
+        return
+    frame_size = int(width) * int(height) * 3
+    if frame_size <= 0:
+        raise RuntimeError("视频尺寸无效，无法流式读取。")
+    cmd = [
+        _get_ffmpeg_path(),
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", f"{max(0, int(start_frame)) / max(float(fps or 24.0), 1e-6):.6f}",
+        "-i", str(path),
+        "-an",
+        "-sn",
+        "-frames:v", str(int(frame_count)),
+        "-f", "image2pipe",
+        "-pix_fmt", "rgb24",
+        "-vcodec", "rawvideo",
+        "-",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert proc.stdout is not None
+        for offset in range(int(frame_count)):
+            raw_frame = proc.stdout.read(frame_size)
+            if not raw_frame:
+                break
+            yield int(start_frame) + offset, _raw_frame_to_tensor(raw_frame, width, height)
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        stderr = proc.stderr.read() if proc.stderr is not None else b""
+        return_code = proc.wait(timeout=30)
+        if return_code != 0:
+            message = stderr.decode("utf-8", errors="ignore") if stderr else ""
+            raise RuntimeError(f"FFmpeg 读取视频帧失败：{message}")
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("FFmpeg 读取视频帧结束等待超时。") from error
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def _decode_video_frame(path: Path, frame_index: int, width: int, height: int, fps: float) -> torch.Tensor:
+    for _index, frame in _stream_video_range(path, frame_index, 1, width, height, fps):
+        return frame
+    raise RuntimeError(f"无法读取视频第 {int(frame_index) + 1} 帧。")
 
 
 def _decode_video_path(path: Path) -> torch.Tensor:
@@ -607,6 +800,20 @@ class GJJ_VisualRegionCrop:
     def INPUT_TYPES(cls):
         return {
             "required": {
+            },
+            "optional": {
+                "media": (INPUT_MEDIA_TYPE, {
+                    "display_name": "图片/视频帧",
+                    "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；连接后优先使用上游。",
+                }),
+                "preview_width": ("INT", {
+                    "default": 360,
+                    "min": 180,
+                    "max": 960,
+                    "step": 16,
+                    "display_name": "预览宽度",
+                    "tooltip": "节点内预览按此宽度等比缩放；不影响最终输出尺寸。",
+                }),
                 "crop_data": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -636,20 +843,6 @@ class GJJ_VisualRegionCrop:
                     "hidden": True,
                     "display": "hidden",
                     "advanced": True,
-                }),
-            },
-            "optional": {
-                "media": (INPUT_MEDIA_TYPE, {
-                    "display_name": "图片/视频帧",
-                    "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；连接后优先使用上游。",
-                }),
-                "preview_width": ("INT", {
-                    "default": 360,
-                    "min": 180,
-                    "max": 960,
-                    "step": 16,
-                    "display_name": "预览宽度",
-                    "tooltip": "节点内预览按此宽度等比缩放；不影响最终输出尺寸。",
                 }),
             },
             "hidden": {
@@ -682,10 +875,84 @@ class GJJ_VisualRegionCrop:
         unique_id=None,
     ):
         source_video = _source_video_entry(media, selected_video, extra_pnginfo, unique_id)
+        data = _safe_crop_data(crop_data)
+
+        video_path = None
+        if media is None:
+            entry = recover_selected_video(selected_video, extra_pnginfo, unique_id)
+            if entry:
+                video_path = resolve_input_video_path(entry)
+        if video_path is not None:
+            meta = _video_meta(video_path)
+            src_w = int(meta.get("width") or 0)
+            src_h = int(meta.get("height") or 0)
+            frame_count = int(meta.get("frames") or 0)
+            fps = float(meta.get("fps") or 24.0)
+            if src_w <= 0 or src_h <= 0 or frame_count <= 0:
+                raise RuntimeError(f"无法读取视频元数据：{video_path.name}")
+            preview_index = max(0, min(frame_count - 1, _as_int(preview_frame, 0)))
+            crop_w = _aligned_size(data.get("width"), src_w, src_w)
+            crop_h = _aligned_size(data.get("height"), src_h, src_h)
+            keyframes = _normalize_keyframes(data, frame_count, src_w, src_h, crop_w, crop_h)
+            range_start, range_end = _normalize_frame_range(data, frame_count)
+
+            cropped: list[torch.Tensor] = []
+            preview_source = None
+            for frame_index, source_frame in _stream_video_range(
+                video_path,
+                range_start,
+                range_end - range_start + 1,
+                src_w,
+                src_h,
+                fps,
+            ):
+                if frame_index == preview_index:
+                    preview_source = source_frame
+                x, y = _interp_at(frame_index, keyframes, src_w, src_h, crop_w, crop_h)
+                cropped.append(source_frame[:, y : y + crop_h, x : x + crop_w, :].contiguous())
+            if not cropped:
+                raise RuntimeError(f"未从视频读取到输出帧：{video_path.name}")
+            if preview_source is None:
+                preview_source = _decode_video_frame(video_path, preview_index, src_w, src_h, fps)
+
+            output = torch.cat(cropped, dim=0).contiguous()
+            output_frame_count = int(output.shape[0])
+            normalized_data = {
+                "version": 1,
+                "source_width": int(src_w),
+                "source_height": int(src_h),
+                "frame_count": int(frame_count),
+                "range_start": int(range_start),
+                "range_end": int(range_start + output_frame_count - 1),
+                "output_frame_count": int(output_frame_count),
+                "width": int(crop_w),
+                "height": int(crop_h),
+                "keyframes": keyframes,
+                "range_user_set": bool(data.get("range_user_set")),
+            }
+            preview_payload = {**normalized_data, "preview_frame": int(preview_index)}
+            digest = hashlib.sha1(json.dumps(preview_payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+            preview = _tensor_to_preview(preview_source, digest)
+            json_text = json.dumps(normalized_data, ensure_ascii=False, separators=(",", ":"))
+            return {
+                "ui": {
+                    "preview_image": [preview],
+                    "source_width": [int(src_w)],
+                    "source_height": [int(src_h)],
+                    "frame_count": [int(frame_count)],
+                    "range_start": [int(range_start)],
+                    "range_end": [int(normalized_data["range_end"])],
+                    "output_frame_count": [int(output_frame_count)],
+                    "preview_frame": [int(preview_index)],
+                    "crop_data": [json_text],
+                    "source_video": [source_video] if source_video else [],
+                },
+                "result": (output, int(crop_w), int(crop_h), int(output_frame_count), json_text),
+            }
+
         frames = _media_to_frames(media, selected_video, extra_pnginfo, unique_id)
         frame_count, src_h, src_w, _channels = frames.shape
         preview_index = max(0, min(int(frame_count) - 1, _as_int(preview_frame, 0)))
-        data = _safe_crop_data(crop_data)
         crop_w = _aligned_size(data.get("width"), src_w, src_w)
         crop_h = _aligned_size(data.get("height"), src_h, src_h)
         keyframes = _normalize_keyframes(data, int(frame_count), int(src_w), int(src_h), crop_w, crop_h)

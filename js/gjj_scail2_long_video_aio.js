@@ -40,6 +40,7 @@ const BASE_MODEL_WIDGETS = new Set([
 	"accel_lora_file",
 	"dpo_lora_file",
 	"slop_bounce_lora_file",
+	"relighting_lora_file",
 	"sam3_checkpoint",
 ]);
 const MULTIVIEW_MODEL_WIDGETS = new Set([
@@ -55,6 +56,7 @@ const OPTIONAL_LORA_WIDGETS = new Set([
 	"accel_lora_file",
 	"dpo_lora_file",
 	"slop_bounce_lora_file",
+	"relighting_lora_file",
 	"multiview_lora_3",
 ]);
 const DEFAULT_MULTIVIEW_LORA_WIDGETS = new Set([
@@ -98,6 +100,7 @@ const MODEL_FIELDS = [
 	["accel_lora_file", "加速LoRA", "text"],
 	["dpo_lora_file", "DPO LoRA", "text"],
 	["slop_bounce_lora_file", "Slop Bounce", "text"],
+	["relighting_lora_file", "Relighting LoRA", "text"],
 	["sam3_checkpoint", "SAM3", "text"],
 ];
 
@@ -106,9 +109,10 @@ const MODEL_FIELD_FALLBACKS = {
 	vae_file: "wan_2.1_vae.safetensors",
 	text_encoder_file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
 	clip_vision_file: "clip_vision_h.safetensors",
-	accel_lora_file: "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
-	dpo_lora_file: "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
-	slop_bounce_lora_file: "wan/i2v_slop_bounce.safetensors",
+	accel_lora_file: "",
+	dpo_lora_file: "",
+	slop_bounce_lora_file: "",
+	relighting_lora_file: "",
 	sam3_checkpoint: "sam3.1_multiplex.safetensors",
 	multiview_unet: "qwen_image_edit_2511_int8_convrot.safetensors",
 	multiview_clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -627,7 +631,7 @@ function hasModelState(node) {
 	];
 	return names.some((name) => {
 		const value = String(getWidget(node, name, "") || "").trim();
-		return value && value !== "不使用";
+		return value && !isNoLoraValue(value);
 	});
 }
 

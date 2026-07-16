@@ -559,23 +559,24 @@ def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, un
 
 
 def resolve_input_video_path(entry: dict[str, str]) -> Path:
-    if str(entry.get("type") or "input").lower() == "temp":
-        candidate = gjjutils_temp_path(str(entry.get("filename") or "")).resolve()
-        if not candidate.exists():
-            raise RuntimeError(f"未找到临时视频：{entry.get('filename') or ''}")
-        if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
-            raise RuntimeError(f"不支持的视频格式：{candidate.name}")
-        return candidate
-    input_dir = _input_dir()
+    media_type = str(entry.get("type") or "input").strip().lower()
+    if media_type == "output":
+        root = Path(folder_paths.get_output_directory()).resolve()
+    elif media_type == "temp":
+        root = Path(folder_paths.get_temp_directory()).resolve()
+    else:
+        media_type = "input"
+        root = _input_dir()
     filename = str(entry.get("filename") or "").strip()
     subfolder = str(entry.get("subfolder") or "").strip().replace("\\", "/")
-    candidate = (input_dir / subfolder / filename).resolve()
+    candidate = (root / subfolder / filename).resolve()
     try:
-        candidate.relative_to(input_dir)
+        candidate.relative_to(root)
     except ValueError as error:
         raise RuntimeError(f"视频路径越界：{subfolder}/{filename}") from error
     if not candidate.exists():
-        raise RuntimeError(f"未找到视频：{subfolder}/{filename}")
+        label = f"{subfolder}/{filename}".strip("/")
+        raise RuntimeError(f"未找到{media_type}视频：{label}")
     if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
         raise RuntimeError(f"不支持的视频格式：{candidate.name}")
     return candidate
@@ -593,7 +594,7 @@ def selected_video_preview_entries(selected: list[dict[str, str]]) -> list[dict[
         previews.append({
             "filename": filename,
             "subfolder": str(entry.get("subfolder") or "").strip().replace("\\", "/"),
-            "type": "temp" if media_type == "temp" else "input",
+            "type": media_type if media_type in {"input", "temp", "output"} else "input",
             "format": "image/gif" if is_gif else f"video/{suffix}",
             "media_type": "image" if is_gif else "video",
         })
@@ -929,34 +930,40 @@ def decode_video_cv2(
     ]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=120,
-        )
-
-        if proc.returncode != 0:
-            stderr_msg = proc.stderr.decode('utf-8', errors='ignore') if proc.stderr else ""
-            raise RuntimeError(f"FFmpeg 解码失败: {stderr_msg}\n命令: {' '.join(cmd)}")
-
-        raw_data = proc.stdout
-        if not raw_data:
-            raise RuntimeError(f"FFmpeg 未输出任何数据\n命令: {' '.join(cmd)}\nstart={start}, stop={stop}, stride={stride}, frames_to_output={frames_to_output}")
-
         if source_width <= 0 or source_height <= 0:
             raise RuntimeError(f"无法确定视频原始尺寸")
 
         frame_size = output_width * output_height * 3
-        if len(raw_data) % frame_size != 0:
-            raise RuntimeError(f"FFmpeg 输出数据不完整")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        frames: list[torch.Tensor] = []
+        try:
+            assert proc.stdout is not None
+            for _index in range(frames_to_output):
+                raw_frame = proc.stdout.read(frame_size)
+                if not raw_frame:
+                    break
+                if len(raw_frame) < frame_size:
+                    raise RuntimeError(f"FFmpeg 输出数据不完整")
+                frames.append(_frames_tensor_from_rgb_bytes(raw_frame, 1, output_width, output_height))
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            stderr = proc.stderr.read() if proc.stderr is not None else b""
+            return_code = proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
-        num_frames = len(raw_data) // frame_size
-        num_frames = min(num_frames, limit)
-        batch = _frames_tensor_from_rgb_bytes(raw_data, num_frames, output_width, output_height)
-        frames = [batch[i:i + 1] for i in range(num_frames)]
+        if return_code != 0:
+            stderr_msg = stderr.decode('utf-8', errors='ignore') if stderr else ""
+            raise RuntimeError(f"FFmpeg 解码失败: {stderr_msg}\n命令: {' '.join(cmd)}")
+        if not frames:
+            raise RuntimeError(f"FFmpeg 未输出任何数据\n命令: {' '.join(cmd)}\nstart={start}, stop={stop}, stride={stride}, frames_to_output={frames_to_output}")
 
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"FFmpeg 解码超时")
+        raise RuntimeError(f"FFmpeg 解码结束等待超时")
     except Exception as e:
         raise RuntimeError(f"FFmpeg 解码错误: {str(e)}")
 

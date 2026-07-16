@@ -282,6 +282,46 @@ def _test_caption_label(kind: str, model_name: str, elapsed: float | None = None
     return f"{_compact_model_name(model_name)} ({_compact_model_size_text(kind, model_name)})[{time_text}]"
 
 
+def _format_test_strength(value: Any) -> str:
+    try:
+        number = round(float(value), 4)
+    except Exception:
+        number = 1.0
+    text = f"{number:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _lora_strength_test_values(start: Any, end: Any, step: Any) -> list[float]:
+    try:
+        current = float(start)
+    except Exception:
+        current = 0.2
+    try:
+        target = float(end)
+    except Exception:
+        target = 1.2
+    try:
+        delta = abs(float(step))
+    except Exception:
+        delta = 0.2
+    if delta <= 1e-6:
+        delta = 0.2
+    direction = 1.0 if target >= current else -1.0
+    values: list[float] = []
+    limit = 256
+    epsilon = delta * 0.001 + 1e-9
+    while len(values) < limit:
+        if direction > 0 and current > target + epsilon:
+            break
+        if direction < 0 and current < target - epsilon:
+            break
+        values.append(round(current, 4))
+        current += delta * direction
+    if not values:
+        values.append(round(target, 4))
+    return values
+
+
 def _load_caption_font(size: int) -> ImageFont.ImageFont:
     windir = os.environ.get("WINDIR", "C:\\Windows")
     candidates = [
@@ -605,6 +645,34 @@ def _apply_krea2_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict
         "width": 1024,
         "height": 1024,
     }
+
+
+def _lazy_preset_for_unet(unet_name: str) -> dict[str, Any]:
+    preset = match_model_family(unet_name)
+    preset = _apply_f2k_fallback_preset(preset, unet_name)
+    preset = _apply_zit_fallback_preset(preset, unet_name)
+    preset = _apply_krea2_fallback_preset(preset, unet_name)
+    return preset
+
+
+def _resolve_lazy_test_model_pair(unet_name: str) -> tuple[dict[str, Any], str, str]:
+    preset = _lazy_preset_for_unet(unet_name)
+    clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
+    vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+    clip_names = resolve_clip_names_for_preset(
+        preset,
+        clip_models,
+        exposed_clip_name="",
+        legacy_clip_names=[],
+    )
+    if not clip_names:
+        clip_names.append(_pick_available_name("", clip_models, DEFAULT_CLIP_NAME))
+    vae_name = _pick_available_name(
+        preset.get("vae_name", DEFAULT_VAE_NAME),
+        vae_models,
+        DEFAULT_VAE_NAME,
+    )
+    return preset, str(clip_names[0] if clip_names else ""), str(vae_name or "")
 
 
 def _supports_multi_reference_edit(
@@ -3000,25 +3068,43 @@ class GJJ_LazyImageStudio:
         # 记录开始时间
         start_time = time.time()
 
-        if test_config_data.get("mode") in {"unet", "lora"}:
+        if test_config_data.get("mode") in {"unet", "lora", "lora_strength"}:
             mode = str(test_config_data.get("mode") or "")
             selected_models = [
                 str(item or "").strip()
                 for item in test_config_data.get("models", [])
                 if str(item or "").strip()
             ]
-            if selected_models:
+            if mode == "lora_strength":
+                lora_name = str(test_config_data.get("lora_name") or "").strip()
+                if lora_name:
+                    selected_models = [lora_name]
+            test_entries: list[dict[str, Any]] = [{"model": name, "strength": None} for name in selected_models]
+            if mode == "lora_strength" and selected_models:
+                strength_values = _lora_strength_test_values(
+                    test_config_data.get("strength_start", 0.2),
+                    test_config_data.get("strength_end", 1.2),
+                    test_config_data.get("strength_step", 0.2),
+                )
+                test_entries = [
+                    {"model": selected_models[0], "strength": strength}
+                    for strength in strength_values
+                ]
+            if test_entries:
                 test_started = time.time()
                 test_width = max(8, int(width))
                 test_height = max(8, int(height))
                 test_seed = int(seed)
-                _send_status(unique_id, f"模型测试开始：{len(selected_models)} 项")
-                progress = comfy.utils.ProgressBar(len(selected_models))
+                _send_status(unique_id, f"模型测试开始：{len(test_entries)} 项")
+                progress = comfy.utils.ProgressBar(len(test_entries))
                 captioned_images: list[torch.Tensor] = []
                 effective_params_list: list[dict[str, Any]] = []
-                for index, model_name in enumerate(selected_models, start=1):
+                for index, test_entry in enumerate(test_entries, start=1):
+                    model_name = str(test_entry.get("model") or "").strip()
+                    item_strength = test_entry.get("strength")
                     item_started = time.time()
-                    _send_status(unique_id, f"测试 {index}/{len(selected_models)}：{model_name}")
+                    strength_text = f" @ {_format_test_strength(item_strength)}" if item_strength is not None else ""
+                    _send_status(unique_id, f"测试 {index}/{len(test_entries)}：{model_name}{strength_text}")
                     try:
                         item_lora_data = lora_data
                         item_unet_name = unet_name
@@ -3031,17 +3117,22 @@ class GJJ_LazyImageStudio:
                         item_denoise = denoise
                         if mode == "unet":
                             item_unet_name = model_name
-                            item_clip_name1 = ""
-                            item_vae_name = ""
-                            item_preset = match_model_family(item_unet_name)
-                            item_preset = _apply_f2k_fallback_preset(item_preset, item_unet_name)
-                            item_preset = _apply_zit_fallback_preset(item_preset, item_unet_name)
-                            item_preset = _apply_krea2_fallback_preset(item_preset, item_unet_name)
+                            item_preset, item_clip_name1, item_vae_name = _resolve_lazy_test_model_pair(item_unet_name)
                             item_steps = int(item_preset.get("steps", steps) or steps)
                             item_cfg = float(item_preset.get("cfg", cfg) or cfg)
                             item_sampler_name = str(item_preset.get("sampler_name", sampler_name) or sampler_name)
                             item_scheduler = str(item_preset.get("scheduler", scheduler) or scheduler)
                             item_denoise = float(item_preset.get("denoise", denoise) or denoise)
+                            _send_status(
+                                unique_id,
+                                f"测试 {index}/{len(test_entries)} 配套：CLIP={item_clip_name1 or '默认'}，VAE={item_vae_name or '默认'}",
+                            )
+                        elif mode == "lora_strength":
+                            strength = float(item_strength if item_strength is not None else 1.0)
+                            item_lora_data = json.dumps(
+                                [{"enabled": True, "name": model_name, "strength": strength}],
+                                ensure_ascii=False,
+                            )
                         else:
                             item_lora_data = json.dumps(
                                 [{"enabled": True, "name": model_name, "strength": 1.0}],
@@ -3084,7 +3175,7 @@ class GJJ_LazyImageStudio:
                         )
                         item_image = item_result["result"][0]
                         item_elapsed = time.time() - item_started
-                        model_size = _model_size_text(mode, model_name)
+                        model_size = _model_size_text("lora" if mode == "lora_strength" else mode, model_name)
                         if (
                             isinstance(item_image, torch.Tensor)
                             and item_image.ndim == 4
@@ -3096,7 +3187,9 @@ class GJJ_LazyImageStudio:
                                 f"{int(item_image.shape[2])}x{int(item_image.shape[1])} -> {test_width}x{test_height}",
                             )
                             item_image = _resize_test_image_to_target(item_image, test_width, test_height)
-                        label = _test_caption_label(mode, model_name, item_elapsed)
+                        label = _test_caption_label("lora" if mode == "lora_strength" else mode, model_name, item_elapsed)
+                        if mode == "lora_strength":
+                            label = f"{_compact_model_name(model_name)} @ {_format_test_strength(item_strength)} ({model_size})[{max(0, int(round(float(item_elapsed or 0))))}秒]"
                         captioned = _caption_test_image(item_image, label)
                         captioned_images.append(captioned)
                         ui_params = item_result.get("ui", {}).get("effective_params", [{}])
@@ -3107,17 +3200,23 @@ class GJJ_LazyImageStudio:
                                 "test_model": model_name,
                                 "test_model_size": model_size,
                                 "test_elapsed_time": item_elapsed,
+                                "test_lora_strength": item_strength,
                             }
                         )
                         effective_params_list.append(effective_params)
                         preview_batch = torch.cat(_pad_images_to_common_size(captioned_images), dim=0)
                         _send_test_preview(unique_id, preview_batch)
                     except Exception as exc:
-                        _send_status(unique_id, f"测试失败 {index}/{len(selected_models)}：{str(exc).splitlines()[0]}")
-                        if mode in {"unet", "lora"}:
+                        _send_status(unique_id, f"测试失败 {index}/{len(test_entries)}：{str(exc).splitlines()[0]}")
+                        if mode in {"unet", "lora", "lora_strength"}:
                             error_image = _caption_test_image(
                                 _make_soft_error_image(test_width, test_height),
-                                _test_caption_label(mode, model_name, failed=True),
+                                (
+                                    f"{_compact_model_name(model_name)} @ {_format_test_strength(item_strength)} "
+                                    f"({_compact_model_size_text('lora', model_name)})[失败]"
+                                    if mode == "lora_strength"
+                                    else _test_caption_label(mode, model_name, failed=True)
+                                ),
                             )
                             captioned_images.append(error_image)
                     finally:

@@ -39,7 +39,7 @@ import { api } from "/scripts/api.js";
 	const SAVED_WORKFLOW_IMAGE_SIZE = 256;
 	const DEFAULT_SORT_MODE = "mtime_desc";
 	const DEFAULT_FILTER_MODE = "openable";
-	const DEFAULT_PAGE_SIZE = 12;
+	const DEFAULT_PAGE_SIZE = 8;
 	const MIN_PAGE_SIZE = 1;
 	const MAX_PAGE_SIZE = 100;
 	const SORT_MODE_LABELS = {
@@ -840,13 +840,15 @@ import { api } from "/scripts/api.js";
 	}
 
 	function normalizeSettings(value = {}) {
+		const rawPageSize = value?.pageSize ?? value?.page_size;
+		const pageSize = pageSizeValue(rawPageSize === 12 ? DEFAULT_PAGE_SIZE : rawPageSize);
 		return {
 			filenameTemplate: normalizeFilenameTemplate(value?.filenameTemplate || value?.filename_template || DEFAULT_FILENAME_TEMPLATE),
 			directoryPath: String(value?.directoryPath || value?.directory || ""),
 			sortMode: choice(value?.sortMode || value?.sort_mode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
 			filterMode: DEFAULT_FILTER_MODE,
 			searchText: String(value?.searchText || value?.search_text || "").slice(0, 160),
-			pageSize: pageSizeValue(value?.pageSize ?? value?.page_size),
+			pageSize,
 		};
 	}
 
@@ -977,7 +979,8 @@ import { api } from "/scripts/api.js";
 		if (workflowSettings.search_text != null || workflowSettings.searchText != null) {
 			settings.searchText = String(workflowSettings.search_text ?? workflowSettings.searchText ?? "").slice(0, 160);
 		}
-		settings.pageSize = pageSizeValue(workflowSettings.page_size ?? workflowSettings.pageSize ?? settings.pageSize);
+		const backendPageSize = workflowSettings.page_size ?? workflowSettings.pageSize;
+		settings.pageSize = pageSizeValue(backendPageSize === 12 ? DEFAULT_PAGE_SIZE : (backendPageSize ?? settings.pageSize));
 		const current = canonicalPathText(settings.directoryPath);
 		const legacy = canonicalPathText(backendLegacyDefaultDirectory);
 		if (backendDefaultDirectory && (!current || (legacy && current === legacy) || looksLikeLegacyDefaultDirectory(settings.directoryPath) || workflowSettings.directory)) {
@@ -3451,8 +3454,9 @@ import { api } from "/scripts/api.js";
 			card.type = "button";
 			card.className = "gjj-workflow-preview-card";
 			card.disabled = !item.workflow;
+			const displayName = previewItemTitle(item) || previewItemName(item);
 			card.title = item.workflow
-				? "打开这个截图内嵌的工作流"
+				? displayName
 				: (item.loading || !item.loaded
 					? `正在读取 workflow 元数据：${item.file?.name || ""}`
 					: `未找到可加载的 workflow 元数据：${item.error || item.file?.name || ""}`);
@@ -3463,16 +3467,13 @@ import { api } from "/scripts/api.js";
 
 			const label = document.createElement("div");
 			label.className = "gjj-workflow-preview-name";
-			label.textContent = previewItemTitle(item) || previewItemName(item);
+			label.textContent = displayName;
+			label.title = displayName;
 
-			const mark = document.createElement("div");
-			mark.className = "gjj-workflow-preview-mark";
-			mark.textContent = item.workflow ? "打开" : (item.loading || !item.loaded ? "读取中" : "无元数据");
-
-			card.append(image, label, mark);
+			card.append(image, label);
 			card.addEventListener("click", () => {
 				card.disabled = true;
-				mark.textContent = "打开中...";
+				label.textContent = "打开中...";
 				loadWorkflowFromPreview(item);
 			});
 			grid.appendChild(card);
@@ -4047,7 +4048,7 @@ import { api } from "/scripts/api.js";
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-panel {
 	width: min(1120px, calc(100vw - 40px));
-	max-height: min(720px, calc(100vh - 44px));
+	max-height: min(840px, calc(100vh - 24px));
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
@@ -4223,8 +4224,12 @@ import { api } from "/scripts/api.js";
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+	grid-template-columns: repeat(auto-fill, 256px);
 	gap: 10px;
+	flex: 0 0 auto;
+	align-content: start;
+	justify-content: start;
+	max-height: 522px;
 	overflow: auto;
 	padding-right: 2px;
 }
@@ -4238,11 +4243,15 @@ import { api } from "/scripts/api.js";
 	font: 12px/18px sans-serif;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card {
-	min-width: 0;
-	padding: 8px;
+	position: relative;
+	width: 256px;
+	height: 256px;
+	min-width: 256px;
+	padding: 0;
+	overflow: hidden;
 	border: 1px solid rgba(117, 137, 148, .34);
 	border-radius: 8px;
-	background: #151d22;
+	background: #080c0f;
 	color: #e8f0ec;
 	text-align: left;
 	cursor: pointer;
@@ -4250,7 +4259,7 @@ import { api } from "/scripts/api.js";
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card:hover {
 	border-color: rgba(105, 184, 139, .82);
-	background: #1c2a22;
+	background: #080c0f;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card:disabled {
 	cursor: not-allowed;
@@ -4258,23 +4267,33 @@ import { api } from "/scripts/api.js";
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card img {
 	display: block;
-	width: 100%;
-	aspect-ratio: 4 / 3;
-	object-fit: contain;
-	border-radius: 6px;
+	width: 256px;
+	height: 256px;
+	object-fit: cover;
+	border-radius: 7px;
 	background: #080c0f;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-name {
-	margin-top: 7px;
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	padding: 7px 9px;
 	overflow: hidden;
 	white-space: nowrap;
 	text-overflow: ellipsis;
-	font: 700 12px/16px sans-serif;
+	background: rgba(6, 10, 12, .58);
+	color: #f4faf6;
+	font: 700 12px/16px "Segoe UI", "Microsoft YaHei", sans-serif;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
+	box-sizing: border-box;
+	backdrop-filter: blur(2px);
 }
-#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-mark {
-	margin-top: 3px;
-	color: #98a7ad;
-	font: 11px/14px sans-serif;
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card:hover .gjj-workflow-preview-name {
+	white-space: normal;
+	text-overflow: clip;
+	max-height: 112px;
+	background: rgba(6, 10, 12, .76);
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination {
 	display: flex;

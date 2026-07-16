@@ -43,6 +43,7 @@ const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
 const TEST_FILTER_PROPERTY = "gjj_lazy_image_studio_test_filters";
 const TEST_SORT_PROPERTY = "gjj_lazy_image_studio_test_sorts";
+const TEST_STRENGTH_PROPERTY = "gjj_lazy_image_studio_test_strength";
 const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link_memory";
 const PREVIEW_LAYOUT_PROPERTY = "gjj_lazy_image_studio_preview_layout";
 const PREVIEW_PAGE_PROPERTY = "gjj_lazy_image_studio_preview_page";
@@ -2871,6 +2872,7 @@ function writeSerializedWidgetValues(node, serializedNode) {
 	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
 	serializedNode.properties[TEST_FILTER_PROPERTY] = lazyTestFilters(node);
 	serializedNode.properties[TEST_SORT_PROPERTY] = lazyTestSorts(node);
+	serializedNode.properties[TEST_STRENGTH_PROPERTY] = lazyTestStrengthSettings(node);
 	persistLoraRows(node, ensureLoraNodeState(node).rows, serializedNode);
 	const fixed = serializedParamValues(params, node);
 	serializedNode.widgets_values = fixed;
@@ -3390,13 +3392,14 @@ function lazyTestFilters(node) {
 		return {
 			unet: String(filters.unet || ""),
 			lora: String(filters.lora || ""),
+			lora_strength: String(filters.lora_strength || filters.lora || ""),
 		};
 	}
-	return { unet: "", lora: "" };
+	return { unet: "", lora: "", lora_strength: "" };
 }
 
 function saveLazyTestFilter(node, kind, value) {
-	if (!node || !["unet", "lora"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
@@ -3414,19 +3417,48 @@ function lazyTestSorts(node) {
 		return {
 			unet: String(sorts.unet || "name_asc"),
 			lora: String(sorts.lora || "name_asc"),
+			lora_strength: String(sorts.lora_strength || sorts.lora || "name_asc"),
 		};
 	}
-	return { unet: "name_asc", lora: "name_asc" };
+	return { unet: "name_asc", lora: "name_asc", lora_strength: "name_asc" };
 }
 
 function saveLazyTestSort(node, kind, value) {
-	if (!node || !["unet", "lora"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
 	const sorts = lazyTestSorts(node);
 	sorts[kind] = String(value || "name_asc");
 	node.properties[TEST_SORT_PROPERTY] = sorts;
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+}
+
+function lazyTestStrengthSettings(node) {
+	const settings = node?.properties?.[TEST_STRENGTH_PROPERTY];
+	const start = Number.parseFloat(String(settings?.start ?? "0.2"));
+	const end = Number.parseFloat(String(settings?.end ?? "1.2"));
+	const step = Number.parseFloat(String(settings?.step ?? "0.2"));
+	return {
+		start: Number.isFinite(start) ? start : 0.2,
+		end: Number.isFinite(end) ? end : 1.2,
+		step: Number.isFinite(step) && Math.abs(step) > 1e-6 ? Math.abs(step) : 0.2,
+	};
+}
+
+function saveLazyTestStrengthSettings(node, values = {}) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const current = lazyTestStrengthSettings(node);
+	node.properties[TEST_STRENGTH_PROPERTY] = {
+		start: values.start ?? current.start,
+		end: values.end ?? current.end,
+		step: values.step ?? current.step,
+	};
 	node.setDirtyCanvas?.(true, true);
 	node.graph?.setDirtyCanvas?.(true, true);
 	node.graph?.change?.();
@@ -3452,6 +3484,16 @@ function selectedLazyTestModels(panel) {
 	return [...panel.querySelectorAll("input[data-model-name]:checked")]
 		.map((input) => input.dataset.modelName)
 		.filter(Boolean);
+}
+
+function selectedLazyTestModel(panel) {
+	const input = panel.querySelector("input[data-model-name]:checked");
+	return input?.dataset?.modelName || "";
+}
+
+function parseLazyStrengthValue(input, fallback) {
+	const value = Number.parseFloat(String(input?.value ?? "").trim());
+	return Number.isFinite(value) ? value : fallback;
 }
 
 function escapeHtml(value) {
@@ -3482,6 +3524,17 @@ function openLazyTestDialog(node, testButton, generateButton) {
 		<div data-sort-tools style="display:flex;align-items:center;gap:6px;padding:0 12px 8px;flex-wrap:wrap;">
 			<span style="color:#91a7ad;font-weight:700;">排序</span>
 		</div>
+		<div data-strength-tools style="display:none;align-items:center;gap:8px;padding:0 12px 8px;flex-wrap:wrap;">
+			<label style="display:flex;align-items:center;gap:5px;color:#cbdce0;font-weight:700;">起始
+				<input data-strength-start type="number" step="0.05" value="0.2" style="width:74px;height:26px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 7px;outline:none;">
+			</label>
+			<label style="display:flex;align-items:center;gap:5px;color:#cbdce0;font-weight:700;">结束
+				<input data-strength-end type="number" step="0.05" value="1.2" style="width:74px;height:26px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 7px;outline:none;">
+			</label>
+			<label style="display:flex;align-items:center;gap:5px;color:#cbdce0;font-weight:700;">步长
+				<input data-strength-step type="number" step="0.05" value="0.2" style="width:74px;height:26px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 7px;outline:none;">
+			</label>
+		</div>
 		<div data-status style="padding:0 12px 6px;color:#91a7ad;min-height:18px;"></div>
 		<div data-list style="flex:1 1 auto;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:5px;"></div>
 		<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid #2c3e45;">
@@ -3495,22 +3548,35 @@ function openLazyTestDialog(node, testButton, generateButton) {
 
 	const savedFilters = lazyTestFilters(node);
 	const savedSorts = lazyTestSorts(node);
+	const savedStrength = lazyTestStrengthSettings(node);
 	const state = {
 		kind: "unet",
 		models: { unet: [], lora: [] },
-		filters: { unet: savedFilters.unet, lora: savedFilters.lora },
-		sorts: { unet: savedSorts.unet, lora: savedSorts.lora },
+		filters: { unet: savedFilters.unet, lora: savedFilters.lora, lora_strength: savedFilters.lora_strength },
+		sorts: { unet: savedSorts.unet, lora: savedSorts.lora, lora_strength: savedSorts.lora_strength },
 	};
 	const list = panel.querySelector("[data-list]");
 	const status = panel.querySelector("[data-status]");
 	const filterInput = panel.querySelector("[data-filter]");
 	const tabs = panel.querySelector("[data-tabs]");
 	const sortTools = panel.querySelector("[data-sort-tools]");
+	const strengthTools = panel.querySelector("[data-strength-tools]");
+	const strengthStartInput = panel.querySelector("[data-strength-start]");
+	const strengthEndInput = panel.querySelector("[data-strength-end]");
+	const strengthStepInput = panel.querySelector("[data-strength-step]");
+	const selectAllButton = panel.querySelector("[data-select-all]");
 	filterInput.value = state.filters[state.kind] || "";
+	strengthStartInput.value = String(savedStrength.start);
+	strengthEndInput.value = String(savedStrength.end);
+	strengthStepInput.value = String(savedStrength.step);
 
 	function renderTabs() {
 		tabs.innerHTML = "";
-		for (const tab of [{ kind: "unet", label: "UNET测试" }, { kind: "lora", label: "Lora测试" }]) {
+		for (const tab of [
+			{ kind: "unet", label: "UNET测试" },
+			{ kind: "lora", label: "Lora模型测试" },
+			{ kind: "lora_strength", label: "Lora强度测试" },
+		]) {
 			const button = document.createElement("button");
 			button.type = "button";
 			button.textContent = tab.label;
@@ -3525,11 +3591,18 @@ function openLazyTestDialog(node, testButton, generateButton) {
 				filterInput.value = state.filters[state.kind] || "";
 				renderTabs();
 				renderSortButtons();
+				renderModeControls();
 				await ensureModels();
 				renderList();
 			};
 			tabs.appendChild(button);
 		}
+	}
+
+	function renderModeControls() {
+		const strengthMode = state.kind === "lora_strength";
+		strengthTools.style.display = strengthMode ? "flex" : "none";
+		selectAllButton.style.display = strengthMode ? "none" : "";
 	}
 
 	function renderSortButtons() {
@@ -3560,17 +3633,19 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	}
 
 	async function ensureModels() {
-		if (state.models[state.kind].length) {
+		const modelKind = state.kind === "lora_strength" ? "lora" : state.kind;
+		if (state.models[modelKind]?.length) {
 			return;
 		}
 		status.textContent = "正在读取模型列表...";
-		state.models[state.kind] = await fetchLazyTestModels(state.kind, node);
+		state.models[modelKind] = await fetchLazyTestModels(modelKind, node);
 	}
 
 	function renderList() {
 		const selected = new Set(selectedLazyTestModels(panel));
+		const modelKind = state.kind === "lora_strength" ? "lora" : state.kind;
 		const filtered = sortedLazyTestModels(
-			state.models[state.kind].filter((item) => modelMatchesTestFilter(item, state.filters[state.kind])),
+			state.models[modelKind].filter((item) => modelMatchesTestFilter(item, state.filters[state.kind])),
 			state.sorts[state.kind],
 		);
 		list.innerHTML = "";
@@ -3578,13 +3653,15 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			const row = document.createElement("label");
 			row.style.cssText = "display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:6px;min-height:30px;padding:5px 7px;border:1px solid #263940;border-radius:6px;background:#111d22;cursor:pointer;";
 			row.innerHTML = `
-				<input type="checkbox" data-model-name="${escapeHtml(item.name)}" ${selected.has(item.name) ? "checked" : ""}>
+				<input type="${state.kind === "lora_strength" ? "radio" : "checkbox"}" name="gjj-lazy-test-${state.kind}" data-model-name="${escapeHtml(item.name)}" ${selected.has(item.name) ? "checked" : ""}>
 				<span title="${escapeHtml(item.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;">${escapeHtml(item.name)}</span>
 				<span style="color:#92a7ad;font-variant-numeric:tabular-nums;">${escapeHtml(item.size || "")}</span>
 			`;
 			list.appendChild(row);
 		}
-		status.textContent = `${state.kind === "unet" ? "UNET" : "LoRA"}：${filtered.length} / ${state.models[state.kind].length}，已选 ${selectedLazyTestModels(panel).length}`;
+		const selectedCount = selectedLazyTestModels(panel).length;
+		const label = state.kind === "unet" ? "UNET" : (state.kind === "lora_strength" ? "LoRA强度" : "LoRA模型");
+		status.textContent = `${label}：${filtered.length} / ${state.models[modelKind].length}，已选 ${selectedCount}`;
 	}
 
 	list.addEventListener("change", renderList);
@@ -3593,6 +3670,17 @@ function openLazyTestDialog(node, testButton, generateButton) {
 		saveLazyTestFilter(node, state.kind, filterInput.value);
 		renderList();
 	});
+	const saveStrengthInputs = () => {
+		saveLazyTestStrengthSettings(node, {
+			start: parseLazyStrengthValue(strengthStartInput, lazyTestStrengthSettings(node).start),
+			end: parseLazyStrengthValue(strengthEndInput, lazyTestStrengthSettings(node).end),
+			step: parseLazyStrengthValue(strengthStepInput, lazyTestStrengthSettings(node).step),
+		});
+	};
+	for (const input of [strengthStartInput, strengthEndInput, strengthStepInput]) {
+		input.addEventListener("input", saveStrengthInputs);
+		input.addEventListener("change", saveStrengthInputs);
+	}
 	panel.querySelector("[data-select-all]").onclick = () => {
 		for (const input of panel.querySelectorAll("input[data-model-name]")) input.checked = true;
 		renderList();
@@ -3616,13 +3704,31 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	});
 	panel.querySelector("[data-ok]").onclick = async () => {
 		const models = selectedLazyTestModels(panel);
-		if (!models.length) {
+		const selectedModel = selectedLazyTestModel(panel);
+		if (state.kind === "lora_strength" && !selectedModel) {
+			status.textContent = "请选择一个 LoRA。";
+			return;
+		}
+		if (state.kind !== "lora_strength" && !models.length) {
 			status.textContent = "请至少选择一个模型。";
 			return;
 		}
 		state.filters[state.kind] = filterInput.value;
 		saveLazyTestFilter(node, state.kind, filterInput.value);
-		writeLazyTestConfig(node, { mode: state.kind, models, filter: state.filters[state.kind], requested_at: new Date().toISOString() });
+		const config = { mode: state.kind, models, filter: state.filters[state.kind], requested_at: new Date().toISOString() };
+		if (state.kind === "lora_strength") {
+			config.lora_name = selectedModel;
+			config.models = [selectedModel];
+			config.strength_start = parseLazyStrengthValue(strengthStartInput, 0.2);
+			config.strength_end = parseLazyStrengthValue(strengthEndInput, 1.2);
+			config.strength_step = parseLazyStrengthValue(strengthStepInput, 0.2);
+			saveLazyTestStrengthSettings(node, {
+				start: config.strength_start,
+				end: config.strength_end,
+				step: config.strength_step,
+			});
+		}
+		writeLazyTestConfig(node, config);
 		close();
 		const originalText = testButton.innerHTML;
 		testButton.innerHTML = "⏳ 测试中";
@@ -3646,6 +3752,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 
 	renderTabs();
 	renderSortButtons();
+	renderModeControls();
 	void ensureModels().then(renderList);
 }
 
@@ -3790,10 +3897,10 @@ function createButtons(node) {
 	// 生成图片按钮
 	const generateButton = document.createElement("button");
 	generateButton.type = "button";
-	generateButton.innerHTML = "✨ 生成";
+	generateButton.innerHTML = "▶️";
 	generateButton.title = "只执行当前节点，无需连接其他节点";
 	generateButton.style.cssText = [
-		...sharedButtonStyle,
+		...emojiButtonStyle,
 		"border:1px solid #10b981",
 		"background:linear-gradient(135deg, #064e3b, #059669)",
 		"color:#a7f3d0",
@@ -4092,11 +4199,11 @@ function createButtons(node) {
 	container.appendChild(inputSizeButton);
 	container.appendChild(seedRandomButton);
 	container.appendChild(translateButton);
-	container.appendChild(testButton);
-	container.appendChild(generateButton);
 	container.appendChild(templateButton);
 	container.appendChild(modelSettingsButton);
 	container.appendChild(settingsButton);
+	container.appendChild(testButton);
+	container.appendChild(generateButton);
 	return container;
 }
 
@@ -4106,7 +4213,7 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [32, 32, 32, 32, 32, 32, 68, 32, 32];
+	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 32, 32, 32];
 	const gap = 0;
 	let rows = 1;
 	let rowWidth = 0;

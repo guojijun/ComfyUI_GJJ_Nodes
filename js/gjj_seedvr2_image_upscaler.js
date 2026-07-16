@@ -158,13 +158,17 @@ function installModelHelpProvider(node) {
 			tooltip: "只读取放大主模型控件；不会扫描随机种子或 control_after_generate。",
 			name: "dit_model",
 			type: "seedvr2",
+			kind: "seedvr2",
+			folder: "SEEDVR2",
 		},
 		{
 			label: "SeedVR2 VAE",
 			value: String(getWidgetValue(node, "vae_model") || ""),
-			tooltip: "只读取解码模型控件；支持 models/seedvr2 子目录。",
+			tooltip: "只读取解码模型控件；支持 models/SEEDVR2 子目录。",
 			name: "vae_model",
 			type: "seedvr2",
+			kind: "seedvr2",
+			folder: "SEEDVR2",
 		},
 	].filter((item) => item.value);
 	node.__gjjHelpModelEntries = entries;

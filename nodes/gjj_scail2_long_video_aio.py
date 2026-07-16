@@ -26,6 +26,7 @@ from .common_utils.model_manager import gjjutils_model_stem_without_quant
 from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file, gjjutils_write_temp_pil_image
 from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
 from .gjj_multi_image_loader import GJJ_MultiImageLoader, resolve_selected_image_path
+from .gjj_multi_lora_chain import normalize_lora_chain_data, parse_lora_data
 from .gjj_multi_video_loader import GJJ_MultiVideoLoader
 from .gjj_multi_video_loader import (
     _audio_window_from_meta,
@@ -64,6 +65,9 @@ AUDIO_UPLOAD_API_PATH = "/gjj/scail2_long_video_aio/upload_audio"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".webm"}
 DEFAULT_NEGATIVE_PROMPT = "(worst quality, low quality, normal quality:1.3), (blurry, out of focus, pixelated, jpeg artifacts, noise, grainy:1.2), (text, watermark, logo, signature, subtitle, border, qr code:1.3), (bad anatomy, bad hands, malformed fingers, extra digits, missing digits, fused fingers, extra limbs, missing limbs, deformed body:1.2), (facial distortion, cross-eyed, asymmetric face, plastic skin, uncanny valley:1.2), (flickering, frame jitter, color flickering, inconsistent lighting, overexposed, underexposed, motion distortion, unnatural movement, rigid movement:1.3), (duplicate characters, extra people, floating objects, wrong background, style drift, 3d render, cartoon, cgi if unwanted:1.1), ugly, disfigured, mutated, morbid, gore"
 NO_LORA_TOKENS = {"不使用", "不使用lora", "不使用 lora", "no lora", "none", "off", "disable", "disabled", "🚫 不使用 lora"}
+DEFAULT_SCAIL2_ACCEL_LORA = "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
+DEFAULT_SCAIL2_DPO_LORA = "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors"
+DEFAULT_SCAIL2_RELIGHTING_LORA = "Scail-2_relighting-lora.safetensors"
 DEFAULT_QWEN2511_LIGHTNING_LORA = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 
@@ -348,6 +352,42 @@ def _lora_chain_config(*names: str) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
+def _merge_lora_chain_configs(*configs: Any) -> str:
+    items: list[dict[str, Any]] = []
+    for config in configs:
+        for item in parse_lora_data(normalize_lora_chain_data(config)):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                strength = float(item.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            items.append({
+                "enabled": item.get("enabled", True) is not False,
+                "name": name,
+                "strength": strength,
+            })
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _active_lora_count(config: Any) -> int:
+    count = 0
+    for item in parse_lora_data(normalize_lora_chain_data(config)):
+        if item.get("enabled", True) is False:
+            continue
+        if not str(item.get("name") or "").strip():
+            continue
+        try:
+            strength = float(item.get("strength", 1.0))
+        except (TypeError, ValueError):
+            strength = 1.0
+        if abs(strength) < 1e-8:
+            continue
+        count += 1
+    return count
+
+
 def _models_relative_dir(path: str) -> str:
     text = str(path or "").replace("\\", "/").strip("/")
     if text.lower().startswith("models/"):
@@ -412,12 +452,18 @@ def _pick_first_relative_model(path: str, keywords: tuple[str, ...], extensions:
     return matches[0] if matches else ""
 
 
+def _is_no_lora_choice(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    compact = "".join(text.split())
+    return text in NO_LORA_TOKENS or compact in {"不使用lora", "🚫不使用lora", "nolora", "none", "off", "disable", "disabled"}
+
+
 def _resolve_relative_model_choice(selected: Any, path: str, keywords: tuple[str, ...], extensions: tuple[str, ...]) -> str:
     candidates = _find_models_in_relative_dir(path, keywords, extensions)
     if not candidates:
         return ""
     raw = str(selected or "").strip().replace("\\", "/").strip("/")
-    if raw.lower() in NO_LORA_TOKENS:
+    if _is_no_lora_choice(raw):
         return ""
     raw_base = raw.rsplit("/", 1)[-1].lower()
     if raw:
@@ -426,6 +472,20 @@ def _resolve_relative_model_choice(selected: Any, path: str, keywords: tuple[str
             if key == raw.lower() or key.rsplit("/", 1)[-1] == raw_base:
                 return candidate
     return candidates[0]
+
+
+def _resolve_optional_lora_choice(selected: Any, keywords: tuple[str, ...]) -> str:
+    raw = str(selected or "").strip().replace("\\", "/").strip("/")
+    if not raw or _is_no_lora_choice(raw):
+        return ""
+    candidates = _find_models_in_relative_dir("models/loras", keywords, (".safetensors",))
+    raw_key = raw.lower()
+    raw_base = raw_key.rsplit("/", 1)[-1]
+    for candidate in candidates:
+        key = candidate.replace("\\", "/").lower()
+        if key == raw_key or key.rsplit("/", 1)[-1] == raw_base:
+            return candidate
+    return ""
 
 
 def _pick_scail_model(selected: str = "") -> str:
@@ -479,9 +539,10 @@ async def _get_scail2_aio_models(request):
         _model_field("vae_file", "SCAIL2基本 / VAE", "vae", "models/vae", ["wan", "2.1", "vae"], [".safetensors"], "【SCAIL2基本模型】Wan 2.1 视频 VAE，用于条件编码、续段锚定解码和最终视频帧解码。", True),
         _model_field("text_encoder_file", "SCAIL2基本 / T5", "text_encoders", "models/text_encoders", ["umt5", "xxl"], [".safetensors"], "【SCAIL2基本模型】Wan T5 文本编码器，用于正向提示词和负向提示词编码。", True),
         _model_field("clip_vision_file", "SCAIL2基本 / CLIP Vision", "clip_vision", "models/clip_vision", ["clip", "vision"], [".safetensors"], "【SCAIL2基本模型】CLIP Vision 参考图编码器，用于增强参考图语义一致性。", True),
-        _model_field("accel_lora_file", "SCAIL2基本 / 加速LoRA", "loras", "models/loras", ["wan", "lightx2v"], [".safetensors"], "【SCAIL2基本模型】LightX2V 加速 LoRA；开启“使用加速LoRA”时叠加，也可选择“不使用 LoRA”。"),
+        _model_field("accel_lora_file", "SCAIL2基本 / 加速LoRA", "loras", "models/loras", ["lightx2v", "i2v", "14b"], [".safetensors"], "【SCAIL2基本模型】LightX2V I2V 14B 加速 LoRA；开启“使用加速LoRA”时叠加，也可选择“不使用 LoRA”。"),
         _model_field("dpo_lora_file", "SCAIL2基本 / DPO LoRA", "loras", "models/loras", ["scail", "dpo"], [".safetensors"], "【SCAIL2基本模型】SCAIL-2 DPO 修正 LoRA，可增强动作迁移/人物替换效果，也可选择“不使用 LoRA”。"),
         _model_field("slop_bounce_lora_file", "SCAIL2基本 / Slop Bounce", "loras", "models/loras", ["slop", "bounce"], [".safetensors"], "【SCAIL2基本模型】弹跳 LoRA，不变脸方向，也可选择“不使用 LoRA”。"),
+        _model_field("relighting_lora_file", "SCAIL2基本 / Relighting LoRA", "loras", "models/loras", ["scail", "relighting"], [".safetensors"], "【SCAIL2基本模型】SCAIL-2 Relighting LoRA，用于增强/调整光照效果，也可选择“不使用 LoRA”。"),
         _model_field("sam3_checkpoint", "SCAIL2基本 / SAM3", "checkpoints", "models/checkpoints", ["sam3.1", "multiplex"], [".safetensors"], "【SCAIL2基本模型】SAM3.1 Multiplex checkpoint，用于目标跟踪并生成 SCAIL-2 彩色身份遮罩。", True),
         _model_field("multiview_unet", "可选多视图 / 主模型", "diffusion_models", "models/diffusion_models", ["qwen", "image", "edit", "2511"], [".safetensors", ".gguf"], "【可选多视图/多角度模型】按 GJJ_CharacterMultiViewStudio 的 2511 链路使用 Qwen Image Edit 主模型。"),
         _model_field("multiview_clip", "可选多视图 / CLIP", "text_encoders", "models/text_encoders", ["qwen", "2.5", "vl"], [".safetensors", ".gguf"], "【可选多视图/多角度模型】2511 链路使用的 Qwen 2.5 VL 文本/视觉编码器。"),
@@ -675,16 +736,16 @@ class GJJ_SCAIL2LongVideoAIO:
                 "description": "CLIP Vision 参考图编码器。连接或选择参考图时用于增强参考图语义一致性；运行时不可用会自动跳过 CLIP Vision 条件。",
             },
             {
-                "label": "【SCAIL2基本模型】文件名包含 wan + lightx2v 的加速 LoRA",
+                "label": "【SCAIL2基本模型】文件名包含 lightx2v + i2v + 14b 的加速 LoRA",
                 "path": "models/loras",
-                "filename": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+                "filename": DEFAULT_SCAIL2_ACCEL_LORA,
                 "required": False,
                 "description": "LightX2V 加速 LoRA。默认开启“使用加速LoRA”；关闭开关或在 🧠 列表选择“不使用 LoRA”后不叠加该 LoRA。",
             },
             {
                 "label": "【SCAIL2基本模型】文件名包含 scail + dpo 的 DPO LoRA",
                 "path": "models/loras",
-                "filename": "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
+                "filename": DEFAULT_SCAIL2_DPO_LORA,
                 "required": False,
                 "description": "SCAIL-2 DPO LoRA，用于增强 SCAIL2 动作迁移/人物替换效果；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
@@ -1057,6 +1118,10 @@ class GJJ_SCAIL2LongVideoAIO:
                     "STRING",
                     {"default": "", "hidden": True, "display": "hidden", "display_name": "RMBG抠图模型"},
                 ),
+                "relighting_lora_file": (
+                    "STRING",
+                    {"default": "", "hidden": True, "display": "hidden", "display_name": "Relighting LoRA"},
+                ),
             },
             "optional": {
                 "positive_prompt": (
@@ -1070,6 +1135,14 @@ class GJJ_SCAIL2LongVideoAIO:
                 "reference_image": (
                     REFERENCE_INPUT_TYPE,
                     {"display_name": "参考图", "tooltip": "非必选。连接 GJJ_BATCH_IMAGE 或 IMAGE 后，面板的参考图按钮会禁用。"},
+                ),
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "forceInput": True,
+                        "display_name": "LoRA串联配置",
+                        "tooltip": "对齐 GJJ_LoraChainConfig 输出；会追加到 SCAIL 内置 DPO / Slop Bounce / Relighting LoRA 后继续叠加。",
+                    },
                 ),
             },
             "hidden": {
@@ -1513,9 +1586,16 @@ class GJJ_SCAIL2LongVideoAIO:
         selected_vae = _resolve_relative_model_choice(kwargs.get("vae_file"), "models/vae", ("wan", "2.1", "vae"), (".safetensors",))
         selected_t5 = _resolve_relative_model_choice(kwargs.get("text_encoder_file"), "models/text_encoders", ("umt5", "xxl"), (".safetensors",))
         selected_clip_vision = _resolve_relative_model_choice(kwargs.get("clip_vision_file"), "models/clip_vision", ("clip", "vision"), (".safetensors",))
-        selected_accel_lora = _resolve_relative_model_choice(kwargs.get("accel_lora_file"), "models/loras", ("wan", "lightx2v"), (".safetensors",))
-        dpo_lora = _resolve_relative_model_choice(kwargs.get("dpo_lora_file"), "models/loras", ("scail", "dpo"), (".safetensors",))
-        slop_bounce_lora = _resolve_relative_model_choice(kwargs.get("slop_bounce_lora_file"), "models/loras", ("slop", "bounce"), (".safetensors",))
+        selected_accel_lora = _resolve_optional_lora_choice(kwargs.get("accel_lora_file"), ("lightx2v", "i2v", "14b"))
+        dpo_lora = _resolve_optional_lora_choice(kwargs.get("dpo_lora_file"), ("scail", "dpo"))
+        slop_bounce_lora = _resolve_optional_lora_choice(kwargs.get("slop_bounce_lora_file"), ("slop", "bounce"))
+        relighting_lora = _resolve_optional_lora_choice(kwargs.get("relighting_lora_file"), ("scail", "relighting"))
+        external_lora_chain = normalize_lora_chain_data(kwargs.get("lora_chain_config", "[]"))
+        merged_lora_chain = _merge_lora_chain_configs(
+            _lora_chain_config(dpo_lora, slop_bounce_lora, relighting_lora),
+            external_lora_chain,
+        )
+        external_lora_count = _active_lora_count(external_lora_chain)
         selected_sam3 = _resolve_relative_model_choice(kwargs.get("sam3_checkpoint"), "models/checkpoints", ("sam3", "multiplex"), (".safetensors",))
         kwargs["model_file"] = selected_model
         kwargs["vae_file"] = selected_vae
@@ -1524,6 +1604,7 @@ class GJJ_SCAIL2LongVideoAIO:
         kwargs["accel_lora_file"] = selected_accel_lora
         kwargs["dpo_lora_file"] = dpo_lora
         kwargs["slop_bounce_lora_file"] = slop_bounce_lora
+        kwargs["relighting_lora_file"] = relighting_lora
         kwargs["sam3_checkpoint"] = selected_sam3
         missing = []
         if not selected_vae:
@@ -1553,6 +1634,12 @@ class GJJ_SCAIL2LongVideoAIO:
             _progress(unique_id, f"3/9 Slop Bounce LoRA：{slop_bounce_lora}", 0.113)
         else:
             _progress(unique_id, "3/9 Slop Bounce LoRA 已禁用。", 0.113)
+        if relighting_lora:
+            _progress(unique_id, f"3/9 Relighting LoRA：{relighting_lora}", 0.114)
+        else:
+            _progress(unique_id, "3/9 Relighting LoRA 已禁用。", 0.114)
+        if external_lora_count:
+            _progress(unique_id, f"3/9 外接 LoRA 串联配置：{external_lora_count} 个启用项", 0.1145)
         loader = GJJ_VideoUniversalModelLoader()
         _progress(unique_id, "3/9 开始加载模型到内存/显存...", 0.115)
         def load_with_model_file(model_file: str):
@@ -1565,7 +1652,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 file_3=selected_t5,
                 file_4=selected_clip_vision,
                 file_5=selected_accel_lora,
-                lora_chain_config=_lora_chain_config(dpo_lora, slop_bounce_lora),
+                lora_chain_config=merged_lora_chain,
                 clip_type_override="auto",
                 unique_id=kwargs.get("unique_id"),
             )

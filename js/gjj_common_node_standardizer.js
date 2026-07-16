@@ -55,6 +55,7 @@ const MODEL_TREE_ICON_BY_KIND = {
 	fantasytalking_model: "🟣",
 	multitalk_model: "🟣",
 	fantasyportrait_model: "🟣",
+	seedvr2: "🟣",
 	empty: "⚫",
 };
 const MODEL_TREE_FOLDER_BY_KIND = {
@@ -66,6 +67,7 @@ const MODEL_TREE_FOLDER_BY_KIND = {
 	fantasytalking_model: "diffusion_models",
 	multitalk_model: "diffusion_models",
 	fantasyportrait_model: "diffusion_models",
+	seedvr2: "SEEDVR2",
 	checkpoint_clip: "text_encoders",
 	clip: "text_encoders",
 	wan_t5_encoder: "text_encoders",
@@ -1366,6 +1368,7 @@ function inferModelKind(entry = {}) {
 	if (text.includes("wan_t5") || text.includes("want5")) return "wan_t5_encoder";
 	if (text.includes("wan_vae") || text.includes("wanvae")) return "wan_vae";
 	if (text.includes("wanvideo") || text.includes("wan_video")) return "wanvideo_model";
+	if (text.includes("seedvr2") || text.includes("seed_vr2")) return "seedvr2";
 	if (text.includes("audio_encoder") || text.includes("音频编码")) return "audio_encoder";
 	if (text.includes("lora") || text.includes("loras") || text.includes("洛拉")) return "loras";
 	if (text.includes("checkpoint") && text.includes("clip")) return "checkpoint_clip";
@@ -1398,6 +1401,7 @@ function inferModelFolder(entry = {}, kind = "") {
 	if (text.includes("clip_vision")) return "clip_vision";
 	if (text.includes("latent_upscale")) return "latent_upscale_models";
 	if (text.includes("audio_encoder")) return "audio_encoders";
+	if (text.includes("seedvr2") || text.includes("seed_vr2")) return "SEEDVR2";
 	if (text.includes("lora")) return "loras";
 	if (text.includes("checkpoint")) return "checkpoints";
 	if (text.includes("vae")) return "vae";
