@@ -343,8 +343,14 @@ CLIP_VISION_H_NAMES = ["clip_vision_h.safetensors"]
 SAM2_BASE_PLUS_NAMES = ["sam2_hiera_base_plus.safetensors", "sam2.1_hiera_base_plus-fp16.safetensors"]
 WAN22_T2V_HIGH_NAMES = ["wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", "Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors"]
 WAN22_T2V_LOW_NAMES = ["wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", "Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors"]
-WAN22_BERNINI_S2V_HIGH_NAMES = ["wan2.2_bernini_r_high_noise_int8_convrot_s2v.safetensors"]
-WAN22_BERNINI_S2V_LOW_NAMES = ["wan2.2_bernini_r_low_noise_int8_convrot_s2v.safetensors"]
+WAN22_BERNINI_S2V_HIGH_NAMES = [
+    "wan2.2_bernini_r_high_noise_int4_convrot_s2v.safetensors",
+    "wan2.2_bernini_r_high_noise_int8_convrot_s2v.safetensors",
+]
+WAN22_BERNINI_S2V_LOW_NAMES = [
+    "wan2.2_bernini_r_low_noise_int4_convrot_s2v.safetensors",
+    "wan2.2_bernini_r_low_noise_int8_convrot_s2v.safetensors",
+]
 WAN22_I2V_HIGH_NAMES = ["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_high_noise_14B_fp16.safetensors"]
 WAN22_I2V_LOW_NAMES = ["wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp16.safetensors"]
 WAN22_REMIX_I2V_HIGH_NAMES = ["Wan2.2_Remix_NSFW_i2v_14b_high_lighting_fp8_e4m3fn_v3.0.safetensors"]
@@ -1718,6 +1724,97 @@ def _torch_dtype(dtype: str):
     }.get(value)
 
 
+def _is_int4_convrot_model(model_name: str) -> bool:
+    text = str(model_name or "").replace("\\", "/").lower()
+    return "int4_convrot" in text or "convrot_w4a4" in text or "w4a4" in text
+
+
+def _dequantize_convrot_weight_tensor(sd: dict[str, Any], prefix: str, orig_shape: tuple[int, int], dtype: Any):
+    weight_key = f"{prefix}.weight"
+    quant_key = f"{prefix}.comfy_quant"
+    scale_key = f"{prefix}.weight_scale"
+    if weight_key not in sd or quant_key not in sd or scale_key not in sd:
+        return None
+    try:
+        import torch
+        from comfy.quant_ops import QuantizedTensor, TensorCoreConvRotW4A4Layout
+
+        conf_tensor = sd[quant_key]
+        conf = json.loads(bytes(conf_tensor.detach().cpu().tolist()).decode("utf-8"))
+        if str(conf.get("format", "")).lower() != "convrot_w4a4":
+            return None
+        params_conf = conf.get("params", {})
+        if not isinstance(params_conf, dict):
+            params_conf = {}
+        params = TensorCoreConvRotW4A4Layout.Params(
+            scale=sd[scale_key],
+            convrot_groupsize=int(conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))),
+            quant_group_size=64,
+            linear_dtype=conf.get("linear_dtype", params_conf.get("linear_dtype", "int4")),
+            orig_dtype=dtype or torch.float16,
+            orig_shape=tuple(int(x) for x in orig_shape),
+        )
+        tensor = QuantizedTensor(sd[weight_key], "TensorCoreConvRotW4A4Layout", params).dequantize()
+        return tensor.to(dtype=dtype or torch.float16, device="cpu").contiguous()
+    except Exception as exc:
+        raise RuntimeError(
+            f"INT4 ConvRot 模型里的 {prefix}.weight 需要还原成普通张量，但当前环境还原失败：{exc}"
+        ) from exc
+
+
+def _patch_int4_convrot_embedding_tensors(sd: dict[str, Any]) -> bool:
+    patched = False
+    key = "trainable_cond_mask"
+    if f"{key}.comfy_quant" not in sd:
+        return False
+    try:
+        import torch
+
+        dim = None
+        head = sd.get("head.modulation")
+        if head is not None and len(getattr(head, "shape", ())) > 0:
+            dim = int(head.shape[-1])
+        patch_embedding = sd.get("patch_embedding.weight")
+        if dim is None and patch_embedding is not None and len(getattr(patch_embedding, "shape", ())) > 0:
+            dim = int(patch_embedding.shape[0])
+        q_weight = sd.get(f"{key}.weight")
+        if dim is None and q_weight is not None and len(getattr(q_weight, "shape", ())) == 2:
+            dim = int(q_weight.shape[1]) * 2
+        if q_weight is None or dim is None:
+            return False
+        dtype = getattr(head, "dtype", None) or torch.float16
+        restored = _dequantize_convrot_weight_tensor(sd, key, (int(q_weight.shape[0]), dim), dtype)
+        if restored is None:
+            return False
+        sd[f"{key}.weight"] = restored
+        sd.pop(f"{key}.weight_scale", None)
+        sd.pop(f"{key}.comfy_quant", None)
+        patched = True
+    except Exception:
+        raise
+    return patched
+
+
+def _load_int4_convrot_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
+    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+    dtype = _torch_dtype(weight_dtype)
+    sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+    patched = _patch_int4_convrot_embedding_tensors(sd)
+    model_options: dict[str, Any] = {}
+    if dtype is not None:
+        model_options["dtype"] = dtype
+    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+    if model is None:
+        raise RuntimeError(f"ERROR: Could not detect INT4 ConvRot model type of: {path}")
+    model.cached_patcher_init = (_load_int4_convrot_diffusion_model, (model_name, weight_dtype, unique_id))
+    if patched:
+        try:
+            setattr(model, "gjj_int4_convrot_embedding_patch", True)
+        except Exception:
+            pass
+    return model
+
+
 def _load_unet_gguf(model_name: str, unique_id: Any = None):
     _ensure_gguf_dependency(model_name, unique_id=unique_id, model_kind="UNET")
     try:
@@ -1803,6 +1900,8 @@ def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltx
 def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
+    if _is_int4_convrot_model(model_name):
+        return _load_int4_convrot_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     if dtype is not None:
@@ -1820,6 +1919,8 @@ def _load_unet_model(model_name: str, weight_dtype: str = "default", unique_id: 
     """Prefer the official UNETLoader shape used by the KJ workflow."""
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
+    if _is_int4_convrot_model(model_name):
+        return _load_int4_convrot_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     import importlib
 
     official_dtype = str(weight_dtype or "default").strip()

@@ -414,6 +414,7 @@ const BERNINI_AIO_WIDGETS = [
 	"bernini_audio_encoder",
 	"bernini_high_lora",
 	"bernini_low_lora",
+	"sam3_text_prompt",
 ];
 
 function aioSummary(node) {
@@ -638,7 +639,7 @@ function createBerniniAioToolbar(node) {
 	const row = document.createElement("div");
 	row.style.cssText = "display:flex;align-items:center;gap:5px;min-height:28px;overflow:hidden;flex-wrap:nowrap;";
 	row.appendChild(makeButton("🎞️", "帧率", (_event, button) => openBerniniAioPopup(node, button, "时间", [["帧率", "frame_rate", "16"], ["LRC时长", "timeline_default_duration", "2.0"]])));
-	row.appendChild(makeButton("🙂", "SAM3人脸", (_event, button) => openBerniniAioPopup(node, button, "SAM3", [["模型", "checkpoint"], ["阈值", "detection_threshold", "0.5"], ["人数", "max_faces", "8"], ["间隔", "detect_interval", "1"], ["平滑", "smoothing", "0.65"]])));
+	row.appendChild(makeButton("🙂", "SAM3人脸", (_event, button) => openBerniniAioPopup(node, button, "SAM3", [["模型", "checkpoint"], ["阈值", "detection_threshold", "0.5"], ["人数", "max_faces", "8"], ["间隔", "detect_interval", "1"], ["平滑", "smoothing", "0.65"], ["目标", "sam3_text_prompt", "head"]])));
 	row.appendChild(makeButton("🧭", "说话人映射", (_event, button) => openBerniniAioPopup(node, button, "说话人映射", [["映射", "speaker_face_map", "左边的男人=0;右边的女人=1"]])));
 	row.appendChild(makeButton("🧠", "Bernini / SAM3.1 模型", (_event, button) => openBerniniModelPopup(node, button)));
 	row.appendChild(makeButton("⚙️", "采样参数", (_event, button) => openBerniniAioPopup(node, button, "采样参数", [["步数", "steps", "4"], ["高噪", "high_steps", "2"], ["CFG", "cfg", "1"], ["种子", "seed", "999"], ["采样器", "sampler_name", "dpmpp_2m_sde"], ["调度器", "scheduler", "sgm_uniform"], ["降噪", "denoise", "1"], ["参考边", "ref_max_size", "1024"], ["VAE分块", "vae_tiling", "true"]])));

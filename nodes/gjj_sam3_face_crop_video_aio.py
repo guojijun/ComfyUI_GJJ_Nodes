@@ -68,7 +68,7 @@ BERNINI_AIO_MODEL_TREE = [
         "value": DEFAULT_CHECKPOINT,
         "kind": "checkpoint_model",
         "required": True,
-        "description": "SAM3.1 Multiplex 人脸/目标跟踪 checkpoint；AIO 先用它跟踪 face 并生成分段裁剪位置。",
+        "description": "SAM3.1 Multiplex 人脸/目标跟踪 checkpoint；Bernini AIO 默认跟踪 head 并生成分段裁剪位置。",
     },
     {
         "label": "Bernini High diffusion model",
@@ -289,6 +289,14 @@ def _extend_frames_pingpong(frames: torch.Tensor, target_count: int) -> torch.Te
 
 def _empty_frames(size: int = 64) -> torch.Tensor:
     return torch.zeros((1, int(size), int(size), 3), dtype=torch.float32)
+
+
+def _empty_frames_for_size(size: int | tuple[int, int] = 64) -> torch.Tensor:
+    if isinstance(size, (tuple, list)) and len(size) >= 2:
+        width = max(1, int(size[0]))
+        height = max(1, int(size[1]))
+        return torch.zeros((1, height, width, 3), dtype=torch.float32)
+    return _empty_frames(int(size))
 
 
 def _safe_float(value: Any, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
@@ -523,6 +531,45 @@ def _auto_face_crop_size(
     return max(32, int(rounded))
 
 
+def _fit_aligned_dimension(value: float, limit: int, multiple: int = 32) -> int:
+    safe_limit = max(1, int(limit))
+    aligned = _round_up_to_multiple(max(1.0, float(value)), int(multiple))
+    if aligned > safe_limit:
+        aligned = max(1, (safe_limit // int(multiple)) * int(multiple))
+        if aligned <= 0:
+            aligned = safe_limit
+    return max(1, min(safe_limit, int(aligned)))
+
+
+def _auto_face_crop_dimensions(
+    masks: torch.Tensor,
+    face_index: int,
+    desired_count: int,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    union = masks.any(dim=1) if masks.ndim == 4 else masks
+    widths: list[float] = []
+    heights: list[float] = []
+    for frame_index in range(int(union.shape[0])):
+        boxes = _partition_face_boxes(union[frame_index], int(width), int(height), desired_count)
+        if int(face_index) >= len(boxes):
+            continue
+        x1, y1, x2, y2 = boxes[int(face_index)]
+        widths.append(max(1.0, float(int(x2) - int(x1))))
+        heights.append(max(1.0, float(int(y2) - int(y1))))
+    if not widths or not heights:
+        fallback = _auto_face_crop_size(masks, desired_count, int(width), int(height))
+        return int(fallback), int(fallback)
+    widths.sort()
+    heights.sort()
+    percentile_index = int(round((len(widths) - 1) * 0.90))
+    sample_index = max(0, min(len(widths) - 1, percentile_index))
+    crop_w = _fit_aligned_dimension(widths[sample_index], int(width), 32)
+    crop_h = _fit_aligned_dimension(heights[sample_index], int(height), 32)
+    return int(crop_w), int(crop_h)
+
+
 def _face_boxes_from_union_masks(
     masks: torch.Tensor,
     face_index: int,
@@ -531,7 +578,7 @@ def _face_boxes_from_union_masks(
     height: int,
     square_crop: bool,
     smoothing: float,
-    crop_size: int,
+    crop_size: int | tuple[int, int],
 ) -> list[dict[str, int]]:
     raw_boxes: list[tuple[int, int, int, int] | None] = []
     union = masks.any(dim=1) if masks.ndim == 4 else masks
@@ -541,7 +588,18 @@ def _face_boxes_from_union_masks(
 
     records: list[dict[str, int]] = []
     valid_indices = [index for index, box in enumerate(raw_boxes) if box is not None]
-    side = max(16, min(int(crop_size), int(width), int(height)))
+    if isinstance(crop_size, (tuple, list)) and len(crop_size) >= 2:
+        target_w = max(1, min(int(crop_size[0]), int(width)))
+        target_h = max(1, min(int(crop_size[1]), int(height)))
+    else:
+        side = max(1, min(int(crop_size), int(width), int(height)))
+        target_w = side
+        target_h = side
+    if square_crop:
+        side = max(target_w, target_h)
+        side = max(1, min(int(side), int(width), int(height)))
+        target_w = side
+        target_h = side
     for index, raw_box in enumerate(raw_boxes):
         if raw_box is None and valid_indices:
             nearest = min(valid_indices, key=lambda item: abs(item - index))
@@ -551,10 +609,10 @@ def _face_boxes_from_union_masks(
         fx1, fy1, fx2, fy2 = raw_box
         center_x = (int(fx1) + int(fx2)) * 0.5
         center_y = (int(fy1) + int(fy2)) * 0.5
-        x1 = max(0, min(int(width) - side, int(round(center_x - side * 0.5))))
-        y1 = max(0, min(int(height) - side, int(round(center_y - side * 0.5))))
-        x2 = x1 + side
-        y2 = y1 + side
+        x1 = max(0, min(int(width) - target_w, int(round(center_x - target_w * 0.5))))
+        y1 = max(0, min(int(height) - target_h, int(round(center_y - target_h * 0.5))))
+        x2 = x1 + target_w
+        y2 = y1 + target_h
         records.append(
             {
                 "frame": int(index),
@@ -608,9 +666,15 @@ def _partition_face_boxes(
 def _crop_frames_from_box_records(
     images: torch.Tensor,
     boxes: list[dict[str, int]],
-    output_size: int,
+    output_size: int | tuple[int, int],
 ) -> torch.Tensor:
-    target = max(16, int(output_size))
+    if isinstance(output_size, (tuple, list)) and len(output_size) >= 2:
+        target_w = max(1, int(output_size[0]))
+        target_h = max(1, int(output_size[1]))
+    else:
+        target = max(16, int(output_size))
+        target_w = target
+        target_h = target
     crops: list[torch.Tensor] = []
     for index, box in enumerate(boxes):
         x1 = max(0, min(int(images.shape[2]) - 1, int(box.get("x", 0))))
@@ -618,7 +682,7 @@ def _crop_frames_from_box_records(
         x2 = max(x1 + 1, min(int(images.shape[2]), x1 + int(box.get("width", images.shape[2]))))
         y2 = max(y1 + 1, min(int(images.shape[1]), y1 + int(box.get("height", images.shape[1]))))
         crop = images[index : index + 1, y1:y2, x1:x2, :3].movedim(-1, 1)
-        crop = F.interpolate(crop, size=(target, target), mode="bilinear", align_corners=False)
+        crop = F.interpolate(crop, size=(target_h, target_w), mode="bilinear", align_corners=False)
         crops.append(crop.movedim(1, -1).squeeze(0).contiguous())
     return torch.stack(crops, dim=0).clamp(0.0, 1.0).contiguous()
 
@@ -929,7 +993,7 @@ def _build_timeline_selection(
     face_outputs: list[torch.Tensor],
     face_positions: list[list[dict[str, int]]],
     ranges: list[dict[str, Any]],
-    output_size: int,
+    output_size: int | tuple[int, int],
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     selected_frames: list[torch.Tensor] = []
     positions: list[dict[str, Any]] = []
@@ -959,7 +1023,7 @@ def _build_timeline_selection(
     if selected_frames:
         tensor = torch.stack(selected_frames, dim=0).clamp(0.0, 1.0).contiguous()
     else:
-        tensor = _empty_frames(int(output_size))
+        tensor = _empty_frames_for_size(output_size)
     return tensor, {"frame_count": int(len(selected_frames)), "positions": positions, "ranges": ranges}
 
 
@@ -2308,6 +2372,15 @@ class GJJ_BerniniSpeakerSegmentAIO:
                         "tooltip": "Low 加速 LoRA；列表按去量化/扩展名后的 bernini+lightx2v+low 关键词过滤。",
                     },
                 ),
+                "sam3_text_prompt": (
+                    "STRING",
+                    {
+                        "default": "head",
+                        "multiline": False,
+                        "display_name": "SAM3目标关键词",
+                        "tooltip": "SAM3.1 Multiplex 跟踪目标关键词。默认 head；可改为 face、people 等英文目标。",
+                    },
+                ),
             },
             "optional": {
                 "timeline_text": (
@@ -2358,6 +2431,7 @@ class GJJ_BerniniSpeakerSegmentAIO:
                 kwargs.get("bernini_audio_encoder", ""),
                 kwargs.get("bernini_high_lora", ""),
                 kwargs.get("bernini_low_lora", ""),
+                kwargs.get("sam3_text_prompt", "head"),
             ],
             ensure_ascii=False,
         )
@@ -2395,6 +2469,7 @@ class GJJ_BerniniSpeakerSegmentAIO:
         bernini_audio_encoder=AUTO_MODEL_CHOICE,
         bernini_high_lora=AUTO_MODEL_CHOICE,
         bernini_low_lora=AUTO_MODEL_CHOICE,
+        sam3_text_prompt="head",
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
@@ -2450,19 +2525,23 @@ class GJJ_BerniniSpeakerSegmentAIO:
         if not speakers:
             speakers = ["单人"]
 
-        _send_status(unique_id, "1/6 加载 SAM3 并跟踪人脸...", 0.03)
+        _send_status(unique_id, "1/6 加载 SAM3 并跟踪目标...", 0.03)
         detection_threshold_value = _safe_float(detection_threshold, 0.5, 0.0, 1.0)
         max_faces_value = _safe_int(max_faces, 8, 1, MAX_FACE_OUTPUTS)
         detect_interval_value = _safe_int(detect_interval, 1, 1, 999)
         smoothing_value = _safe_float(smoothing, 0.65, 0.0, 0.95)
         model, sam_clip, resolved = _load_checkpoint(checkpoint, unique_id=unique_id)
-        conditioning = _encode_text(sam_clip, (_translate_prompts(["face"], unique_id=unique_id)[0] or "face").strip())
+        sam3_target = str(sam3_text_prompt or "head").strip() or "head"
+        translated_sam3_target = (_translate_prompts([sam3_target], unique_id=unique_id)[0] or sam3_target).strip() or "head"
+        conditioning = _encode_text(sam_clip, translated_sam3_target)
         try:
             track_data = _track_route(source, model, conditioning, detection_threshold_value, max_faces_value, detect_interval_value)
             track_data = _normalize_track_frame_count(track_data, source)
             track_data = _prepare_track_data(track_data, "", "从左到右")
         except Exception as exc:
-            raise RuntimeError(f"SAM3 人脸跟踪失败。\n模型：{resolved}\n详细错误：{exc}") from exc
+            raise RuntimeError(
+                f"SAM3 目标跟踪失败。\n模型：{resolved}\n原始目标：{sam3_target}\n翻译目标：{translated_sam3_target}\n详细错误：{exc}"
+            ) from exc
 
         masks = _unpack_sam3_masks(track_data)
         if masks is None:
@@ -2473,23 +2552,31 @@ class GJJ_BerniniSpeakerSegmentAIO:
             mode="nearest",
         ).view(int(masks.shape[0]), int(masks.shape[1]), int(height), int(width)) > 0.5
         face_count = min(max(1, len(speakers)), MAX_FACE_OUTPUTS, int(masks.shape[1]))
-        auto_crop_size = _auto_face_crop_size(masks, face_count, int(width), int(height))
+        auto_crop_sizes = [
+            _auto_face_crop_dimensions(masks, face_index, face_count, int(width), int(height))
+            for face_index in range(face_count)
+        ]
         frame_outputs = []
         face_positions: list[list[dict[str, int]]] = []
         for face_index in range(face_count):
+            crop_size = auto_crop_sizes[face_index]
             boxes = _face_boxes_from_union_masks(
                 masks,
                 face_index,
                 face_count,
                 int(width),
                 int(height),
-                True,
+                False,
                 smoothing_value,
-                auto_crop_size,
+                crop_size,
             )
-            frame_outputs.append(_crop_frames_from_box_records(source, boxes, auto_crop_size))
+            frame_outputs.append(_crop_frames_from_box_records(source, boxes, crop_size))
             face_positions.append(boxes)
         frame_outputs, face_positions = _sort_faces_left_to_right(frame_outputs, face_positions)
+        auto_crop_sizes = [
+            (int(frames.shape[2]), int(frames.shape[1]))
+            for frames in frame_outputs[:face_count]
+        ]
 
         manual_map = _parse_speaker_face_map(speaker_face_map, face_count)
         speaker_to_face: dict[str, int] = {}
@@ -2576,7 +2663,7 @@ class GJJ_BerniniSpeakerSegmentAIO:
                         frame_outputs,
                         face_positions,
                         [item],
-                        auto_crop_size,
+                        auto_crop_sizes[int(item["face_index"])] if int(item["face_index"]) < len(auto_crop_sizes) else 64,
                     )
                     positions = _minimal_position_payload(selected_payload.get("positions") or [])
                     if int(segment_faces.shape[0]) <= 0 or not positions:
@@ -2680,7 +2767,8 @@ class GJJ_BerniniSpeakerSegmentAIO:
                         "start_frame": int(item["start_frame"]),
                         "end_frame": int(item["end_frame"]),
                         "frame_count": int(seg_len),
-                        "crop_size": int(auto_crop_size),
+                        "crop_width": int(seg_w),
+                        "crop_height": int(seg_h),
                         "temp_saved": True,
                     }
                 )
