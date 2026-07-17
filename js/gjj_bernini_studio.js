@@ -215,6 +215,8 @@ const FIXED_CHOICES = {
 	image_resize_mode: new Set(["拉伸", "补边", "留边", "裁剪"]),
 	image_resize_align: new Set(["上", "下", "左", "右", "中"]),
 };
+const MODEL_WIDGETS = new Set(["high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora"]);
+const MISSING_MODEL_PREFIX = "未找到匹配模型：";
 const BUTTON_CHOICE_GROUPS = {
 	image_resize_mode: [
 		["拉伸", "拉伸"],
@@ -455,6 +457,9 @@ function normalizeValue(name, input) {
 		return integer ? Math.round(clamped) : clamped;
 	}
 	const text = String(input ?? "");
+	if (MODEL_WIDGETS.has(name)) {
+		if (!text.trim() || text.trim().startsWith(MISSING_MODEL_PREFIX)) return String(fallback ?? "");
+	}
 	if (name === "format_name" && ["true", "false", "1", "0", "null", "none", ""].includes(text.trim().toLowerCase())) {
 		return String(fallback ?? "");
 	}
@@ -470,7 +475,7 @@ function normalizeValue(name, input) {
 function collectValues(node) {
 	const values = {};
 	for (const name of BACKEND_WIDGETS) {
-		values[name] = normalizeValue(name, widget(node, name)?.value);
+		values[name] = legalWidgetValue(node, name, widget(node, name)?.value);
 	}
 	return values;
 }
@@ -482,7 +487,7 @@ function applyValues(node, values) {
 		for (const name of BACKEND_WIDGETS) {
 			const target = widget(node, name);
 			if (!target) continue;
-			const nextValue = normalizeValue(name, values[name]);
+			const nextValue = legalWidgetValue(node, name, values[name]);
 			target.value = nextValue;
 			if (target.inputEl && "value" in target.inputEl) target.inputEl.value = nextValue;
 			if (target.element && "value" in target.element) target.element.value = nextValue;
@@ -1478,6 +1483,39 @@ function widgetChoices(target) {
 	return Array.isArray(choices) ? choices.map(String) : [];
 }
 
+function widgetDefaultModel(target, name) {
+	return String(target?.options?.gjj_default_model || DEFAULT_VALUES[name] || "");
+}
+
+function legalWidgetValue(node, name, input) {
+	const text = normalizeValue(name, input);
+	if (!MODEL_WIDGETS.has(name)) return text;
+	const target = widget(node, name);
+	const choices = widgetChoices(target);
+	if (!choices.length) return text || widgetDefaultModel(target, name);
+	if (!text || text.startsWith(MISSING_MODEL_PREFIX) || !choices.includes(text)) return choices[0];
+	return text;
+}
+
+function isMissingModelValue(node, name, currentValue = null) {
+	if (!MODEL_WIDGETS.has(name)) return false;
+	const target = widget(node, name);
+	if (!target?.options?.gjj_missing_model) return false;
+	const current = String(currentValue ?? value(node, name, widgetDefaultModel(target, name)) ?? "");
+	return current === widgetDefaultModel(target, name);
+}
+
+function updateMissingModelControl(node, name, control, currentValue = null) {
+	if (!control || !MODEL_WIDGETS.has(name)) return;
+	const missing = isMissingModelValue(node, name, currentValue);
+	control.classList.toggle("gjj-bs-missing-model", missing);
+	if (missing) {
+		const target = widget(node, name);
+		const label = target?.options?.display_name || target?.label || name;
+		control.title = `${label} 缺失：${widgetDefaultModel(target, name)}。请放入对应模型目录后刷新 ComfyUI。`;
+	}
+}
+
 function setBooleanButtonState(control, enabled) {
 	const label = control?.dataset?.label || "";
 	if (!control) return;
@@ -1551,13 +1589,22 @@ function makeControl(node, name) {
 		bindButton(control, () => setValue(node, name, !Boolean(value(node, name, DEFAULT_VALUES[name]))));
 	} else if (choices.length) {
 		control = document.createElement("select");
+		const defaultModel = widgetDefaultModel(target, name);
+		const nextValue = legalWidgetValue(node, name, target.value);
+		const missingModel = isMissingModelValue(node, name, nextValue);
 		for (const choice of choices) {
 			const option = document.createElement("option");
 			option.value = choice;
 			option.textContent = choice;
+			if (missingModel && choice === defaultModel) {
+				option.dataset.missingModel = "true";
+				option.style.color = "#ff8b8b";
+			}
 			control.appendChild(option);
 		}
-		control.value = String(target.value ?? "");
+		if (nextValue !== target.value) setValue(node, name, nextValue);
+		control.value = String(nextValue ?? "");
+		updateMissingModelControl(node, name, control, nextValue);
 		control.addEventListener("change", () => setValue(node, name, control.value));
 	} else if (typeof target.value === "number") {
 		control = document.createElement("input");
@@ -1673,6 +1720,7 @@ function ensurePanelStyle() {
 		.gjj-bs-heading{font-weight:800;color:#9ed6df;margin-bottom:5px}.gjj-bs-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}.gjj-bs-field{display:flex;align-items:center;gap:8px;min-width:0}.gjj-bs-field.wide{align-items:flex-start;flex-direction:column}.gjj-bs-field>span{flex:0 0 92px;color:#aebbc0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 		.gjj-bs-control{flex:1;min-width:0;width:100%;border:1px solid #40515a;border-radius:5px;background:#0e1519;color:#eaf2f3;padding:5px 7px}.gjj-bs-control:is(textarea){min-height:64px;resize:vertical}
 		select.gjj-bs-control{border-color:#3c7f91;background:#122932;color:#f0fbff;font-weight:650;box-shadow:0 0 0 1px rgba(77,171,193,.18) inset;cursor:pointer}select.gjj-bs-control:hover{border-color:#62b9cb;background:#15323d}select.gjj-bs-control:focus{outline:none;border-color:#8bd8e8;box-shadow:0 0 0 1px rgba(139,216,232,.6),0 0 0 3px rgba(35,130,154,.28)}select.gjj-bs-control option{background:#102229;color:#f0fbff}
+		select.gjj-bs-control.gjj-bs-missing-model{border-color:#ff5f5f;background:#321819;color:#ffb4b4;box-shadow:0 0 0 1px rgba(255,95,95,.45) inset,0 0 0 3px rgba(255,95,95,.12)}select.gjj-bs-control.gjj-bs-missing-model option[data-missing-model="true"]{color:#ff8b8b}
 		.gjj-bs-segment-control{display:flex;align-items:center;gap:6px;padding:0;border:0;background:transparent}.gjj-bs-segment-control>button{flex:1 1 0;min-width:0;min-height:32px;border:1px solid #40515a;border-radius:6px;background:#152026;color:#b9c8cc;font-weight:750;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.gjj-bs-choice-control>button{flex:0 1 auto;min-width:44px;padding:0 10px}.gjj-bs-segment-control>button.active{border-color:#24c68b;background:#164d3c;color:#eafff7}.gjj-bs-segment-control>button:disabled{cursor:not-allowed;opacity:.52}
 		.gjj-bs-boolean-row{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}.gjj-bs-boolean-row>.gjj-bs-control{flex:1 1 0;min-width:0;width:auto;min-height:28px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#152026;color:#b9c8cc}.gjj-bs-boolean-row>.gjj-bs-control.active{border-color:#24c68b;background:#164d3c;color:#eafff7}
 		.gjj-bs-material-timeline{display:flex;flex-direction:column;gap:6px;width:100%;padding:8px 10px;border:1px solid #3c515a;border-radius:6px;background:#0d151a;pointer-events:auto}.gjj-bs-material-head{display:flex;align-items:center;justify-content:space-between;color:#dce7e2;font-size:14px;line-height:18px}.gjj-bs-material-hint{color:#8fa4ac;font-size:13px}.gjj-bs-material-strip{position:relative;height:154px;overflow-x:auto;overflow-y:hidden;border:1px solid #253841;border-radius:4px;background:#05090c;scrollbar-gutter:stable}.gjj-bs-material-row{position:relative;display:inline-flex;align-items:stretch;min-width:max-content;height:132px;padding:3px 3px 19px 3px}.gjj-bs-material-frame{position:relative;width:168px;height:132px;flex:0 0 168px;border:1px solid #283d46;background:#071015;display:flex;align-items:center;justify-content:center;overflow:visible}.gjj-bs-material-frame:first-child{border-radius:3px 0 0 3px}.gjj-bs-material-frame:last-child{border-radius:0 3px 3px 0}.gjj-bs-material-frame.dragging{opacity:.55}.gjj-bs-material-frame.drop-target{outline:2px solid #7ed6a7;outline-offset:-2px}.gjj-bs-material-frame>img{display:block;width:100%;height:100%;object-fit:cover;background:#05090c}.gjj-bs-material-badge{position:absolute;right:7px;top:7px;width:20px;height:20px;border-radius:5px;border:1px solid rgba(255,255,255,.42);background:#4c8eea;color:#fff;font-size:14px;line-height:18px;text-align:center;box-shadow:0 1px 5px rgba(0,0,0,.35);z-index:4}.gjj-bs-material-splitter{position:absolute;top:0;bottom:0;right:0;width:62px;transform:translateX(31px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:5;pointer-events:none}.gjj-bs-material-line{position:absolute;top:0;bottom:0;left:50%;width:4px;transform:translateX(-2px);background:rgba(126,214,167,.9);box-shadow:0 0 8px rgba(126,214,167,.75);cursor:ew-resize;pointer-events:auto}.gjj-bs-material-frame-label{position:relative;z-index:6;padding:2px 6px;border-radius:999px;background:rgba(5,9,12,.78);color:#dce7e2;font-size:12px;line-height:16px;box-shadow:0 1px 5px rgba(0,0,0,.45);user-select:none;cursor:ew-resize;pointer-events:auto}.gjj-bs-material-prompt-badge{position:absolute;left:0;right:0;bottom:0;padding:4px 8px;box-sizing:border-box;background:rgba(5,9,12,.45);color:#aebfc3;font-size:14px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text;pointer-events:auto;z-index:3}.gjj-bs-material-prompt-badge:hover{color:#f3fff9;background:rgba(5,9,12,.62)}.gjj-bs-material-editor{position:fixed;z-index:100002;display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid #45606a;border-radius:8px;background:#10191e;color:#dce7e9;box-shadow:0 12px 32px rgba(0,0,0,.45);font:12px/1.4 system-ui,'Microsoft YaHei',sans-serif;box-sizing:border-box}.gjj-bs-material-editor-title{font-weight:800;color:#d8f5f3}.gjj-bs-material-editor textarea{width:100%;height:88px;box-sizing:border-box;border:1px solid #42606c;border-radius:7px;background:#071015;color:#e7f3f3;font-size:13px;line-height:1.45;padding:7px;resize:vertical}.gjj-bs-material-editor-buttons{display:flex;justify-content:flex-end;gap:6px}.gjj-bs-material-editor button{min-height:24px;padding:0 10px;border:1px solid #45606a;border-radius:6px;background:#15242b;color:#dce7e9;cursor:pointer}.gjj-bs-material-editor button:hover{border-color:#24c68b;color:#fff}.gjj-bs-material-empty{color:#8fa4ac;font-size:12px;padding:56px 10px}
@@ -1913,7 +1961,8 @@ function syncPanel(node) {
 	const sourceControlsSize = sourceSizeComesFromInput(node);
 	for (const [name, control] of state.controls || []) {
 		if (!control) continue;
-		const current = value(node, name, DEFAULT_VALUES[name]);
+		const current = legalWidgetValue(node, name, value(node, name, DEFAULT_VALUES[name]));
+		if (MODEL_WIDGETS.has(name) && current !== value(node, name, DEFAULT_VALUES[name])) setValue(node, name, current);
 		const focused = document.activeElement === control;
 		if (control.dataset?.resizeModeControl === "true") {
 			setResizeModeControlState(control, Boolean(current));
@@ -1925,6 +1974,7 @@ function syncPanel(node) {
 			if (control.type === "checkbox") control.checked = Boolean(current);
 			else control.value = String(current ?? "");
 		}
+		updateMissingModelControl(node, name, control, current);
 		const templateControlled = Boolean(String(sources[name] || "").trim());
 		const sizeControlled = sourceControlsSize && (name === "width" || name === "height");
 		const controlled = templateControlled || sizeControlled;

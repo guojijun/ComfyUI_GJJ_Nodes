@@ -30,7 +30,7 @@ from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
 from .gjj_wanvideo_decode import GJJ_WanVideoDecode
 from .common_utils.dependency_checker import build_node_help_payload, make_missing_model_spec
-from .common_utils.model_manager import gjjutils_find_model_list
+from .common_utils.model_manager import gjjutils_model_search_state
 
 try:
     from .gjj_bernini_runtime_patch import apply_gjj_bernini_patches
@@ -199,19 +199,20 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def _model_choices(folder_type: str, keywords: str | list[str], default: str, match_mode: str = "AND") -> list[str]:
+def _model_choice_state(folder_type: str, keywords: str | list[str], default: str, match_mode: str = "AND") -> dict[str, Any]:
     try:
-        matches = gjjutils_find_model_list(keywords, folder_type, match_mode)
+        state = gjjutils_model_search_state(keywords, folder_type, default, match_mode)
     except Exception:
-        matches = []
-    folder_names = set(_filename_list(folder_type))
-    choices = _dedupe([*matches])
-    if default in folder_names and default not in choices:
-        choices.insert(0, default)
-    if choices:
-        return choices
-    label = " + ".join(str(item) for item in (keywords if isinstance(keywords, list) else [keywords]))
-    return [f"未找到匹配模型：{folder_type} / {label}"]
+        state = {"models": [], "value": default, "default_model": default, "missing": bool(default)}
+    choices = _dedupe([str(item) for item in state.get("models") or []])
+    default_text = str(state.get("default_model") or default or "").strip()
+    if not choices and default_text:
+        choices = [default_text]
+    state["models"] = choices
+    state["value"] = choices[0] if choices else default_text
+    state["default_model"] = default_text
+    state["missing"] = bool(state.get("missing")) and bool(default_text) and choices == [default_text]
+    return state
 
 
 def _is_missing_model_choice(value: Any) -> bool:
@@ -1547,12 +1548,18 @@ class GJJ_BerniniStudio:
 
     @classmethod
     def INPUT_TYPES(cls):
-        high_models = _model_choices("diffusion_models", ["bernini", "high"], DEFAULT_HIGH_MODEL)
-        low_models = _model_choices("diffusion_models", ["bernini", "low"], DEFAULT_LOW_MODEL)
-        vae_models = _model_choices("vae", ["wan","2.1", "vae"], DEFAULT_VAE)
-        clip_models = _model_choices("text_encoders", ["umt5", "xxl"], DEFAULT_CLIP)
-        high_loras = _model_choices("loras", ["bernini", "lightx2v","high"], DEFAULT_HIGH_LORA)
-        low_loras = _model_choices("loras", ["bernini", "lightx2v","low"], DEFAULT_LOW_LORA)
+        high_model_state = _model_choice_state("diffusion_models", ["bernini", "high"], DEFAULT_HIGH_MODEL)
+        low_model_state = _model_choice_state("diffusion_models", ["bernini", "low"], DEFAULT_LOW_MODEL)
+        vae_state = _model_choice_state("vae", ["wan", "2.1", "vae"], DEFAULT_VAE)
+        clip_state = _model_choice_state("text_encoders", ["umt5", "xxl"], DEFAULT_CLIP)
+        high_lora_state = _model_choice_state("loras", ["bernini", "lightx2v", "high"], DEFAULT_HIGH_LORA)
+        low_lora_state = _model_choice_state("loras", ["bernini", "lightx2v", "low"], DEFAULT_LOW_LORA)
+        high_models = high_model_state["models"]
+        low_models = low_model_state["models"]
+        vae_models = vae_state["models"]
+        clip_models = clip_state["models"]
+        high_loras = high_lora_state["models"]
+        low_loras = low_lora_state["models"]
         return {
             "required": {},
             "optional": {
@@ -1584,12 +1591,12 @@ class GJJ_BerniniStudio:
                 "vae_tiling": ("BOOLEAN", {"default": True, "display_name": "VAE分块", "tooltip": "解码时启用 VAE 分块，省显存但可能更慢。"}),
                 "tile_x": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "display_name": "分块宽", "tooltip": "VAE 分块宽度。"}),
                 "tile_y": ("INT", {"default": 272, "min": 40, "max": 2048, "step": 8, "display_name": "分块高", "tooltip": "VAE 分块高度。"}),
-                "high_model": (high_models, {"default": high_models[0], "display_name": "High模型", "tooltip": "使用 GJJ 公共模型搜索函数在 diffusion_models 中搜索 Bernini High 模型，并返回可选列表。"}),
-                "low_model": (low_models, {"default": low_models[0], "display_name": "Low模型", "tooltip": "使用 GJJ 公共模型搜索函数在 diffusion_models 中搜索 Bernini Low 模型，并返回可选列表。"}),
-                "vae_name": (vae_models, {"default": vae_models[0], "display_name": "VAE", "tooltip": "使用 GJJ 公共模型搜索函数在 models/vae 中搜索 Wan VAE，并返回可选列表。"}),
-                "clip_name": (clip_models, {"default": clip_models[0], "display_name": "CLIP编码器", "tooltip": "使用 GJJ 公共模型搜索函数在 text_encoders 中搜索 UMT5 XXL 编码器，并返回可选列表。"}),
-                "high_lora": (high_loras, {"default": high_loras[0], "display_name": "High LoRA", "tooltip": "使用 GJJ 公共模型搜索函数在 loras 中搜索 High 加速 LoRA，并返回可选列表。"}),
-                "low_lora": (low_loras, {"default": low_loras[0], "display_name": "Low LoRA", "tooltip": "使用 GJJ 公共模型搜索函数在 loras 中搜索 Low 加速 LoRA，并返回可选列表。"}),
+                "high_model": (high_models, {"default": high_model_state["value"], "display_name": "High模型", "tooltip": "使用 GJJ 公共模型搜索函数在 diffusion_models 中搜索 Bernini High 模型，并返回可选列表。", "gjj_default_model": DEFAULT_HIGH_MODEL, "gjj_missing_model": high_model_state["missing"]}),
+                "low_model": (low_models, {"default": low_model_state["value"], "display_name": "Low模型", "tooltip": "使用 GJJ 公共模型搜索函数在 diffusion_models 中搜索 Bernini Low 模型，并返回可选列表。", "gjj_default_model": DEFAULT_LOW_MODEL, "gjj_missing_model": low_model_state["missing"]}),
+                "vae_name": (vae_models, {"default": vae_state["value"], "display_name": "VAE", "tooltip": "使用 GJJ 公共模型搜索函数在 models/vae 中搜索 Wan VAE，并返回可选列表。", "gjj_default_model": DEFAULT_VAE, "gjj_missing_model": vae_state["missing"]}),
+                "clip_name": (clip_models, {"default": clip_state["value"], "display_name": "CLIP编码器", "tooltip": "使用 GJJ 公共模型搜索函数在 text_encoders 中搜索 UMT5 XXL 编码器，并返回可选列表。", "gjj_default_model": DEFAULT_CLIP, "gjj_missing_model": clip_state["missing"]}),
+                "high_lora": (high_loras, {"default": high_lora_state["value"], "display_name": "High LoRA", "tooltip": "使用 GJJ 公共模型搜索函数在 loras 中搜索 High 加速 LoRA，并返回可选列表。", "gjj_default_model": DEFAULT_HIGH_LORA, "gjj_missing_model": high_lora_state["missing"]}),
+                "low_lora": (low_loras, {"default": low_lora_state["value"], "display_name": "Low LoRA", "tooltip": "使用 GJJ 公共模型搜索函数在 loras 中搜索 Low 加速 LoRA，并返回可选列表。", "gjj_default_model": DEFAULT_LOW_LORA, "gjj_missing_model": low_lora_state["missing"]}),
                 "translation_enabled": ("BOOLEAN", {"default": False, "display_name": "翻译提示词", "tooltip": "开启后复用 GJJ CLIP 面板翻译。"}),
                 "segment_frames": ("INT", {"default": 21, "min": 5, "max": 225, "step": 4, "display_name": "每段帧数", "tooltip": "长视频每段生成帧数，自动规范为 4n+1。推荐 25、49、81、121、169、225。"}),
                 "keep_model": ("BOOLEAN", {"default": False, "display_name": "保持模型", "tooltip": "低显存默认关闭；开启后相同模型配置会复用已加载的 High/Low/VAE/CLIP，速度更快但占用更多显存。"}),

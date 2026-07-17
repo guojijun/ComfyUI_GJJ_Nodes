@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+breast_size_v2_krea2_loraholic	breast_size_v2_krea2_loraholic	胸部滑块		14	Krea2胸部大小调节，越大越趋动画风格	
 360-degree-rotation-microwave-rotation-wan21-i2v-lora	360-degree-rotation-microwave-rotation-wan21-i2v-lora	360环视	r0t4tion 360 degrees rotation	1		
 depth-control-lora	depth-control-lora	深度控制		1	Krea2深度控制	https://huggingface.co/stabilityai/control-lora
 flux-multi-angles-v2-72poses-comfy	flux-multi-angles-v2-72poses-comfy	多角度	<sks> [azimuth] [elevation] [distance]	1.0	72个精准的相机姿势——对相机位置的精确控制	https://huggingface.co/lovis93/Flux-2-Multi-Angles-LoRA-v2
