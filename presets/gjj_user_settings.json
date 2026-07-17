@@ -129,5 +129,97 @@
   },
   "text_merge": {
     "template_text": "{文本1}{文本2}"
+  },
+  "node_color_theme": {
+    "version": 1,
+    "selected_style_id": "vivid",
+    "custom_palette": [
+      "#00AEEF",
+      "#6F5CC4",
+      "#B8741A",
+      "#2E8C61",
+      "#38A86B",
+      "#3F8F88",
+      "#7D56A8",
+      "#7A5FA8",
+      "#2B86A6",
+      "#9B6A22",
+      "#6B6FAF",
+      "#59636B"
+    ],
+    "big_categories": [
+      {
+        "id": "input",
+        "label": "输入",
+        "styleId": "vivid",
+        "color": "#3B82F6"
+      },
+      {
+        "id": "guide",
+        "label": "引导",
+        "styleId": "vivid",
+        "color": "#8B5CF6"
+      },
+      {
+        "id": "sample",
+        "label": "采样",
+        "styleId": "vivid",
+        "color": "#20242C"
+      },
+      {
+        "id": "output",
+        "label": "输出",
+        "styleId": "vivid",
+        "color": "#10B981"
+      },
+      {
+        "id": "decode",
+        "label": "解码",
+        "styleId": "vivid",
+        "color": "#06B6D4"
+      },
+      {
+        "id": "encode",
+        "label": "编码",
+        "styleId": "vivid",
+        "color": "#22D3EE"
+      },
+      {
+        "id": "model",
+        "label": "模型",
+        "styleId": "vivid",
+        "color": "#7C3AED"
+      },
+      {
+        "id": "prompt",
+        "label": "提示",
+        "styleId": "vivid",
+        "color": "#D946EF"
+      },
+      {
+        "id": "image",
+        "label": "图像",
+        "styleId": "vivid",
+        "color": "#0EA5E9"
+      },
+      {
+        "id": "video",
+        "label": "视频",
+        "styleId": "vivid",
+        "color": "#F59E0B"
+      },
+      {
+        "id": "audio",
+        "label": "音频",
+        "styleId": "vivid",
+        "color": "#84CC16"
+      },
+      {
+        "id": "tool",
+        "label": "工具",
+        "styleId": "vivid",
+        "color": "#64748B"
+      }
+    ]
   }
 }

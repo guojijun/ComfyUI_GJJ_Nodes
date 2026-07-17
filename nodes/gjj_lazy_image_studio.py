@@ -121,6 +121,8 @@ DEFAULT_UNET_DTYPE = "default"
 DEFAULT_MODEL_SOURCE = "UNET 主模型"
 MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]
 DEFAULT_CHECKPOINT_NAME = ""
+DEFAULT_DEVICE_PREFERENCE = "GPU优先"
+DEVICE_PREFERENCE_OPTIONS = [DEFAULT_DEVICE_PREFERENCE, "CPU优先"]
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
@@ -924,6 +926,58 @@ def _as_bool(value: Any) -> bool:
         return bool(value)
     text = str(value or "").strip().lower()
     return text in {"true", "1", "yes", "on", "启用", "开启"}
+
+
+def _normalize_device_preference(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if "cpu" in text or "内存" in text or "卸载" in text:
+        return "CPU优先"
+    return DEFAULT_DEVICE_PREFERENCE
+
+
+def _runtime_prefers_gpu(value: Any) -> bool:
+    return _normalize_device_preference(value) == DEFAULT_DEVICE_PREFERENCE
+
+
+def _load_patcher_gpu(patcher: Any) -> None:
+    if patcher is None:
+        return
+    comfy.model_management.load_model_gpu(patcher)
+
+
+def _offload_patcher_cpu(patcher: Any) -> None:
+    if patcher is None or not hasattr(patcher, "unpatch_model"):
+        return
+    try:
+        patcher.unpatch_model(comfy.model_management.unet_offload_device())
+    except TypeError:
+        patcher.unpatch_model(device_to=comfy.model_management.unet_offload_device())
+
+
+def _prepare_model_device(model: Any, device_preference: Any) -> None:
+    try:
+        if _runtime_prefers_gpu(device_preference):
+            _load_patcher_gpu(model)
+        else:
+            _offload_patcher_cpu(model)
+    except Exception as exc:
+        print(f"[GJJ_LazyImageStudio] 设备偏好处理主模型失败，继续使用 ComfyUI 默认调度：{exc}")
+
+
+def _prepare_vae_device(vae: Any, device_preference: Any) -> None:
+    try:
+        patcher = getattr(vae, "patcher", None)
+        if _runtime_prefers_gpu(device_preference):
+            if patcher is not None:
+                comfy.model_management.load_models_gpu([patcher])
+        else:
+            if patcher is not None:
+                _offload_patcher_cpu(patcher)
+            model = getattr(vae, "first_stage_model", None)
+            if model is not None and hasattr(model, "to"):
+                model.to(comfy.model_management.vae_offload_device())
+    except Exception as exc:
+        print(f"[GJJ_LazyImageStudio] 设备偏好处理 VAE 失败，继续使用 ComfyUI 默认调度：{exc}")
 
 
 def _stable_json(value: Any) -> str:
@@ -2281,6 +2335,17 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "device_preference": (
+                        DEVICE_PREFERENCE_OPTIONS,
+                        {
+                            "default": DEFAULT_DEVICE_PREFERENCE,
+                            "display_name": "GPU/CPU优先",
+                            "tooltip": "GPU优先会在采样前主动把主模型加载到显卡，优先发挥 GPU 性能；CPU优先适合显存紧张时使用。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -2971,6 +3036,7 @@ class GJJ_LazyImageStudio:
         use_input_image_size=True,
         model_source=DEFAULT_MODEL_SOURCE,
         ckpt_name=DEFAULT_CHECKPOINT_NAME,
+        device_preference=DEFAULT_DEVICE_PREFERENCE,
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -3006,12 +3072,14 @@ class GJJ_LazyImageStudio:
         use_input_image_size = _unwrap_list_input(use_input_image_size)
         model_source = _unwrap_list_input(model_source)
         ckpt_name = _unwrap_list_input(ckpt_name)
+        device_preference = _unwrap_list_input(device_preference)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
         keep_model_loaded = _as_bool(keep_model_loaded)
         disable_equal_reference_canvas = _as_bool(disable_equal_reference_canvas)
         use_input_image_size = _as_bool(use_input_image_size)
+        device_preference = _normalize_device_preference(device_preference)
 
         test_config_data: dict[str, Any] = {}
         if str(test_config or "").strip():
@@ -3037,6 +3105,8 @@ class GJJ_LazyImageStudio:
                                     lora_data = str(props.get("lora_data", ""))
                                 if not str(ckpt_name or "").strip():
                                     ckpt_name = str(props.get("ckpt_name", ""))
+                                if not str(device_preference or "").strip():
+                                    device_preference = str(props.get("device_preference", DEFAULT_DEVICE_PREFERENCE))
                                 if not str(model_source or "").strip() or (
                                     str(model_source or "") == DEFAULT_MODEL_SOURCE
                                     and str(props.get("model_source", "")) == "底模 checkpoint"
@@ -3168,6 +3238,7 @@ class GJJ_LazyImageStudio:
                             use_input_image_size=use_input_image_size,
                             model_source=model_source,
                             ckpt_name=ckpt_name,
+                            device_preference=device_preference,
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
@@ -3268,6 +3339,7 @@ class GJJ_LazyImageStudio:
                 "vae_name": str(vae_name or ""),
                 "model_source": str(model_source or DEFAULT_MODEL_SOURCE),
                 "ckpt_name": str(ckpt_name or ""),
+                "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),
@@ -3420,6 +3492,7 @@ class GJJ_LazyImageStudio:
                     "model_sampling": str(preset.get("model_sampling", "")),
                     "model_shift": float(preset.get("model_shift", 0.0)),
                     "cfg_norm_strength": float(preset.get("cfg_norm_strength", 0.0)),
+                    "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 }
             )
             effective_steps_for_cache = _resolve_effective_steps(int(steps), preset)
@@ -3446,6 +3519,7 @@ class GJJ_LazyImageStudio:
                     "use_input_image_size": bool(use_input_image_size),
                     "pairs": _pairs_signature(pairs),
                     "mask": _tensor_signature(mask) if mask is not None else "",
+                    "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 }
             )
             if keep_model_loaded:
@@ -3500,6 +3574,13 @@ class GJJ_LazyImageStudio:
                     model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
                 if keep_model_loaded:
                     self._remember_runtime(runtime_key, model, clip, vae)
+
+            if _runtime_prefers_gpu(device_preference):
+                _send_status(unique_id, "3/6 GPU优先：准备主模型进入显卡...")
+                _prepare_model_device(model, device_preference)
+            else:
+                _send_status(unique_id, "3/6 CPU优先：按低显存卸载策略准备模型...")
+                _prepare_model_device(model, device_preference)
 
             prompt_count = len(prompt_items)
             supports_reference_edit = _supports_multi_reference_edit(
@@ -3655,6 +3736,7 @@ class GJJ_LazyImageStudio:
                         enabled=True,
                     )
                 sample_seed = int(seed) + prompt_index if prompt_count > 1 else int(seed)
+                _prepare_model_device(sample_model, device_preference)
                 if boogu_turbo_sample:
                     _send_status(
                         unique_id,
@@ -3725,6 +3807,7 @@ class GJJ_LazyImageStudio:
 
                 _send_status(unique_id, f"6/6 解码输出图像{status_suffix}...")
                 sampled_latent = _limit_latent_batch(sampled_latent, int(batch_size))
+                _prepare_vae_device(vae, device_preference)
                 output_image = VAEDecode().decode(vae, sampled_latent)[0]
                 return output_image, local_width, local_height
 
@@ -3778,6 +3861,7 @@ class GJJ_LazyImageStudio:
                 "vae_name": str(resolved_vae_name or vae_name or ""),
                 "model_source": str(model_source or DEFAULT_MODEL_SOURCE),
                 "ckpt_name": str(ckpt_name or ""),
+                "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),

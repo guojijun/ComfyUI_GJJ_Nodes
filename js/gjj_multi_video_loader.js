@@ -233,6 +233,7 @@ function serializeSelection(selection) {
 		(selection || []).map((item) => ({
 			filename: String(item?.filename || ""),
 			subfolder: String(item?.subfolder || ""),
+			type: String(item?.type || "input"),
 		})),
 	);
 }
@@ -259,7 +260,7 @@ function serializeInputs(inputs) {
 }
 
 function itemKey(item) {
-	return `${String(item?.subfolder || "")}/${String(item?.filename || "")}`;
+	return `${String(item?.type || "input")}:${String(item?.subfolder || "")}/${String(item?.filename || "")}`;
 }
 
 function selectedFromNode(node, serializedNode = null) {
@@ -453,10 +454,11 @@ async function fetchOptions() {
 	}
 }
 
-function inputVideoUrl(item) {
+function sourceVideoUrl(item) {
 	if (!item?.filename) return "";
+	const mediaType = String(item?.type || "input");
 	const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
-	return api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=input&subfolder=${encodeURIComponent(item.subfolder || "")}${randParam}`);
+	return api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(mediaType)}&subfolder=${encodeURIComponent(item.subfolder || "")}${randParam}`);
 }
 
 function imageDataToUrl(item) {
@@ -489,7 +491,7 @@ async function fetchMediaMeta(item) {
 	const hasUsableMeta = Number(item.width || 0) > 0 && Number(item.height || 0) > 0 && Number(item.fps || 0) > 0;
 	if (hasUsableMeta) return item;
 	try {
-		const url = api.apiURL(`${VIDEO_META_API_PATH}?filename=${encodeURIComponent(item.filename)}&subfolder=${encodeURIComponent(item.subfolder || "")}`);
+		const url = api.apiURL(`${VIDEO_META_API_PATH}?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "input")}&subfolder=${encodeURIComponent(item.subfolder || "")}`);
 		const response = await fetch(url);
 		const payload = await response.json().catch(() => ({}));
 		if (!response.ok) throw new Error(payload?.error || "解析媒体信息失败");
@@ -1350,6 +1352,20 @@ function addSelection(node, item) {
 	renderAll(node);
 }
 
+function findMatchingInputOptionForFile(node, file) {
+	const state = ensureState(node);
+	const options = Array.isArray(state.allOptions) && state.allOptions.length ? state.allOptions : state.options;
+	const filename = String(file?.name || "");
+	const size = Number(file?.size || 0);
+	if (!filename || !(size > 0)) return null;
+	const matches = (options || []).filter((item) => (
+		String(item?.type || "input") === "input"
+		&& String(item?.filename || "") === filename
+		&& Number(item?.size || 0) === size
+	));
+	return matches.length === 1 ? matches[0] : null;
+}
+
 function removeSelection(node, item) {
 	const state = ensureState(node);
 	state.selection = state.selection.filter((selected) => itemKey(selected) !== itemKey(item));
@@ -1443,7 +1459,7 @@ function makeSelectedCard(node, item, options = {}) {
 		].join(";");
 
 	const video = document.createElement("video");
-	video.src = inputVideoUrl(item);
+	video.src = sourceVideoUrl(item);
 	video.muted = true;
 	video.controls = isSinglePreview;
 	video.preload = "metadata";
@@ -1519,7 +1535,7 @@ function makeSelectedCard(node, item, options = {}) {
 			"cursor:zoom-out",
 		].join(";");
 		const zoomedVideo = document.createElement("video");
-		zoomedVideo.src = inputVideoUrl(item);
+		zoomedVideo.src = sourceVideoUrl(item);
 		zoomedVideo.muted = true;
 		zoomedVideo.controls = true;
 		zoomedVideo.playsInline = true;
@@ -1889,10 +1905,35 @@ async function uploadFiles(node, files) {
 		.sort((a, b) => FILE_NAME_COLLATOR.compare(a.name || "", b.name || ""));
 	if (!list.length) return;
 	const state = ensureState(node);
-	setSummary(node, `正在导入 ${list.length} 个视频...`);
+	if (!Array.isArray(state.allOptions) || !state.allOptions.length) {
+		await refreshOptions(node);
+	}
+
+	const filesToUpload = [];
+	let directCount = 0;
+	for (const file of list) {
+		const directInput = findMatchingInputOptionForFile(node, file);
+		if (directInput && state.selection.length < MAX_SELECTED_VIDEOS && !isSelected(state, directInput)) {
+			state.selection.push(directInput);
+			directCount += 1;
+		} else {
+			filesToUpload.push(file);
+		}
+	}
+	if (directCount > 0) {
+		state.executedFrames = [];
+		state.executedFrameCount = 0;
+		scheduleNativePreviewClear(node);
+		syncProperties(node);
+		renderAll(node);
+		setSummary(node, `已直接使用 input 中的 ${directCount} 个视频。`);
+		syncPanelValuesFromSelection(node);
+	}
+	if (!filesToUpload.length) return;
+	setSummary(node, `正在导入 ${filesToUpload.length} 个视频...`);
 
 	const uploaded = [];
-	for (const file of list) {
+	for (const file of filesToUpload) {
 		const formData = new FormData();
 		formData.append("video", file, file.name);
 		const response = await fetch(api.apiURL(VIDEO_UPLOAD_API_PATH), { method: "POST", body: formData });

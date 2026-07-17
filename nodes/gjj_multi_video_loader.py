@@ -273,6 +273,7 @@ def list_input_videos() -> list[dict[str, Any]]:
                 "subfolder": subfolder,
                 "label": f"{subfolder}/{file_path.name}" if subfolder else file_path.name,
                 "type": "input",
+                "size": int(file_path.stat().st_size),
                 **meta,
             }
         )
@@ -357,7 +358,7 @@ def parse_selected_videos(raw_value: Any) -> list[dict[str, str]]:
         return []
 
     cleaned: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for item in parsed:
         if not isinstance(item, dict):
             continue
@@ -365,11 +366,11 @@ def parse_selected_videos(raw_value: Any) -> list[dict[str, str]]:
         subfolder = str(item.get("subfolder") or "").strip().replace("\\", "/")
         if not filename:
             continue
-        key = (subfolder, filename)
+        media_type = str(item.get("type") or "input").strip() or "input"
+        key = (media_type, subfolder, filename)
         if key in seen:
             continue
         seen.add(key)
-        media_type = str(item.get("type") or "input").strip() or "input"
         cleaned.append({"filename": filename, "subfolder": subfolder, "type": media_type})
     return cleaned[:MAX_SELECTED_VIDEOS]
 

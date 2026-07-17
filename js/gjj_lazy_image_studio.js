@@ -31,6 +31,7 @@ const TEST_CONFIG_WIDGET_NAME = "test_config";
 const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
 const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
+const DEVICE_PREFERENCE_WIDGET_NAME = "device_preference";
 const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
 const MODEL_SOURCE_WIDGET_NAME = "model_source";
 const CHECKPOINT_WIDGET_NAME = "ckpt_name";
@@ -91,6 +92,22 @@ const KEEP_MODEL_BUTTON_STYLES = {
 		border: "#c084fc",
 		color: "#f5f3ff",
 		title: "模型保持已开启：执行后保留当前模型、CLIP 和 VAE，适合连续生成。",
+	},
+};
+const DEVICE_PREFERENCE_STYLES = {
+	gpu: {
+		bg: "linear-gradient(135deg, #047857, #059669)",
+		hover: "linear-gradient(135deg, #059669, #10b981)",
+		border: "#34d399",
+		color: "#ecfdf5",
+		title: "GPU优先：采样前主动把主模型加载到显卡，优先发挥 GPU 性能。",
+	},
+	cpu: {
+		bg: "linear-gradient(135deg, #334155, #475569)",
+		hover: "linear-gradient(135deg, #475569, #64748b)",
+		border: "#94a3b8",
+		color: "#f8fafc",
+		title: "CPU优先：尽量把模型留在卸载设备，适合显存紧张时使用。",
 	},
 };
 const MODEL_SETTINGS_BUTTON_STYLES = {
@@ -156,7 +173,7 @@ const REFERENCE_BROWSER_BUTTON_STYLES = {
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
-const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
+const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, DEVICE_PREFERENCE_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
 const STRICT_MODEL_WIDGETS = new Set(["unet_name", "clip_name1", "vae_name", CHECKPOINT_WIDGET_NAME]);
 const MODEL_PANEL_WIDGETS = new Set([
 	MODEL_SOURCE_WIDGET_NAME,
@@ -165,6 +182,7 @@ const MODEL_PANEL_WIDGETS = new Set([
 	"unet_dtype",
 	"clip_name1",
 	"vae_name",
+	DEVICE_PREFERENCE_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
 ]);
 const OTHER_PANEL_WIDGETS = new Set([
@@ -192,6 +210,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	LORA_CHAIN_CONFIG_INPUT,
 	LORA_DATA_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
+	DEVICE_PREFERENCE_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 	"prompt",
@@ -448,6 +467,7 @@ const PANEL_SYNC_WIDGETS = [
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
+	DEVICE_PREFERENCE_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -469,6 +489,7 @@ const RESTORE_WIDGET_TYPES = {
 	denoise: "number",
 	grow_mask_by: "number",
 	[KEEP_MODEL_WIDGET_NAME]: "toggle",
+	[DEVICE_PREFERENCE_WIDGET_NAME]: "combo",
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: "toggle",
 	[MODEL_SOURCE_WIDGET_NAME]: "combo",
 	[CHECKPOINT_WIDGET_NAME]: "combo",
@@ -518,6 +539,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
+	DEVICE_PREFERENCE_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -544,6 +566,7 @@ const DEFAULT_PARAM_VALUES = {
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: true,
 	[MODEL_SOURCE_WIDGET_NAME]: "UNET 主模型",
 	[CHECKPOINT_WIDGET_NAME]: "",
+	[DEVICE_PREFERENCE_WIDGET_NAME]: "GPU优先",
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -1380,6 +1403,36 @@ function keepModelEnabled(node) {
 	return boolValue(params[KEEP_MODEL_WIDGET_NAME]);
 }
 
+function devicePreferenceValue(node) {
+	const widget = getWidget(node, DEVICE_PREFERENCE_WIDGET_NAME);
+	const params = node?.properties?.[PARAM_VALUES_PROPERTY] || {};
+	const raw = widget ? widget.value : params[DEVICE_PREFERENCE_WIDGET_NAME];
+	return String(raw || "GPU优先").includes("CPU") ? "CPU优先" : "GPU优先";
+}
+
+function setDevicePreference(node, value) {
+	if (!node) return;
+	const nextValue = String(value || "").includes("CPU") ? "CPU优先" : "GPU优先";
+	node.properties = node.properties || {};
+	node.properties[PARAM_VALUES_PROPERTY] = {
+		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
+		[DEVICE_PREFERENCE_WIDGET_NAME]: nextValue,
+	};
+	const widget = getWidget(node, DEVICE_PREFERENCE_WIDGET_NAME);
+	if (widget) {
+		widget.value = nextValue;
+		const index = getWidgetIndex(node, DEVICE_PREFERENCE_WIDGET_NAME);
+		if (Array.isArray(node.widgets_values) && index >= 0) {
+			node.widgets_values[index] = nextValue;
+		}
+		try { widget.callback?.(nextValue); } catch (_) {}
+	}
+	writeLiveParamSnapshot(node);
+	syncFloatingPanels(node);
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
 function setKeepModelEnabled(node, enabled) {
 	if (!node) return;
 	const value = Boolean(enabled);
@@ -2134,6 +2187,93 @@ function createFloatingControl(node, name) {
 	return row;
 }
 
+function createPanelButtonGroup(node, name, choices, getValue, setValue) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return null;
+	}
+	const wrap = document.createElement("div");
+	wrap.dataset.widgetName = name;
+	wrap.style.cssText = "display:grid;grid-template-columns:130px minmax(0,1fr);gap:8px;align-items:center;font-size:12px;color:#c7d5d8";
+	const label = document.createElement("span");
+	label.textContent = widgetDisplayLabel(widget, name);
+	label.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+	const group = document.createElement("div");
+	group.style.cssText = `display:grid;grid-template-columns:repeat(${choices.length},minmax(0,1fr));gap:6px;min-width:0;width:100%`;
+	for (const choice of choices) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.dataset.value = String(choice.value);
+		button.textContent = String(choice.label);
+		button.title = choice.title || "";
+		button.style.cssText = [
+			"height:30px",
+			"min-width:0",
+			"border:1px solid #41535b",
+			"border-radius:6px",
+			"background:#11181c",
+			"color:#dce7e2",
+			"cursor:pointer",
+			"font-size:12px",
+			"font-weight:800",
+			"overflow:hidden",
+			"text-overflow:ellipsis",
+			"white-space:nowrap",
+			"padding:0 8px",
+		].join(";");
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			setValue(node, choice.value);
+			wrap.__gjjRefresh?.();
+		});
+		group.appendChild(button);
+	}
+	wrap.__gjjRefresh = () => {
+		const currentValue = String(getValue(node));
+		for (const button of group.querySelectorAll("button[data-value]")) {
+			const active = String(button.dataset.value || "") === currentValue;
+			const choice = choices.find((item) => String(item.value) === String(button.dataset.value || "")) || {};
+			const style = choice.style || {};
+			button.style.background = active ? style.bg || "linear-gradient(135deg,#064e3b,#047857)" : "#11181c";
+			button.style.borderColor = active ? style.border || "#34d399" : "#41535b";
+			button.style.color = active ? style.color || "#ecfdf5" : "#dce7e2";
+			button.__gjjLazyDefaultBg = active ? style.bg : "#11181c";
+			button.__gjjLazyHoverBg = active ? style.hover : "#1f2933";
+			button.setAttribute("aria-pressed", active ? "true" : "false");
+		}
+	};
+	wrap.append(label, group);
+	wrap.__gjjRefresh();
+	return wrap;
+}
+
+function createKeepModelPanelButton(node) {
+	return createPanelButtonGroup(
+		node,
+		KEEP_MODEL_WIDGET_NAME,
+		[
+			{ value: true, label: "保持模型", title: KEEP_MODEL_BUTTON_STYLES.on.title, style: KEEP_MODEL_BUTTON_STYLES.on },
+			{ value: false, label: "不保持", title: KEEP_MODEL_BUTTON_STYLES.off.title, style: KEEP_MODEL_BUTTON_STYLES.off },
+		],
+		(currentNode) => keepModelEnabled(currentNode),
+		(currentNode, value) => setKeepModelEnabled(currentNode, Boolean(value)),
+	);
+}
+
+function createDevicePreferencePanelButton(node) {
+	return createPanelButtonGroup(
+		node,
+		DEVICE_PREFERENCE_WIDGET_NAME,
+		[
+			{ value: "GPU优先", label: "GPU优先", title: DEVICE_PREFERENCE_STYLES.gpu.title, style: DEVICE_PREFERENCE_STYLES.gpu },
+			{ value: "CPU优先", label: "CPU优先", title: DEVICE_PREFERENCE_STYLES.cpu.title, style: DEVICE_PREFERENCE_STYLES.cpu },
+		],
+		(currentNode) => devicePreferenceValue(currentNode),
+		setDevicePreference,
+	);
+}
+
 function ensureFloatingPanels(node) {
 	if (!node.__gjjLazyModelFloatingPanel) {
 		node.__gjjLazyModelFloatingPanel = createFloatingPanel(node, "model", "🧠 模型参数");
@@ -2426,12 +2566,12 @@ function renderModelPanelControls(node, body) {
 	});
 	tree.style.maxHeight = "320px";
 	body.appendChild(tree);
-	for (const name of [KEEP_MODEL_WIDGET_NAME]) {
-		const control = createFloatingControl(node, name);
-		if (control) {
-			control.__gjjRefresh?.();
-			body.appendChild(control);
+	for (const control of [createDevicePreferencePanelButton(node), createKeepModelPanelButton(node)]) {
+		if (!control) {
+			continue;
 		}
+		control.__gjjRefresh?.();
+		body.appendChild(control);
 	}
 }
 
@@ -2690,6 +2830,7 @@ function coerceParamValue(name, value, node) {
 	if (name === SEED_CONTROL_KEY) return isSeedControlValue(value) ? textValue(value) : fallbackParamValue(node, name);
 	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
+	if (name === DEVICE_PREFERENCE_WIDGET_NAME) return String(value || "").includes("CPU") ? "CPU优先" : "GPU优先";
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
 	if (STRICT_MODEL_WIDGETS.has(name)) return normalizeStrictModelParam(node, name, value);

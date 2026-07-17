@@ -353,6 +353,16 @@ WAN22_BERNINI_S2V_LOW_NAMES = [
 ]
 WAN22_I2V_HIGH_NAMES = ["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_high_noise_14B_fp16.safetensors"]
 WAN22_I2V_LOW_NAMES = ["wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp16.safetensors"]
+WAN22_IS2V_HIGH_NAMES = [
+    "wan2.2_is2v_high_noise_14B_int8_convrot.safetensors",
+    "wan2.2_is2v_high_noise_14B_int4_convrot.safetensors",
+    "wan2.2_is2v_high_noise_14B_fp16.safetensors",
+]
+WAN22_IS2V_LOW_NAMES = [
+    "wan2.2_is2v_low_noise_14B_int8_convrot.safetensors",
+    "wan2.2_is2v_low_noise_14B_int4_convrot.safetensors",
+    "wan2.2_is2v_low_noise_14B_fp16.safetensors",
+]
 WAN22_REMIX_I2V_HIGH_NAMES = ["Wan2.2_Remix_NSFW_i2v_14b_high_lighting_fp8_e4m3fn_v3.0.safetensors"]
 WAN22_REMIX_I2V_LOW_NAMES = ["Wan2.2_Remix_NSFW_i2v_14b_low_lighting_fp8_e4m3fn_v3.0.safetensors"]
 WAN22_SMOOTHMIX_I2V_HIGH_NAMES = [
@@ -422,19 +432,6 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("low_lora", "Low LoRA名称", "loras", "name", ["Bernini-R","lightx2v","low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
-    "wan22_Dancer": {
-        "label": "Wan2.2 Dancer 舞蹈视频生成",
-        "clip_type": "wan",
-        "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "dancer","global"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan","dancer","local"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
-            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
-            S("high_lora", "High LoRA名称", "loras", "name", ["lightx2v", "i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["lightx2v","i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
-        ],
-    },
     "wan22_bernini_s2v": {
         "label": "Bernini-R S2V 音频驱动",
         "clip_type": "wan",
@@ -446,6 +443,33 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("audio_encoder", "音频编码器", "audio_encoders", "audio_encoder", ["wav2vec2"], preferred_name="wav2vec2_large_english_fp16.safetensors", official_names=["wav2vec2_large_english_fp16.safetensors"]),
             S("high_lora", "High LoRA名称", "loras", "name", ["Bernini-R", "lightx2v", "high"], preferred_name=WAN22_BERNINI_R_LORA_HIGH_NAMES[0], official_names=WAN22_BERNINI_R_LORA_HIGH_NAMES),
             S("low_lora", "Low LoRA名称", "loras", "name", ["Bernini-R", "lightx2v", "low"], preferred_name=WAN22_BERNINI_R_LORA_LOW_NAMES[0], official_names=WAN22_BERNINI_R_LORA_LOW_NAMES),
+        ],
+    },
+    "wan22_is2v": {
+        "label": "Wan2.2 IS2V 图片音频生视频",
+        "clip_type": "wan",
+        "slots": [
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "is2v", "high"], preferred_name=WAN22_IS2V_HIGH_NAMES[0], official_names=WAN22_IS2V_HIGH_NAMES, loader="unet"),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "is2v", "low"], preferred_name=WAN22_IS2V_LOW_NAMES[0], official_names=WAN22_IS2V_LOW_NAMES, loader="unet"),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("audio_encoder", "音频编码器", "audio_encoders", "audio_encoder", ["wav2vec2"], preferred_name="wav2vec2_large_english_fp16.safetensors", official_names=["wav2vec2_large_english_fp16.safetensors"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["Bernini-R", "lightx2v", "high"], preferred_name=WAN22_BERNINI_R_LORA_HIGH_NAMES[0], official_names=WAN22_BERNINI_R_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["Bernini-R", "lightx2v", "low"], preferred_name=WAN22_BERNINI_R_LORA_LOW_NAMES[0], official_names=WAN22_BERNINI_R_LORA_LOW_NAMES),
+        ],
+    },
+    "wan22_Dancer": {
+        "label": "Wan2.2 Dancer 舞蹈视频生成",
+        "clip_type": "wan",
+        "slots": [
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "dancer","global"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan","dancer","local"], preferred_name="wan2.2_dancer_14b_global_fp8_scaled.safetensors", official_names="wan2.2_dancer_14b_global_fp8_scaled.safetensors", loader="unet"),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["lightx2v", "i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["lightx2v","i2v","cfg_step_distill"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_remix": {
@@ -1724,9 +1748,17 @@ def _torch_dtype(dtype: str):
     }.get(value)
 
 
-def _is_int4_convrot_model(model_name: str) -> bool:
+def _convrot_quantization_from_model_name(model_name: str) -> str:
     text = str(model_name or "").replace("\\", "/").lower()
-    return "int4_convrot" in text or "convrot_w4a4" in text or "w4a4" in text
+    if "int4_convrot" in text or "convrot_w4a4" in text or "w4a4" in text:
+        return "int4"
+    if "int8_convrot" in text:
+        return "int8"
+    return ""
+
+
+def _is_convrot_quantized_model(model_name: str) -> bool:
+    return bool(_convrot_quantization_from_model_name(model_name))
 
 
 def _dequantize_convrot_weight_tensor(sd: dict[str, Any], prefix: str, orig_shape: tuple[int, int], dtype: Any):
@@ -1737,7 +1769,15 @@ def _dequantize_convrot_weight_tensor(sd: dict[str, Any], prefix: str, orig_shap
         return None
     try:
         import torch
-        from comfy.quant_ops import QuantizedTensor, TensorCoreConvRotW4A4Layout
+        from comfy.quant_ops import QuantizedTensor
+        try:
+            from comfy.quant_ops import TensorCoreConvRotW4A4Layout
+        except ImportError as exc:
+            raise RuntimeError(
+                "当前 ComfyUI 不支持 INT4 ConvRot W4A4。"
+                "请使用带 TensorCoreConvRotW4A4Layout 的 ComfyUI/ComfyUI-Quant 版本，"
+                "或改选 int8_convrot / fp16 模型。"
+            ) from exc
 
         conf_tensor = sd[quant_key]
         conf = json.loads(bytes(conf_tensor.detach().cpu().tolist()).decode("utf-8"))
@@ -1795,7 +1835,7 @@ def _patch_int4_convrot_embedding_tensors(sd: dict[str, Any]) -> bool:
     return patched
 
 
-def _load_int4_convrot_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
+def _load_convrot_quantized_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
@@ -1805,8 +1845,9 @@ def _load_int4_convrot_diffusion_model(model_name: str, weight_dtype: str = "def
         model_options["dtype"] = dtype
     model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
     if model is None:
-        raise RuntimeError(f"ERROR: Could not detect INT4 ConvRot model type of: {path}")
-    model.cached_patcher_init = (_load_int4_convrot_diffusion_model, (model_name, weight_dtype, unique_id))
+        quant_label = (_convrot_quantization_from_model_name(model_name) or "ConvRot").upper()
+        raise RuntimeError(f"ERROR: Could not detect {quant_label} model type of: {path}")
+    model.cached_patcher_init = (_load_convrot_quantized_diffusion_model, (model_name, weight_dtype, unique_id))
     if patched:
         try:
             setattr(model, "gjj_int4_convrot_embedding_patch", True)
@@ -1900,8 +1941,8 @@ def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltx
 def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
-    if _is_int4_convrot_model(model_name):
-        return _load_int4_convrot_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
+    if _is_convrot_quantized_model(model_name):
+        return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     if dtype is not None:
@@ -1919,8 +1960,8 @@ def _load_unet_model(model_name: str, weight_dtype: str = "default", unique_id: 
     """Prefer the official UNETLoader shape used by the KJ workflow."""
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
-    if _is_int4_convrot_model(model_name):
-        return _load_int4_convrot_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
+    if _is_convrot_quantized_model(model_name):
+        return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     import importlib
 
     official_dtype = str(weight_dtype or "default").strip()
