@@ -131,6 +131,29 @@ const SIZE_SOURCE_BUTTON_STYLES = {
 		color: "#ffffff",
 	},
 };
+const REFERENCE_BROWSER_BUTTON_STYLES = {
+	empty: {
+		bg: "linear-gradient(135deg, #1f2933, #374151)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#55636f",
+		color: "#cbd5e1",
+		title: "暂无可浏览的参考图片。",
+	},
+	ready: {
+		bg: "linear-gradient(135deg, #0f766e, #14b8a6)",
+		hover: "linear-gradient(135deg, #0d9488, #2dd4bf)",
+		border: "#5eead4",
+		color: "#ecfeff",
+		title: "打开参考图片预览。",
+	},
+	disabled: {
+		bg: "linear-gradient(135deg, #374151, #4b5563)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#6b7280",
+		color: "#9ca3af",
+		title: "批量图片输入已连接，浏览参考图片按钮暂不可用。",
+	},
+};
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
 const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
@@ -762,6 +785,131 @@ function setBatchLinkButtonState(node) {
 	button.__gjjLazyHoverBg = hoverBackground;
 }
 
+function parseReferenceImageSelection(rawValue) {
+	try {
+		const parsed = JSON.parse(String(rawValue || "[]"));
+		return Array.isArray(parsed) ? parsed.filter((item) => item?.filename) : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function referenceImageViewUrl(item) {
+	if (item?.url) {
+		const url = String(item.url);
+		if (/^(?:https?:|blob:|data:)/i.test(url)) {
+			return url;
+		}
+	}
+	const filename = String(item?.filename || "").trim();
+	if (!filename) {
+		return "";
+	}
+	const type = String(item?.type || "input");
+	const subfolder = String(item?.subfolder || "");
+	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
+	const path = `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${previewFormat}`;
+	return api?.apiURL ? api.apiURL(path) : path;
+}
+
+function splitReferenceInputPath(value) {
+	let text = String(value || "").trim().replace(/\\/g, "/");
+	const annotated = text.match(/\s+\[(input|output|temp)\]$/i);
+	const type = annotated ? annotated[1].toLowerCase() : "input";
+	if (annotated) {
+		text = text.slice(0, annotated.index).trim();
+	}
+	if (!text) {
+		return null;
+	}
+	const parts = text.split("/").filter(Boolean);
+	if (["input", "output", "temp"].includes(String(parts[0] || "").toLowerCase())) {
+		parts.shift();
+	}
+	const filename = parts.pop() || "";
+	if (!filename) {
+		return null;
+	}
+	return { filename, subfolder: parts.join("/"), type };
+}
+
+function sourceNodeImageWidgetItem(sourceNode) {
+	const widgets = Array.isArray(sourceNode?.widgets) ? sourceNode.widgets : [];
+	const preferred = widgets.find((widget) => ["image", "filename"].includes(String(widget?.name || "").toLowerCase()));
+	const fallback = widgets.find((widget) => {
+		const name = String(widget?.name || "").toLowerCase();
+		const value = String(widget?.value || "");
+		return /(?:image|filename|file|图片|图像)/i.test(name) && /\.(?:png|jpe?g|webp|bmp|gif|avif|tiff?)(?:\s+\[(?:input|output|temp)\])?$/i.test(value);
+	});
+	return splitReferenceInputPath((preferred || fallback)?.value);
+}
+
+function linkedReferenceImageUrls(node) {
+	const urls = [];
+	for (const input of getImageInputs(node)) {
+		if (String(input?.name || "") === PRIMARY_IMAGE_INPUT || input?.link == null) {
+			continue;
+		}
+		const link = graphLinkById(input.link);
+		const sourceNode = link?.origin_id != null ? app.graph?.getNodeById?.(Number(link.origin_id)) : null;
+		let item = null;
+		if (sourceNode?.comfyClass === "GJJ_MultiImageLoader") {
+			const raw = String(getWidget(sourceNode, "selected_images")?.value || sourceNode.properties?.selected_images || "[]");
+			const selection = parseReferenceImageSelection(raw);
+			const sourceIndex = Math.max(0, Number(link.origin_slot || 1) - 1);
+			item = selection[sourceIndex];
+		} else {
+			item = sourceNodeImageWidgetItem(sourceNode);
+		}
+		const url = referenceImageViewUrl(item);
+		if (url) {
+			urls.push(url);
+		}
+	}
+	return urls;
+}
+
+function storedReferenceImageUrls(node) {
+	const widgetValue = getWidget(node, BATCH_SOURCE_WIDGET)?.value;
+	const raw = widgetValue || node?.properties?.[BATCH_SOURCE_WIDGET] || "";
+	return parseReferenceImageSelection(raw).map(referenceImageViewUrl).filter(Boolean);
+}
+
+function referenceBrowserUrls(node) {
+	return [...storedReferenceImageUrls(node), ...linkedReferenceImageUrls(node)];
+}
+
+function primaryBatchImageLinked(node) {
+	return Boolean(getInput(node, PRIMARY_IMAGE_INPUT)?.link != null);
+}
+
+function applyReferenceBrowserButtonState(node) {
+	const button = node?.__gjjReferenceBrowserButton;
+	if (!button) {
+		return;
+	}
+	const disabledByBatchLink = primaryBatchImageLinked(node);
+	const urls = disabledByBatchLink ? [] : referenceBrowserUrls(node);
+	const hasReference = urls.length > 0;
+	const style = disabledByBatchLink
+		? REFERENCE_BROWSER_BUTTON_STYLES.disabled
+		: (hasReference ? REFERENCE_BROWSER_BUTTON_STYLES.ready : REFERENCE_BROWSER_BUTTON_STYLES.empty);
+	button.textContent = "📂";
+	button.disabled = disabledByBatchLink || !hasReference;
+	button.style.opacity = button.disabled ? "0.55" : "1";
+	button.style.cursor = button.disabled ? "not-allowed" : "pointer";
+	button.style.borderColor = style.border;
+	button.style.background = style.bg;
+	button.style.color = style.color;
+	button.__gjjLazyDefaultBg = style.bg;
+	button.__gjjLazyHoverBg = style.hover;
+	button.__gjjReferenceBrowserUrls = urls;
+	button.title = disabledByBatchLink
+		? style.title
+		: (hasReference ? `${style.title}\n共 ${urls.length} 张。` : style.title);
+	button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
+}
+
 function applyInputSizeButtonState(node) {
 	const button = node?.__gjjInputSizeButton;
 	if (!button) {
@@ -827,6 +975,7 @@ function toggleBatchImageExternalLink(node) {
 	node.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.change?.();
 	setBatchLinkButtonState(node);
+	applyReferenceBrowserButtonState(node);
 	applyInputSizeButtonState(node);
 	return true;
 }
@@ -1529,6 +1678,7 @@ function applySettingsVisibility(node) {
 	updateSizeSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
+	applyReferenceBrowserButtonState(node);
 	orderLazyWidgets(node);
 	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	GJJ_Utils.refreshNode(node);
@@ -3039,21 +3189,25 @@ function buildMultiLoaderSelectionPayload(sourceNode) {
 function syncBatchSourceWidget(node) {
 	const widget = getWidget(node, BATCH_SOURCE_WIDGET);
 	if (!widget) {
+		applyReferenceBrowserButtonState(node);
 		return;
 	}
 	const primary = getInput(node, PRIMARY_IMAGE_INPUT);
 	const linkId = primary?.link;
 	if (!linkId || !app.graph?.links) {
 		widget.value = "[]";
+		applyReferenceBrowserButtonState(node);
 		return;
 	}
 	const link = app.graph.links[linkId];
 	const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
 	if (sourceNode?.comfyClass !== "GJJ_MultiImageLoader" || Number(link?.origin_slot) !== 0) {
 		widget.value = "[]";
+		applyReferenceBrowserButtonState(node);
 		return;
 	}
 	widget.value = buildMultiLoaderSelectionPayload(sourceNode);
+	applyReferenceBrowserButtonState(node);
 }
 
 function loadImageDimensions(url) {
@@ -3803,6 +3957,19 @@ function createButtons(node) {
 		"gap:0",
 		"font-size:15px",
 	];
+	const referenceBrowserButton = document.createElement("button");
+	referenceBrowserButton.type = "button";
+	referenceBrowserButton.textContent = "📂";
+	referenceBrowserButton.title = REFERENCE_BROWSER_BUTTON_STYLES.empty.title;
+	referenceBrowserButton.setAttribute("aria-label", "浏览参考图片");
+	referenceBrowserButton.style.cssText = [
+		...emojiButtonStyle,
+		`border:1px solid ${REFERENCE_BROWSER_BUTTON_STYLES.empty.border}`,
+		`background:${REFERENCE_BROWSER_BUTTON_STYLES.empty.bg}`,
+		`color:${REFERENCE_BROWSER_BUTTON_STYLES.empty.color}`,
+	].join(";");
+	node.__gjjReferenceBrowserButton = referenceBrowserButton;
+
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
@@ -3940,6 +4107,9 @@ function createButtons(node) {
 		btn.__gjjLazyDefaultBg = defaultBg;
 		btn.__gjjLazyHoverBg = hoverBg;
 		btn.addEventListener("mouseenter", () => {
+			if (btn.disabled) {
+				return;
+			}
 			if (btn === inputSizeButton && sizeSettingsOpen(node)) {
 				return;
 			}
@@ -3954,6 +4124,10 @@ function createButtons(node) {
 		});
 
 		btn.addEventListener("mouseleave", () => {
+			if (btn.disabled) {
+				btn.style.transform = "translateY(0)";
+				return;
+			}
 			if (btn === inputSizeButton && sizeSettingsOpen(node)) {
 				btn.style.transform = "translateY(0)";
 				updateSizeSettingsButtonState(node);
@@ -3974,10 +4148,16 @@ function createButtons(node) {
 		});
 
 		btn.addEventListener("mousedown", () => {
+			if (btn.disabled) {
+				return;
+			}
 			btn.style.transform = "translateY(0) scale(0.98)";
 		});
 
 		btn.addEventListener("mouseup", () => {
+			if (btn.disabled) {
+				return;
+			}
 			btn.style.transform = "translateY(-1px)";
 		});
 	}
@@ -4135,6 +4315,18 @@ function createButtons(node) {
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
+	function handleReferenceBrowser(event) {
+		protectEvent(event);
+		applyReferenceBrowserButtonState(node);
+		const urls = Array.isArray(referenceBrowserButton.__gjjReferenceBrowserUrls)
+			? referenceBrowserButton.__gjjReferenceBrowserUrls
+			: [];
+		if (referenceBrowserButton.disabled || !urls.length) {
+			return;
+		}
+		window.open(urls[0], "_blank", "noopener,noreferrer");
+	}
+
 	function handleModelSettings(event) {
 		protectEvent(event);
 		setModelSettingsOpen(node, !modelSettingsOpen(node));
@@ -4166,6 +4358,7 @@ function createButtons(node) {
 		setSeedRandomEnabled(node, !seedRandomEnabled(node));
 	}
 
+	setupButtonHover(referenceBrowserButton, REFERENCE_BROWSER_BUTTON_STYLES.empty.bg, REFERENCE_BROWSER_BUTTON_STYLES.empty.hover);
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(batchLinkButton, "linear-gradient(135deg, #075985, #0284c7)", "linear-gradient(135deg, #0284c7, #38bdf8)");
 	setupButtonHover(inputSizeButton, "linear-gradient(135deg, #065f46, #16a34a)", "linear-gradient(135deg, #16a34a, #22c55e)");
@@ -4176,6 +4369,7 @@ function createButtons(node) {
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(modelSettingsButton, MODEL_SETTINGS_BUTTON_STYLES.off.bg, MODEL_SETTINGS_BUTTON_STYLES.off.hover);
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
+	setupButtonEvents(referenceBrowserButton, handleReferenceBrowser);
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(batchLinkButton, handleBatchLink);
 	setupButtonEvents(inputSizeButton, handleInputSize);
@@ -4190,10 +4384,12 @@ function createButtons(node) {
 	applySeedRandomButtonState(node);
 	applyKeepModelButtonState(node);
 	applyInputSizeButtonState(node);
+	applyReferenceBrowserButtonState(node);
 	updateModelSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 
+	container.appendChild(referenceBrowserButton);
 	container.appendChild(refreshButton);
 	container.appendChild(batchLinkButton);
 	container.appendChild(inputSizeButton);
@@ -4213,7 +4409,7 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 32, 32, 32];
+	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32];
 	const gap = 0;
 	let rows = 1;
 	let rowWidth = 0;

@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+qwen_edit_action	qwen_edit_action	动作人偶	action the scene	1	把任何东西变成玩具和动作人偶，配有关节、逼真的塑料材料和涂装细节	https://huggingface.co/systms/SYSTMS-ACTION-LoRA-Qwen-Image-Edit-2511
 breast_size_v2_krea2_loraholic	breast_size_v2_krea2_loraholic	胸部滑块		14	Krea2胸部大小调节，越大越趋动画风格	
 360-degree-rotation-microwave-rotation-wan21-i2v-lora	360-degree-rotation-microwave-rotation-wan21-i2v-lora	360环视	r0t4tion 360 degrees rotation	1		
 depth-control-lora	depth-control-lora	深度控制		1	Krea2深度控制	https://huggingface.co/stabilityai/control-lora
