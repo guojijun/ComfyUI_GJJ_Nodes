@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import inspect
+import gc
 from typing import Any
 
 try:
@@ -239,6 +240,41 @@ _MISSING_MODELS = list(_ENVIRONMENT_REPORT.get("missing_models", []) or [])
 if not (_DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE):
     print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ Gemma 文本生成模型提示")
 
+_CLIP_CACHE: dict[str, Any] = {"key": None, "clip": None}
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "开启", "开", "是", "保持模型"}:
+        return True
+    if text in {"0", "false", "no", "off", "关闭", "关", "否", "不保持"}:
+        return False
+    return default
+
+
+def _device_from_preference(clip_device: str, device_preference: str) -> str:
+    if str(device_preference or "").strip().startswith("CPU"):
+        return "cpu"
+    if str(clip_device or "").strip().lower() == "cpu":
+        return "cpu"
+    return "default"
+
+
+def _clear_clip_cache() -> None:
+    _CLIP_CACHE["key"] = None
+    _CLIP_CACHE["clip"] = None
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
 
 def _load_merged_clip(clip_name: str, clip_type: str, device: str = "default"):
     normalized_name = _basename(clip_name).lower()
@@ -269,6 +305,20 @@ def _load_merged_clip(clip_name: str, clip_type: str, device: str = "default"):
     except Exception as exc:
         raise RuntimeError(f"无法导入 ComfyUI 官方 CLIPLoader：{exc}") from exc
     return CLIPLoader().load_clip(clip_name, clip_type, device)[0]
+
+
+def _load_clip_cached(clip_name: str, clip_type: str, device: str, keep_model: bool):
+    cache_key = f"{clip_name}\n{clip_type}\n{device}"
+    if keep_model and _CLIP_CACHE.get("key") == cache_key and _CLIP_CACHE.get("clip") is not None:
+        print(f"[GJJ GemmaTextGenerate] 复用保持模型缓存: {_basename(clip_name)} device={device}", flush=True)
+        return _CLIP_CACHE["clip"], True
+    if keep_model or _CLIP_CACHE.get("clip") is not None:
+        _clear_clip_cache()
+    clip = _load_merged_clip(clip_name, clip_type, device)
+    if keep_model:
+        _CLIP_CACHE["key"] = cache_key
+        _CLIP_CACHE["clip"] = clip
+    return clip, False
 
 
 def _generate_text(
@@ -799,6 +849,20 @@ class GJJ_GemmaTextGenerate:
                     "display_name": "输出约束",
                     "tooltip": "点击模板按钮时追加到系统提示词正文之后；与 GJJ_OllamaAssistant 共用预设。",
                 }),
+                "keep_model": ("BOOLEAN", {
+                    "default": False,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "保持模型",
+                    "tooltip": "开启后保留已加载的 CLIP/Gemma 模型，后续执行复用，减少重复加载时间但会占用显存/内存。",
+                }),
+                "device_preference": (["GPU优先", "CPU优先"], {
+                    "default": "GPU优先",
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "GPU/CPU优先",
+                    "tooltip": "GPU优先使用 ComfyUI 默认 GPU 加载策略；CPU优先强制把 CLIP/Gemma 加载到 CPU。",
+                }),
             },
             "optional": {
                 "media": (MEDIA_INPUT_TYPE, {
@@ -836,6 +900,8 @@ class GJJ_GemmaTextGenerate:
         system_prompt: str = "",
         system_prompt_templates: str = "",
         system_prompt_output_rule: str = "",
+        keep_model: bool = False,
+        device_preference: str = "GPU优先",
     ):
         if not _find_text_encoder_path(clip_name):
             missing = [_model_spec_for_clip(clip_name)]
@@ -867,9 +933,16 @@ class GJJ_GemmaTextGenerate:
             video = None
             
             start_load = time.time()
-            clip = _load_merged_clip(str(clip_name), str(clip_type or "ideogram4"), str(clip_device or "default"))
+            effective_device = _device_from_preference(str(clip_device or "default"), str(device_preference or "GPU优先"))
+            keep_loaded = _as_bool(keep_model, False)
+            clip, cache_hit = _load_clip_cached(str(clip_name), str(clip_type or "ideogram4"), effective_device, keep_loaded)
             load_time = time.time() - start_load
-            print(f"[GJJ GemmaTextGenerate] CLIP 模型加载耗时: {load_time:.2f} 秒", flush=True)
+            print(
+                f"[GJJ GemmaTextGenerate] CLIP 模型加载耗时: {load_time:.2f} 秒 | "
+                f"device_preference={device_preference} effective_device={effective_device} "
+                f"keep_model={keep_loaded} cache_hit={cache_hit}",
+                flush=True,
+            )
             
             start_gen = time.time()
             text = _generate_text(
@@ -893,6 +966,12 @@ class GJJ_GemmaTextGenerate:
             gen_time = time.time() - start_gen
             total_time = time.time() - start_total
             print(f"[GJJ GemmaTextGenerate] 文本生成耗时: {gen_time:.2f} 秒 | 总耗时: {total_time:.2f} 秒 | thinking={thinking}", flush=True)
+            if not keep_loaded:
+                try:
+                    del clip
+                except Exception:
+                    pass
+                _clear_clip_cache()
             return (text,)
         except Exception as exc:
             report = getattr(exc, "gjj_report", None)

@@ -1839,6 +1839,18 @@ def _load_convrot_quantized_diffusion_model(model_name: str, weight_dtype: str =
     path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+    if str((metadata or {}).get("gjj_padded_convrot_version", "") or "").strip():
+        try:
+            from .gjj_padded_convrot_runtime import PADDED_CONVROT_AVAILABLE, _PATCH_ERROR
+        except Exception as exc:
+            raise RuntimeError(
+                "该模型使用 GJJ 填充式 INT4 ConvRot，需要启用 ComfyUI_GJJ_Nodes 后重启 ComfyUI。"
+            ) from exc
+        if not PADDED_CONVROT_AVAILABLE:
+            raise RuntimeError(
+                "当前运行环境无法启用 GJJ 填充式 INT4 ConvRot。"
+                f"运行时错误：{_PATCH_ERROR or '未知错误'}"
+            )
     patched = _patch_int4_convrot_embedding_tensors(sd)
     model_options: dict[str, Any] = {}
     if dtype is not None:

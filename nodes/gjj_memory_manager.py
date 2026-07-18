@@ -3,6 +3,7 @@ import sys
 import gc
 import time
 import importlib
+import subprocess
 from typing import Any
 
 from aiohttp import web
@@ -196,6 +197,53 @@ def _get_process_memory_info():
         return {"error": f"获取进程内存失败: {e}"}
 
 
+def _get_nvidia_smi_gpu_info():
+    """读取整卡显存。llama.cpp 等非 PyTorch 后端不会出现在 torch.cuda.memory_reserved 里。"""
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0,
+        )
+        if result.returncode != 0:
+            return []
+        items = []
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 4:
+                continue
+            index, name, used_mb, total_mb = parts[:4]
+            try:
+                used = float(used_mb) / 1024
+                total = float(total_mb) / 1024
+            except Exception:
+                continue
+            items.append(
+                {
+                    "device": f"GPU {index}",
+                    "name": name,
+                    "total": round(total, 2),
+                    "used": round(used, 2),
+                    "allocated": round(used, 2),
+                    "cached": round(used, 2),
+                    "available": round(max(0.0, total - used), 2),
+                    "percent": round((used / total) * 100, 1) if total else 0,
+                    "unit": "GB",
+                    "source": "nvidia-smi",
+                }
+            )
+        return items
+    except Exception:
+        return []
+
+
 def _get_gpu_info():
     """获取 GPU 显存信息。"""
     gpu_info = []
@@ -211,24 +259,48 @@ def _get_gpu_info():
                 )
                 allocated = torch.cuda.memory_allocated(device) / (1024**3)
                 cached = torch.cuda.memory_reserved(device) / (1024**3)
-                available = total - cached
+                used = max(allocated, cached)
+                available = total - used
 
                 gpu_info.append(
                     {
                         "device": f"GPU {i}",
                         "name": torch.cuda.get_device_name(device),
                         "total": round(total, 2),
+                        "used": round(used, 2),
                         "allocated": round(allocated, 2),
                         "cached": round(cached, 2),
                         "available": round(available, 2),
-                        "percent": round((cached / total) * 100, 1) if total else 0,
+                        "percent": round((used / total) * 100, 1) if total else 0,
                         "unit": "GB",
+                        "source": "torch",
                     }
                 )
         else:
             gpu_info.append({"error": "未检测到 CUDA 设备"})
     except Exception as e:
         gpu_info.append({"error": f"获取 GPU 信息失败: {str(e)}"})
+
+    nvidia_info = _get_nvidia_smi_gpu_info()
+    if nvidia_info:
+        merged = []
+        count = max(len(gpu_info), len(nvidia_info))
+        for i in range(count):
+            torch_item = gpu_info[i] if i < len(gpu_info) and not gpu_info[i].get("error") else {}
+            nvidia_item = nvidia_info[i] if i < len(nvidia_info) else {}
+            if not torch_item and not nvidia_item:
+                continue
+            used = max(float(torch_item.get("used") or torch_item.get("cached") or 0), float(nvidia_item.get("used") or 0))
+            total = float(nvidia_item.get("total") or torch_item.get("total") or 0)
+            item = {**torch_item, **nvidia_item}
+            item["used"] = round(used, 2)
+            item["cached"] = round(used, 2)
+            item["available"] = round(max(0.0, total - used), 2) if total else 0
+            item["percent"] = round((used / total) * 100, 1) if total else 0
+            item["source"] = "nvidia-smi+torch" if torch_item else "nvidia-smi"
+            merged.append(item)
+        if merged:
+            return merged
 
     return gpu_info
 

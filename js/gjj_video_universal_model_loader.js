@@ -936,8 +936,15 @@ function helpModelFileForSlot(node, state, slot, index, secondary = false) {
 function videoLoaderHelpEntries(node) {
 	const state = ensureState(node);
 	try { saveWidgetValues(node); } catch (_) {}
+	// 帮助树必须与主面板当前实际渲染的预设完全一致。不要在这里仅凭
+	// widget / properties 再推断一次配置；刷新或恢复工作流期间这些值可能
+	// 短暂不同步，导致帮助树串到另一个官方流。
 	const key = currentHelpConfigKey(node, state);
-	const cfg = state.configs?.[key] || null;
+	const appliedKey = String(node?.__gjjVUAppliedConfigKey || node?.properties?.gjj_vu_applied_config_key || "").trim();
+	const cfg = node?.__gjjVUAppliedConfig
+		|| state.configs?.[appliedKey]
+		|| state.configs?.[key]
+		|| null;
 	if (!cfg) return [];
 	const entries = [];
 	const loraEnabled = effectiveUseLora(node);
@@ -2417,6 +2424,8 @@ function applyConfig(node, opts = {}) {
 	const state = ensureState(node);
 	if (!state.configs || !state.folders) { refreshBackendLists(node, false).finally(() => applyConfig(node, opts)); return; }
 	const cfg = currentConfig(node, state);
+	// 保存主面板本次实际使用的配置对象，帮助树直接复用，避免二次解析预设。
+	node.__gjjVUAppliedConfig = cfg;
 	updateInputs(node, cfg);
 	const rows = node.__gjjVURows; if (!rows) return;
 	node.__gjjVUVisibleRowCount = 0;

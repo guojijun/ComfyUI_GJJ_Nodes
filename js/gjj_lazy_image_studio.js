@@ -36,6 +36,35 @@ const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
 const MODEL_SOURCE_WIDGET_NAME = "model_source";
 const CHECKPOINT_WIDGET_NAME = "ckpt_name";
 const CHECKPOINT_MODEL_SOURCE_VALUE = "底模 checkpoint";
+const ENABLE_SAGE_ATTENTION_WIDGET_NAME = "enable_sage_attention";
+const SAGE_ATTENTION_MODE_WIDGET_NAME = "sage_attention_mode";
+const ALLOW_SAGE_COMPILE_WIDGET_NAME = "allow_sage_compile";
+const ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME = "enable_fp16_accumulation_setting";
+const FP16_ACCUMULATION_WIDGET_NAME = "fp16_accumulation";
+const MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME = "missing_sage_attention_policy";
+const MODEL_OPTIMIZATION_WIDGETS = [
+	ENABLE_SAGE_ATTENTION_WIDGET_NAME,
+	SAGE_ATTENTION_MODE_WIDGET_NAME,
+	ALLOW_SAGE_COMPILE_WIDGET_NAME,
+	ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME,
+	FP16_ACCUMULATION_WIDGET_NAME,
+	MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME,
+];
+const MODEL_OPTIMIZATION_BOOLEAN_WIDGETS = new Set([
+	ENABLE_SAGE_ATTENTION_WIDGET_NAME,
+	ALLOW_SAGE_COMPILE_WIDGET_NAME,
+	ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME,
+	FP16_ACCUMULATION_WIDGET_NAME,
+]);
+const MODEL_OPTIMIZATION_COMBO_WIDGETS = new Set([
+	SAGE_ATTENTION_MODE_WIDGET_NAME,
+	MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME,
+]);
+const MODEL_OPTIMIZATION_BUTTON_LABELS = {
+	[ENABLE_SAGE_ATTENTION_WIDGET_NAME]: "SageAttention",
+	[ALLOW_SAGE_COMPILE_WIDGET_NAME]: "Sage编译",
+	[FP16_ACCUMULATION_WIDGET_NAME]: "FP16累积",
+};
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const MODEL_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_model_settings_open";
 const SIZE_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_size_settings_open";
@@ -92,22 +121,6 @@ const KEEP_MODEL_BUTTON_STYLES = {
 		border: "#c084fc",
 		color: "#f5f3ff",
 		title: "模型保持已开启：执行后保留当前模型、CLIP 和 VAE，适合连续生成。",
-	},
-};
-const DEVICE_PREFERENCE_STYLES = {
-	gpu: {
-		bg: "linear-gradient(135deg, #047857, #059669)",
-		hover: "linear-gradient(135deg, #059669, #10b981)",
-		border: "#34d399",
-		color: "#ecfdf5",
-		title: "GPU优先：采样前主动把主模型加载到显卡，优先发挥 GPU 性能。",
-	},
-	cpu: {
-		bg: "linear-gradient(135deg, #334155, #475569)",
-		hover: "linear-gradient(135deg, #475569, #64748b)",
-		border: "#94a3b8",
-		color: "#f8fafc",
-		title: "CPU优先：尽量把模型留在卸载设备，适合显存紧张时使用。",
 	},
 };
 const MODEL_SETTINGS_BUTTON_STYLES = {
@@ -172,7 +185,7 @@ const REFERENCE_BROWSER_BUTTON_STYLES = {
 	},
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME, ...MODEL_OPTIMIZATION_WIDGETS]);
 const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, DEVICE_PREFERENCE_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
 const STRICT_MODEL_WIDGETS = new Set(["unet_name", "clip_name1", "vae_name", CHECKPOINT_WIDGET_NAME]);
 const MODEL_PANEL_WIDGETS = new Set([
@@ -184,6 +197,7 @@ const MODEL_PANEL_WIDGETS = new Set([
 	"vae_name",
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
+	...MODEL_OPTIMIZATION_WIDGETS,
 ]);
 const OTHER_PANEL_WIDGETS = new Set([
 	"negative_prompt",
@@ -232,6 +246,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	"grow_mask_by",
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
+	...MODEL_OPTIMIZATION_WIDGETS,
 ]);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
@@ -468,6 +483,7 @@ const PANEL_SYNC_WIDGETS = [
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
 	DEVICE_PREFERENCE_WIDGET_NAME,
+	...MODEL_OPTIMIZATION_WIDGETS,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -493,6 +509,12 @@ const RESTORE_WIDGET_TYPES = {
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: "toggle",
 	[MODEL_SOURCE_WIDGET_NAME]: "combo",
 	[CHECKPOINT_WIDGET_NAME]: "combo",
+	[ENABLE_SAGE_ATTENTION_WIDGET_NAME]: "toggle",
+	[SAGE_ATTENTION_MODE_WIDGET_NAME]: "combo",
+	[ALLOW_SAGE_COMPILE_WIDGET_NAME]: "toggle",
+	[ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME]: "toggle",
+	[FP16_ACCUMULATION_WIDGET_NAME]: "toggle",
+	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "combo",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -540,6 +562,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
 	DEVICE_PREFERENCE_WIDGET_NAME,
+	...MODEL_OPTIMIZATION_WIDGETS,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -566,7 +589,13 @@ const DEFAULT_PARAM_VALUES = {
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: true,
 	[MODEL_SOURCE_WIDGET_NAME]: "UNET 主模型",
 	[CHECKPOINT_WIDGET_NAME]: "",
-	[DEVICE_PREFERENCE_WIDGET_NAME]: "GPU优先",
+	[DEVICE_PREFERENCE_WIDGET_NAME]: "智能调度",
+	[ENABLE_SAGE_ATTENTION_WIDGET_NAME]: false,
+	[SAGE_ATTENTION_MODE_WIDGET_NAME]: "自动",
+	[ALLOW_SAGE_COMPILE_WIDGET_NAME]: false,
+	[ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME]: false,
+	[FP16_ACCUMULATION_WIDGET_NAME]: true,
+	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "自动跳过SageAttention继续运行",
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -1403,36 +1432,6 @@ function keepModelEnabled(node) {
 	return boolValue(params[KEEP_MODEL_WIDGET_NAME]);
 }
 
-function devicePreferenceValue(node) {
-	const widget = getWidget(node, DEVICE_PREFERENCE_WIDGET_NAME);
-	const params = node?.properties?.[PARAM_VALUES_PROPERTY] || {};
-	const raw = widget ? widget.value : params[DEVICE_PREFERENCE_WIDGET_NAME];
-	return String(raw || "GPU优先").includes("CPU") ? "CPU优先" : "GPU优先";
-}
-
-function setDevicePreference(node, value) {
-	if (!node) return;
-	const nextValue = String(value || "").includes("CPU") ? "CPU优先" : "GPU优先";
-	node.properties = node.properties || {};
-	node.properties[PARAM_VALUES_PROPERTY] = {
-		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
-		[DEVICE_PREFERENCE_WIDGET_NAME]: nextValue,
-	};
-	const widget = getWidget(node, DEVICE_PREFERENCE_WIDGET_NAME);
-	if (widget) {
-		widget.value = nextValue;
-		const index = getWidgetIndex(node, DEVICE_PREFERENCE_WIDGET_NAME);
-		if (Array.isArray(node.widgets_values) && index >= 0) {
-			node.widgets_values[index] = nextValue;
-		}
-		try { widget.callback?.(nextValue); } catch (_) {}
-	}
-	writeLiveParamSnapshot(node);
-	syncFloatingPanels(node);
-	node.graph?.change?.();
-	app.graph?.setDirtyCanvas?.(true, true);
-}
-
 function setKeepModelEnabled(node, enabled) {
 	if (!node) return;
 	const value = Boolean(enabled);
@@ -2137,6 +2136,9 @@ function createFloatingControl(node, name) {
 	if (name !== MODEL_SOURCE_WIDGET_NAME) {
 		valueElement.style.cssText = "min-width:0;width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 7px;font-size:12px";
 	}
+	if (valueElement.type === "checkbox") {
+		valueElement.style.cssText = "appearance:none;-webkit-appearance:none;justify-self:end;min-width:42px;width:42px;height:22px;box-sizing:border-box;border:1px solid #52636b;border-radius:999px;background:#4b5563;cursor:pointer;transition:background-color .15s,border-color .15s;outline:none";
+	}
 	if (name === "unet_name") {
 		valueElement.style.cssText = input.style.cssText;
 	}
@@ -2154,7 +2156,13 @@ function createFloatingControl(node, name) {
 			}
 		} else if (name === "unet_name") {
 			valueElement.textContent = String(current.value ?? "") || "未选择";
-		} else if (valueElement.type === "checkbox") valueElement.checked = boolValue(current.value);
+		} else if (valueElement.type === "checkbox") {
+			valueElement.checked = boolValue(current.value);
+			valueElement.style.background = valueElement.checked
+				? "radial-gradient(circle at calc(100% - 10px) 50%,#172026 0 7px,transparent 7.5px),#60a5fa"
+				: "radial-gradient(circle at 10px 50%,#d1d5db 0 7px,transparent 7.5px),#4b5563";
+			valueElement.style.borderColor = valueElement.checked ? "#7db7ff" : "#52636b";
+		}
 		else valueElement.value = String(current.value ?? "");
 	};
 	const commit = () => {
@@ -2185,6 +2193,148 @@ function createFloatingControl(node, name) {
 	row.append(label, input);
 	refresh();
 	return row;
+}
+
+function createModelOptimizationBooleanButton(node, name, refreshSection) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return null;
+	}
+	const row = document.createElement("div");
+	row.dataset.widgetName = name;
+	row.style.cssText = "display:block;width:100%;min-width:0";
+
+	const button = document.createElement("button");
+	button.type = "button";
+	button.dataset.widgetName = name;
+	button.style.cssText = [
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"width:100%",
+		"min-width:0",
+		"height:34px",
+		"box-sizing:border-box",
+		"padding:0 6px",
+		"border:1px solid #41535b",
+		"border-radius:7px",
+		"background:#1a2328",
+		"color:#cbd5e1",
+		"cursor:pointer",
+		"font-size:12px",
+		"font-weight:800",
+		"overflow:hidden",
+		"transition:background .15s,border-color .15s,color .15s",
+	].join(";");
+
+	const label = document.createElement("span");
+	label.textContent = MODEL_OPTIMIZATION_BUTTON_LABELS[name] || widgetDisplayLabel(widget, name);
+	label.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center";
+	button.appendChild(label);
+	row.appendChild(button);
+
+	row.__gjjRefresh = () => {
+		const current = getWidget(node, name);
+		if (!current) return;
+		const active = name === FP16_ACCUMULATION_WIDGET_NAME
+			? boolValue(getWidget(node, ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME)?.value) && boolValue(current.value)
+			: boolValue(current.value);
+		button.setAttribute("aria-pressed", active ? "true" : "false");
+		button.title = `${widgetDisplayLabel(current, name)}：${active ? "已开启" : "已关闭"}。点击切换。`;
+		button.style.background = active
+			? "linear-gradient(135deg,#075985,#2563eb)"
+			: "linear-gradient(135deg,#1a2328,#263238)";
+		button.style.borderColor = active ? "#60a5fa" : "#41535b";
+		button.style.color = active ? "#eff6ff" : "#cbd5e1";
+	};
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const current = getWidget(node, name);
+		if (!current || button.disabled) return;
+		const active = name === FP16_ACCUMULATION_WIDGET_NAME
+			? boolValue(getWidget(node, ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME)?.value) && boolValue(current.value)
+			: boolValue(current.value);
+		const nextValue = !active;
+		setWidgetValue(current, nextValue);
+		if (name === FP16_ACCUMULATION_WIDGET_NAME) {
+			const compatibilityGate = getWidget(node, ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME);
+			if (compatibilityGate) setWidgetValue(compatibilityGate, nextValue);
+		}
+		writeLiveParamSnapshot(node);
+		row.__gjjRefresh?.();
+		refreshSection?.();
+	});
+	row.__gjjRefresh();
+	return row;
+}
+
+function modelOptimizationControlEnabled(node, name) {
+	if ([SAGE_ATTENTION_MODE_WIDGET_NAME, ALLOW_SAGE_COMPILE_WIDGET_NAME, MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME].includes(name)) {
+		return boolValue(getWidget(node, ENABLE_SAGE_ATTENTION_WIDGET_NAME)?.value);
+	}
+	return true;
+}
+
+function createModelOptimizationSection(node) {
+	const rows = [];
+	const section = document.createElement("div");
+	section.style.cssText = "display:flex;flex-direction:column;gap:8px;margin-top:2px;padding-top:8px;border-top:1px solid #263842";
+
+	const title = document.createElement("div");
+	title.textContent = "⚡ 性能优化";
+	title.style.cssText = "color:#f2faf7;font-size:12px;font-weight:800";
+	section.appendChild(title);
+
+	const booleanNames = MODEL_OPTIMIZATION_WIDGETS.filter(
+		(name) => MODEL_OPTIMIZATION_BOOLEAN_WIDGETS.has(name) && name !== ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME,
+	);
+	const buttonBar = document.createElement("div");
+	buttonBar.style.cssText = `display:grid;grid-template-columns:repeat(${booleanNames.length},minmax(0,1fr));gap:7px;width:100%;min-width:0`;
+	for (const name of booleanNames) {
+		const row = createModelOptimizationBooleanButton(node, name, () => section.__gjjRefresh?.());
+		if (!row) continue;
+		const widget = getWidget(node, name);
+		if (widget?.options?.tooltip) {
+			row.title = String(widget.options.tooltip);
+		}
+		rows.push({ name, row });
+		buttonBar.appendChild(row);
+	}
+	if (buttonBar.children.length) {
+		section.appendChild(buttonBar);
+	}
+
+	for (const name of MODEL_OPTIMIZATION_WIDGETS.filter((item) => !MODEL_OPTIMIZATION_BOOLEAN_WIDGETS.has(item))) {
+		const row = createFloatingControl(node, name);
+		if (!row) continue;
+		const widget = getWidget(node, name);
+		if (widget?.options?.tooltip) {
+			row.title = String(widget.options.tooltip);
+		}
+		rows.push({ name, row });
+		section.appendChild(row);
+	}
+	if (!rows.length) {
+		return null;
+	}
+
+	section.__gjjRefresh = () => {
+		for (const { name, row } of rows) {
+			row.__gjjRefresh?.();
+			const enabled = modelOptimizationControlEnabled(node, name);
+			const input = row.querySelector("[data-widget-name]");
+			if (input) input.disabled = !enabled;
+			row.style.opacity = enabled ? "1" : "0.5";
+		}
+	};
+	for (const { row } of rows) {
+		const input = row.querySelector("[data-widget-name]");
+		input?.addEventListener("change", () => section.__gjjRefresh?.());
+		input?.addEventListener("input", () => section.__gjjRefresh?.());
+	}
+	section.__gjjRefresh();
+	return section;
 }
 
 function createPanelButtonGroup(node, name, choices, getValue, setValue) {
@@ -2261,17 +2411,96 @@ function createKeepModelPanelButton(node) {
 	);
 }
 
-function createDevicePreferencePanelButton(node) {
-	return createPanelButtonGroup(
-		node,
-		DEVICE_PREFERENCE_WIDGET_NAME,
-		[
-			{ value: "GPU优先", label: "GPU优先", title: DEVICE_PREFERENCE_STYLES.gpu.title, style: DEVICE_PREFERENCE_STYLES.gpu },
-			{ value: "CPU优先", label: "CPU优先", title: DEVICE_PREFERENCE_STYLES.cpu.title, style: DEVICE_PREFERENCE_STYLES.cpu },
-		],
-		(currentNode) => devicePreferenceValue(currentNode),
-		setDevicePreference,
-	);
+function setModelSourceValue(node, value) {
+	const widget = getWidget(node, MODEL_SOURCE_WIDGET_NAME);
+	if (!widget) return;
+	setWidgetValue(widget, coerceParamValue(MODEL_SOURCE_WIDGET_NAME, value, node));
+	applySettingsVisibility(node);
+	writeLiveParamSnapshot(node);
+}
+
+function createModelQuickToggleBar(node) {
+	const sourceWidget = getWidget(node, MODEL_SOURCE_WIDGET_NAME);
+	const keepWidget = getWidget(node, KEEP_MODEL_WIDGET_NAME);
+	if (!sourceWidget && !keepWidget) {
+		return null;
+	}
+	const bar = document.createElement("div");
+	bar.style.cssText = [
+		"display:grid",
+		"grid-template-columns:repeat(2,minmax(0,1fr))",
+		"gap:8px",
+		"width:100%",
+		"min-width:0",
+		"align-items:center",
+	].join(";");
+
+	const makeButton = (key, labelFn, titleFn, styleFn, onClick) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.dataset.toggleKey = key;
+		button.style.cssText = [
+			"height:36px",
+			"min-width:0",
+			"border:1px solid #41535b",
+			"border-radius:7px",
+			"background:#11181c",
+			"color:#dce7e2",
+			"cursor:pointer",
+			"font-size:13px",
+			"font-weight:900",
+			"overflow:hidden",
+			"text-overflow:ellipsis",
+			"white-space:nowrap",
+			"padding:0 8px",
+		].join(";");
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			onClick();
+			bar.__gjjRefresh?.();
+		});
+		button.__gjjRefresh = () => {
+			const style = styleFn();
+			button.textContent = labelFn();
+			button.title = titleFn();
+			button.style.background = style.bg;
+			button.style.borderColor = style.border;
+			button.style.color = style.color;
+			button.setAttribute("aria-pressed", "true");
+		};
+		bar.appendChild(button);
+		return button;
+	};
+
+	if (sourceWidget) {
+		makeButton(
+			"model_source",
+			() => checkpointModelSourceEnabled(node) ? "Checkpoint" : "UNET主模型",
+			() => checkpointModelSourceEnabled(node) ? "当前使用底模 checkpoint；点击切换到 UNET 主模型。" : "当前使用 UNET 主模型；点击切换到底模 checkpoint。",
+			() => checkpointModelSourceEnabled(node)
+				? { bg: "linear-gradient(135deg, #075985, #2563eb)", border: "#38bdf8", color: "#e0f2fe" }
+				: { bg: "linear-gradient(135deg, #064e3b, #047857)", border: "#34d399", color: "#ecfdf5" },
+			() => setModelSourceValue(node, checkpointModelSourceEnabled(node) ? "UNET 主模型" : CHECKPOINT_MODEL_SOURCE_VALUE),
+		);
+	}
+	if (keepWidget) {
+		makeButton(
+			"keep_model",
+			() => keepModelEnabled(node) ? "保持模型" : "不保持",
+			() => keepModelEnabled(node) ? KEEP_MODEL_BUTTON_STYLES.on.title : KEEP_MODEL_BUTTON_STYLES.off.title,
+			() => keepModelEnabled(node) ? KEEP_MODEL_BUTTON_STYLES.on : KEEP_MODEL_BUTTON_STYLES.off,
+			() => setKeepModelEnabled(node, !keepModelEnabled(node)),
+		);
+	}
+
+	bar.__gjjRefresh = () => {
+		for (const button of bar.querySelectorAll("button[data-toggle-key]")) {
+			button.__gjjRefresh?.();
+		}
+	};
+	bar.__gjjRefresh();
+	return bar;
 }
 
 function ensureFloatingPanels(node) {
@@ -2540,12 +2769,9 @@ function lazyModelTreeEntries(node) {
 
 function renderModelPanelControls(node, body) {
 	body.replaceChildren();
-	for (const name of [MODEL_SOURCE_WIDGET_NAME]) {
-		const control = createFloatingControl(node, name);
-		if (control) {
-			control.__gjjRefresh?.();
-			body.appendChild(control);
-		}
+	const quickToggles = createModelQuickToggleBar(node);
+	if (quickToggles) {
+		body.appendChild(quickToggles);
 	}
 	const tree = GJJ_Utils.createModelTreeView({
 		node,
@@ -2566,12 +2792,10 @@ function renderModelPanelControls(node, body) {
 	});
 	tree.style.maxHeight = "320px";
 	body.appendChild(tree);
-	for (const control of [createDevicePreferencePanelButton(node), createKeepModelPanelButton(node)]) {
-		if (!control) {
-			continue;
-		}
-		control.__gjjRefresh?.();
-		body.appendChild(control);
+
+	const optimizationSection = createModelOptimizationSection(node);
+	if (optimizationSection) {
+		body.appendChild(optimizationSection);
 	}
 }
 
@@ -2830,11 +3054,15 @@ function coerceParamValue(name, value, node) {
 	if (name === SEED_CONTROL_KEY) return isSeedControlValue(value) ? textValue(value) : fallbackParamValue(node, name);
 	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
-	if (name === DEVICE_PREFERENCE_WIDGET_NAME) return String(value || "").includes("CPU") ? "CPU优先" : "GPU优先";
+	if (name === DEVICE_PREFERENCE_WIDGET_NAME) return "智能调度";
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
 	if (STRICT_MODEL_WIDGETS.has(name)) return normalizeStrictModelParam(node, name, value);
 	if (name === MODEL_SOURCE_WIDGET_NAME) return comboLikeValue(name, value, node) ? textValue(value) : fallbackParamValue(node, name);
+	if (MODEL_OPTIMIZATION_BOOLEAN_WIDGETS.has(name)) return boolValue(value);
+	if (MODEL_OPTIMIZATION_COMBO_WIDGETS.has(name)) {
+		return comboLikeValue(name, value, node) ? textValue(value) : fallbackParamValue(node, name);
+	}
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
 
@@ -5206,7 +5434,7 @@ function applyPreset(node, force = false) {
 	const hasPresetLora = Boolean(
 		String(preset.lora1 || "").trim() || String(preset.lora2 || "").trim()
 	);
-	if (!hasPresetLora) {
+	if (!hasPresetLora && (force || !hasConfiguredLoraRows(node))) {
 		clearPresetLoras(node);
 	}
 	if (!force && node.properties[LAST_PRESET_KEY] === currentUnet) {
@@ -6645,6 +6873,7 @@ app.registerExtension({
 			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
 			writeSerializedWidgetValues(this, serializedNode);
 			if (serializedNode) {
+				persistLoraRows(this, ensureLoraNodeState(this).rows, serializedNode);
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[LORA_GLOBAL_SEARCH_PROPERTY] = String(ensureLoraNodeState(this).globalSearch || "");
 			}

@@ -31,6 +31,8 @@ const HIDDEN_WIDGETS = new Set([
 	"system_prompt",
 	TEMPLATE_WIDGET,
 	OUTPUT_RULE_WIDGET,
+	"keep_model",
+	"device_preference",
 ]);
 const BACKEND_WIDGETS = [
 	"clip_name",
@@ -51,6 +53,8 @@ const BACKEND_WIDGETS = [
 	"system_prompt",
 	TEMPLATE_WIDGET,
 	OUTPUT_RULE_WIDGET,
+	"keep_model",
+	"device_preference",
 ];
 const REORDERED_WIDGETS = [
 	PROMPT_WIDGET,
@@ -149,9 +153,11 @@ function workflowScore(values) {
 	if (/gemma|ideogram|\.safetensors$|\.gguf$/i.test(clipName)) score += 8;
 	if (["ideogram4", "stable_diffusion", "sd3", "wan", "qwen_image", "flux2"].includes(String(values.clip_type ?? ""))) score += 5;
 	if (["default", "cpu"].includes(String(values.clip_device ?? ""))) score += 4;
+	if (["GPU优先", "CPU优先"].includes(String(values.device_preference ?? ""))) score += 4;
 	if (["on", "off"].includes(String(values.sampling_mode ?? ""))) score += 3;
 	if (typeof values.thinking === "boolean") score += 2;
 	if (typeof values.use_default_template === "boolean") score += 2;
+	if (typeof values.keep_model === "boolean") score += 2;
 	for (const [name, min, max] of [
 		["max_length", 1, 2048],
 		["temperature", 0.01, 2],
@@ -186,6 +192,8 @@ function restoreWorkflowValues(node, serializedNode) {
 		values = candidates[0]?.values || null;
 	}
 	if (!values) return;
+	if (values.keep_model === undefined) values.keep_model = false;
+	if (values.device_preference === undefined) values.device_preference = String(values.clip_device || "") === "cpu" ? "CPU优先" : "GPU优先";
 	node.__gjjGemmaRestoring = true;
 	try {
 		for (const name of BACKEND_WIDGETS) {
@@ -215,6 +223,24 @@ function restoreWorkflowValues(node, serializedNode) {
 
 function asBool(value) {
 	return value === true || ["true", "1", "yes", "on"].includes(String(value || "").toLowerCase());
+}
+
+function keepModelEnabled(node) {
+	return asBool(widgetValue(node, "keep_model", false));
+}
+
+function devicePreferenceValue(node) {
+	return String(widgetValue(node, "device_preference", "GPU优先") || "GPU优先").includes("CPU") ? "CPU优先" : "GPU优先";
+}
+
+function setKeepModel(node, enabled) {
+	setWidgetValue(node, "keep_model", !!enabled);
+}
+
+function setDevicePreference(node, value) {
+	const next = String(value || "").includes("CPU") ? "CPU优先" : "GPU优先";
+	setWidgetValue(node, "device_preference", next);
+	setWidgetValue(node, "clip_device", next === "CPU优先" ? "cpu" : "default");
 }
 
 function splitTemplateBlocks(rawText) {
@@ -652,6 +678,10 @@ function buildSettings(node) {
 	bindWidgetControl(node, "clip_type", clipType);
 	const clipDevice = selectField("CLIP 加载设备");
 	bindWidgetControl(node, "clip_device", clipDevice);
+	clipDevice.addEventListener("change", () => {
+		setWidgetValue(node, "device_preference", clipDevice.value === "cpu" ? "CPU优先" : "GPU优先");
+		syncPanel(node);
+	});
 
 	const numeric = document.createElement("div");
 	numeric.className = "gjj-ia-numeric";
@@ -721,9 +751,6 @@ function buildSettings(node) {
 	});
 
 	settings.append(
-		labelledField("🤖 CLIP 模型", clipName),
-		labelledField("🧩 CLIP 类型", clipType),
-		labelledField("💻 加载设备", clipDevice),
 		numeric,
 		labelledField("🧩 系统提示词模板", templateEditor, saveTemplates),
 		labelledField("🚫 输出约束", outputRule),
@@ -747,6 +774,37 @@ function buildSettings(node) {
 		outputRule,
 		systemPrompt,
 	};
+}
+
+function buildModelPanel(node, controls) {
+	const panel = document.createElement("div");
+	panel.className = "gjj-gemma-model-panel";
+
+	const toggleRow = document.createElement("div");
+	toggleRow.className = "gjj-gemma-model-toggles";
+	const gpuPriority = button("GPU优先", "使用 ComfyUI 默认 GPU 加载策略。点击切换为 CPU优先。", () => {
+		setDevicePreference(node, devicePreferenceValue(node) === "GPU优先" ? "CPU优先" : "GPU优先");
+		syncPanel(node);
+	});
+	const keepModel = button("保持模型", "开启后复用已加载模型，减少重复加载时间，但会占用显存/内存。", () => {
+		setKeepModel(node, !keepModelEnabled(node));
+		syncPanel(node);
+	});
+	const defaultTemplate = button("默认模板", "切换模型默认模板", () => {
+		setWidgetValue(node, "use_default_template", !asBool(widgetValue(node, "use_default_template", true)));
+		syncPanel(node);
+	});
+	toggleRow.append(gpuPriority, keepModel, defaultTemplate);
+
+	const grid = document.createElement("div");
+	grid.className = "gjj-gemma-model-grid";
+	grid.append(
+		labelledField("🤖 CLIP 模型", controls.clipName),
+		labelledField("🧩 CLIP 类型", controls.clipType),
+		labelledField("💻 加载设备", controls.clipDevice),
+	);
+	panel.append(toggleRow, grid);
+	return { panel, gpuPriority, keepModel, defaultTemplate };
 }
 
 function renderTemplateButtons(node, config) {
@@ -783,15 +841,30 @@ function syncPanel(node) {
 	const thinking = asBool(widgetValue(node, "thinking", false));
 	const defaultTemplate = asBool(widgetValue(node, "use_default_template", true));
 	const sampling = String(widgetValue(node, "sampling_mode", "on")) === "on";
+	const keepModel = keepModelEnabled(node);
+	const devicePreference = devicePreferenceValue(node);
 	state.thinking.classList.toggle("active", thinking);
 	state.thinking.title = thinking ? "思考模式：开。点击关闭。" : "思考模式：关。点击开启。";
 	state.defaultTemplate.classList.toggle("active", defaultTemplate);
 	state.defaultTemplate.title = defaultTemplate ? "模型默认模板：开。点击关闭。" : "模型默认模板：关。点击开启。";
+	state.keepModel.classList.toggle("active", keepModel);
+	state.keepModel.textContent = keepModel ? "保持模型" : "不保持";
+	state.keepModel.title = keepModel ? "保持模型：开。点击关闭。" : "保持模型：关。点击开启。";
+	state.gpuPriority.classList.toggle("active", devicePreference === "GPU优先");
+	state.gpuPriority.textContent = devicePreference;
+	state.gpuPriority.title = devicePreference === "GPU优先"
+		? "GPU优先：使用 ComfyUI 默认 GPU 加载策略。点击切换 CPU优先。"
+		: "CPU优先：强制把 CLIP/Gemma 加载到 CPU。点击切换 GPU优先。";
 	state.randomSeed.classList.toggle("active", sampling);
 	state.randomSeed.title = sampling ? "随机采样：开。点击关闭采样。" : "随机采样：关。点击开启采样。";
 	state.settingsButton.classList.toggle("active", state.expanded);
-	state.settingsButton.title = state.expanded ? "收起模型、参数和提示词设置" : "展开模型、参数和提示词设置";
+	state.settingsButton.title = state.expanded ? "收起生成参数和提示词设置" : "展开生成参数和提示词设置";
 	state.settings.style.display = state.expanded ? "flex" : "none";
+	state.modelPanel.style.display = state.modelExpanded ? "flex" : "none";
+	state.modelPanelButton.classList.toggle("active", state.modelExpanded || keepModel);
+	state.modelPanelButton.title = state.modelExpanded
+		? "收起模型设置"
+		: `展开模型设置。${keepModel ? "保持模型已开启。" : "保持模型未开启。"}`;
 	state.modelButton.title = `当前模型：${String(widgetValue(node, "clip_name", "") || "未选择")}。点击直接选择模型。`;
 
 	syncSearchableSelect(state.clipName, choices("clip_name", node), widgetValue(node, "clip_name", ""));
@@ -837,6 +910,11 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-button:hover { background:#24333b; border-color:#5f8590; }
 		.gjj-gemma-assistant-panel .gjj-ia-button.active { background:#24452d; border-color:#65a271; color:#ebffee; }
 		.gjj-gemma-assistant-panel .gjj-ia-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.88); }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-panel { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(91,121,130,.78); border-radius:8px; background:rgba(13,22,25,.94); box-shadow:0 10px 28px rgba(0,0,0,.32); }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles .gjj-ia-button { width:100%; max-width:none; text-align:center; }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-grid .gjj-ia-field:first-child { grid-column:1 / -1; }
 		.gjj-gemma-assistant-panel .gjj-ia-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 		.gjj-gemma-assistant-panel .gjj-ia-label { color:#aebfc4; font-weight:700; font-size:11px; letter-spacing:.02em; }
 		.gjj-gemma-assistant-panel .gjj-ia-label-row { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
@@ -873,8 +951,8 @@ function createPanel(node) {
 		setWidgetValue(node, "thinking", !asBool(widgetValue(node, "thinking", false)));
 		syncPanel(node);
 	});
-	const defaultTemplate = button("🧠", "切换模型默认模板", () => {
-		setWidgetValue(node, "use_default_template", !asBool(widgetValue(node, "use_default_template", true)));
+	const modelPanelButton = button("🧠", "展开模型设置", () => {
+		node.__gjjGemmaPanel.modelExpanded = !node.__gjjGemmaPanel.modelExpanded;
 		syncPanel(node);
 	});
 	const randomSeed = button("🎲", "切换随机采样", () => {
@@ -882,14 +960,15 @@ function createPanel(node) {
 		setWidgetValue(node, "sampling_mode", enabled ? "off" : "on");
 		syncPanel(node);
 	});
-	const settingsButton = button("⚙️", "展开模型、参数和提示词设置", () => {
+	const settingsButton = button("⚙️", "展开生成参数和提示词设置", () => {
 		node.__gjjGemmaPanel.expanded = !node.__gjjGemmaPanel.expanded;
 		syncPanel(node);
 	});
-	toolbar.append(templates, modelButton, thinking, defaultTemplate, randomSeed, settingsButton);
+	toolbar.append(templates, modelButton, thinking, modelPanelButton, randomSeed, settingsButton);
 
 	const settingsState = buildSettings(node);
-	root.append(style, toolbar, settingsState.settings);
+	const modelState = buildModelPanel(node, settingsState);
+	root.append(style, toolbar, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
@@ -905,10 +984,15 @@ function createPanel(node) {
 		templateButtons: new Map(),
 		modelButton,
 		thinking,
-		defaultTemplate,
+		modelPanelButton,
+		modelPanel: modelState.panel,
+		gpuPriority: modelState.gpuPriority,
+		keepModel: modelState.keepModel,
+		defaultTemplate: modelState.defaultTemplate,
 		randomSeed,
 		settingsButton,
 		expanded: false,
+		modelExpanded: false,
 		...settingsState,
 	};
 	const index = node.widgets?.indexOf(domWidget) ?? -1;
@@ -936,6 +1020,12 @@ function createPanel(node) {
 
 function stabilize(node) {
 	if (!node || String(node.comfyClass || node.type || "") !== NODE_TYPE) return;
+	if (!String(widgetValue(node, "device_preference", "") || "").trim()) {
+		setWidgetValue(node, "device_preference", String(widgetValue(node, "clip_device", "default")) === "cpu" ? "CPU优先" : "GPU优先");
+	}
+	if (widgetValue(node, "keep_model", undefined) === undefined) {
+		setWidgetValue(node, "keep_model", false);
+	}
 	hideBackendWidgets(node);
 	createPanel(node);
 	restorePromptWidget(node);

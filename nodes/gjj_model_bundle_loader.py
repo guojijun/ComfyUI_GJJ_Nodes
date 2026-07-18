@@ -9,6 +9,7 @@ import folder_paths
 import torch
 import comfy.clip_vision
 import comfy.controlnet
+import comfy.model_management
 import comfy.sd
 import comfy.utils
 from aiohttp import web
@@ -69,6 +70,9 @@ CHECKPOINT_COMMON_TEMPLATE_ID = "checkpoint_common"
 CONTROL_NET_NONE = "不选择"
 MAX_CONTROL_NET_SLOTS = 8
 MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft", ".gguf")
+CONVROT_MODEL_TOKENS = ("int4_convrot", "int8_convrot", "convrot_w4a4")
+INT4_CONVROT_MODEL_TOKENS = ("int4_convrot", "convrot_w4a4", "w4a4")
+PADDED_CONVROT_NATIVE_SCHEDULING_ATTR = "_gjj_padded_convrot_native_scheduling"
 MODEL_IGNORED_TOKENS = {
     "fp8",
     "fp16",
@@ -199,6 +203,16 @@ def _model_stem(name: str) -> str:
         if text.endswith(suffix):
             return text[: -len(suffix)]
     return text
+
+
+def _is_convrot_quantized_model_name(name: str) -> bool:
+    normalized = str(name or "").replace("\\", "/").lower()
+    return any(token in normalized for token in CONVROT_MODEL_TOKENS)
+
+
+def _is_int4_convrot_model_name(name: str) -> bool:
+    normalized = str(name or "").replace("\\", "/").lower()
+    return any(token in normalized for token in INT4_CONVROT_MODEL_TOKENS)
 
 
 def _model_extension(name: str) -> str:
@@ -491,7 +505,7 @@ def _torch_dtype_from_name(name: str) -> torch.dtype | None:
 
 
 def _build_unet_model_options(weight_dtype: str) -> dict:
-    model_options: dict = {}
+    model_options: dict = {"offload_device": torch.device("cpu")}
     value = _normalize_text(weight_dtype)
     if value == "fp8_e4m3fn_fast" and hasattr(torch, "float8_e4m3fn"):
         model_options["dtype"] = torch.float8_e4m3fn
@@ -505,15 +519,118 @@ def _build_unet_model_options(weight_dtype: str) -> dict:
 
 
 def _build_clip_model_options(dtype_name: str, device: str = "default") -> dict:
-    model_options: dict = {}
+    cpu = torch.device("cpu")
+    model_options: dict = {"offload_device": cpu}
     dtype = _torch_dtype_from_name(dtype_name)
     if dtype is not None:
         model_options["dtype"] = dtype
     if _normalize_text(device) == "cpu":
-        cpu = torch.device("cpu")
         model_options["load_device"] = cpu
-        model_options["offload_device"] = cpu
     return model_options
+
+
+def _configure_smart_patcher(patcher, label: str) -> None:
+    if patcher is None:
+        return
+
+    base_model = getattr(patcher, "model", None)
+    model_class_name = type(base_model).__name__.lower() if base_model is not None else ""
+    if "boogu" in model_class_name and hasattr(base_model, "memory_usage_factor"):
+        current_factor = float(getattr(base_model, "memory_usage_factor", 0.0) or 0.0)
+        if current_factor < 4.0:
+            base_model.memory_usage_factor = 4.0
+            print(
+                f"[GJJ ModelBundleLoader] {label} 已启用 Boogu 显存安全余量："
+                f"memory_usage_factor {current_factor:g} -> 4.0"
+            )
+
+    preserve_native_scheduling = bool(
+        getattr(patcher, PADDED_CONVROT_NATIVE_SCHEDULING_ATTR, False)
+        or getattr(base_model, PADDED_CONVROT_NATIVE_SCHEDULING_ATTR, False)
+    )
+    if preserve_native_scheduling:
+        log_attr = f"{PADDED_CONVROT_NATIVE_SCHEDULING_ATTR}_logged"
+        if not getattr(base_model, log_attr, False):
+            print(
+                f"[GJJ ModelBundleLoader] {label} 为填充式 INT4 ConvRot，"
+                "保留与 LazyImageStudio 相同的 ComfyUI 原生显存调度。"
+            )
+            try:
+                setattr(base_model, log_attr, True)
+            except Exception:
+                pass
+        return
+
+    cpu = torch.device("cpu")
+    patcher.offload_device = cpu
+
+    try:
+        current_device = patcher.current_loaded_device()
+    except Exception:
+        current_device = None
+    if current_device is None or comfy.model_management.is_device_cpu(current_device):
+        return
+
+    try:
+        comfy.model_management.unload_model_and_clones(patcher)
+        try:
+            remaining_device = patcher.current_loaded_device()
+        except Exception:
+            remaining_device = None
+        if remaining_device is not None and not comfy.model_management.is_device_cpu(remaining_device):
+            patcher.unpatch_model(cpu, unpatch_weights=True)
+        print(f"[GJJ ModelBundleLoader] {label} 已转为智能显存调度，可按需卸载到 CPU。")
+    except Exception as exc:
+        print(f"[GJJ ModelBundleLoader] {label} 智能卸载初始化失败，将继续由 ComfyUI 调度：{exc}")
+
+
+def _configure_smart_bundle(
+    unet,
+    clip,
+    vae,
+    clip_vision=None,
+    model_patch=None,
+    controlnets=(),
+) -> None:
+    pending = [
+        (unet, "扩散模型"),
+        (getattr(clip, "patcher", None), "文本编码器"),
+        (getattr(vae, "patcher", None), "VAE"),
+        (getattr(clip_vision, "patcher", None), "CLIP视觉模型"),
+        (model_patch, "模型补丁"),
+    ]
+
+    for index, controlnet in enumerate(controlnets or (), start=1):
+        if controlnet is None:
+            continue
+        try:
+            control_models = controlnet.get_models()
+        except Exception:
+            control_models = []
+        pending.extend(
+            (patcher, f"ControlNet {index}")
+            for patcher in control_models
+            if patcher is not None
+        )
+
+    seen: set[int] = set()
+    cursor = 0
+    while cursor < len(pending):
+        patcher, label = pending[cursor]
+        cursor += 1
+        if patcher is None or id(patcher) in seen:
+            continue
+        seen.add(id(patcher))
+        _configure_smart_patcher(patcher, label)
+        try:
+            nested_patchers = patcher.model_patches_models()
+        except Exception:
+            nested_patchers = []
+        pending.extend(
+            (nested, f"{label}附加模型")
+            for nested in nested_patchers
+            if nested is not None and id(nested) not in seen
+        )
 
 
 def _load_unet_gguf(unet_name: str):
@@ -521,7 +638,29 @@ def _load_unet_gguf(unet_name: str):
         from ..vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
     except ImportError:
         from vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
-    return load_gjj_gguf_unet(unet_name)
+    model = load_gjj_gguf_unet(unet_name)
+    _configure_smart_patcher(model, "GGUF扩散模型")
+    return model
+
+
+def _load_convrot_quantized_unet(unet_name: str, unet_dtype: str):
+    try:
+        from .gjj_video_universal_model_loader import _load_convrot_quantized_diffusion_model
+    except ImportError:
+        from nodes.gjj_video_universal_model_loader import _load_convrot_quantized_diffusion_model
+
+    model = _load_convrot_quantized_diffusion_model(unet_name, unet_dtype)
+    if _is_int4_convrot_model_name(unet_name):
+        try:
+            setattr(model, PADDED_CONVROT_NATIVE_SCHEDULING_ATTR, True)
+        except Exception:
+            pass
+        try:
+            setattr(getattr(model, "model", None), PADDED_CONVROT_NATIVE_SCHEDULING_ATTR, True)
+        except Exception:
+            pass
+    print(f"[GJJ ModelBundleLoader] ConvRot 专用加载完成：{unet_name}")
+    return model
 
 
 def _load_clip_gguf(clip_name: str, clip_type: str):
@@ -529,7 +668,9 @@ def _load_clip_gguf(clip_name: str, clip_type: str):
         from ..vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
     except ImportError:
         from vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
-    return load_gjj_gguf_clip(clip_name, clip_type)
+    clip = load_gjj_gguf_clip(clip_name, clip_type)
+    _configure_smart_patcher(getattr(clip, "patcher", None), "GGUF文本编码器")
+    return clip
 
 
 def _split_clip_names(value: str) -> list[str]:
@@ -830,7 +971,7 @@ def _preset_lora_items(
 class GJJ_ModelBundleLoader:
     CATEGORY = "GJJ"
     FUNCTION = "load_models"
-    DESCRIPTION = "一次性加载模型族模板中的扩散模型、CLIP、VAE、模型补丁、CLIP视觉模型、ControlNet，并附带常用采样参数输出。"
+    DESCRIPTION = "按模型族模板加载扩散模型、CLIP、VAE、模型补丁、CLIP视觉模型、ControlNet，并交给 ComfyUI 按实时显存自动完整加载或部分卸载。"
     SEARCH_ALIASES = ["MMM", "简易加载器", "model loader", "easy loader", "UNET", "Checkpoint", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "CONTROL_NET", "ControlNet", "KSampler", "采样参数"]
     GJJ_HELP = {
         "model_tree": True,
@@ -1308,6 +1449,8 @@ class GJJ_ModelBundleLoader:
         _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
         if _is_gguf_model(unet_name):
             model = _load_unet_gguf(unet_name)
+        elif "diffusion_models" in unet_categories and _is_convrot_quantized_model_name(unet_name):
+            model = _load_convrot_quantized_unet(unet_name, unet_dtype)
         else:
             model = comfy.sd.load_diffusion_model(unet_path, model_options=_build_unet_model_options(unet_dtype))
 
@@ -1338,7 +1481,9 @@ class GJJ_ModelBundleLoader:
             from comfy_extras.nodes_model_patch import ModelPatchLoader
         except Exception as exc:
             raise RuntimeError("当前 ComfyUI 环境缺少 ModelPatchLoader，无法加载模型补丁。") from exc
-        return ModelPatchLoader().load_model_patch(resolved)[0]
+        model_patch = ModelPatchLoader().load_model_patch(resolved)[0]
+        _configure_smart_patcher(model_patch, "模型补丁")
+        return model_patch
 
     def _load_clip_vision(self, clip_vision_name: str):
         name = _optional_model_text(clip_vision_name)
@@ -1348,6 +1493,7 @@ class GJJ_ModelBundleLoader:
         clip_vision = comfy.clip_vision.load(clip_path)
         if clip_vision is None:
             raise RuntimeError(f"加载 CLIP视觉模型失败：{name}")
+        _configure_smart_patcher(getattr(clip_vision, "patcher", None), "CLIP视觉模型")
         return clip_vision
 
     def _load_controlnet(self, control_net_name: str):
@@ -1358,6 +1504,12 @@ class GJJ_ModelBundleLoader:
         controlnet = comfy.controlnet.load_controlnet(controlnet_path)
         if controlnet is None:
             raise RuntimeError(f"加载 ControlNet 模型失败：{name}")
+        try:
+            control_models = controlnet.get_models()
+        except Exception:
+            control_models = []
+        for patcher in control_models:
+            _configure_smart_patcher(patcher, "ControlNet")
         return controlnet
 
     def _apply_preset_model_only_loras(self, model, lora_items: list[dict]):
@@ -1505,6 +1657,7 @@ class GJJ_ModelBundleLoader:
                 vae_dtype,
                 (main_category,),
             )
+        _configure_smart_bundle(unet, clip, vae)
         if checkpoint_common and _bool_value(use_separate_vae, False):
             selected_vae_name = str(vae_name or "").strip()
             if not selected_vae_name:
@@ -1552,6 +1705,15 @@ class GJJ_ModelBundleLoader:
         if not checkpoint_common:
             control_net_values = [control_net_values[0]] + [""] * (MAX_CONTROL_NET_SLOTS - 1)
         controlnets = self._load_controlnets(control_net_values)
+
+        _configure_smart_bundle(
+            unet,
+            clip,
+            vae,
+            clip_vision,
+            model_patch,
+            controlnets,
+        )
 
         dynamic_outputs: list = [item for item in controlnets if item is not None]
         if model_patch is not None:

@@ -54,7 +54,7 @@ SAGE_ATTENTION_MAP = {
 
 SAGE_MODE_TOOLTIP = (
     "选择 SageAttention 后端模式；只有“启用SageAttention”打开时生效。"
-    "选项说明：自动=调用 sageattention.sageattn；"
+    "选项说明：自动=调用 sageattention.sageattn，不支持当前 head_dim 时自动回退 ComfyUI 原生注意力；"
     "int8_fp16_cuda=CUDA int8 QK + fp16 PV 后端；"
     "int8_fp16_triton=Triton int8 QK + fp16 PV 后端；"
     "int8_fp8_cuda=CUDA int8 QK + fp8 PV 累积；"
@@ -311,19 +311,41 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False, unique_id=N
     if not allow_compile and hasattr(torch, "compiler"):
         sage_func = torch.compiler.disable()(sage_func)
 
+    fallback_head_dims_logged = set()
+
     @wrap_attn
     def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
-        if kwargs.get("low_precision_attention", True) is False:
+        original_q, original_k, original_v, original_mask = q, k, v, mask
+
+        def fallback_to_pytorch():
             return attention_pytorch(
-                q,
-                k,
-                v,
+                original_q,
+                original_k,
+                original_v,
                 heads,
-                mask=mask,
+                mask=original_mask,
+                attn_precision=attn_precision,
                 skip_reshape=skip_reshape,
                 skip_output_reshape=skip_output_reshape,
                 **kwargs,
             )
+
+        if kwargs.get("low_precision_attention", True) is False:
+            return fallback_to_pytorch()
+
+        if skip_reshape:
+            dim_head = int(q.shape[-1])
+        else:
+            dim_head = int(q.shape[-1]) // int(heads)
+
+        if sage_attention == "auto" and dim_head not in {64, 96, 128}:
+            if dim_head not in fallback_head_dims_logged:
+                logging.warning(
+                    "[GJJ] SageAttention 自动模式不支持 head_dim=%s，已回退 ComfyUI 原生注意力。",
+                    dim_head,
+                )
+                fallback_head_dims_logged.add(dim_head)
+            return fallback_to_pytorch()
 
         in_dtype = v.dtype
         if q.dtype == torch.float32 or k.dtype == torch.float32 or v.dtype == torch.float32:
@@ -344,7 +366,23 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False, unique_id=N
             if mask.ndim == 3:
                 mask = mask.unsqueeze(1)
 
-        out = sage_func(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout).to(in_dtype)
+        try:
+            out = sage_func(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout).to(in_dtype)
+        except Exception as exc:
+            normalized_error = str(exc).lower().replace("_", "").replace(" ", "")
+            is_head_dim_error = "headdim" in normalized_error and all(
+                supported_dim in normalized_error for supported_dim in ("64", "96", "128")
+            )
+            if sage_attention != "auto" or not is_head_dim_error:
+                raise
+            if dim_head not in fallback_head_dims_logged:
+                logging.warning(
+                    "[GJJ] SageAttention 自动模式拒绝 head_dim=%s，已回退 ComfyUI 原生注意力：%s",
+                    dim_head,
+                    exc,
+                )
+                fallback_head_dims_logged.add(dim_head)
+            return fallback_to_pytorch()
         if tensor_layout == "HND":
             if not skip_output_reshape:
                 out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)

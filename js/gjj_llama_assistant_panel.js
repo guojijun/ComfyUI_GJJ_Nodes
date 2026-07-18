@@ -15,6 +15,7 @@ const USER_PROMPT_HEIGHT = 74;
 const NODE_EXTRA_HEIGHT = 78;
 const DEFAULT_TEMPLATE_TEXT = "";
 const DEFAULT_OUTPUT_RULE = "";
+const CACHE_TYPE_OPTIONS = ["默认(F16)", "q8_0"];
 let assistantSettingsPromise = null;
 const BACKEND_WIDGETS = [
 	"main_model",
@@ -55,6 +56,12 @@ function widget(node, name) {
 
 function value(node, name, fallback = "") {
 	return widget(node, name)?.value ?? fallback;
+}
+
+function boolValue(raw) {
+	if (typeof raw === "boolean") return raw;
+	const text = String(raw ?? "").trim().toLowerCase();
+	return ["true", "1", "yes", "on", "开启", "启用"].includes(text);
 }
 
 function protect(element) {
@@ -508,6 +515,55 @@ async function refreshModels(node, autoPair = false) {
 	resizeNode(node);
 }
 
+function keepModelEnabled(node) {
+	return String(value(node, "model_keep_alive", "保持模型")) === "保持模型";
+}
+
+function gpuPriorityEnabled(node) {
+	return Number(value(node, "gpu_layers", -1)) !== 0;
+}
+
+function setKeepModelEnabled(node, enabled) {
+	setWidgetValue(node, "model_keep_alive", enabled ? "保持模型" : "卸载模型");
+	syncPanel(node);
+}
+
+function setGpuPriorityEnabled(node, enabled) {
+	setWidgetValue(node, "gpu_layers", enabled ? -1 : 0);
+	syncPanel(node);
+}
+
+function closeModelPopup(node) {
+	const state = node?.__gjjLlamaPanel;
+	if (!state) return;
+	state.modelPopupOpen = false;
+	state.modelPopup?.classList.remove("open");
+	syncPanel(node);
+}
+
+function positionModelPopup(node) {
+	const state = node?.__gjjLlamaPanel;
+	const popup = state?.modelPopup;
+	const anchor = state?.keepAlive;
+	if (!popup || !anchor || !state.modelPopupOpen) return;
+	const rect = anchor.getBoundingClientRect();
+	const width = Math.min(540, Math.max(380, window.innerWidth - 28));
+	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect.left));
+	const top = Math.min(window.innerHeight - 120, Math.max(14, rect.bottom + 6));
+	popup.style.width = `${width}px`;
+	popup.style.left = `${Math.round(left)}px`;
+	popup.style.top = `${Math.round(top)}px`;
+}
+
+function toggleModelPopup(node) {
+	const state = node?.__gjjLlamaPanel;
+	if (!state) return;
+	state.modelPopupOpen = !state.modelPopupOpen;
+	state.modelPopup?.classList.toggle("open", state.modelPopupOpen);
+	syncPanel(node);
+	positionModelPopup(node);
+}
+
 function remember(node, serializedNode = null) {
 	if (!node || node.__gjjLlamaRestoring) return {};
 	const values = {};
@@ -583,18 +639,19 @@ function syncPanel(node) {
 	syncInput(state.repeatPenalty, value(node, "repeat_penalty", 1.15));
 	syncInput(state.contextLength, value(node, "context_length", 8192));
 	syncInput(state.gpuLayers, value(node, "gpu_layers", -1));
+	syncInput(state.cacheTypeK, value(node, "cache_type_k", CACHE_TYPE_OPTIONS[0]));
+	syncInput(state.cacheTypeV, value(node, "cache_type_v", CACHE_TYPE_OPTIONS[0]));
+	syncInput(state.nCpuMoe, value(node, "n_cpu_moe", 0));
 	syncInput(state.maxFrames, value(node, "max_frames", 24));
 	syncInput(state.maxImageEdge, value(node, "max_image_edge", 1024));
 	syncInput(state.systemPrompt, value(node, "system_prompt", ""));
 	syncInput(state.templateEditor, value(node, TEMPLATE_WIDGET, state.userSettings?.templateText || DEFAULT_TEMPLATE_TEXT));
 	syncInput(state.outputRule, value(node, OUTPUT_RULE_WIDGET, state.userSettings?.outputRule || DEFAULT_OUTPUT_RULE));
 	state.settings.style.display = state.expanded ? "flex" : "none";
-	state.modelButton.textContent = "🤖";
-	state.modelButton.title = `主模型：${String(value(node, "main_model", "") || "未选择")}\n视觉模型：${String(value(node, "mmproj_model", NO_MMPROJ) || NO_MMPROJ)}`;
 	state.thinking.textContent = "💭";
 	state.thinking.title = String(value(node, "thinking_mode", "关闭思考")) === "开启思考" ? "思考模式：开。点击关闭。" : "思考模式：关。点击开启。";
 	state.keepAlive.textContent = "🧠";
-	state.keepAlive.title = String(value(node, "model_keep_alive", "保持模型")) === "保持模型" ? "模型常驻。点击改为用后卸载。" : "用后卸载。点击改为常驻。";
+	state.keepAlive.title = `${state.modelPopupOpen ? "关闭" : "打开"}模型参数\n主模型：${String(value(node, "main_model", "") || "未选择")}\n视觉模型：${String(value(node, "mmproj_model", NO_MMPROJ) || NO_MMPROJ)}\n${keepModelEnabled(node) ? "保持模型已开启" : "保持模型已关闭"}`;
 	state.randomSeed.textContent = "🎲";
 	state.randomSeed.title = String(value(node, "seed_mode", "每次随机")) === "每次随机" ? "随机种：开。" : "随机种：关。";
 	state.runCurrent.textContent = "▶️";
@@ -602,8 +659,12 @@ function syncPanel(node) {
 	state.settingsButton.title = state.expanded ? "收起设置" : "展开设置";
 	state.settingsButton.classList.toggle("active", state.expanded);
 	state.thinking.classList.toggle("active", String(value(node, "thinking_mode", "关闭思考")) === "开启思考");
-	state.keepAlive.classList.toggle("active", String(value(node, "model_keep_alive", "保持模型")) === "保持模型");
+	state.keepAlive.classList.toggle("active", keepModelEnabled(node));
+	state.keepAlive.classList.toggle("popup-open", Boolean(state.modelPopupOpen));
 	state.randomSeed.classList.toggle("active", String(value(node, "seed_mode", "每次随机")) === "每次随机");
+	state.modelPopup?.classList.toggle("open", Boolean(state.modelPopupOpen));
+	state.modelPopup?.__gjjRefresh?.();
+	positionModelPopup(node);
 	renderTemplates(node);
 	resizeNode(node);
 	resizeNode(node, 120);
@@ -632,7 +693,10 @@ function buildSettings(node) {
 		syncPanel(node);
 	});
 	const mmprojModel = select("视觉模型 mmproj", [NO_MMPROJ]);
-	mmprojModel.addEventListener("change", () => setWidgetValue(node, "mmproj_model", mmprojModel.value));
+	mmprojModel.addEventListener("change", () => {
+		setWidgetValue(node, "mmproj_model", mmprojModel.value);
+		syncPanel(node);
+	});
 	const refresh = button("🔄", "重新读取 models/LLM 模型列表", () => refreshModels(node, true));
 	refresh.classList.add("compact");
 
@@ -668,6 +732,18 @@ function buildSettings(node) {
 	bindNumber(node, contextLength, "context_length", 1024, 327680, true);
 	const gpuLayers = input("number", "GPU层数");
 	bindNumber(node, gpuLayers, "gpu_layers", -1, 9999, true);
+	const cacheTypeK = select("KV缓存K类型", CACHE_TYPE_OPTIONS);
+	cacheTypeK.addEventListener("change", () => {
+		setWidgetValue(node, "cache_type_k", cacheTypeK.value);
+		syncPanel(node);
+	});
+	const cacheTypeV = select("KV缓存V类型", CACHE_TYPE_OPTIONS);
+	cacheTypeV.addEventListener("change", () => {
+		setWidgetValue(node, "cache_type_v", cacheTypeV.value);
+		syncPanel(node);
+	});
+	const nCpuMoe = input("number", "前N层专家上CPU");
+	bindNumber(node, nCpuMoe, "n_cpu_moe", 0, 256, true);
 	const maxFrames = input("number", "最多帧数");
 	bindNumber(node, maxFrames, "max_frames", 2, 1024, true);
 	const maxImageEdge = input("number", "最大边长");
@@ -683,8 +759,6 @@ function buildSettings(node) {
 		param("出现", presencePenalty),
 		param("频率", frequencyPenalty),
 		param("重复", repeatPenalty),
-		param("上下文", contextLength),
-		param("GPU层", gpuLayers),
 		param("帧数", maxFrames),
 		param("边长", maxImageEdge),
 	);
@@ -711,8 +785,6 @@ function buildSettings(node) {
 	outputRule.addEventListener("input", () => setWidgetValue(node, OUTPUT_RULE_WIDGET, outputRule.value));
 
 	settings.append(
-		field("主模型", mainModel, refresh),
-		field("视觉模型 mmproj", mmprojModel),
 		numeric,
 		field("系统提示词模板", templateEditor, saveTemplates),
 		field("输出约束", outputRule),
@@ -722,6 +794,7 @@ function buildSettings(node) {
 		settings,
 		mainModel,
 		mmprojModel,
+		refresh,
 		temperature,
 		maxTokens,
 		seedMode,
@@ -734,6 +807,9 @@ function buildSettings(node) {
 		repeatPenalty,
 		contextLength,
 		gpuLayers,
+		cacheTypeK,
+		cacheTypeV,
+		nCpuMoe,
 		maxFrames,
 		maxImageEdge,
 		systemPrompt,
@@ -741,6 +817,56 @@ function buildSettings(node) {
 		saveTemplates,
 		outputRule,
 	};
+}
+
+function buildModelPopup(node, controls) {
+	const popup = document.createElement("div");
+	popup.className = "gjj-la-model-popup";
+	protect(popup);
+	const head = document.createElement("div");
+	head.className = "gjj-la-model-popup-head";
+	const title = document.createElement("div");
+	title.className = "gjj-la-model-popup-title";
+	title.textContent = "🧠 模型参数";
+	const close = button("×", "关闭模型参数", () => closeModelPopup(node));
+	close.classList.add("compact");
+	head.append(title, close);
+
+	const toggles = document.createElement("div");
+	toggles.className = "gjj-la-model-toggles";
+	const gpuPriority = button("GPU优先", "开启后 GPU层数设为 -1，尽量让 llama.cpp 全部上 GPU。", () => {
+		setGpuPriorityEnabled(node, !gpuPriorityEnabled(node));
+	});
+	const keepModel = button("保持模型", "切换模型常驻 / 用后卸载。", () => {
+		setKeepModelEnabled(node, !keepModelEnabled(node));
+	});
+	const cpuMoe = button("MoE专家CPU", "仅 Qwen3.6-VL 相关模型支持；开启后 MoE 专家层可放到 CPU。", () => {
+		setWidgetValue(node, "cpu_moe", !boolValue(value(node, "cpu_moe", false)));
+		syncPanel(node);
+	});
+	toggles.append(gpuPriority, keepModel, cpuMoe);
+
+	const grid = document.createElement("div");
+	grid.className = "gjj-la-model-grid";
+	grid.append(
+		field("主模型", controls.mainModel, controls.refresh),
+		field("视觉模型 mmproj", controls.mmprojModel),
+		param("上下文", controls.contextLength),
+		param("GPU层", controls.gpuLayers),
+		field("KV缓存 K", controls.cacheTypeK),
+		field("KV缓存 V", controls.cacheTypeV),
+		param("MoE层数", controls.nCpuMoe),
+	);
+	popup.append(head, toggles, grid);
+	popup.__gjjRefresh = () => {
+		gpuPriority.textContent = gpuPriorityEnabled(node) ? "GPU优先" : "CPU优先";
+		gpuPriority.classList.toggle("active", gpuPriorityEnabled(node));
+		keepModel.textContent = keepModelEnabled(node) ? "保持模型" : "卸载模型";
+		keepModel.classList.toggle("active", keepModelEnabled(node));
+		cpuMoe.textContent = boolValue(value(node, "cpu_moe", false)) ? "MoE上CPU" : "MoE默认";
+		cpuMoe.classList.toggle("active", boolValue(value(node, "cpu_moe", false)));
+	};
+	return popup;
 }
 
 function createPanel(node) {
@@ -758,7 +884,17 @@ function createPanel(node) {
 		.gjj-la-button.compact{width:auto;min-width:28px;max-width:74px;height:22px;padding:0 7px;font-size:11px;line-height:20px}
 		.gjj-la-button:hover{background:#24333b;border-color:#5f8590}
 		.gjj-la-button.active{background:#24452d;border-color:#65a271;color:#ebffee}
+		.gjj-la-button.popup-open{box-shadow:0 0 0 2px rgba(102,178,255,.18);border-color:#72a7d7}
 		.gjj-la-settings{display:none;flex-direction:column;gap:7px;padding:8px;border:1px solid rgba(73,93,101,.7);border-radius:8px;background:rgba(15,22,26,.88)}
+		.gjj-la-model-popup{position:fixed;z-index:900;display:none;flex-direction:column;gap:9px;padding:10px;border:1px solid #41535b;border-radius:8px;background:#10171b;color:#dce7e2;box-shadow:0 16px 42px rgba(0,0,0,.45)}
+		.gjj-la-model-popup.open{display:flex}
+		.gjj-la-model-popup-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+		.gjj-la-model-popup-title{font-weight:900;font-size:14px;color:#f2faf7}
+		.gjj-la-model-toggles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+		.gjj-la-model-toggles .gjj-la-button{width:100%;max-width:none;height:32px}
+		.gjj-la-model-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:start}
+		.gjj-la-model-grid .gjj-la-field,.gjj-la-model-grid .gjj-la-param{min-width:0;max-width:none}
+		.gjj-la-model-grid .gjj-la-param{width:100%}
 		.gjj-la-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 		.gjj-la-label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 		.gjj-la-label{color:#aebfc4;font-weight:700;font-size:11px}
@@ -777,20 +913,12 @@ function createPanel(node) {
 	toolbar.className = "gjj-la-toolbar";
 	const templates = document.createElement("div");
 	templates.className = "gjj-la-templates";
-	const modelButton = button("🤖", "当前模型。点击展开模型设置。", () => {
-		node.__gjjLlamaPanel.expanded = true;
-		syncPanel(node);
-	});
 	const thinking = button("💭", "切换思考模式", () => {
 		const next = String(value(node, "thinking_mode", "关闭思考")) === "开启思考" ? "关闭思考" : "开启思考";
 		setWidgetValue(node, "thinking_mode", next);
 		syncPanel(node);
 	});
-	const keepAlive = button("🧠", "切换模型常驻/用后卸载", () => {
-		const next = String(value(node, "model_keep_alive", "保持模型")) === "保持模型" ? "卸载模型" : "保持模型";
-		setWidgetValue(node, "model_keep_alive", next);
-		syncPanel(node);
-	});
+	const keepAlive = button("🧠", "打开模型参数", () => toggleModelPopup(node));
 	const randomSeed = button("🎲", "切换随机种模式", () => {
 		const next = String(value(node, "seed_mode", "每次随机")) === "每次随机" ? "固定种子" : "每次随机";
 		setWidgetValue(node, "seed_mode", next);
@@ -802,15 +930,18 @@ function createPanel(node) {
 		syncPanel(node);
 	});
 	const settingsState = buildSettings(node);
-	toolbar.append(templates, modelButton, thinking, keepAlive, randomSeed, runCurrent, settingsButton);
+	const modelPopup = buildModelPopup(node, settingsState);
+	toolbar.append(templates, keepAlive, thinking, randomSeed, runCurrent, settingsButton);
 	root.append(style, toolbar, settingsState.settings);
+	(document.body || document.documentElement).appendChild(modelPopup);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
 	domWidget.computeSize = (width) => [Math.max(470, Number(width || node.size?.[0] || 470)), Math.max(35, Math.ceil(root.scrollHeight || 35))];
 	node.__gjjLlamaPanel = {
 		root,
 		domWidget,
 		templates,
-		modelButton,
+		modelPopup,
+		modelPopupOpen: false,
 		thinking,
 		keepAlive,
 		randomSeed,
@@ -881,6 +1012,11 @@ app.registerExtension({
 			const result = originalOnConnectionsChange?.apply(this, args);
 			schedule(this);
 			return result;
+		};
+		const originalOnRemoved = nodeType.prototype.onRemoved;
+		nodeType.prototype.onRemoved = function (...args) {
+			this.__gjjLlamaPanel?.modelPopup?.remove?.();
+			return originalOnRemoved?.apply(this, args);
 		};
 	},
 

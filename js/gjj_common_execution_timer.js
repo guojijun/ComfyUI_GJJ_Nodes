@@ -74,7 +74,7 @@ function normalizeMemoryStats(payload = {}) {
 	const gpu = Array.isArray(payload?.gpu) ? payload.gpu : [];
 	const firstGpu = gpu.find((item) => item && !item.error) || null;
 	if (firstGpu) {
-		const used = Number(firstGpu.cached ?? firstGpu.allocated ?? 0);
+		const used = Number(firstGpu.used ?? firstGpu.memory_used ?? firstGpu.cached ?? firstGpu.allocated ?? 0);
 		const total = Number(firstGpu.total || 0);
 		const unit = String(firstGpu.unit || "GB");
 		stats.vram = {
@@ -83,7 +83,7 @@ function normalizeMemoryStats(payload = {}) {
 			unit,
 			percent: Number.isFinite(Number(firstGpu.percent)) ? Number(firstGpu.percent) : percent(used, total),
 			label: "显存 VRAM",
-			detail: `已占 ${formatStatValue(used, unit)} / ${formatStatValue(total, unit)}`,
+			detail: `已占 ${formatStatValue(used, unit)} / ${formatStatValue(total, unit)}${firstGpu.source ? ` · ${firstGpu.source}` : ""}`,
 		};
 	}
 	return stats;

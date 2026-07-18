@@ -9,6 +9,7 @@ const HIDDEN_WIDGETS = new Set([STATE_WIDGET, FILE_WIDGET]);
 
 const ALIGN_PX = [2, 4, 8, 16, 32];
 const DEFAULT_ALIGN = 16;
+const DEFAULT_BORDER_WIDTH = 0;
 const MAX_ROWS = 4;
 const MAX_COLS = 4;
 
@@ -24,13 +25,13 @@ const TOTAL_H = HEADER_H + CANVAS_H + CONTROLS_H + BLOCK_PREVIEW_H + 18;
 // ─── State ─────────────────────────────────────────────────────────
 
 function defaultState() {
-	return { rows: 2, cols: 2, h_positions: [0.5], v_positions: [0.5], show_blocks: false, align_px: DEFAULT_ALIGN };
+	return { rows: 2, cols: 2, h_positions: [0.5], v_positions: [0.5], show_blocks: false, align_px: DEFAULT_ALIGN, border_width: DEFAULT_BORDER_WIDTH };
 }
 
 function parseState(raw) {
 	try {
 		const v = JSON.parse(String(raw || "{}"));
-		return v && typeof v === "object" ? v : defaultState();
+		return v && typeof v === "object" ? { ...defaultState(), ...v } : defaultState();
 	} catch { return defaultState(); }
 }
 
@@ -45,6 +46,28 @@ function snapToPixels(fraction, dimension, alignPx) {
 	const snapped = Math.round(px / alignPx) * alignPx;
 	const clamped = Math.max(alignPx, Math.min(dimension - alignPx, snapped));
 	return clamped / dimension;
+}
+
+function parseBorderWidth(value) {
+	const n = Number.parseInt(String(value ?? DEFAULT_BORDER_WIDTH), 10);
+	if (!Number.isFinite(n)) return DEFAULT_BORDER_WIDTH;
+	return Math.max(0, Math.min(4096, n));
+}
+
+function trimBlockRect(sx, sy, sw, sh, borderWidth) {
+	const x = Math.round(sx);
+	const y = Math.round(sy);
+	const w = Math.max(1, Math.round(sw));
+	const h = Math.max(1, Math.round(sh));
+	const maxBorder = Math.max(0, Math.min(Math.floor((w - 1) / 2), Math.floor((h - 1) / 2)));
+	const border = Math.min(parseBorderWidth(borderWidth), maxBorder);
+	return {
+		sx: x + border,
+		sy: y + border,
+		sw: Math.max(1, w - border * 2),
+		sh: Math.max(1, h - border * 2),
+		border,
+	};
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -498,6 +521,106 @@ function createSplitterWidget(node) {
 	updateBlockToggleStyle();
 
 	let currentAlign = ALIGN_PX.includes(Number(state.align_px)) ? Number(state.align_px) : DEFAULT_ALIGN;
+	let currentBorderWidth = parseBorderWidth(state.border_width);
+
+	const settingsBtn = document.createElement("button");
+	settingsBtn.type = "button";
+	settingsBtn.textContent = "⚙️";
+	settingsBtn.title = "边框宽度：裁剪每个区块时先向内去掉边框，再计算对齐尺寸";
+	settingsBtn.style.cssText = "width:24px;height:22px;padding:0;border:1px solid rgba(113,137,148,0.45);border-radius:4px;background:#1b252b;color:#d9e4e8;font-size:13px;cursor:pointer;line-height:20px;";
+
+	function closeSettingsPanel() {
+		if (node.__gjjSplitterSettingsPanel?.parentNode) {
+			node.__gjjSplitterSettingsPanel.parentNode.removeChild(node.__gjjSplitterSettingsPanel);
+		}
+		delete node.__gjjSplitterSettingsPanel;
+		if (node.__gjjSplitterSettingsOutsideHandler) {
+			document.removeEventListener("pointerdown", node.__gjjSplitterSettingsOutsideHandler, true);
+		}
+		delete node.__gjjSplitterSettingsOutsideHandler;
+	}
+
+	function updateSettingsButtonStyle() {
+		const active = currentBorderWidth > 0;
+		settingsBtn.style.background = active ? "#2d2818" : "#1b252b";
+		settingsBtn.style.color = active ? "#ffd36a" : "#d9e4e8";
+		settingsBtn.style.borderColor = active ? "rgba(255,211,106,0.58)" : "rgba(113,137,148,0.45)";
+		settingsBtn.title = `边框宽度 ${currentBorderWidth}px：裁剪每个区块时先向内去边框，再计算对齐尺寸`;
+	}
+
+	function showSettingsPanel() {
+		closeSettingsPanel();
+		const panel = document.createElement("div");
+		panel.style.cssText = "position:fixed;z-index:100000;min-width:210px;padding:10px;border:1px solid rgba(113,137,148,0.55);border-radius:8px;background:#10191f;color:#d9e4e8;box-shadow:0 12px 34px rgba(0,0,0,0.42);font:12px system-ui,sans-serif;";
+
+		const title = document.createElement("div");
+		title.textContent = "⚙️ 裁剪边框";
+		title.style.cssText = "font-weight:700;color:#e4f1f4;margin-bottom:8px;";
+
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:8px;";
+		const text = document.createElement("span");
+		text.textContent = "宽度";
+		text.style.cssText = "color:#a9bbc2;white-space:nowrap;";
+		const input = document.createElement("input");
+		input.type = "number";
+		input.min = "0";
+		input.max = "4096";
+		input.step = "1";
+		input.value = String(currentBorderWidth);
+		input.style.cssText = "width:92px;height:26px;padding:2px 7px;border:1px solid rgba(113,137,148,0.55);border-radius:5px;background:#0c1419;color:#e4f1f4;box-sizing:border-box;";
+		const px = document.createElement("span");
+		px.textContent = "px";
+		px.style.cssText = "color:#8fa6ae;";
+		row.append(text, input, px);
+
+		const hint = document.createElement("div");
+		hint.textContent = "先裁掉边框，再按当前 🎯 对齐值取最小尺寸。";
+		hint.style.cssText = "margin-top:7px;color:#7f969e;line-height:1.3;";
+
+		function applyBorder() {
+			currentBorderWidth = parseBorderWidth(input.value);
+			state.border_width = currentBorderWidth;
+			input.value = String(currentBorderWidth);
+			updateSettingsButtonStyle();
+			syncState();
+			draw();
+			updateBlockPreviews();
+		}
+
+		input.addEventListener("change", applyBorder);
+		input.addEventListener("input", () => {
+			currentBorderWidth = parseBorderWidth(input.value);
+			state.border_width = currentBorderWidth;
+			updateSettingsButtonStyle();
+			syncState();
+			updateBlockPreviews();
+		});
+		panel.append(title, row, hint);
+		document.body.appendChild(panel);
+		const rect = settingsBtn.getBoundingClientRect();
+		const left = Math.min(window.innerWidth - panel.offsetWidth - 8, Math.max(8, rect.left));
+		const top = Math.min(window.innerHeight - panel.offsetHeight - 8, rect.bottom + 6);
+		panel.style.left = `${left}px`;
+		panel.style.top = `${top}px`;
+		node.__gjjSplitterSettingsPanel = panel;
+		node.__gjjSplitterSettingsOutsideHandler = (event) => {
+			if (panel.contains(event.target) || settingsBtn.contains(event.target)) return;
+			closeSettingsPanel();
+		};
+		setTimeout(() => document.addEventListener("pointerdown", node.__gjjSplitterSettingsOutsideHandler, true), 0);
+		input.focus();
+		input.select();
+	}
+
+	settingsBtn.onclick = (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (node.__gjjSplitterSettingsPanel) closeSettingsPanel();
+		else showSettingsPanel();
+	};
+	updateSettingsButtonStyle();
+
 	const alignBox = document.createElement("span");
 	alignBox.title = "拖拽分割线时吸附到指定像素倍数";
 	alignBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;margin-left:2px;color:#9fb3bd;font-size:10px;white-space:nowrap;flex:0 0 auto;";
@@ -518,7 +641,7 @@ function createSplitterWidget(node) {
 		alignBox.appendChild(lbl);
 	}
 
-	toolbar.append(openBtn, rowBox, colBox, evenBtn, blockToggleBtn, alignBox);
+	toolbar.append(openBtn, rowBox, colBox, evenBtn, blockToggleBtn, settingsBtn, alignBox);
 	ctrl.append(toolbar);
 	wrap.insertBefore(ctrl, header);
 
@@ -555,6 +678,7 @@ function createSplitterWidget(node) {
 			v_positions: state.v_positions.map(p => Math.round(p * 1e6) / 1e6),
 			show_blocks: showBlocks,
 			align_px: currentAlign,
+			border_width: currentBorderWidth,
 		}));
 		if (app.graph) app.graph.setDirtyCanvas(true, true);
 	}
@@ -811,10 +935,11 @@ function createSplitterWidget(node) {
 				const sy = allH[r] * imgH;
 				const sw = (allV[c + 1] - allV[c]) * imgW;
 				const sh = (allH[r + 1] - allH[r]) * imgH;
-				const outW = Math.max(1, Math.floor(Math.round(sw) / currentAlign) * currentAlign || Math.round(sw));
-				const outH = Math.max(1, Math.floor(Math.round(sh) / currentAlign) * currentAlign || Math.round(sh));
+				const crop = trimBlockRect(sx, sy, sw, sh, currentBorderWidth);
+				const outW = Math.max(1, Math.floor(crop.sw / currentAlign) * currentAlign || crop.sw);
+				const outH = Math.max(1, Math.floor(crop.sh / currentAlign) * currentAlign || crop.sh);
 				const mw = 60;
-				const mh = Math.max(24, Math.min(70, Math.round(mw * sh / sw)));
+				const mh = Math.max(24, Math.min(70, Math.round(mw * crop.sh / crop.sw)));
 
 				const b = document.createElement("div");
 				b.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;";
@@ -823,11 +948,11 @@ function createSplitterWidget(node) {
 				mc.width = mw; mc.height = mh;
 				mc.style.cssText = `width:${mw}px;height:${mh}px;border:1px solid rgba(113,137,148,0.3);border-radius:3px;`;
 				const mctx = mc.getContext("2d");
-				mctx.drawImage(loadedImage, sx, sy, sw, sh, 0, 0, mw, mh);
+				mctx.drawImage(loadedImage, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, mw, mh);
 
 				const lbl = document.createElement("span");
 				lbl.style.cssText = "font-size:9px;color:#98d6d1;line-height:1;";
-				lbl.title = `输出 ${outW}×${outH} 像素（${currentAlign}px 对齐）`;
+				lbl.title = `输出 ${outW}×${outH} 像素（边框 ${crop.border}px，${currentAlign}px 对齐）`;
 				lbl.textContent = `${outW}×${outH}`;
 
 				b.append(mc, lbl);
@@ -916,6 +1041,7 @@ function createSplitterWidget(node) {
 	node.onRemoved = function () {
 		origRem?.apply(this, arguments);
 		delete node.__gjjImageSplitterRefreshFromUpstream;
+		closeSettingsPanel();
 		ro.disconnect();
 		if (fileInput && fileInput.parentNode) fileInput.parentNode.removeChild(fileInput);
 	};
@@ -943,6 +1069,12 @@ function createSplitterWidget(node) {
 						colVal.textContent = String(pd.cols); }
 					if (pd.h_positions) state.h_positions = pd.h_positions;
 					if (pd.v_positions) state.v_positions = pd.v_positions;
+					if (Number.isFinite(Number(pd.align_px)) && ALIGN_PX.includes(Number(pd.align_px))) currentAlign = Number(pd.align_px);
+					if (Number.isFinite(Number(pd.border_width))) {
+						currentBorderWidth = parseBorderWidth(pd.border_width);
+						state.border_width = currentBorderWidth;
+						updateSettingsButtonStyle();
+					}
 					syncState();
 				};
 				img.onerror = () => {

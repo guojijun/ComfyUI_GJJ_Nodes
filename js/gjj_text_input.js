@@ -11,7 +11,9 @@ const WIDTH_PROPERTY = "gjj_text_input_width";
 const LAST_LINK_PROPERTY = "gjj_text_input_last_upstream_link";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
-const MIN_WIDGET_WIDTH = 1;
+const DEFAULT_NODE_WIDTH = 360;
+const MIN_NODE_WIDTH = 240;
+const WIDTH_GRID = 5;
 const MIN_WIDGET_HEIGHT = 24;
 const MIN_EDITOR_HEIGHT = 32;
 const EMPTY_TEXT = "空文本";
@@ -191,26 +193,51 @@ function setMode(node, mode) {
 	node.properties[MODE_PROPERTY] = mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
 }
 
-function getCurrentWidth(node) {
-	const sizeWidth = Number(node?.size?.[0] || 0);
-	const savedWidth = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
-	return sizeWidth || savedWidth || 0;
+function normalizeWidth(value, fallback = 0) {
+	const width = Number(value || 0);
+	if (!Number.isFinite(width) || width < MIN_NODE_WIDTH) {
+		return fallback;
+	}
+	return Math.round(width / WIDTH_GRID) * WIDTH_GRID;
 }
 
-function rememberWidth(node) {
+function ensureStableWidth(node, fallback = DEFAULT_NODE_WIDTH, preferCurrent = false) {
 	if (!node) {
-		return 0;
+		return fallback;
 	}
-	const width = getCurrentWidth(node);
-	if (width > 0) {
-		node.properties = node.properties || {};
-		node.properties[WIDTH_PROPERTY] = width;
+	const sizeWidth = normalizeWidth(node.size?.[0]);
+	const savedWidth = normalizeWidth(node.properties?.[WIDTH_PROPERTY]);
+	const width = preferCurrent
+		? (sizeWidth || savedWidth || fallback)
+		: Math.max(sizeWidth, savedWidth, fallback);
+	node.properties = node.properties || {};
+	node.properties[WIDTH_PROPERTY] = width;
+	node.min_width = Math.max(Number(node.min_width || 0), MIN_NODE_WIDTH);
+	if (Array.isArray(node.size) && normalizeWidth(node.size[0]) !== width) {
+		node.size[0] = width;
 	}
 	return width;
 }
 
+function getCurrentWidth(node) {
+	if (!node) {
+		return DEFAULT_NODE_WIDTH;
+	}
+	const sizeWidth = normalizeWidth(node.size?.[0]);
+	const savedWidth = normalizeWidth(node.properties?.[WIDTH_PROPERTY]);
+	return sizeWidth || savedWidth || DEFAULT_NODE_WIDTH;
+}
+
+function rememberWidth(node, preferCurrent = false) {
+	if (!node) {
+		return 0;
+	}
+	const width = ensureStableWidth(node, getCurrentWidth(node), preferCurrent);
+	return width;
+}
+
 function effectiveWidgetWidth(node, width = 0) {
-	return Math.max(MIN_WIDGET_WIDTH, Number(width || getCurrentWidth(node) || 0));
+	return Math.max(MIN_NODE_WIDTH, normalizeWidth(width) || getCurrentWidth(node));
 }
 
 function syncEditorHeight(editor) {
@@ -242,11 +269,9 @@ function refreshNode(node) {
 	}
 	const width = rememberWidth(node);
 	const computed = node.computeSize?.([width, node.size?.[1] || 0]) || node.size || [width, MIN_WIDGET_HEIGHT];
-	const nextWidth = width || Number(computed?.[0] || node.size?.[0] || 0);
+	const nextWidth = Math.max(MIN_NODE_WIDTH, width);
 	const nextHeight = Math.max(MIN_WIDGET_HEIGHT, Number(computed?.[1] || measureDomHeight(node)));
-	if (nextWidth > 0) {
-		node.setSize?.([nextWidth, nextHeight]);
-	}
+	node.setSize?.([nextWidth, nextHeight]);
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -1512,6 +1537,7 @@ function stabilizeNode(node) {
 	if (!node) {
 		return;
 	}
+	ensureStableWidth(node);
 	ensureDom(node);
 	recordCurrentTextInputLink(node);
 	bindTextWidget(node);
@@ -1555,16 +1581,9 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
-			const serializedWidth = Number(serializedNode?.size?.[0] || 0);
-			const savedWidth = Number(serializedNode?.properties?.[WIDTH_PROPERTY] || this.properties?.[WIDTH_PROPERTY] || 0);
-			const width = serializedWidth || savedWidth;
-			if (width > 0) {
-				this.properties = this.properties || {};
-				this.properties[WIDTH_PROPERTY] = width;
-				if (Array.isArray(this.size) && !Number(this.size[0] || 0)) {
-					this.size[0] = width;
-				}
-			}
+			const serializedWidth = normalizeWidth(serializedNode?.size?.[0]);
+			const savedWidth = normalizeWidth(serializedNode?.properties?.[WIDTH_PROPERTY] || this.properties?.[WIDTH_PROPERTY]);
+			ensureStableWidth(this, serializedWidth || savedWidth || DEFAULT_NODE_WIDTH);
 			restoreSavedValue(this, serializedNode);
 			scheduleStabilize(this, 0);
 			return result;
@@ -1573,7 +1592,7 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
-			rememberWidth(this);
+			rememberWidth(this, true);
 			scheduleStabilize(this, 0);
 			return result;
 		};
@@ -1620,12 +1639,12 @@ app.registerExtension({
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[SAVED_TEXT_PROPERTY] = value;
-				const propertyWidth = getCurrentWidth(this) || width;
+				const propertyWidth = normalizeWidth(getCurrentWidth(this) || width);
 				if (propertyWidth > 0) {
 					serializedNode.properties[WIDTH_PROPERTY] = propertyWidth;
 				}
 				if (Array.isArray(serializedNode.size)) {
-					const savedWidth = propertyWidth || Number(serializedNode.size[0] || 0);
+					const savedWidth = propertyWidth || normalizeWidth(serializedNode.size[0]);
 					if (savedWidth > 0) {
 						serializedNode.size[0] = savedWidth;
 					}

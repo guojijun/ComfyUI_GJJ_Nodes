@@ -70,6 +70,11 @@ from .gjj_model_bundle_loader import (
     list_unet_models,
     list_vae_models,
 )
+from .gjj_model_patch_bundle import (
+    GJJ_ModelPatchBundle,
+    MISSING_SAGE_HANDLING_MODES,
+    SAGE_ATTENTION_MODES,
+)
 from .common_utils.model_manager import gjjutils_find_model_list
 from .common_utils.model_family import (
     gjjutils_model_family_match_preset as match_model_family,
@@ -121,8 +126,8 @@ DEFAULT_UNET_DTYPE = "default"
 DEFAULT_MODEL_SOURCE = "UNET 主模型"
 MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]
 DEFAULT_CHECKPOINT_NAME = ""
-DEFAULT_DEVICE_PREFERENCE = "GPU优先"
-DEVICE_PREFERENCE_OPTIONS = [DEFAULT_DEVICE_PREFERENCE, "CPU优先"]
+DEFAULT_DEVICE_PREFERENCE = "智能调度"
+DEVICE_PREFERENCE_OPTIONS = ["GPU优先", "CPU优先", DEFAULT_DEVICE_PREFERENCE]
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
@@ -234,7 +239,53 @@ def _format_bytes(size: int | float | None) -> str:
     return f"{value:.1f}{units[index]}" if index else f"{int(value)}{units[index]}"
 
 
+def _padded_convrot_legacy_alias(name: Any) -> str:
+    return re.sub(
+        r"(?i)_int4_convrot_padded(?=\.safetensors$)",
+        "_int4_convrot",
+        str(name or "").strip(),
+    )
+
+
+def _padded_convrot_target_name(name: Any) -> str:
+    return re.sub(
+        r"(?i)_int4_convrot(?=\.safetensors$)",
+        "_int4_convrot_padded",
+        str(name or "").strip(),
+    )
+
+
+def _resolve_lazy_unet_model_name(name: Any) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return value
+    for category in ("diffusion_models", "unet_gguf", "checkpoints"):
+        try:
+            if folder_paths.get_full_path(category, value):
+                return value
+        except Exception:
+            pass
+    padded_name = _padded_convrot_target_name(value)
+    if padded_name == value:
+        return value
+    for category in ("diffusion_models", "unet_gguf", "checkpoints"):
+        try:
+            if folder_paths.get_full_path(category, padded_name):
+                print(f"[GJJ] LazyImageStudio 模型别名：{value} -> {padded_name}")
+                return padded_name
+        except Exception:
+            pass
+    return value
+
+
+def _is_convrot_quantized_model_name(name: Any) -> bool:
+    normalized = str(name or "").replace("\\", "/").lower()
+    return any(token in normalized for token in ("int4_convrot", "int8_convrot", "convrot_w4a4"))
+
+
 def _model_full_path(kind: str, name: str) -> str | None:
+    if kind != "lora":
+        name = _resolve_lazy_unet_model_name(name)
     categories = ("loras",) if kind == "lora" else ("diffusion_models", "unet_gguf")
     for category in categories:
         try:
@@ -771,12 +822,18 @@ def _ensure_gguf_model_folders() -> None:
 
 def _list_lazy_unet_models() -> list[str]:
     _ensure_gguf_model_folders()
-    return _dedupe_keep_order(
+    models = _dedupe_keep_order(
         _safe_filename_list("unet_gguf")
         + list_unet_models()
         + _safe_filename_list("diffusion_models")
         + _safe_filename_list("checkpoints")
     )
+    legacy_aliases = [
+        alias
+        for name in models
+        if (alias := _padded_convrot_legacy_alias(name)) != name
+    ]
+    return _dedupe_keep_order(models + legacy_aliases)
 
 
 def _list_lazy_checkpoints() -> list[str]:
@@ -929,55 +986,32 @@ def _as_bool(value: Any) -> bool:
 
 
 def _normalize_device_preference(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if "cpu" in text or "内存" in text or "卸载" in text:
-        return "CPU优先"
     return DEFAULT_DEVICE_PREFERENCE
 
 
-def _runtime_prefers_gpu(value: Any) -> bool:
-    return _normalize_device_preference(value) == DEFAULT_DEVICE_PREFERENCE
-
-
-def _load_patcher_gpu(patcher: Any) -> None:
+def _load_patcher_smart(patcher: Any) -> None:
     if patcher is None:
         return
-    comfy.model_management.load_model_gpu(patcher)
-
-
-def _offload_patcher_cpu(patcher: Any) -> None:
-    if patcher is None or not hasattr(patcher, "unpatch_model"):
-        return
     try:
-        patcher.unpatch_model(comfy.model_management.unet_offload_device())
+        comfy.model_management.load_model_gpu(patcher)
     except TypeError:
-        patcher.unpatch_model(device_to=comfy.model_management.unet_offload_device())
+        comfy.model_management.load_models_gpu([patcher])
 
 
 def _prepare_model_device(model: Any, device_preference: Any) -> None:
     try:
-        if _runtime_prefers_gpu(device_preference):
-            _load_patcher_gpu(model)
-        else:
-            _offload_patcher_cpu(model)
+        _load_patcher_smart(model)
     except Exception as exc:
-        print(f"[GJJ_LazyImageStudio] 设备偏好处理主模型失败，继续使用 ComfyUI 默认调度：{exc}")
+        print(f"[GJJ_LazyImageStudio] 主模型智能调度失败，继续使用 ComfyUI 默认状态：{exc}")
 
 
 def _prepare_vae_device(vae: Any, device_preference: Any) -> None:
     try:
         patcher = getattr(vae, "patcher", None)
-        if _runtime_prefers_gpu(device_preference):
-            if patcher is not None:
-                comfy.model_management.load_models_gpu([patcher])
-        else:
-            if patcher is not None:
-                _offload_patcher_cpu(patcher)
-            model = getattr(vae, "first_stage_model", None)
-            if model is not None and hasattr(model, "to"):
-                model.to(comfy.model_management.vae_offload_device())
+        if patcher is not None:
+            _load_patcher_smart(patcher)
     except Exception as exc:
-        print(f"[GJJ_LazyImageStudio] 设备偏好处理 VAE 失败，继续使用 ComfyUI 默认调度：{exc}")
+        print(f"[GJJ_LazyImageStudio] VAE 智能调度失败，继续使用 ComfyUI 默认状态：{exc}")
 
 
 def _stable_json(value: Any) -> str:
@@ -1395,8 +1429,17 @@ def _load_model_with_native_unet_loader(unet_name: str, unet_dtype: str):
 def _load_model(
     unet_name: str, unet_dtype: str, clip_type: str = "", unique_id: Any = None
 ):
+    unet_name = _resolve_lazy_unet_model_name(unet_name)
     if _is_gguf_model(unet_name):
         return _load_model_gguf(unet_name)
+    if _is_convrot_quantized_model_name(unet_name):
+        from .gjj_video_universal_model_loader import _load_convrot_quantized_diffusion_model
+
+        return _load_convrot_quantized_diffusion_model(
+            unet_name,
+            unet_dtype,
+            unique_id=unique_id,
+        )
     try:
         unet_path = _resolve_full_path(("diffusion_models", "checkpoints"), unet_name)
         print(f"[DEBUG] Loading UNET model: {unet_name}")
@@ -1988,6 +2031,7 @@ class GJJ_LazyImageStudio:
     OUTPUT_NODE = True  # 设为True以确保节点可以作为有效输出节点
     OUTPUT_TOOLTIPS = ("节点内部完成条件编码、采样和解码后的最终图片。",)
     _shared_runtime_cache: dict[str, tuple[Any, Any, Any]] = {}
+    _shared_gpu_pin_cache: dict[str, Any] = {}
     _shared_result_cache: dict[str, dict[str, Any]] = {}
     _shared_result_order: list[str] = []
     _MAX_RESULT_CACHE = 8
@@ -2030,9 +2074,14 @@ class GJJ_LazyImageStudio:
         cls._shared_runtime_cache[key] = (model, clip, vae)
 
     @classmethod
+    def _pin_runtime_gpu(cls, key: str, model: Any) -> None:
+        cls._shared_gpu_pin_cache[key] = model
+
+    @classmethod
     def _clear_shared_caches(cls, *, runtime: bool = False, results: bool = False) -> None:
         if runtime:
             cls._shared_runtime_cache.clear()
+            cls._shared_gpu_pin_cache.clear()
         if results:
             cls._shared_result_cache.clear()
             cls._shared_result_order.clear()
@@ -2339,8 +2388,74 @@ class GJJ_LazyImageStudio:
                         DEVICE_PREFERENCE_OPTIONS,
                         {
                             "default": DEFAULT_DEVICE_PREFERENCE,
-                            "display_name": "GPU/CPU优先",
-                            "tooltip": "GPU优先会在采样前主动把主模型加载到显卡，优先发挥 GPU 性能；CPU优先适合显存紧张时使用。",
+                            "display_name": "智能调度",
+                            "tooltip": "交给 ComfyUI 根据实时可用显存自动决定完整加载、部分驻留和卸载，不再强制 GPU 或 CPU。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "enable_sage_attention": (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "启用SageAttention",
+                            "tooltip": "为采样模型启用 SageAttention；缺少对应运行库时按下方策略处理。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "sage_attention_mode": (
+                        SAGE_ATTENTION_MODES,
+                        {
+                            "default": "自动",
+                            "display_name": "SageAttention模式",
+                            "tooltip": "选择 SageAttention 后端；自动模式遇到不支持的 head_dim 时会回退 ComfyUI 原生注意力。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "allow_sage_compile": (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "允许Sage编译",
+                            "tooltip": "允许 SageAttention 参与 torch.compile；默认关闭更稳。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "enable_fp16_accumulation_setting": (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "启用FP16累积设置",
+                            "tooltip": "兼容旧工作流的内部开关；懒人工作室面板已合并到“FP16累积”按钮。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "fp16_accumulation": (
+                        "BOOLEAN",
+                        {
+                            "default": True,
+                            "display_name": "FP16累积",
+                            "tooltip": "开启时同时启用 FP16 累积设置并使用 CUDA FP16 矩阵乘累积路径。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "missing_sage_attention_policy": (
+                        MISSING_SAGE_HANDLING_MODES,
+                        {
+                            "default": "自动跳过SageAttention继续运行",
+                            "display_name": "缺SageAttention处理",
+                            "tooltip": "缺少所选 SageAttention 依赖时的兼容策略；当前安全行为会跳过 Sage 并继续其它补丁。",
                             "hidden": True,
                             "display": "hidden",
                             "forceInput": False,
@@ -2543,21 +2658,27 @@ class GJJ_LazyImageStudio:
             raise RuntimeError("Boogu Image Edit Turbo 分支至少需要一张有效参考图。")
 
         encoder_kwargs: dict[str, Any] = {}
-        scaled_images: list[torch.Tensor] = []
+        reference_images: list[torch.Tensor] = []
         for index, pair in enumerate(pairs[:16], start=1):
             image = pair.get("image")
             if not isinstance(image, torch.Tensor):
                 continue
-            encoder_kwargs[f"image_{index}"] = image[:, :, :, :3].float().clamp(0.0, 1.0).contiguous()
-            scaled = _scale_image_to_workflow_megapixels(
-                image[:, :, :, :3],
-                1.0,
-                "lanczos",
-            ).float().clamp(0.0, 1.0).contiguous()
-            scaled_images.append(scaled)
+            encoder_kwargs[f"image_{index}"] = image
+            reference_images.append(image)
 
-        if not scaled_images:
+        if not reference_images:
             raise RuntimeError("Boogu Image Edit Turbo 分支未收到可用图片张量。")
+
+        first_image = reference_images[0]
+        latent_width = int(target_width) if target_width else int(first_image.shape[2])
+        latent_height = int(target_height) if target_height else int(first_image.shape[1])
+        latent_width = max(8, latent_width)
+        latent_height = max(8, latent_height)
+        latent_out = EmptyLatentImage().generate(
+            latent_width,
+            latent_height,
+            max(1, int(batch_size)),
+        )[0]
 
         positive, negative = GJJ_TextEncodeBooguEdit().encode(
             clip,
@@ -2566,15 +2687,7 @@ class GJJ_LazyImageStudio:
             vae=vae,
             **encoder_kwargs,
         )
-        first_image = scaled_images[0]
-        latent_width = int(target_width) if target_width else int(first_image.shape[2])
-        latent_height = int(target_height) if target_height else int(first_image.shape[1])
-        latent_out = EmptyLatentImage().generate(
-            max(8, latent_width),
-            max(8, latent_height),
-            max(1, int(batch_size)),
-        )[0]
-        return positive, negative, latent_out, max(8, latent_width), max(8, latent_height)
+        return positive, negative, latent_out, latent_width, latent_height
 
     def _sample_boogu_image_edit_turbo_workflow(
         self,
@@ -3037,6 +3150,12 @@ class GJJ_LazyImageStudio:
         model_source=DEFAULT_MODEL_SOURCE,
         ckpt_name=DEFAULT_CHECKPOINT_NAME,
         device_preference=DEFAULT_DEVICE_PREFERENCE,
+        enable_sage_attention=False,
+        sage_attention_mode="自动",
+        allow_sage_compile=False,
+        enable_fp16_accumulation_setting=False,
+        fp16_accumulation=True,
+        missing_sage_attention_policy="自动跳过SageAttention继续运行",
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -3073,6 +3192,13 @@ class GJJ_LazyImageStudio:
         model_source = _unwrap_list_input(model_source)
         ckpt_name = _unwrap_list_input(ckpt_name)
         device_preference = _unwrap_list_input(device_preference)
+        unet_name = _resolve_lazy_unet_model_name(unet_name)
+        enable_sage_attention = _unwrap_list_input(enable_sage_attention)
+        sage_attention_mode = _unwrap_list_input(sage_attention_mode)
+        allow_sage_compile = _unwrap_list_input(allow_sage_compile)
+        enable_fp16_accumulation_setting = _unwrap_list_input(enable_fp16_accumulation_setting)
+        fp16_accumulation = _unwrap_list_input(fp16_accumulation)
+        missing_sage_attention_policy = _unwrap_list_input(missing_sage_attention_policy)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
@@ -3080,6 +3206,26 @@ class GJJ_LazyImageStudio:
         disable_equal_reference_canvas = _as_bool(disable_equal_reference_canvas)
         use_input_image_size = _as_bool(use_input_image_size)
         device_preference = _normalize_device_preference(device_preference)
+        enable_sage_attention = _as_bool(enable_sage_attention)
+        sage_attention_mode = str(sage_attention_mode or "自动")
+        if sage_attention_mode not in SAGE_ATTENTION_MODES:
+            sage_attention_mode = "自动"
+        allow_sage_compile = _as_bool(allow_sage_compile)
+        enable_fp16_accumulation_setting = _as_bool(enable_fp16_accumulation_setting)
+        fp16_accumulation = _as_bool(fp16_accumulation)
+        missing_sage_attention_policy = str(
+            missing_sage_attention_policy or "自动跳过SageAttention继续运行"
+        )
+        if missing_sage_attention_policy not in MISSING_SAGE_HANDLING_MODES:
+            missing_sage_attention_policy = "自动跳过SageAttention继续运行"
+        optimization_params = {
+            "enable_sage_attention": bool(enable_sage_attention),
+            "sage_attention_mode": sage_attention_mode,
+            "allow_sage_compile": bool(allow_sage_compile),
+            "enable_fp16_accumulation_setting": bool(enable_fp16_accumulation_setting),
+            "fp16_accumulation": bool(fp16_accumulation),
+            "missing_sage_attention_policy": missing_sage_attention_policy,
+        }
 
         test_config_data: dict[str, Any] = {}
         if str(test_config or "").strip():
@@ -3239,6 +3385,12 @@ class GJJ_LazyImageStudio:
                             model_source=model_source,
                             ckpt_name=ckpt_name,
                             device_preference=device_preference,
+                            enable_sage_attention=enable_sage_attention,
+                            sage_attention_mode=sage_attention_mode,
+                            allow_sage_compile=allow_sage_compile,
+                            enable_fp16_accumulation_setting=enable_fp16_accumulation_setting,
+                            fp16_accumulation=fp16_accumulation,
+                            missing_sage_attention_policy=missing_sage_attention_policy,
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
@@ -3349,6 +3501,7 @@ class GJJ_LazyImageStudio:
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
                 "use_input_image_size": bool(use_input_image_size),
+                **optimization_params,
             }
             return {
                 "ui": {
@@ -3493,6 +3646,7 @@ class GJJ_LazyImageStudio:
                     "model_shift": float(preset.get("model_shift", 0.0)),
                     "cfg_norm_strength": float(preset.get("cfg_norm_strength", 0.0)),
                     "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
+                    "optimization": optimization_params,
                 }
             )
             effective_steps_for_cache = _resolve_effective_steps(int(steps), preset)
@@ -3525,6 +3679,12 @@ class GJJ_LazyImageStudio:
             if keep_model_loaded:
                 cached_result = self._cached_result(result_key)
                 if cached_result is not None:
+                    cached_runtime = self._cached_runtime(runtime_key)
+                    if cached_runtime is not None:
+                        cached_model, _cached_clip, _cached_vae = cached_runtime
+                        _send_status(unique_id, "缓存命中：按实时显存恢复模型。")
+                        _prepare_model_device(cached_model, device_preference)
+                        self._pin_runtime_gpu(runtime_key, cached_model)
                     _send_status(unique_id, "缓存命中：参数未变化，直接返回上次结果。")
                     return {
                         "ui": {
@@ -3572,15 +3732,21 @@ class GJJ_LazyImageStudio:
                         float(preset.get("model_shift", 0.0)),
                     )
                     model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
+                model, _ = GJJ_ModelPatchBundle().patch(
+                    MODEL=model,
+                    启用SageAttention=enable_sage_attention,
+                    SageAttention模式=sage_attention_mode,
+                    允许Sage编译=allow_sage_compile,
+                    启用FP16累积设置=enable_fp16_accumulation_setting,
+                    FP16累积=fp16_accumulation,
+                    缺SageAttention处理=missing_sage_attention_policy,
+                    unique_id=unique_id,
+                )
                 if keep_model_loaded:
                     self._remember_runtime(runtime_key, model, clip, vae)
 
-            if _runtime_prefers_gpu(device_preference):
-                _send_status(unique_id, "3/6 GPU优先：准备主模型进入显卡...")
-                _prepare_model_device(model, device_preference)
-            else:
-                _send_status(unique_id, "3/6 CPU优先：按低显存卸载策略准备模型...")
-                _prepare_model_device(model, device_preference)
+            _send_status(unique_id, "3/6 智能调度：按实时显存准备主模型...")
+            _prepare_model_device(model, device_preference)
 
             prompt_count = len(prompt_items)
             supports_reference_edit = _supports_multi_reference_edit(
@@ -3607,7 +3773,7 @@ class GJJ_LazyImageStudio:
                         raise RuntimeError("Boogu Image Edit Turbo 工作流需要至少连接一张参考图。")
                     _send_status(
                         unique_id,
-                        f"4/6 按 Boogu Image Edit Turbo 工作流编码{status_suffix}（缩放参考图到 1MP）...",
+                        f"4/6 按 Boogu Image Edit Turbo 工作流编码{status_suffix}（参考图直连编码器，按目标尺寸创建空 latent）...",
                     )
                     positive, negative, latent_out, boogu_width, boogu_height = (
                         self._encode_boogu_image_edit_turbo_workflow(
@@ -3736,6 +3902,7 @@ class GJJ_LazyImageStudio:
                         enabled=True,
                     )
                 sample_seed = int(seed) + prompt_index if prompt_count > 1 else int(seed)
+                _send_status(unique_id, f"5/6 智能调度：确认采样模型驻留状态{status_suffix}...")
                 _prepare_model_device(sample_model, device_preference)
                 if boogu_turbo_sample:
                     _send_status(
@@ -3871,6 +4038,7 @@ class GJJ_LazyImageStudio:
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
                 "use_input_image_size": bool(use_input_image_size),
+                **optimization_params,
             }
 
             # 准备返回值（在清理资源之前）
@@ -3885,10 +4053,12 @@ class GJJ_LazyImageStudio:
             }
 
             if keep_model_loaded:
+                _send_status(unique_id, f"完成：保持模型，显存继续智能调度  耗时：{elapsed_str}")
+                _prepare_model_device(model, device_preference)
+                self._pin_runtime_gpu(runtime_key, model)
                 self._kept_runtime = (model, clip, vae)
                 self._remember_result_cache(result_key, image, preview_images, effective_params)
                 del image, generated_images
-                _send_status(unique_id, f"完成：模型保持中  耗时：{elapsed_str}")
             else:
                 self._kept_runtime = None
                 # 及时清理 GPU/CPU 缓存，释放显存供下次调用

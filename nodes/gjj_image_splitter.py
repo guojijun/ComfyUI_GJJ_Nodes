@@ -23,6 +23,7 @@ DEFAULT_STATE = json.dumps({
     "v_positions": [0.5],
     "show_blocks": False,
     "align_px": 16,
+    "border_width": 0,
 })
 
 
@@ -155,6 +156,7 @@ class GJJ_ImageSplitter:
         h_positions: list[float] = list(state.get("h_positions", []))
         v_positions: list[float] = list(state.get("v_positions", []))
         align_px = self._parse_align_px(state.get("align_px", 16))
+        border_width = self._parse_border_width(state.get("border_width", 0))
 
         image = torch.clamp(image, 0.0, 1.0)
         if image.ndim == 3:
@@ -188,8 +190,7 @@ class GJJ_ImageSplitter:
                 x0 = v_pixels[c]
                 x1 = v_pixels[c + 1]
                 if y1 > y0 and x1 > x0:
-                    cropped = image[:, y0:y1, x0:x1, :].contiguous()
-                    cropped = self._trim_to_multiple(cropped, align_px)
+                    cropped = self._crop_block(image, x0, y0, x1, y1, border_width, align_px)
                     active_blocks.append(cropped)
                 else:
                     active_blocks.append(torch.zeros((1, 1, 1, C), device=image.device, dtype=image.dtype))
@@ -222,8 +223,7 @@ class GJJ_ImageSplitter:
                 x0 = v_pixels[c]
                 x1 = v_pixels[c + 1]
                 if y1 > y0 and x1 > x0:
-                    block = image[:, y0:y1, x0:x1, :].contiguous()
-                    block = self._trim_to_multiple(block, align_px)
+                    block = self._crop_block(image, x0, y0, x1, y1, border_width, align_px)
                     block_file = self._save_block_preview(block, r, c)
                     block_previews.append({
                         "row": r,
@@ -232,6 +232,7 @@ class GJJ_ImageSplitter:
                         "w": int(block.shape[2]),
                         "h": int(block.shape[1]),
                         "align_px": int(align_px),
+                        "border_width": int(border_width),
                     })
 
         ui: dict[str, Any] = {
@@ -244,6 +245,7 @@ class GJJ_ImageSplitter:
                 "h_positions": h_positions,
                 "v_positions": v_positions,
                 "align_px": int(align_px),
+                "border_width": int(border_width),
                 "blocks": block_previews,
             },),
         }
@@ -326,6 +328,14 @@ class GJJ_ImageSplitter:
         return v if v in {2, 4, 8, 16, 32} else 16
 
     @staticmethod
+    def _parse_border_width(raw: Any) -> int:
+        try:
+            v = int(float(raw))
+        except Exception:
+            v = 0
+        return max(0, min(4096, v))
+
+    @staticmethod
     def _floor_to_multiple(value: int, align_px: int) -> int:
         value = int(value)
         align_px = max(1, int(align_px))
@@ -348,6 +358,24 @@ class GJJ_ImageSplitter:
         h = cls._floor_to_multiple(block.shape[1], align_px)
         w = cls._floor_to_multiple(block.shape[2], align_px)
         return block[:, :h, :w, :].contiguous()
+
+    @classmethod
+    def _crop_block(
+        cls,
+        image: torch.Tensor,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        border_width: int,
+        align_px: int,
+    ) -> torch.Tensor:
+        width = max(1, int(x1) - int(x0))
+        height = max(1, int(y1) - int(y0))
+        max_border = max(0, min((width - 1) // 2, (height - 1) // 2))
+        border = max(0, min(int(border_width), max_border))
+        cropped = image[:, y0 + border:y1 - border, x0 + border:x1 - border, :].contiguous()
+        return cls._trim_to_multiple(cropped, align_px)
 
     @staticmethod
     def _parse_state(raw: str) -> dict[str, Any]:

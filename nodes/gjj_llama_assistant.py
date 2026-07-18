@@ -28,10 +28,65 @@ except Exception:
     web = None
     PromptServer = None
 
+
+def _add_cuda_dll_directories() -> None:
+    candidates = []
+    cuda_env = os.environ.get("CUDA_PATH")
+    if cuda_env:
+        candidates.extend([Path(cuda_env) / "bin" / "x64", Path(cuda_env) / "bin"])
+    candidates.extend(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA").glob("v*/bin/x64"))
+    candidates.extend(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA").glob("v*/bin"))
+    for path in candidates:
+        try:
+            if path.exists():
+                os.add_dll_directory(str(path))
+        except Exception:
+            pass
+
+
+_add_cuda_dll_directories()
+
 try:
+    import llama_cpp as llama_cpp_package
     from llama_cpp import Llama
 except Exception:
+    llama_cpp_package = None
     Llama = None
+
+try:
+    from llama_cpp import _ggml as llama_cpp_ggml
+except Exception:
+    llama_cpp_ggml = None
+
+try:
+    from llama_cpp import llama_cpp as llama_cpp_backend
+except Exception:
+    llama_cpp_backend = None
+
+
+def _load_llama_backends() -> None:
+    if llama_cpp_package is None or llama_cpp_ggml is None:
+        return
+    try:
+        lib_dir = Path(llama_cpp_package.__file__).resolve().parent / "lib"
+        if not lib_dir.exists():
+            return
+        try:
+            os.add_dll_directory(str(lib_dir))
+        except Exception:
+            pass
+        for dll_name in ("ggml-cuda.dll", "ggml-cpu-zen4.dll", "ggml-cpu-x64.dll"):
+            dll_path = lib_dir / dll_name
+            if dll_path.exists():
+                try:
+                    llama_cpp_ggml.ggml_backend_load(str(dll_path).encode())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+_load_llama_backends()
 
 try:
     from llama_cpp import GGML_TYPE_Q8_0
@@ -224,6 +279,24 @@ def _normalize_seed(value: Any) -> int | None:
     return seed if seed >= 0 else None
 
 
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "启用", "是"}
+    return bool(value)
+
+
+def _normalize_gpu_layers(value: Any) -> int | str:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"all", "auto"}:
+            return text
+    try:
+        layers = int(value)
+    except Exception:
+        return "all"
+    return "all" if layers < 0 else layers
+
+
 def _cache_type(value: str | None) -> int | None:
     if not value or value == DEFAULT_CACHE_TYPE:
         return None
@@ -263,6 +336,15 @@ def _llama_init_supports(param_name: str) -> bool | None:
         return param_name in inspect.signature(Llama.__init__).parameters
     except Exception:
         return None
+
+
+def _llama_supports_gpu_offload() -> bool:
+    if llama_cpp_backend is None:
+        return False
+    try:
+        return bool(llama_cpp_backend.llama_supports_gpu_offload())
+    except Exception:
+        return False
 
 
 def _image_to_base64(image_tensor, index: int, max_edge: int) -> str:
@@ -327,7 +409,14 @@ def _extract_text(response: Mapping[str, Any]) -> str:
         return str(response)
 
 
-def _create_qwen35_handler(mmproj_path: str, *, enable_thinking: bool, preserve_thinking: bool, unique_id: Any = None):
+def _create_qwen35_handler(
+    mmproj_path: str,
+    *,
+    enable_thinking: bool,
+    preserve_thinking: bool,
+    use_gpu: bool,
+    unique_id: Any = None,
+):
     handler_cls = Qwen35ChatHandler
     if handler_cls is None:
         handler_cls = _first_available_chat_handler(
@@ -339,16 +428,16 @@ def _create_qwen35_handler(mmproj_path: str, *, enable_thinking: bool, preserve_
     if handler_cls is None:
         _raise_llama_cpp_version_error("Qwen3.5/3.6-VL 视觉 ChatHandler", unique_id=unique_id)
     for kwargs in [
-        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "add_vision_id": True, "preserve_thinking": preserve_thinking, "verbose": False},
-        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "preserve_thinking": preserve_thinking, "verbose": False},
-        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "verbose": False},
-        {"clip_model_path": mmproj_path, "verbose": False},
+        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "add_vision_id": True, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
+        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
+        {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "use_gpu": use_gpu, "verbose": True},
+        {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
     ]:
         try:
             return handler_cls(**kwargs)
         except TypeError:
             continue
-    return handler_cls(clip_model_path=mmproj_path, verbose=False)
+    return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
 
 
 def _first_available_chat_handler(*names: str):
@@ -386,7 +475,15 @@ def _raise_llama_cpp_version_error(feature: str, *, unique_id: Any = None):
     )
 
 
-def _create_chat_handler(family: str, mmproj_path: str, thinking: bool, preserve_thinking: bool, *, unique_id: Any = None):
+def _create_chat_handler(
+    family: str,
+    mmproj_path: str,
+    thinking: bool,
+    preserve_thinking: bool,
+    *,
+    use_gpu: bool,
+    unique_id: Any = None,
+):
     if family == "Qwen3-VL":
         handler_cls = Qwen3VLChatHandler or _first_available_chat_handler(
             "Qwen25VLChatHandler",
@@ -397,21 +494,27 @@ def _create_chat_handler(family: str, mmproj_path: str, thinking: bool, preserve
         if handler_cls is None:
             _raise_llama_cpp_version_error("Qwen3VLChatHandler", unique_id=unique_id)
         for kwargs in [
-            {"clip_model_path": mmproj_path, "force_reasoning": thinking, "verbose": False},
-            {"clip_model_path": mmproj_path, "use_think_prompt": thinking, "verbose": False},
-            {"clip_model_path": mmproj_path, "verbose": False},
+            {"clip_model_path": mmproj_path, "force_reasoning": thinking, "use_gpu": use_gpu, "verbose": True},
+            {"clip_model_path": mmproj_path, "use_think_prompt": thinking, "use_gpu": use_gpu, "verbose": True},
+            {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
         ]:
             try:
                 return handler_cls(**kwargs)
             except TypeError:
                 continue
-        return handler_cls(clip_model_path=mmproj_path, verbose=False)
+        return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
     if family in {"Qwen3.5-VL", "Qwen3.6-VL"}:
-        return _create_qwen35_handler(mmproj_path, enable_thinking=thinking, preserve_thinking=preserve_thinking, unique_id=unique_id)
+        return _create_qwen35_handler(
+            mmproj_path,
+            enable_thinking=thinking,
+            preserve_thinking=preserve_thinking,
+            use_gpu=use_gpu,
+            unique_id=unique_id,
+        )
     if family == "Gemma4":
         if Gemma4ChatHandler is None:
             raise RuntimeError("当前 llama-cpp-python 不支持 Gemma4ChatHandler，请安装带 Gemma4 支持的版本。")
-        return Gemma4ChatHandler(clip_model_path=mmproj_path, verbose=False)
+        return Gemma4ChatHandler(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
     handler_cls = _first_available_chat_handler(
         "Qwen35ChatHandler",
         "Qwen3VLChatHandler",
@@ -423,15 +526,15 @@ def _create_chat_handler(family: str, mmproj_path: str, thinking: bool, preserve
     if handler_cls is None:
         _raise_llama_cpp_version_error("通用视觉 ChatHandler", unique_id=unique_id)
     for kwargs in [
-        {"clip_model_path": mmproj_path, "enable_thinking": thinking, "preserve_thinking": preserve_thinking, "verbose": False},
-        {"clip_model_path": mmproj_path, "force_reasoning": thinking, "verbose": False},
-        {"clip_model_path": mmproj_path, "verbose": False},
+        {"clip_model_path": mmproj_path, "enable_thinking": thinking, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
+        {"clip_model_path": mmproj_path, "force_reasoning": thinking, "use_gpu": use_gpu, "verbose": True},
+        {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
     ]:
         try:
             return handler_cls(**kwargs)
         except TypeError:
             continue
-    return handler_cls(clip_model_path=mmproj_path, verbose=False)
+    return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
 
 
 @dataclass
@@ -491,22 +594,36 @@ class _LlamaStorage:
             if not mmproj_path or not os.path.exists(mmproj_path):
                 raise FileNotFoundError(f"找不到视觉投影 mmproj：{mmproj_path or mmproj}")
 
+        gpu_layers = _normalize_gpu_layers(config.get("n_gpu_layers", -1))
+        use_gpu = gpu_layers != 0
+        gpu_backend_available = _llama_supports_gpu_offload()
+        if use_gpu and not gpu_backend_available:
+            print(
+                "[GJJ][LlamaAssistant][WARN] GPU优先已开启，但当前 llama-cpp-python 没有可用 CUDA 后端；"
+                "日志只会加载 CPU backend。请关闭 ComfyUI 后运行 D:\\AI\\CUI78\\install_llama_cpp_cuda_gjj.bat，"
+                "直到显示 gpu_offload True。"
+            )
         chat_handler = None
         if mmproj_path:
             chat_handler = _create_chat_handler(
                 str(config.get("family") or "Qwen3.6-VL"),
                 mmproj_path,
-                bool(config.get("thinking")),
-                bool(config.get("preserve_thinking")),
+                _bool_value(config.get("thinking")),
+                _bool_value(config.get("preserve_thinking")),
+                use_gpu=use_gpu,
                 unique_id=unique_id,
             )
 
         llama_kwargs = {
             "model_path": model_path,
             "n_ctx": int(config.get("n_ctx") or 8192),
-            "n_gpu_layers": int(config.get("n_gpu_layers") or -1),
-            "verbose": False,
+            "n_gpu_layers": gpu_layers,
+            "verbose": True,
         }
+        if _llama_init_supports("offload_kqv"):
+            llama_kwargs["offload_kqv"] = gpu_layers != 0
+        if _llama_init_supports("op_offload"):
+            llama_kwargs["op_offload"] = gpu_layers != 0
         if chat_handler is not None:
             llama_kwargs["chat_handler"] = chat_handler
         cache_k = _cache_type(config.get("cache_type_k"))
@@ -518,8 +635,17 @@ class _LlamaStorage:
         if config.get("family") == "Qwen3.6-VL" and _llama_init_supports("n_cpu_moe") and int(config.get("n_cpu_moe") or 0) > 0:
             llama_kwargs["n_cpu_moe"] = int(config.get("n_cpu_moe") or 0)
         if config.get("family") == "Qwen3.6-VL" and _llama_init_supports("cpu_moe"):
-            llama_kwargs["cpu_moe"] = bool(config.get("cpu_moe"))
+            llama_kwargs["cpu_moe"] = _bool_value(config.get("cpu_moe"))
 
+        print(
+            "[GJJ][LlamaAssistant] loading "
+            f"{os.path.basename(model_path)} n_gpu_layers={llama_kwargs['n_gpu_layers']} "
+            f"mmproj_use_gpu={use_gpu} "
+            f"gpu_backend_available={gpu_backend_available} "
+            f"offload_kqv={llama_kwargs.get('offload_kqv', 'default')} "
+            f"op_offload={llama_kwargs.get('op_offload', 'default')} "
+            f"n_ctx={llama_kwargs['n_ctx']}"
+        )
         cls.model = _LoadedLlama(Llama(**llama_kwargs), dict(config), chat_handler)
         return cls.model
 
