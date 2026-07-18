@@ -130,7 +130,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 | `models/diffusion_models/` | flux-2-klein-4b-fp8.safetensors | 批量水印去除 |
 | `models/diffusion_models/` | wan2.2_s2v_14B_fp8_scaled | Wan S2V 检测分支 |
 | `models/text_encoders/` | gemma_3_12B_it_fp4_mixed.safetensors | LTX2.3 图片说话 |
-| `models/audio_encoders/` | wav2vec2_large_english_fp16.safetensors | Wan S2V 音频条件编码 |
+| `models/audio_encoders/` 或 `models/wav2vec2/` | wav2vec2_large_english_fp16.safetensors | Wan S2V 音频条件编码；两个目录可互相兼容 |
 | `models/loras/LTX/` | ltx-2.3-22b-distilled-lora-384 + AV-LoRA | LTX2.3 口型同步 |
 | `models/vae/` | LTX23_video_vae_bf16 / LTX23_audio_vae_bf16 | LTX2.3 音视频链路 |
 | `models/GJJ/wav/` | 参考音频文件（默认 .wav，兼容 .mp3） | 语音克隆各节点（参考音色） |

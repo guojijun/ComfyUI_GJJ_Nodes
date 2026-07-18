@@ -5,9 +5,26 @@ import re
 import traceback
 import sys
 
+
+def _register_audio_encoder_compatibility_paths():
+    """让 audio_encoders 与 wav2vec2 两个模型目录互相兼容。"""
+    try:
+        import folder_paths
+
+        audio_encoders_dir = os.path.join(folder_paths.models_dir, "audio_encoders")
+        wav2vec2_dir = os.path.join(folder_paths.models_dir, "wav2vec2")
+        folder_paths.add_model_folder_path("audio_encoders", wav2vec2_dir)
+        folder_paths.add_model_folder_path("wav2vec2", audio_encoders_dir)
+    except Exception as exc:
+        if _console_dependency_warnings_enabled():
+            print(f"[GJJ] 注册音频编码器兼容目录失败: {type(exc).__name__}: {exc}")
+
 def _console_dependency_warnings_enabled():
     value = str(os.environ.get("GJJ_SHOW_STARTUP_DEPENDENCY_WARNINGS", "") or "").strip().lower()
     return value in {"1", "true", "yes", "on", "debug"}
+
+
+_register_audio_encoder_compatibility_paths()
 
 # 优先导入 common_utils 子包，确保其他模块可以使用
 _common_utils_loaded = False
