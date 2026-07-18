@@ -280,16 +280,16 @@ def _bool_value(value: Any) -> bool:
     return bool(value)
 
 
-def _normalize_gpu_layers(value: Any) -> int | str:
+def _normalize_gpu_layers(value: Any) -> int:
     if isinstance(value, str):
         text = value.strip().lower()
         if text in {"all", "auto"}:
-            return text
+            return -1
     try:
         layers = int(value)
     except Exception:
-        return "all"
-    return "all" if layers < 0 else layers
+        return -1
+    return -1 if layers < 0 else layers
 
 
 def _cache_type(value: str | None) -> int | None:
@@ -404,6 +404,27 @@ def _extract_text(response: Mapping[str, Any]) -> str:
         return str(response)
 
 
+def _instantiate_chat_handler(handler_cls, kwargs_candidates: list[dict[str, Any]]):
+    """Create a chat handler across llama-cpp-python API versions.
+
+    Older multimodal handlers expose ``use_gpu`` while newer handlers (notably
+    Llava15ChatHandler) select the backend without accepting that keyword.
+    """
+    last_error: TypeError | None = None
+    for kwargs in kwargs_candidates:
+        variants = [kwargs]
+        if "use_gpu" in kwargs:
+            variants.append({key: value for key, value in kwargs.items() if key != "use_gpu"})
+        for variant in variants:
+            try:
+                return handler_cls(**variant)
+            except TypeError as error:
+                last_error = error
+    if last_error is not None:
+        raise last_error
+    return handler_cls()
+
+
 def _create_qwen35_handler(
     mmproj_path: str,
     *,
@@ -422,17 +443,12 @@ def _create_qwen35_handler(
         )
     if handler_cls is None:
         _raise_llama_cpp_version_error("Qwen3.5/3.6-VL 视觉 ChatHandler", unique_id=unique_id)
-    for kwargs in [
+    return _instantiate_chat_handler(handler_cls, [
         {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "add_vision_id": True, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
         {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
         {"clip_model_path": mmproj_path, "enable_thinking": enable_thinking, "use_gpu": use_gpu, "verbose": True},
         {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
-    ]:
-        try:
-            return handler_cls(**kwargs)
-        except TypeError:
-            continue
-    return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
+    ])
 
 
 def _first_available_chat_handler(*names: str):
@@ -488,16 +504,11 @@ def _create_chat_handler(
         )
         if handler_cls is None:
             _raise_llama_cpp_version_error("Qwen3VLChatHandler", unique_id=unique_id)
-        for kwargs in [
+        return _instantiate_chat_handler(handler_cls, [
             {"clip_model_path": mmproj_path, "force_reasoning": thinking, "use_gpu": use_gpu, "verbose": True},
             {"clip_model_path": mmproj_path, "use_think_prompt": thinking, "use_gpu": use_gpu, "verbose": True},
             {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
-        ]:
-            try:
-                return handler_cls(**kwargs)
-            except TypeError:
-                continue
-        return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
+        ])
     if family in {"Qwen3.5-VL", "Qwen3.6-VL"}:
         return _create_qwen35_handler(
             mmproj_path,
@@ -509,7 +520,9 @@ def _create_chat_handler(
     if family == "Gemma4":
         if Gemma4ChatHandler is None:
             raise RuntimeError("当前 llama-cpp-python 不支持 Gemma4ChatHandler，请安装带 Gemma4 支持的版本。")
-        return Gemma4ChatHandler(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
+        return _instantiate_chat_handler(Gemma4ChatHandler, [
+            {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
+        ])
     handler_cls = _first_available_chat_handler(
         "Qwen35ChatHandler",
         "Qwen3VLChatHandler",
@@ -520,16 +533,11 @@ def _create_chat_handler(
     )
     if handler_cls is None:
         _raise_llama_cpp_version_error("通用视觉 ChatHandler", unique_id=unique_id)
-    for kwargs in [
+    return _instantiate_chat_handler(handler_cls, [
         {"clip_model_path": mmproj_path, "enable_thinking": thinking, "preserve_thinking": preserve_thinking, "use_gpu": use_gpu, "verbose": True},
         {"clip_model_path": mmproj_path, "force_reasoning": thinking, "use_gpu": use_gpu, "verbose": True},
         {"clip_model_path": mmproj_path, "use_gpu": use_gpu, "verbose": True},
-    ]:
-        try:
-            return handler_cls(**kwargs)
-        except TypeError:
-            continue
-    return handler_cls(clip_model_path=mmproj_path, use_gpu=use_gpu, verbose=True)
+    ])
 
 
 @dataclass

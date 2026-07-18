@@ -271,7 +271,16 @@ function refreshNode(node) {
 	const computed = node.computeSize?.([width, node.size?.[1] || 0]) || node.size || [width, MIN_WIDGET_HEIGHT];
 	const nextWidth = Math.max(MIN_NODE_WIDTH, width);
 	const nextHeight = Math.max(MIN_WIDGET_HEIGHT, Number(computed?.[1] || measureDomHeight(node)));
-	node.setSize?.([nextWidth, nextHeight]);
+	const currentWidth = Number(node.size?.[0] || 0);
+	const currentHeight = Number(node.size?.[1] || 0);
+	if (Math.abs(currentWidth - nextWidth) >= 0.5 || Math.abs(currentHeight - nextHeight) >= 0.5) {
+		node.__gjjTextInputInternalResize = true;
+		try {
+			node.setSize?.([nextWidth, nextHeight]);
+		} finally {
+			node.__gjjTextInputInternalResize = false;
+		}
+	}
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -1592,6 +1601,9 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
+			if (this.__gjjTextInputInternalResize) {
+				return result;
+			}
 			rememberWidth(this, true);
 			scheduleStabilize(this, 0);
 			return result;
