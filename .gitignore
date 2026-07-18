@@ -71,6 +71,12 @@ models/
 *.bin
 *.ckpt
 
+# SeedVR2 内置运行时的模型结构源码和固定文本嵌入属于插件代码资产，必须随发布包分发。
+!vendor/seedvr2_runtime/src/models/
+!vendor/seedvr2_runtime/src/models/**
+!vendor/seedvr2_runtime/pos_emb.pt
+!vendor/seedvr2_runtime/neg_emb.pt
+
 # 缓存和临时
 *.tmp
 *.log

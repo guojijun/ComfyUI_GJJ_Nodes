@@ -221,17 +221,12 @@ _GJJ_HELP = build_node_help_payload(
     ],
     model_tree=[
         {
-            "label": "主模型",
+            "label": "LLM 模型目录",
             "path": "models/LLM",
+            "filename": "LLM",
             "kind": "LLM",
-            "description": "支持 .gguf / .safetensors / .bin / .pth / .pt；主模型列表会排除 mmproj 文件。",
-        },
-        {
-            "label": "视觉模型 mmproj",
-            "path": "models/LLM",
-            "kind": "mmproj",
-            "required": False,
-            "description": "文件名包含 mmproj 的 .gguf / .safetensors / .bin；选择主模型后前端会自动匹配。",
+            "directory": True,
+            "description": "主模型和可选 mmproj 视觉投影统一放在 models/LLM；主模型列表会排除 mmproj 文件并自动匹配视觉投影。",
         },
     ],
     runtime=[

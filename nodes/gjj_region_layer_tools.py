@@ -12,6 +12,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageOps
 
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+
 try:
     import folder_paths
 except Exception:
@@ -524,6 +526,11 @@ class GJJ_RegionCrop:
 
     def crop(self, crop_config="", image_file="", total_pixels=0, scale_ratio=1.0, align_multiple=8, region=None, image=None):
         images = _batch_image_items(image) if image is not None else [_load_input_image(image_file)]
+        try:
+            preview_images = gjjutils_write_temp_tensor_images(images[0])
+        except Exception as error:
+            print(f"[GJJ_RegionCrop] 输入图片预览生成失败：{error}")
+            preview_images = []
         cropped_items: list[torch.Tensor] = []
         mask_items: list[torch.Tensor] = []
         ui_items: list[dict[str, Any]] = []
@@ -537,6 +544,7 @@ class GJJ_RegionCrop:
         first = ui_items[0]
         return {
             "ui": {
+                "preview_image": preview_images[:1],
                 "source_width": [first["source_width"]],
                 "source_height": [first["source_height"]],
                 "region_x": [first["region_x"]],

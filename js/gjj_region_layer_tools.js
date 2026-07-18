@@ -377,6 +377,53 @@ function cropImageFileUrl(value) {
 	return `/api/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`;
 }
 
+function cropImageRefUrl(item, fallbackType = "input") {
+	if (!item) return "";
+	if (typeof item === "string") {
+		const text = item.trim();
+		if (!text) return "";
+		if (/^(?:https?:|data:|blob:|\/api\/view)/i.test(text)) return text;
+		return cropImageFileUrl(text);
+	}
+	if (typeof item !== "object") return "";
+	const direct = String(item.src || item.url || "").trim();
+	if (direct) return direct;
+	const filename = String(item.filename || item.name || item.file || "").trim();
+	if (!filename) return "";
+	return `/api/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(item.type || fallbackType)}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
+}
+
+function parseCropJson(value, fallback) {
+	try { return JSON.parse(String(value ?? "")); } catch (_) { return fallback; }
+}
+
+function getCropMultiLoaderDescriptor(sourceNode, linkId) {
+	if (!["GJJ_MultiImageLoader"].includes(sourceNode?.comfyClass || sourceNode?.type)) return null;
+	const executed = sourceNode?.__gjjMultiImageState?.executedImages;
+	const selected = Array.isArray(executed) && executed.length
+		? executed
+		: parseCropJson(sourceNode?.properties?.selected_images || getWidget(sourceNode, "selected_images")?.value || "[]", []);
+	const item = Array.isArray(selected) ? selected.find((entry) => cropImageRefUrl(entry)) : null;
+	const src = cropImageRefUrl(item);
+	if (!src) return null;
+	return { src, width: Number(item?.width || 0), height: Number(item?.height || 0), signature: `${linkId}:${sourceNode.id}:multi:${src}` };
+}
+
+function getCropTemplateDescriptor(sourceNode, originSlot, linkId) {
+	if (!["GJJ_TemplateParams", "GJJ_TemplateSetVariables"].includes(sourceNode?.comfyClass || sourceNode?.type)) return null;
+	const values = parseCropJson(getWidget(sourceNode, "values_json")?.value || "{}", {});
+	const schema = parseCropJson(getWidget(sourceNode, "schema_json")?.value || "[]", []);
+	const output = sourceNode?.outputs?.[Number(originSlot || 0)];
+	const outputKey = String(output?.gjj_template_param_key || "").trim();
+	const field = Array.isArray(schema)
+		? schema.find((entry) => outputKey && String(entry?.key || "") === outputKey) || schema[Number(originSlot || 0)]
+		: null;
+	const value = field ? values?.[field.key] ?? values?.[field.label] ?? field.default : null;
+	const src = cropImageRefUrl(value);
+	if (!src) return null;
+	return { src, width: 0, height: 0, signature: `${linkId}:${sourceNode.id}:template:${originSlot}:${src}` };
+}
+
 function degToRad(value) {
 	return Number(value || 0) * Math.PI / 180;
 }
@@ -492,6 +539,10 @@ function getCropSourceDescriptor(node) {
 	const link = app.graph.links[linkId];
 	const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
 	if (!sourceNode) return null;
+	const multi = getCropMultiLoaderDescriptor(sourceNode, linkId);
+	if (multi) return multi;
+	const template = getCropTemplateDescriptor(sourceNode, link?.origin_slot, linkId);
+	if (template) return template;
 	const imageWidget = getWidget(sourceNode, "image");
 	const filename = String(imageWidget?.value || "").trim();
 	if (!filename) return null;
@@ -556,7 +607,8 @@ function setCropPanelImage(node, src, width = 0, height = 0, signature = "") {
 }
 
 function updateCropPreview(node, message) {
-	const src = getFirstValue(message?.preview_image) || getFirstValue(message?.ui?.preview_image);
+	const previewRef = getFirstValue(message?.preview_image) || getFirstValue(message?.ui?.preview_image);
+	const src = cropImageRefUrl(previewRef, "temp");
 	if (!src) return;
 
 	const state = ensureCropPreviewState(node);
@@ -987,8 +1039,8 @@ async function tryLoadCropSourceFromLink(node, force = false) {
 	if (!force && panel.sourceSignature === descriptor.signature && panel.image) return;
 	if (panel.sizeLine) panel.sizeLine.textContent = "上游图片已变化，正在刷新...";
 	clearCropPreview(node);
-	const src = `/api/view?filename=${encodeURIComponent(descriptor.filename)}&type=${encodeURIComponent(descriptor.viewType)}&rand=${Date.now()}`;
-	setCropPanelImage(node, src, 0, 0, descriptor.signature);
+	const src = descriptor.src || `/api/view?filename=${encodeURIComponent(descriptor.filename)}&type=${encodeURIComponent(descriptor.viewType)}&rand=${Date.now()}`;
+	setCropPanelImage(node, src, descriptor.width || 0, descriptor.height || 0, descriptor.signature);
 }
 
 function makeCropButton(label, title, onClick) {

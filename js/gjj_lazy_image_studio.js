@@ -1829,7 +1829,7 @@ function floatingPanelBaseStyle() {
 		"z-index:800",
 		"width:min(520px, calc(100vw - 28px))",
 		"max-height:min(680px, calc(100vh - 32px))",
-		"overflow:auto",
+		"overflow:hidden",
 		"display:none",
 		"flex-direction:column",
 		"gap:10px",
@@ -1851,6 +1851,53 @@ function protectFloatingPanelEvents(element) {
 	element.addEventListener("wheel", stopCanvasWheelCapture, { passive: true });
 }
 
+function clampFloatingPanelToViewport(panel, left, top) {
+	const padding = 14;
+	const width = panel.getBoundingClientRect?.().width || panel.offsetWidth || 360;
+	const height = panel.getBoundingClientRect?.().height || panel.offsetHeight || 120;
+	return {
+		left: Math.max(padding, Math.min(left, window.innerWidth - width - padding)),
+		top: Math.max(padding, Math.min(top, window.innerHeight - height - padding)),
+	};
+}
+
+function makeFloatingPanelDraggable(panel, header) {
+	header.style.cursor = "move";
+	header.style.userSelect = "none";
+	header.title = "拖动窗口";
+	header.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0 || event.target?.closest?.("button, input, select, textarea, a")) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		const rect = panel.getBoundingClientRect();
+		const offsetX = event.clientX - rect.left;
+		const offsetY = event.clientY - rect.top;
+		panel.__gjjManualPosition = true;
+		header.setPointerCapture?.(event.pointerId);
+
+		const move = (moveEvent) => {
+			const position = clampFloatingPanelToViewport(
+				panel,
+				moveEvent.clientX - offsetX,
+				moveEvent.clientY - offsetY,
+			);
+			panel.style.left = `${Math.round(position.left)}px`;
+			panel.style.top = `${Math.round(position.top)}px`;
+		};
+		const stop = (stopEvent) => {
+			header.releasePointerCapture?.(stopEvent.pointerId);
+			header.removeEventListener("pointermove", move);
+			header.removeEventListener("pointerup", stop);
+			header.removeEventListener("pointercancel", stop);
+		};
+		header.addEventListener("pointermove", move);
+		header.addEventListener("pointerup", stop);
+		header.addEventListener("pointercancel", stop);
+	});
+}
+
 function createFloatingPanel(node, kind, titleText) {
 	const panel = document.createElement("div");
 	panel.className = `gjj-lazy-floating-panel gjj-lazy-${kind}-panel`;
@@ -1858,7 +1905,7 @@ function createFloatingPanel(node, kind, titleText) {
 	protectFloatingPanelEvents(panel);
 
 	const header = document.createElement("div");
-	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;background:#10171b;padding-bottom:4px;z-index:1";
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;background:#10171b;padding-bottom:4px;z-index:1;flex:0 0 auto;touch-action:none";
 	const title = document.createElement("div");
 	title.textContent = titleText;
 	title.style.cssText = "font-size:13px;font-weight:700;color:#f2faf7";
@@ -1885,9 +1932,10 @@ function createFloatingPanel(node, kind, titleText) {
 		else setSettingsOpen(node, false);
 	});
 	header.append(title, close);
+	makeFloatingPanelDraggable(panel, header);
 
 	const body = document.createElement("div");
-	body.style.cssText = "display:flex;flex-direction:column;gap:8px";
+	body.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;overflow:auto;overscroll-behavior:contain";
 	panel.append(header, body);
 	document.body.appendChild(panel);
 	return { panel, body };
@@ -2553,13 +2601,21 @@ function nodeScreenRect(node) {
 
 function positionFloatingPanel(node, panel, anchor) {
 	if (!panel) return;
-	const rect = anchor?.getBoundingClientRect?.();
 	const width = Math.min(520, Math.max(360, window.innerWidth - 28));
-	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect?.left || 80));
-	const top = Math.min(window.innerHeight - 120, Math.max(14, (rect?.bottom || 80) + 6));
 	panel.style.width = `${width}px`;
+	if (panel.__gjjManualPosition) {
+		const current = panel.getBoundingClientRect();
+		const position = clampFloatingPanelToViewport(panel, current.left, current.top);
+		panel.style.left = `${Math.round(position.left)}px`;
+		panel.style.top = `${Math.round(position.top)}px`;
+		return;
+	}
+	const rect = anchor?.getBoundingClientRect?.();
+	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect?.left || 80));
+	const panelHeight = panel.getBoundingClientRect?.().height || 120;
+	const top = Math.min(window.innerHeight - panelHeight - 14, Math.max(14, (rect?.bottom || 80) + 6));
 	panel.style.left = `${Math.round(left)}px`;
-	panel.style.top = `${Math.round(top)}px`;
+	panel.style.top = `${Math.round(Math.max(14, top))}px`;
 }
 
 function renderFloatingPanelControls(node, body, names) {
@@ -6162,10 +6218,8 @@ function ensureGlobalLoraPopup() {
 					item.addEventListener(eventName, (event) => event.stopPropagation(), true);
 				}
 
-				// 在 pointerup 和 click 上处理点击逻辑
-				for (const eventName of ["pointerup", "click"]) {
-					item.addEventListener(eventName, runItemClick, true);
-				}
+				// ComfyUI 画布可能拦截合成 click；只处理 pointerup，既可靠又避免双触发。
+				item.addEventListener("pointerup", runItemClick, true);
 				item.addEventListener("keydown", (event) => {
 					if (event.key === "Enter" || event.key === " ") {
 						runItemClick(event);
@@ -6328,10 +6382,8 @@ function buildLoraRow(node, row, index, rowsContainer) {
 		});
 	}
 
-	// 根据指南：在多个事件类型上绑定，使用捕获阶段确保不被 canvas 拦截
-	for (const eventName of ["pointerup", "click"]) {
-		picker.addEventListener(eventName, runPickerClick, true);
-	}
+	// ComfyUI 画布可能拦截合成 click；只处理 pointerup，避免弹窗打开后再次切换。
+	picker.addEventListener("pointerup", runPickerClick, true);
 
 	// 在 mousedown 和 pointerdown 上只阻止冒泡，不阻止点击逻辑
 	for (const eventName of ["pointerdown", "mousedown"]) {
