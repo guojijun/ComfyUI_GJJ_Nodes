@@ -923,6 +923,7 @@ class GJJ_SAM2PointMaskEditor:
 		"description": DESCRIPTION,
 		"🌏模型下载": SAM2_MODEL_DOWNLOAD_URL,
 		"models": REQUIRED_MODELS,
+		"static_model_tree_only": True,
 		"dependencies": [
 			{
 				"name": spec["display_name"],

@@ -948,7 +948,7 @@ function declaredModelEntries(meta) {
 			name: escapeText(item.input || item.widget || item.name || ""),
 			type: escapeText(item.type || item.output_type || ""),
 			kind: escapeText(item.kind || item.model_kind || ""),
-			folder: escapeText(item.folder || item.category || item.dest || item.directory || ""),
+			folder: escapeText(item.folder || item.category || item.dest || item.directory || item.subdir || ""),
 			icon: escapeText(item.icon || ""),
 		} : null;
 	};
@@ -1560,12 +1560,12 @@ function buildModelTreeNode(items) {
 
 function modelTreeText(items, emptyText) {
 	const modelsNode = buildModelTreeNode(items);
-	const lines = ["ComfyUI/", "├──📁 models/"];
+	const lines = ["📁 ComfyUI/", "└──📁 models/"];
 	if (!modelsNode.children.size) {
-		lines.push(`│   └──⚫ ${emptyText}`);
+		lines.push(`    └──⚫ ${emptyText}`);
 		return lines.join("\n");
 	}
-	const render = (node, prefix = "│   ") => {
+	const render = (node, prefix = "    ") => {
 		const children = Array.from(node.children.values()).sort((a, b) => {
 			if (a.directory !== b.directory) return a.directory ? -1 : 1;
 			return a.name.localeCompare(b.name, "zh-Hans-CN");
@@ -1623,12 +1623,12 @@ function createModelTreeDom(items, emptyText) {
 	const tree = document.createElement("div");
 	tree.className = "gjj-help-model-tree-dom";
 	tree.appendChild(createHelpModelTreeLine("", "📁", "ComfyUI", { directory: true }));
-	tree.appendChild(createHelpModelTreeLine("├──", "📁", "models", { directory: true }));
+	tree.appendChild(createHelpModelTreeLine("└──", "📁", "models", { directory: true }));
 	if (!modelsNode.children.size) {
-		tree.appendChild(createHelpModelTreeLine("│   └──", "⚫", emptyText || "未选择模型文件"));
+		tree.appendChild(createHelpModelTreeLine("    └──", "⚫", emptyText || "未选择模型文件"));
 		return tree;
 	}
-	const render = (node, prefix = "│   ") => {
+	const render = (node, prefix = "    ") => {
 		const children = Array.from(node.children.values()).sort((a, b) => {
 			if (a.directory !== b.directory) return a.directory ? -1 : 1;
 			return a.name.localeCompare(b.name, "zh-Hans-CN");

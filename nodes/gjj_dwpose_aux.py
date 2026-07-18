@@ -2,6 +2,7 @@ import json
 import math
 import os
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ from .common_utils.dependency_checker import (
     print_dependency_model_report,
     send_dependency_model_notice,
 )
+from .common_utils.temp_files import gjjutils_hash_bytes, gjjutils_temp_path
 
 
 MAX_RESOLUTION = 16384
@@ -82,6 +84,59 @@ _DWPOSE_DESCRIPTION = (
     if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
     else _DEPENDENCY_REPORT["warning_message"]
 )
+
+_DWPOSE_CACHE_VERSION = 1
+
+
+def _dwpose_cache_path(image, options: dict, det_path, pose_path) -> Path:
+    tensor = image.detach().cpu().contiguous()
+    array = tensor.numpy()
+    digest_parts = [
+        f"dwpose-cache-v{_DWPOSE_CACHE_VERSION}".encode("ascii"),
+        json.dumps(options, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        f"{array.dtype}:{array.shape}".encode("ascii"),
+        array.tobytes(),
+    ]
+    for model_path in (det_path, pose_path):
+        if model_path:
+            path = Path(model_path)
+            stat = path.stat()
+            digest_parts.append(f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
+        else:
+            digest_parts.append(b"None")
+    cache_key = gjjutils_hash_bytes(b"\0".join(digest_parts))
+    return gjjutils_temp_path(f"dwpose_cache_{cache_key}.npz")
+
+
+def _read_dwpose_cache(path: Path):
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as cached:
+            outputs = torch.from_numpy(cached["outputs"].copy())
+            openpose_dicts = json.loads(cached["openpose_json"].tobytes().decode("utf-8"))
+        return outputs, openpose_dicts
+    except Exception as error:
+        print(f"[GJJ_DWPoseEstimator] 缓存读取失败，将重新计算: {error}")
+        return None
+
+
+def _write_dwpose_cache(path: Path, outputs: torch.Tensor, openpose_dicts: list) -> None:
+    try:
+        buffer = BytesIO()
+        np.savez_compressed(
+            buffer,
+            outputs=outputs.detach().cpu().numpy(),
+            openpose_json=np.frombuffer(
+                json.dumps(openpose_dicts, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                dtype=np.uint8,
+            ),
+        )
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        tmp_path.write_bytes(buffer.getvalue())
+        os.replace(tmp_path, path)
+    except Exception as error:
+        print(f"[GJJ_DWPoseEstimator] 缓存写入失败，本次结果仍正常返回: {error}")
 
 
 def _save_dwpose_webp_preview(frames: list[torch.Tensor], fps: float = 8.0) -> list[dict]:
@@ -427,6 +482,7 @@ class GJJ_DWPoseEstimator:
         "copy_label": _DEPENDENCY_REPORT["copy_label"] if not _DEPENDENCY_REPORT["available"] else "",
         "warning_message": _DEPENDENCY_REPORT["warning_message"] if not _DEPENDENCY_REPORT["available"] else "",
         "models": REQUIRED_MODELS,
+        "static_model_tree_only": True,
         "dependencies": [
             "opencv-python（cv2；图像缩放、骨架绘制和 ONNX DNN 推理）",
         ],
@@ -434,6 +490,7 @@ class GJJ_DWPoseEstimator:
             "这是 GJJ 内置运行时版本，不需要安装 comfyui_controlnet_aux。",
             "默认姿态模型使用 TorchScript，可走当前 PyTorch 设备。",
             "bbox 检测模型 yolox_l.onnx 依赖当前环境的 OpenCV DNN 或 onnxruntime；如果加载失败，可把 bbox 检测器设为 None。",
+            "相同输入、参数及模型会从 temp/GJJ 复用哈希缓存，避免重复姿态推理。",
         ],
     }
 
@@ -459,14 +516,6 @@ class GJJ_DWPoseEstimator:
 
     def estimate_pose(self, image, detect_hand=True, detect_body=True, detect_face=True, resolution=512, bbox_detector=DEFAULT_DWPOSE_DET, pose_estimator=DEFAULT_DWPOSE_POSE, scale_stick_for_xinsr_cn=False, unique_id=None):
         try:
-            Wholebody = _load_wholebody_runtime()
-        except Exception as exc:
-            report = getattr(exc, "gjj_report", None) or _DEPENDENCY_REPORT
-            if report:
-                print_dependency_model_report(report, title="GJJ 节点运行环境缺失！")
-                send_dependency_model_notice(report, unique_id=unique_id)
-            raise RuntimeError(report.get("warning_message") or "DWPose 运行时依赖缺失。") from None
-        try:
             det_path = _resolve_controlnet_file(bbox_detector, "人体框检测")
             pose_path = _resolve_controlnet_file(pose_estimator, "姿态估计")
         except Exception as exc:
@@ -476,6 +525,34 @@ class GJJ_DWPoseEstimator:
                 send_dependency_model_notice(report, unique_id=unique_id)
                 raise RuntimeError(report.get("warning_message") or "DWPose 模型缺失。") from None
             raise
+        cache_options = {
+            "detect_hand": bool(detect_hand),
+            "detect_body": bool(detect_body),
+            "detect_face": bool(detect_face),
+            "resolution": int(resolution),
+            "scale_stick_for_xinsr_cn": bool(scale_stick_for_xinsr_cn),
+        }
+        cache_path = _dwpose_cache_path(image, cache_options, det_path, pose_path)
+        cached = _read_dwpose_cache(cache_path)
+        if cached is not None:
+            print(f"[GJJ_DWPoseEstimator] 命中缓存: {cache_path.name}")
+            output_batch, openpose_dicts = cached
+            preview_images = _save_dwpose_webp_preview([frame for frame in output_batch[::8]])
+            return {
+                "ui": {
+                    "openpose_json": [json.dumps(openpose_dicts, ensure_ascii=False, indent=2)],
+                    "images": preview_images,
+                },
+                "result": (output_batch, openpose_dicts),
+            }
+        try:
+            Wholebody = _load_wholebody_runtime()
+        except Exception as exc:
+            report = getattr(exc, "gjj_report", None) or _DEPENDENCY_REPORT
+            if report:
+                print_dependency_model_report(report, title="GJJ 节点运行环境缺失！")
+                send_dependency_model_notice(report, unique_id=unique_id)
+            raise RuntimeError(report.get("warning_message") or "DWPose 运行时依赖缺失。") from None
         runtime = Wholebody(det_path, pose_path, torchscript_device=model_management.get_torch_device())
         batch_size = image.shape[0]
         pbar = comfy.utils.ProgressBar(batch_size)
@@ -510,13 +587,15 @@ class GJJ_DWPoseEstimator:
             outputs.append(torch.from_numpy(canvas.astype(np.float32) / 255.0))
             pbar.update(1)
         del runtime
+        output_batch = torch.stack(outputs, dim=0)
+        _write_dwpose_cache(cache_path, output_batch, openpose_dicts)
         preview_images = _save_dwpose_webp_preview(preview_tensors)
         return {
             "ui": {
                 "openpose_json": [json.dumps(openpose_dicts, ensure_ascii=False, indent=2)],
                 "images": preview_images,
             },
-            "result": (torch.stack(outputs, dim=0), openpose_dicts),
+            "result": (output_batch, openpose_dicts),
         }
 
 

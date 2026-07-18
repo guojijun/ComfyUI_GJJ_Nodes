@@ -446,6 +446,19 @@ def _media_frames(value: Any) -> list[torch.Tensor]:
     return [frame for frame in frames if not _is_black_placeholder(frame)]
 
 
+def _media_items(value: Any) -> list[torch.Tensor]:
+    # A Comfy VIDEO stores time in the tensor batch dimension.  Keep that batch
+    # intact so _concat_pair can combine corresponding frames instead of turning
+    # a video into one enormous spatial strip.
+    components = _video_components(value)
+    if components is not None:
+        tensors: list[torch.Tensor] = []
+        for key in MEDIA_KEYS:
+            tensors.extend(_media_tensors_recursive(components.get(key)))
+        return [tensor for tensor in tensors if not _is_black_placeholder(tensor)]
+    return _media_frames(value)
+
+
 def _interleave_media_frame_groups(frame_groups: list[list[torch.Tensor]]) -> list[torch.Tensor]:
     if not frame_groups:
         return []
@@ -901,16 +914,16 @@ class GJJ_ImageConcanate:
                 cache_record = _cache_record_for_value(str(key), raw_value)
                 if cache_record is not None:
                     cache_records.append(cache_record)
-                frames = _media_frames(raw_value)
-                if frames:
-                    media_frame_groups.append(frames)
+                items = _media_items(raw_value)
+                if items:
+                    media_frame_groups.append(items)
             if not raw_items and held_active:
                 cache_records = _parse_cache_records(held_media_json)
                 raw_items = _raw_items_from_cache_records(cache_records)
                 for raw_value in raw_items:
-                    frames = _media_frames(raw_value)
-                    if frames:
-                        media_frame_groups.append(frames)
+                    items = _media_items(raw_value)
+                    if items:
+                        media_frame_groups.append(items)
             _release_cuda_cache()
             media_items = _interleave_media_frame_groups(media_frame_groups)
 
