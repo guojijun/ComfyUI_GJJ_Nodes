@@ -63,3 +63,11 @@ timm
 # 支持：
 # - GJJ · ✂️ 综合抠图 / GJJ_ComprehensiveMatting：BiRefNet 边缘/拉普拉斯相关滤波
 kornia
+
+# 支持：
+# - GJJ · 🔍 SeedVR2图像视频放大器 / GJJ_SeedVR2ImageUpscaler：内置 SeedVR2 推理运行时
+einops
+omegaconf>=2.3.0
+diffusers>=0.33.1
+psutil
+tqdm

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import sys
 from fractions import Fraction
 from functools import lru_cache
@@ -12,12 +11,6 @@ import folder_paths
 import torch
 from comfy_api.latest import InputImpl, Types
 
-try:
-    from .common_utils.dependency_checker import DEFAULT_MODEL_URL
-except ImportError:
-    from common_utils.dependency_checker import DEFAULT_MODEL_URL
-
-
 NODE_NAME = "GJJ_SeedVR2ImageUpscaler"
 NODE_DISPLAY_NAME = "GJJ · 🔍 SeedVR2图像视频放大器"
 DEFAULT_DIT_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
@@ -26,8 +19,6 @@ MODEL_CATEGORY = "SEEDVR2"
 LEGACY_MODEL_CATEGORY = "seedvr2"
 MODEL_SUBDIR = "models/SEEDVR2"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
-MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
-GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 COMMON_VIDEO_HEIGHT_OPTIONS = [
     "手动输入",
     "480",
@@ -86,7 +77,7 @@ any_type = AnyType("*")
 
 
 def _seedvr2_runtime_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "seedvr2_videoupscaler"
+    return Path(__file__).resolve().parents[1] / "vendor" / "seedvr2_runtime"
 
 
 def _missing_runtime_specs() -> list[dict[str, str]]:
@@ -95,10 +86,9 @@ def _missing_runtime_specs() -> list[dict[str, str]]:
         return []
     return [
         {
-            "module_name": "seedvr2_videoupscaler",
-            "package_name": "seedvr2_videoupscaler",
-            "display_name": "SeedVR2 运行时",
-            "description": "需要本地 custom_nodes/seedvr2_videoupscaler 运行时；GJJ 节点复用它执行 SeedVR2 推理。",
+            "module_name": "GJJ 内置 SeedVR2 运行时",
+            "display_name": "GJJ 内置 SeedVR2 运行时文件",
+            "description": "GJJ 扩展安装不完整，请重新下载或更新 ComfyUI_GJJ_Nodes。",
         }
     ]
 
@@ -125,7 +115,7 @@ def _list_seedvr2_folder_models() -> list[str]:
         if not text:
             continue
         lower = text.lower()
-        if not lower.endswith((".safetensors", ".gguf", ".ckpt", ".pt", ".pth", ".bin")):
+        if not lower.endswith(".safetensors"):
             continue
         key = lower.replace("\\", "/")
         if key in seen:
@@ -139,6 +129,8 @@ def _list_seedvr2_folder_models() -> list[str]:
 def _ordered_model_choices(seed_name: str, *, want_vae: bool) -> list[str]:
     folder_models = _list_seedvr2_folder_models()
     preferred = gjjutils_resolve_model_by_extensionless_seed(seed_name, MODEL_CATEGORY)
+    if preferred and not str(preferred).lower().endswith(".safetensors"):
+        preferred = None
     filtered = []
     for name in folder_models:
         is_vae = "vae" in name.replace("\\", "/").lower()
@@ -156,17 +148,20 @@ def _ordered_model_choices(seed_name: str, *, want_vae: bool) -> list[str]:
 
 
 def _default_model_choice(seed_name: str) -> str:
-    return gjjutils_resolve_model_by_extensionless_seed(seed_name, MODEL_CATEGORY) or seed_name
+    resolved = gjjutils_resolve_model_by_extensionless_seed(seed_name, MODEL_CATEGORY)
+    return resolved if resolved and str(resolved).lower().endswith(".safetensors") else seed_name
 
 
 _ENVIRONMENT_REPORT = build_dependency_model_report(
     node_name=NODE_DISPLAY_NAME,
     missing_dependencies=_missing_runtime_specs(),
     install_packages=None,
-    description="SeedVR2 运行时用于加载模型并执行图像/视频超分。",
-    model_download_url=MODEL_DOWNLOAD_URL,
+    description="SeedVR2 推理运行时已内置在 GJJ 扩展中，不依赖任何第三方自定义节点。",
 )
-# 不再手动覆盖 install_cmd 和 copy_text，让公共函数自动生成完整安装命令
+if _ENVIRONMENT_REPORT.get("missing_dependencies"):
+    _ENVIRONMENT_REPORT["install_cmd"] = ""
+    _ENVIRONMENT_REPORT["copy_text"] = ""
+    _ENVIRONMENT_REPORT["copy_label"] = ""
 _DEPENDENCIES_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("dependencies_available", True))
 _MISSING_DEPENDENCIES = list(_ENVIRONMENT_REPORT.get("missing_dependencies", []) or [])
 if _MISSING_DEPENDENCIES:
@@ -176,10 +171,10 @@ _GJJ_HELP = build_node_help_payload(
     description=_DESCRIPTION_INTRO,
     dependencies=[
         {
-            "name": "SeedVR2 运行时 custom_nodes/seedvr2_videoupscaler",
-            "type": "本地运行时",
+            "name": "GJJ 内置 SeedVR2 运行时",
+            "type": "内置运行时",
             "required": True,
-            "description": "节点复用该运行时的推理、显存优化和视频组件处理。",
+            "description": "推理、显存优化和视频处理代码随 GJJ 扩展提供，无需安装第三方节点。",
         }
     ],
     model_tree=[
@@ -202,9 +197,8 @@ _GJJ_HELP = build_node_help_payload(
         "布尔选项在节点顶部按钮行切换，其余参数默认隐藏，点击 ⚙️设置 展开。",
     ],
     runtime=[
-        "执行期如果 SeedVR2 运行时或模型不可用，会通过 GJJ 公共提示面板给出中文说明和可复制内容。",
+        "无需安装 ComfyUI-SeedVR2_VideoUpscaler；执行期如果内置运行时或模型不可用，会给出中文说明。",
     ],
-    model_download_url=MODEL_DOWNLOAD_URL,
     install_cmd=_ENVIRONMENT_REPORT.get("install_cmd", ""),
     copy_text=_ENVIRONMENT_REPORT.get("copy_text", ""),
     copy_label=_ENVIRONMENT_REPORT.get("copy_label", ""),
@@ -229,11 +223,11 @@ _GJJ_HELP = build_node_help_payload(
         ],
         "依赖信息": [
             {
-                "name": "SeedVR2 运行时",
-                "type": "本地 custom_nodes 运行时",
-                "path": "custom_nodes/seedvr2_videoupscaler",
+                "name": "GJJ 内置 SeedVR2 运行时",
+                "type": "内置运行时",
+                "path": "custom_nodes/ComfyUI_GJJ_Nodes/vendor/seedvr2_runtime",
                 "required": True,
-                "description": "节点复用该运行时的推理、显存优化和 VIDEO 输出构建逻辑。",
+                "description": "随 GJJ 扩展提供，不需要安装第三方自定义节点。",
             },
             {
                 "name": "PyTorch / comfy_api.latest / folder_paths",
@@ -246,53 +240,6 @@ _GJJ_HELP = build_node_help_payload(
         "notice_level": _ENVIRONMENT_REPORT.get("notice_level", "ok"),
     },
 )
-
-
-def _is_gguf_model(value: Any) -> bool:
-    return str(value or "").replace("\\", "/").lower().endswith(".gguf")
-
-
-def _raise_gguf_dependency_missing(model_names: list[str], unique_id=None, original_error: Any = "") -> None:
-    names = "、".join(str(name) for name in model_names if str(name or "").strip()) or "GGUF 模型"
-    report = build_dependency_model_report(
-        node_name=NODE_DISPLAY_NAME,
-        missing_dependencies=[
-            {
-                "module_name": "gguf",
-                "package_name": GGUF_PACKAGE_SPEC,
-                "display_name": GGUF_PACKAGE_SPEC,
-                "description": "只有读取 .gguf SeedVR2 模型时需要；safetensors 模型不需要此依赖。",
-            }
-        ],
-        install_packages=[GGUF_PACKAGE_SPEC],
-        description=(
-            f"当前选择了 GGUF 模型：{names}\n"
-            "如改用 safetensors / int4_convrot / int8_convrot 模型，则不需要安装 gguf。"
-        ),
-        original_error=str(original_error or ""),
-        model_download_url=MODEL_DOWNLOAD_URL,
-    )
-    report["warning_message"] = f"⚠️检测到 GGUF 模型但缺少 gguf 依赖：{names}"
-    report["copy_label"] = "📋 复制安装 gguf 依赖命令"
-    print_dependency_model_report(report, title="GJJ SeedVR2 GGUF 依赖缺失")
-    send_dependency_model_notice(report, unique_id=unique_id)
-    err = RuntimeError(
-        f"检测到 GGUF 模型，但当前 ComfyUI Python 缺少 gguf 依赖。\n"
-        f"模型：{names}\n"
-        f"请安装 {GGUF_PACKAGE_SPEC} 后重启 ComfyUI，或改用非 GGUF 模型。"
-    )
-    setattr(err, "gjj_report", report)
-    raise err
-
-
-def _ensure_gguf_dependency_for_selected_models(dit_model: Any, vae_model: Any, unique_id=None) -> None:
-    gguf_models = [str(name) for name in (dit_model, vae_model) if _is_gguf_model(name)]
-    if not gguf_models:
-        return
-    try:
-        importlib.import_module("gguf")
-    except Exception as exc:
-        _raise_gguf_dependency_missing(gguf_models, unique_id=unique_id, original_error=exc)
 
 
 def _get_local_device_list(include_none: bool = False, include_cpu: bool = False) -> list[str]:
@@ -347,16 +294,16 @@ def _get_seedvr2_model_options() -> tuple[list[str], list[str]]:
     vae_models = _ordered_model_choices(DEFAULT_VAE_MODEL, want_vae=True)
 
     try:
-        custom_nodes_root = Path(__file__).resolve().parents[2]
-        seedvr2_root = custom_nodes_root / "seedvr2_videoupscaler"
-        seedvr2_root_str = str(seedvr2_root)
-        if seedvr2_root_str not in sys.path:
-            sys.path.insert(0, seedvr2_root_str)
+        runtime_parent = str(_seedvr2_runtime_root().parent)
+        if runtime_parent not in sys.path:
+            sys.path.insert(0, runtime_parent)
 
-        constants = importlib.import_module("src.utils.constants")
+        constants = importlib.import_module("seedvr2_runtime.src.utils.constants")
         discovered = constants.get_all_model_files()
         for filename in sorted(discovered.keys()):
             lowered = filename.lower()
+            if not lowered.endswith(".safetensors"):
+                continue
             if "vae" in lowered:
                 if filename not in vae_models:
                     vae_models.append(filename)
@@ -380,26 +327,20 @@ def _get_seedvr2_api() -> dict[str, Any]:
             except Exception:
                 pass
 
-    custom_nodes_root = Path(__file__).resolve().parents[2]
-    custom_nodes_root_str = str(custom_nodes_root)
-    if custom_nodes_root_str not in sys.path:
-        sys.path.insert(0, custom_nodes_root_str)
-
-    seedvr2_root = custom_nodes_root / "seedvr2_videoupscaler"
-    seedvr2_root_str = str(seedvr2_root)
-    if seedvr2_root_str not in sys.path:
-        sys.path.insert(0, seedvr2_root_str)
+    runtime_parent = str(_seedvr2_runtime_root().parent)
+    if runtime_parent not in sys.path:
+        sys.path.insert(0, runtime_parent)
 
     try:
-        model_registry = importlib.import_module("src.utils.model_registry")
-        constants = importlib.import_module("src.utils.constants")
-        downloads = importlib.import_module("src.utils.downloads")
-        debug_module = importlib.import_module("src.utils.debug")
-        generation_phases = importlib.import_module("src.core.generation_phases")
-        generation_utils = importlib.import_module("src.core.generation_utils")
-        memory_manager = importlib.import_module("src.optimization.memory_manager")
+        runtime_package = "seedvr2_runtime.src"
+        model_registry = importlib.import_module(f"{runtime_package}.utils.model_registry")
+        constants = importlib.import_module(f"{runtime_package}.utils.constants")
+        debug_module = importlib.import_module(f"{runtime_package}.utils.debug")
+        generation_phases = importlib.import_module(f"{runtime_package}.core.generation_phases")
+        generation_utils = importlib.import_module(f"{runtime_package}.core.generation_utils")
+        memory_manager = importlib.import_module(f"{runtime_package}.optimization.memory_manager")
     except Exception as exc:
-        err = RuntimeError("无法导入 seedvr2_videoupscaler 运行时。")
+        err = RuntimeError("无法导入 GJJ 内置 SeedVR2 运行时。")
         setattr(err, "_gjj_original_error", str(exc))
         raise err from exc
 
@@ -407,7 +348,6 @@ def _get_seedvr2_api() -> dict[str, Any]:
         "DEFAULT_DIT": getattr(model_registry, "DEFAULT_DIT", DEFAULT_DIT_MODEL),
         "DEFAULT_VAE": getattr(model_registry, "DEFAULT_VAE", DEFAULT_VAE_MODEL),
         "get_base_cache_dir": constants.get_base_cache_dir,
-        "download_weight": downloads.download_weight,
         "Debug": debug_module.Debug,
         "encode_all_batches": generation_phases.encode_all_batches,
         "upscale_all_batches": generation_phases.upscale_all_batches,
@@ -534,22 +474,21 @@ def _seedvr2_model_dir(api: dict[str, Any], dit_model: str, vae_model: str) -> A
 
 
 def _raise_seedvr2_runtime_error(original_error: str, unique_id=None):
+    missing_runtime = _missing_runtime_specs()
     report = build_dependency_model_report(
         node_name=NODE_DISPLAY_NAME,
-        missing_dependencies=_missing_runtime_specs() or [
-            {
-                "module_name": "seedvr2_videoupscaler",
-                "package_name": "seedvr2_videoupscaler",
-                "display_name": "SeedVR2 运行时",
-                "description": "运行时导入失败，可能是依赖未安装或版本不兼容。",
-            }
-        ],
-        install_packages=None,
-        description="SeedVR2 图像/视频放大需要本地 seedvr2_videoupscaler 运行时。",
+        missing_dependencies=missing_runtime,
+        install_packages=[] if missing_runtime else None,
+        description=(
+            "GJJ 内置 SeedVR2 运行时文件缺失，请重新下载或更新 GJJ 扩展。"
+            if missing_runtime
+            else "GJJ 内置 SeedVR2 运行时加载失败，请确认已安装 GJJ requirements.txt 中的基础 Python 依赖。"
+        ),
         original_error=original_error,
-        model_download_url=MODEL_DOWNLOAD_URL,
     )
-    # 不再手动覆盖 install_cmd 和 copy_text，让公共函数自动生成完整安装命令
+    report["install_cmd"] = ""
+    report["copy_text"] = ""
+    report["copy_label"] = ""
     print_dependency_model_report(report, title="GJJ SeedVR2 运行时缺失")
     send_dependency_model_notice(report, unique_id=unique_id)
     err = RuntimeError(report.get("warning_message") or "SeedVR2 运行时缺失")
@@ -782,8 +721,6 @@ class GJJ_SeedVR2ImageUpscaler:
         if media is None:
             media = kwargs.get("video", None)
 
-        _ensure_gguf_dependency_for_selected_models(dit_model, vae_model, unique_id=unique_id)
-
         try:
             api = _get_seedvr2_api()
         except Exception as exc:
@@ -870,27 +807,20 @@ class GJJ_SeedVR2ImageUpscaler:
                 unique_id=unique_id,
                 copy_text=MODEL_SUBDIR,
                 copy_label="📋 复制模型目录",
-                model_download_url=MODEL_DOWNLOAD_URL,
             )
         if dit_root is None and vae_root is None:
-            try:
-                _send_status(unique_id, "2/6 检查 SeedVR2 模型...")
-                api["download_weight"](dit_model=dit_model, vae_model=vae_model, debug=debug)
-            except Exception as exc:
-                missing = [
-                    make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "主超分模型不可用。"),
-                    make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "VAE 模型不可用。"),
-                ]
-                raise_dependency_model_error(
-                    node_name=NODE_DISPLAY_NAME,
-                    missing_models=missing,
-                    description="请把 SeedVR2 模型放到 models/SEEDVR2，可放在子目录中；节点会按去扩展名、去量化信息后的名称做大小写不敏感搜索。",
-                    original_error=str(exc),
-                    unique_id=unique_id,
-                    copy_text=MODEL_SUBDIR,
-                    copy_label="📋 复制模型目录",
-                    model_download_url=MODEL_DOWNLOAD_URL,
-                )
+            missing = [
+                make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "主超分 safetensors 模型不可用。"),
+                make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "VAE safetensors 模型不可用。"),
+            ]
+            raise_dependency_model_error(
+                node_name=NODE_DISPLAY_NAME,
+                missing_models=missing,
+                description="请把 SeedVR2 的 safetensors 主模型和 VAE 放到 models/SEEDVR2；节点不会联网下载模型。",
+                unique_id=unique_id,
+                copy_text=MODEL_SUBDIR,
+                copy_label="📋 复制模型目录",
+            )
         else:
             _send_status(unique_id, "2/6 已找到本地 SeedVR2 模型...")
 

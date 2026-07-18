@@ -917,6 +917,11 @@ function helpModelFileForSlot(node, state, slot, index, secondary = false) {
 	const values = secondary
 		? sourceList.map(String)
 		: filterList(sourceList, slot?.keywords || [], allowAny, slot?.fallback_keywords || [], slot?.file_extension || "");
+	// 与主面板共用同一缺失判定。即使 fallback 关键词能匹配到其它本地模型，
+	// 当前预设要求的官方模型不存在时，帮助树也应显示缺失的目标文件，
+	// 不能把不兼容的候选模型当作已选模型展示。
+	const missing = missingModelForSlot(slot, values, secondary);
+	if (missing) return missing;
 	const current = firstHelpModelFile(helpValueOf(node, `${secondary ? "secondary_file" : "file"}_${index + 1}`));
 	const normalizedValues = new Set(values.map((value) => String(value).replaceAll("\\", "/").toLowerCase()));
 	const currentKey = current.replaceAll("\\", "/").toLowerCase();
@@ -941,7 +946,9 @@ function videoLoaderHelpEntries(node) {
 	// 短暂不同步，导致帮助树串到另一个官方流。
 	const key = currentHelpConfigKey(node, state);
 	const appliedKey = String(node?.__gjjVUAppliedConfigKey || node?.properties?.gjj_vu_applied_config_key || "").trim();
-	const cfg = node?.__gjjVUAppliedConfig
+	const appliedSnapshot = node?.__gjjVUAppliedConfigSnapshot;
+	const cfg = (appliedSnapshot?.key === appliedKey ? appliedSnapshot.config : null)
+		|| node?.__gjjVUAppliedConfig
 		|| state.configs?.[appliedKey]
 		|| state.configs?.[key]
 		|| null;
@@ -2424,8 +2431,6 @@ function applyConfig(node, opts = {}) {
 	const state = ensureState(node);
 	if (!state.configs || !state.folders) { refreshBackendLists(node, false).finally(() => applyConfig(node, opts)); return; }
 	const cfg = currentConfig(node, state);
-	// 保存主面板本次实际使用的配置对象，帮助树直接复用，避免二次解析预设。
-	node.__gjjVUAppliedConfig = cfg;
 	updateInputs(node, cfg);
 	const rows = node.__gjjVURows; if (!rows) return;
 	node.__gjjVUVisibleRowCount = 0;
@@ -2439,6 +2444,10 @@ function applyConfig(node, opts = {}) {
 	}
 	const loraEnabled = effectiveUseLora(node);
 	const configKey = activeConfigKey(node, state);
+	// 同时记录配置键与配置对象。帮助树只接受键匹配的快照，避免刷新期间
+	// 上一预设的对象与新预设键交叉，确保它和当前主面板选择严格一致。
+	node.__gjjVUAppliedConfig = cfg;
+	node.__gjjVUAppliedConfigSnapshot = { key: configKey, config: cfg };
 	node.properties = node.properties || {};
 	const previousSettingsConfig = String(node.properties[SETTINGS_CONFIG_PROPERTY] || "");
 	const previousAppliedConfig = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");
