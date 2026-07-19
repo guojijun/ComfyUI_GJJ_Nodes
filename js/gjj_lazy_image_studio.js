@@ -2798,7 +2798,7 @@ function lazyModelTreeEntries(node) {
 			label: "UNET 主模型",
 			folder: "models/diffusion_models",
 			icon: "🟣",
-			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "gguf"],
+			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "gguf"],
 			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
 			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
 		},
@@ -3944,6 +3944,9 @@ async function fetchLazyTestModels(kind, node) {
 		const names = getLoraOptions().map((item) => String(item?.value || item?.name || "")).filter(Boolean);
 		return names.map((name) => ({ name, size: "", bytes: 0 }));
 	}
+	if (kind === "checkpoint") {
+		return optionValues(node, CHECKPOINT_WIDGET_NAME).filter(Boolean).map((name) => ({ name, size: "", bytes: 0 }));
+	}
 	return optionValues(node, "unet_name").filter(Boolean).map((name) => ({ name, size: "", bytes: 0 }));
 }
 
@@ -3972,13 +3975,14 @@ function lazyTestFilters(node) {
 			unet: String(filters.unet || ""),
 			lora: String(filters.lora || ""),
 			lora_strength: String(filters.lora_strength || filters.lora || ""),
+			checkpoint: String(filters.checkpoint || ""),
 		};
 	}
-	return { unet: "", lora: "", lora_strength: "" };
+	return { unet: "", lora: "", lora_strength: "", checkpoint: "" };
 }
 
 function saveLazyTestFilter(node, kind, value) {
-	if (!node || !["unet", "lora", "lora_strength"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength", "checkpoint"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
@@ -3997,13 +4001,14 @@ function lazyTestSorts(node) {
 			unet: String(sorts.unet || "name_asc"),
 			lora: String(sorts.lora || "name_asc"),
 			lora_strength: String(sorts.lora_strength || sorts.lora || "name_asc"),
+			checkpoint: String(sorts.checkpoint || "name_asc"),
 		};
 	}
-	return { unet: "name_asc", lora: "name_asc", lora_strength: "name_asc" };
+	return { unet: "name_asc", lora: "name_asc", lora_strength: "name_asc", checkpoint: "name_asc" };
 }
 
 function saveLazyTestSort(node, kind, value) {
-	if (!node || !["unet", "lora", "lora_strength"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength", "checkpoint"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
@@ -4130,9 +4135,9 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	const savedStrength = lazyTestStrengthSettings(node);
 	const state = {
 		kind: "unet",
-		models: { unet: [], lora: [] },
-		filters: { unet: savedFilters.unet, lora: savedFilters.lora, lora_strength: savedFilters.lora_strength },
-		sorts: { unet: savedSorts.unet, lora: savedSorts.lora, lora_strength: savedSorts.lora_strength },
+		models: { unet: [], lora: [], checkpoint: [] },
+		filters: { unet: savedFilters.unet, lora: savedFilters.lora, lora_strength: savedFilters.lora_strength, checkpoint: savedFilters.checkpoint },
+		sorts: { unet: savedSorts.unet, lora: savedSorts.lora, lora_strength: savedSorts.lora_strength, checkpoint: savedSorts.checkpoint },
 	};
 	const list = panel.querySelector("[data-list]");
 	const status = panel.querySelector("[data-status]");
@@ -4155,6 +4160,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			{ kind: "unet", label: "UNET测试" },
 			{ kind: "lora", label: "Lora模型测试" },
 			{ kind: "lora_strength", label: "Lora强度测试" },
+			{ kind: "checkpoint", label: "Checkpoint测试" },
 		]) {
 			const button = document.createElement("button");
 			button.type = "button";
@@ -4239,7 +4245,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			list.appendChild(row);
 		}
 		const selectedCount = selectedLazyTestModels(panel).length;
-		const label = state.kind === "unet" ? "UNET" : (state.kind === "lora_strength" ? "LoRA强度" : "LoRA模型");
+		const label = state.kind === "unet" ? "UNET" : (state.kind === "lora_strength" ? "LoRA强度" : (state.kind === "checkpoint" ? "Checkpoint" : "LoRA模型"));
 		status.textContent = `${label}：${filtered.length} / ${state.models[modelKind].length}，已选 ${selectedCount}`;
 	}
 
@@ -4477,7 +4483,7 @@ function createButtons(node) {
 	const testButton = document.createElement("button");
 	testButton.type = "button";
 	testButton.textContent = "🧪";
-	testButton.title = "打开 UNET / LoRA 批量测试窗口";
+	testButton.title = "打开 UNET / LoRA / Checkpoint 批量测试窗口";
 	testButton.setAttribute("aria-label", "模型测试");
 	testButton.style.cssText = [
 		...emojiButtonStyle,
@@ -5206,37 +5212,10 @@ function lazyPreviewHeightForNode(node, width = null) {
 	if (!preview?.wrap || preview.wrap.style.display === "none") {
 		return 0;
 	}
+	// DOMWidget 会把已分配的槽位高度反映到容器 scrollHeight；不要再用它反推内容高度，
+	// 否则每次 refreshNode 都会把旧高度回写并继续累加空白。
 	updateLazyPreviewLayout(node, width);
 	return Number(node.__gjjLazyPreviewHeight || 0);
-}
-
-function measuredLazyPreviewHeight(node) {
-	const container = node?.__gjjLazyPreview?.container;
-	if (!container || container.style.display === "none") {
-		return 0;
-	}
-	const measured = Math.ceil(Number(container.scrollHeight || container.getBoundingClientRect?.().height || 0));
-	return Number.isFinite(measured) && measured > 0 ? measured + 2 : 0;
-}
-
-function applyMeasuredLazyPreviewHeight(node) {
-	const measured = measuredLazyPreviewHeight(node);
-	if (measured <= 0) return false;
-	const current = Number(node.__gjjLazyPreviewHeight || 0);
-	if (Math.abs(current - measured) <= 1) return false;
-	node.__gjjLazyPreviewHeight = measured;
-	return true;
-}
-
-function scheduleLazyPreviewHeightSync(node) {
-	if (!node || node.__gjjLazyPreviewMeasureQueued) return;
-	node.__gjjLazyPreviewMeasureQueued = true;
-	requestAnimationFrame(() => {
-		node.__gjjLazyPreviewMeasureQueued = false;
-		if (applyMeasuredLazyPreviewHeight(node)) {
-			GJJ_Utils.refreshNode(node);
-		}
-	});
 }
 
 function updateLazyPreviewLayout(node, width = null) {
@@ -5310,12 +5289,10 @@ function updateLazyPreviewLayout(node, width = null) {
 		const itemWidth = Number(item.width || 1);
 		const itemHeight = Number(item.height || 1);
 		node.__gjjLazyPreviewHeight = Math.max(96, Math.ceil(contentWidth * itemHeight / itemWidth) + controlHeight + 10);
-		if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 		return;
 	}
 	const gap = Math.max(0, rowCount - 1) * tileGap;
 	node.__gjjLazyPreviewHeight = Math.max(96, rowCount * tileHeight + gap + controlHeight + 10);
-	if (!applyMeasuredLazyPreviewHeight(node)) scheduleLazyPreviewHeightSync(node);
 }
 
 function configureImagePreviewWidget(node, widget, container) {

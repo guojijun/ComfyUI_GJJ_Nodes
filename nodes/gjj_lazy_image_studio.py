@@ -284,9 +284,13 @@ def _is_convrot_quantized_model_name(name: Any) -> bool:
 
 
 def _model_full_path(kind: str, name: str) -> str | None:
-    if kind != "lora":
+    if kind not in {"lora", "checkpoint"}:
         name = _resolve_lazy_unet_model_name(name)
-    categories = ("loras",) if kind == "lora" else ("diffusion_models", "unet_gguf")
+    categories = (
+        ("loras",)
+        if kind == "lora"
+        else (("checkpoints",) if kind == "checkpoint" else ("diffusion_models", "unet_gguf"))
+    )
     for category in categories:
         try:
             path = folder_paths.get_full_path(category, name)
@@ -2099,7 +2103,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
+        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "gguf"]
         _filtered = [
             m
             for m in _raw_diffusion_models
@@ -3284,7 +3288,7 @@ class GJJ_LazyImageStudio:
         # 记录开始时间
         start_time = time.time()
 
-        if test_config_data.get("mode") in {"unet", "lora", "lora_strength"}:
+        if test_config_data.get("mode") in {"unet", "lora", "lora_strength", "checkpoint"}:
             mode = str(test_config_data.get("mode") or "")
             selected_models = [
                 str(item or "").strip()
@@ -3331,6 +3335,8 @@ class GJJ_LazyImageStudio:
                         item_sampler_name = sampler_name
                         item_scheduler = scheduler
                         item_denoise = denoise
+                        item_model_source = model_source
+                        item_ckpt_name = ckpt_name
                         if mode == "unet":
                             item_unet_name = model_name
                             item_preset, item_clip_name1, item_vae_name = _resolve_lazy_test_model_pair(item_unet_name)
@@ -3343,6 +3349,9 @@ class GJJ_LazyImageStudio:
                                 unique_id,
                                 f"测试 {index}/{len(test_entries)} 配套：CLIP={item_clip_name1 or '默认'}，VAE={item_vae_name or '默认'}",
                             )
+                        elif mode == "checkpoint":
+                            item_model_source = "底模 checkpoint"
+                            item_ckpt_name = model_name
                         elif mode == "lora_strength":
                             strength = float(item_strength if item_strength is not None else 1.0)
                             item_lora_data = json.dumps(
@@ -3382,8 +3391,8 @@ class GJJ_LazyImageStudio:
                             keep_model_loaded=keep_model_loaded,
                             test_config="",
                             use_input_image_size=use_input_image_size,
-                            model_source=model_source,
-                            ckpt_name=ckpt_name,
+                            model_source=item_model_source,
+                            ckpt_name=item_ckpt_name,
                             device_preference=device_preference,
                             enable_sage_attention=enable_sage_attention,
                             sage_attention_mode=sage_attention_mode,
@@ -3431,7 +3440,7 @@ class GJJ_LazyImageStudio:
                         _send_test_preview(unique_id, preview_batch)
                     except Exception as exc:
                         _send_status(unique_id, f"测试失败 {index}/{len(test_entries)}：{str(exc).splitlines()[0]}")
-                        if mode in {"unet", "lora", "lora_strength"}:
+                        if mode in {"unet", "lora", "lora_strength", "checkpoint"}:
                             error_image = _caption_test_image(
                                 _make_soft_error_image(test_width, test_height),
                                 (
@@ -4130,9 +4139,11 @@ try:
             kind = str(request.query.get("kind", "unet") or "unet").lower()
             if kind == "lora":
                 names = [str(f) for f in folder_paths.get_filename_list("loras") if str(f or "").strip()]
+            elif kind == "checkpoint":
+                names = [str(f) for f in folder_paths.get_filename_list("checkpoints") if str(f or "").strip()]
             else:
                 raw_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-                keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
+                keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "gguf"]
                 filtered = [m for m in raw_models if any(k in str(m).lower() for k in keywords)]
                 names = filtered if filtered else raw_models
                 kind = "unet"
