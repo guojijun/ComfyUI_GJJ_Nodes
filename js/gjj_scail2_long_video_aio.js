@@ -63,6 +63,12 @@ const DEFAULT_MULTIVIEW_LORA_WIDGETS = new Set([
 	"multiview_lora_1",
 	"multiview_lora_2",
 ]);
+const DEFAULT_BASE_LORA_WIDGETS = new Set([
+	"accel_lora_file",
+	"dpo_lora_file",
+	"slop_bounce_lora_file",
+	"relighting_lora_file",
+]);
 
 const BUTTONS = [
 	["video", "🎬", "导入/选择原视频"],
@@ -109,10 +115,10 @@ const MODEL_FIELD_FALLBACKS = {
 	vae_file: "wan_2.1_vae.safetensors",
 	text_encoder_file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
 	clip_vision_file: "clip_vision_h.safetensors",
-	accel_lora_file: "",
-	dpo_lora_file: "",
-	slop_bounce_lora_file: "",
-	relighting_lora_file: "",
+	accel_lora_file: "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+	dpo_lora_file: "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",
+	slop_bounce_lora_file: "wan/Wan2.2 - I2V -Slop Bounce-Low-i2v-(弹跳lora不变脸).safetensors",
+	relighting_lora_file: "Scail-2_relighting-lora.safetensors",
 	sam3_checkpoint: "sam3.1_multiplex.safetensors",
 	multiview_unet: "qwen_image_edit_2511_int8_convrot.safetensors",
 	multiview_clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -363,6 +369,11 @@ function sanitizeWidgetValues(node) {
 		const item = widget(node, name);
 		const fallback = MODEL_FIELD_FALLBACKS[name] || "";
 		if (item && fallback && isNoLoraValue(item.value)) item.value = fallback;
+	}
+	for (const name of DEFAULT_BASE_LORA_WIDGETS) {
+		const item = widget(node, name);
+		const fallback = MODEL_FIELD_FALLBACKS[name] || "";
+		if (item && fallback && !String(item.value || "").trim()) item.value = fallback;
 	}
 }
 

@@ -3,6 +3,8 @@ import { api } from "/scripts/api.js";
 
 const TARGET_NODES = new Set(["GJJ_PromptPresetStudio"]);
 const STYLES_API_URL = "/gjj/prompt_preset_styles";
+const STYLE_PAGE_SIZE = 12;
+const ANGLE_SLIDER_FIELDS = new Set(["视角旋转", "视角俯仰", "镜头远近"]);
 const SCHEMA_API_URL = "/gjj/prompt_preset_schema";
 
 const TOOLBAR_WIDGET_NAME = "gjj_prompt_preset_toolbar";
@@ -53,9 +55,7 @@ const FALLBACK_DEFAULTS = {
 let schemaCache = null;
 let schemaPromise = null;
 let schemaLoaded = false;
-let styleCatalog = [];
-let styleCatalogPromise = null;
-let stylesLoaded = false;
+const stylePageCache = new Map();
 const styleLookup = new Map();
 
 function normalizeText(value) {
@@ -612,9 +612,8 @@ function isolateScrollableControl(control) {
 }
 
 function cacheStyleCatalog(items) {
-	styleCatalog = Array.isArray(items) ? items : [];
-	styleLookup.clear();
-	for (const item of styleCatalog) {
+	const catalog = Array.isArray(items) ? items : [];
+	for (const item of catalog) {
 		const aliases = [
 			item?.name,
 			item?.name_cn,
@@ -630,28 +629,39 @@ function cacheStyleCatalog(items) {
 			styleLookup.set(normalizeKey(text), item);
 		}
 	}
-	return styleCatalog;
+	return catalog;
 }
 
-async function loadStyleCatalog() {
-	if (!styleCatalogPromise) {
-		styleCatalogPromise = api.fetchApi(STYLES_API_URL)
+async function loadStyleCatalogPage(page = 1, query = "") {
+	const normalizedPage = Math.max(1, Number(page) || 1);
+	const normalizedQuery = normalizeText(query);
+	const cacheKey = `${normalizedQuery}\n${normalizedPage}`;
+	if (!stylePageCache.has(cacheKey)) {
+		const params = new URLSearchParams({
+			page: String(normalizedPage),
+			page_size: String(STYLE_PAGE_SIZE),
+		});
+		if (normalizedQuery) {
+			params.set("query", normalizedQuery);
+		}
+		stylePageCache.set(cacheKey, api.fetchApi(`${STYLES_API_URL}?${params}`)
 			.then((response) => {
 				if (!response.ok) {
-					throw new Error(`load styles failed: ${response.status}`);
+					throw new Error(`load style page failed: ${response.status}`);
 				}
 				return response.json();
 			})
-			.then((payload) => cacheStyleCatalog(payload?.styles))
-			.catch((error) => {
-				console.warn("[GJJ] 加载风格缩略图失败", error);
-				return cacheStyleCatalog([]);
+			.then((payload) => {
+				cacheStyleCatalog(payload?.styles);
+				return payload;
 			})
-			.finally(() => {
-				stylesLoaded = true;
-			});
+			.catch((error) => {
+				stylePageCache.delete(cacheKey);
+				console.warn("[GJJ] 加载风格分页失败", error);
+				throw error;
+			}));
 	}
-	return styleCatalogPromise;
+	return stylePageCache.get(cacheKey);
 }
 
 async function loadSchema() {
@@ -827,10 +837,9 @@ function createAnglePreview(node, disabled) {
 		"display:flex",
 		"flex-direction:column",
 		"gap:10px",
-		"padding:10px",
-		"border-radius:14px",
-		"border:1px solid #314047",
-		"background:linear-gradient(180deg, #10181d 0%, #0d1418 100%)",
+		"padding:8px 0 0",
+		"border:0",
+		"background:transparent",
 	].join(";");
 
 	const header = document.createElement("div");
@@ -847,18 +856,17 @@ function createAnglePreview(node, disabled) {
 	title.style.cssText = [
 		"font-size:12px",
 		"font-weight:600",
-		"color:#e8f3f7",
+		"color:#f1f8fa",
 	].join(";");
 
 	const modeBadge = document.createElement("div");
 	modeBadge.style.cssText = [
-		"padding:4px 8px",
-		"border-radius:999px",
+		"padding:0",
 		"font-size:10px",
 		"line-height:1",
-		"border:1px solid #3d5964",
-		"background:#162228",
-		"color:#d7e8ee",
+		"border:0",
+		"background:transparent",
+		"color:#cde5ed",
 	].join(";");
 
 	header.appendChild(title);
@@ -877,9 +885,8 @@ function createAnglePreview(node, disabled) {
 	stage.style.cssText = [
 		"position:relative",
 		"height:104px",
-		"border-radius:12px",
-		"border:1px solid #27343b",
-		"background:radial-gradient(circle at 35% 25%, #1d2d36 0%, #10181d 62%, #0a1014 100%)",
+		"border:0",
+		"background:radial-gradient(circle at 35% 25%, rgba(116, 177, 201, 0.18) 0%, rgba(16, 24, 29, 0) 68%)",
 		"display:flex",
 		"align-items:center",
 		"justify-content:center",
@@ -914,8 +921,8 @@ function createAnglePreview(node, disabled) {
 			"display:flex",
 			"align-items:center",
 			"justify-content:center",
-			"border:1px solid rgba(144, 204, 230, 0.44)",
-			"border-radius:12px",
+			"border:0",
+			"border-radius:8px",
 			`background:${faceDef.background}`,
 			"backdrop-filter:blur(1px)",
 			"box-sizing:border-box",
@@ -962,13 +969,12 @@ function createAnglePreview(node, disabled) {
 	const makeChip = () => {
 		const chip = document.createElement("div");
 		chip.style.cssText = [
-			"padding:4px 8px",
-			"border-radius:999px",
-			"border:1px solid #314047",
-			"background:#121a1f",
+			"padding:0",
+			"border:0",
+			"background:transparent",
 			"font-size:10px",
 			"line-height:1.2",
-			"color:#dbe8ee",
+			"color:#dcecf1",
 		].join(";");
 		return chip;
 	};
@@ -984,7 +990,7 @@ function createAnglePreview(node, disabled) {
 	metrics.style.cssText = [
 		"font-size:10px",
 		"line-height:1.45",
-		"color:#8fa7b1",
+		"color:#c3d8df",
 	].join(";");
 
 	const distanceRow = document.createElement("div");
@@ -995,22 +1001,21 @@ function createAnglePreview(node, disabled) {
 		"gap:8px",
 		"font-size:10px",
 		"line-height:1.2",
-		"color:#dbe8ee",
+		"color:#dcecf1",
 	].join(";");
 
 	const distanceTitle = document.createElement("div");
 	distanceTitle.style.cssText = [
 		"font-weight:600",
-		"color:#e8f3f7",
+		"color:#f1f8fa",
 	].join(";");
 
 	const distanceValue = document.createElement("div");
 	distanceValue.style.cssText = [
-		"padding:3px 7px",
-		"border-radius:999px",
-		"border:1px solid #314047",
-		"background:#121a1f",
-		"color:#bcd5de",
+		"padding:0",
+		"border:0",
+		"background:transparent",
+		"color:#d8edf4",
 	].join(";");
 
 	distanceRow.appendChild(distanceTitle);
@@ -1022,7 +1027,7 @@ function createAnglePreview(node, disabled) {
 		"border-radius:999px",
 		"background:#162228",
 		"overflow:hidden",
-		"border:1px solid #243239",
+		"border:0",
 	].join(";");
 
 	const zoomFill = document.createElement("div");
@@ -1042,7 +1047,7 @@ function createAnglePreview(node, disabled) {
 		"align-items:center",
 		"font-size:10px",
 		"line-height:1.2",
-		"color:#7f98a2",
+		"color:#b8cdd4",
 	].join(";");
 
 	const zoomFar = document.createElement("div");
@@ -1056,7 +1061,7 @@ function createAnglePreview(node, disabled) {
 	status.style.cssText = [
 		"font-size:10px",
 		"line-height:1.45",
-		"color:#9fb1b8",
+		"color:#c3d8df",
 	].join(";");
 
 	info.appendChild(chips);
@@ -1073,15 +1078,14 @@ function createAnglePreview(node, disabled) {
 	promptLabel.style.cssText = [
 		"font-size:10px",
 		"line-height:1.2",
-		"color:#8fa7b1",
+		"color:#c3d8df",
 	].join(";");
 
 	const promptBox = document.createElement("div");
 	promptBox.style.cssText = [
-		"padding:9px 10px",
-		"border-radius:10px",
-		"border:1px solid #26353c",
-		"background:#0f171b",
+		"padding:4px 0",
+		"border:0",
+		"background:transparent",
 		"font-size:11px",
 		"line-height:1.45",
 		"color:#eef7fb",
@@ -1098,8 +1102,7 @@ function createAnglePreview(node, disabled) {
 		card.style.opacity = disabled ? "0.76" : "1";
 		cube.style.transform = data.cubeTransform;
 		modeBadge.textContent = data.detailMode === "简洁" ? "简洁模式" : "详细模式";
-		modeBadge.style.borderColor = data.detailMode === "简洁" ? "#516a74" : "#79aebe";
-		modeBadge.style.background = data.detailMode === "简洁" ? "#152126" : "#19303a";
+		modeBadge.style.color = data.detailMode === "简洁" ? "#c4d8df" : "#d9f1f8";
 
 		horizontalChip.textContent = `水平：${data.horizontalLabel}`;
 		verticalChip.textContent = `垂直：${data.verticalLabel}`;
@@ -1161,6 +1164,45 @@ function createDetailRow(node, fieldKey, field, disabled) {
 			updateState(node, { [fieldKey]: control.value });
 			notifyPanelStateChanged(node);
 		});
+	} else if ((field?.kind === "int" || field?.kind === "float") && ANGLE_SLIDER_FIELDS.has(fieldKey)) {
+		const sliderRow = document.createElement("div");
+		sliderRow.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:10px;align-items:center";
+		control = document.createElement("input");
+		control.type = "range";
+		control.value = String(state[fieldKey] ?? field.default ?? "");
+		control.min = String(typeof field.min === "number" ? field.min : 0);
+		control.max = String(typeof field.max === "number" ? field.max : 100);
+		control.step = String(typeof field.step === "number" ? field.step : 1);
+		const valueLabel = document.createElement("output");
+		valueLabel.textContent = control.value;
+		valueLabel.style.cssText = "color:#e4f3f7;font-size:11px;text-align:right;font-variant-numeric:tabular-nums";
+		const syncSliderValue = () => {
+			const nextValue = field.kind === "int"
+				? Number.parseInt(control.value, 10)
+				: Number.parseFloat(control.value);
+			valueLabel.textContent = field.kind === "int" ? String(nextValue) : nextValue.toFixed(1);
+			updateState(node, { [fieldKey]: nextValue });
+			notifyPanelStateChanged(node);
+		};
+		control.addEventListener("input", syncSliderValue);
+		control.disabled = disabled;
+		control.style.cssText = [
+			"width:100%",
+			"height:18px",
+			"margin:0",
+			"padding:0",
+			"border:0",
+			"background:transparent",
+			"accent-color:#8bc3d8",
+			"cursor:pointer",
+		].join(";");
+		stopControlMouse(control);
+		sliderRow.appendChild(control);
+		sliderRow.appendChild(valueLabel);
+		shell.appendChild(sliderRow);
+		row.appendChild(label);
+		row.appendChild(shell);
+		return row;
 	} else if (field?.kind === "int" || field?.kind === "float") {
 		control = document.createElement("input");
 		control.type = "number";
@@ -1246,14 +1288,6 @@ function renderDetailPanel(node, section, container) {
 	].join(";");
 	container.appendChild(summary);
 
-	if (section.key === "angle") {
-		const anglePreview = createAnglePreview(node, !enabled);
-		node.__gjjPromptPresetPanelRefresh = anglePreview.update;
-		container.appendChild(anglePreview.element);
-	} else {
-		node.__gjjPromptPresetPanelRefresh = null;
-	}
-
 	const body = document.createElement("div");
 	body.style.cssText = [
 		"display:flex",
@@ -1272,26 +1306,37 @@ function renderDetailPanel(node, section, container) {
 	}
 
 	container.appendChild(body);
+
+	if (section.key === "angle") {
+		const anglePreview = createAnglePreview(node, !enabled);
+		node.__gjjPromptPresetPanelRefresh = anglePreview.update;
+		container.appendChild(anglePreview.element);
+	} else {
+		node.__gjjPromptPresetPanelRefresh = null;
+	}
 }
 
 function buildStyleCard(node, item, selectedSet) {
 	const button = document.createElement("button");
+	const isSelected = selectedSet.has(item.name);
 	button.type = "button";
+	button.setAttribute("aria-pressed", isSelected ? "true" : "false");
 	button.title = normalizeText(item?.name_cn || item?.name);
 	button.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:5px",
+		"display:block",
+		"position:relative",
 		"width:100%",
-		"padding:5px",
-		"border-radius:11px",
-		"border:1px solid #314047",
+		"height:112px",
+		"padding:0",
+		"border-radius:0",
+		"border:0",
 		"background:#121a1f",
 		"color:#dce7e2",
 		"text-align:left",
 		"cursor:pointer",
 		"box-sizing:border-box",
 	].join(";");
+	button.addEventListener("pointerdown", (event) => event.stopPropagation());
 	button.addEventListener("mousedown", (event) => event.stopPropagation());
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -1317,29 +1362,29 @@ function buildStyleCard(node, item, selectedSet) {
 
 	const imageFrame = document.createElement("div");
 	imageFrame.style.cssText = [
-		"align-self:center",
-		"width:auto",
-		"max-width:100%",
-		"height:62px",
+		"width:100%",
+		"height:100%",
 		"display:flex",
 		"align-items:center",
 		"justify-content:center",
-		"overflow:visible",
+		"overflow:hidden",
 		"box-sizing:border-box",
 	].join(";");
 
 	const image = document.createElement("img");
 	image.loading = "lazy";
+	image.draggable = false;
 	image.referrerPolicy = "no-referrer";
 	image.src = normalizeText(item?.thumbnail);
 	image.alt = normalizeText(item?.name_cn || item?.name);
 	image.style.cssText = [
-		"width:auto",
-		"max-width:100%",
+		"width:100%",
 		"height:100%",
-		"object-fit:contain",
-		"border-radius:8px",
+		"object-fit:cover",
+		"border-radius:0",
 		"display:block",
+		"pointer-events:none",
+		`filter:${isSelected ? "brightness(0.72) saturate(1.15)" : "none"}`,
 	].join(";");
 	image.addEventListener("error", () => {
 		image.style.opacity = "0.22";
@@ -1349,33 +1394,55 @@ function buildStyleCard(node, item, selectedSet) {
 	const title = document.createElement("div");
 	title.textContent = normalizeText(item?.name_cn || item?.name);
 	title.style.cssText = [
+		"position:absolute",
+		"left:0",
+		"right:0",
+		"bottom:0",
+		"z-index:1",
+		"padding:18px 7px 5px",
+		"background:linear-gradient(transparent, rgba(5, 10, 13, 0.78))",
 		"font-size:11px",
 		"line-height:1.32",
 		"font-weight:600",
-		"color:#e5f0f4",
+		"color:rgba(255, 255, 255, 0.92)",
 		"word-break:break-word",
+		"text-shadow:0 1px 2px rgba(0, 0, 0, 0.9)",
+		"pointer-events:none",
 	].join(";");
 
 	imageFrame.appendChild(image);
 	button.appendChild(imageFrame);
 	button.appendChild(title);
-
-	if (normalizeText(item?.name_cn) && normalizeText(item?.name_cn) !== normalizeText(item?.name)) {
-		const subtitle = document.createElement("div");
-		subtitle.textContent = normalizeText(item?.name);
-		subtitle.style.cssText = [
-			"font-size:10px",
-			"line-height:1.3",
-			"color:#8fa4ac",
-			"word-break:break-word",
+	if (isSelected) {
+		const selectedBadge = document.createElement("span");
+		selectedBadge.textContent = "✓";
+		selectedBadge.style.cssText = [
+			"position:absolute",
+			"top:6px",
+			"right:6px",
+			"z-index:2",
+			"width:22px",
+			"height:22px",
+			"border-radius:50%",
+			"background:rgba(52, 174, 212, 0.92)",
+			"color:#fff",
+			"font-size:15px",
+			"font-weight:700",
+			"line-height:22px",
+			"text-align:center",
+			"pointer-events:none",
 		].join(";");
-		button.appendChild(subtitle);
+		button.appendChild(selectedBadge);
 	}
 
 	stylePillButton(button, {
-		active: selectedSet.has(item.name),
-		accent: selectedSet.has(item.name),
+		active: isSelected,
+		accent: isSelected,
 	});
+	button.style.border = "0";
+	button.style.borderRadius = "0";
+	button.style.background = "#121a1f";
+	button.style.boxShadow = "none";
 	return button;
 }
 
@@ -1389,7 +1456,7 @@ function updateStylePanelContents(node) {
 	const selectedNames = getSelectedStyleNamesFromState(currentState);
 	const selectedSet = new Set(selectedNames);
 	const modeValue = normalizeText(currentState["风格模式"]);
-	const { clearButton, summary, grid } = panelState;
+	const { clearButton, summary, grid, pager, previousButton, nextButton, pageLabel } = panelState;
 
 	clearButton.disabled = selectedNames.length === 0;
 	summary.textContent = modeValue === OPTION_OFF
@@ -1397,47 +1464,33 @@ function updateStylePanelContents(node) {
 		: `当前模式：${modeValue}，已选 ${selectedNames.length} 个风格。风格卡片按 Shift 可多选。`;
 
 	grid.innerHTML = "";
-
-	if (!styleCatalog.length && !stylesLoaded) {
-		loadStyleCatalog().then(() => renderNode(node));
-	}
-	if (!styleCatalog.length) {
-		grid.appendChild(createHelpNotice(stylesLoaded ? "未读取到风格缩略图数据。" : "风格缩略图加载中，稍后会自动显示。"));
+	grid.appendChild(createHelpNotice("正在加载本页风格…"));
+	const requestId = (panelState.requestId || 0) + 1;
+	panelState.requestId = requestId;
+	const query = node.__gjjPromptPresetStyleSearch || "";
+	const requestedPage = Math.max(1, panelState.page || 1);
+	loadStyleCatalogPage(requestedPage, query).then((payload) => {
+		if (panelState.requestId !== requestId) return;
+		panelState.page = payload.page || 1;
+		panelState.totalPages = payload.total_pages || 1;
+		grid.innerHTML = "";
+		const items = Array.isArray(payload.styles) ? payload.styles : [];
+		if (!items.length) {
+			grid.appendChild(createHelpNotice(query ? "没有找到匹配的风格。" : "未读取到风格缩略图数据。"));
+		} else {
+			for (const item of items) grid.appendChild(buildStyleCard(node, item, selectedSet));
+		}
+		pager.style.display = panelState.totalPages > 1 ? "flex" : "none";
+		pageLabel.textContent = `${panelState.page} / ${panelState.totalPages}`;
+		previousButton.disabled = panelState.page <= 1;
+		nextButton.disabled = panelState.page >= panelState.totalPages;
 		scheduleLayout(node);
-		return;
-	}
-
-	const query = normalizeKey(node.__gjjPromptPresetStyleSearch || "");
-	const filtered = styleCatalog
-		.filter((item) => {
-			if (!query) {
-				return true;
-			}
-			return [item?.name, item?.name_cn, item?.label]
-				.some((value) => normalizeKey(value).includes(query));
-		})
-		.sort((left, right) => {
-			const leftSelected = selectedSet.has(left?.name);
-			const rightSelected = selectedSet.has(right?.name);
-			if (leftSelected !== rightSelected) {
-				return leftSelected ? -1 : 1;
-			}
-			return String(left?.name_cn || left?.name || "").localeCompare(
-				String(right?.name_cn || right?.name || ""),
-				"zh-CN",
-			);
-		});
-
-	if (!filtered.length) {
-		grid.appendChild(createHelpNotice("没有找到匹配的风格。"));
+	}).catch(() => {
+		if (panelState.requestId !== requestId) return;
+		grid.innerHTML = "";
+		grid.appendChild(createHelpNotice("风格预览加载失败，请稍后重试。"));
 		scheduleLayout(node);
-		return;
-	}
-
-	for (const item of filtered) {
-		grid.appendChild(buildStyleCard(node, item, selectedSet));
-	}
-	scheduleLayout(node);
+	});
 }
 
 function renderStylePanel(node, container) {
@@ -1467,6 +1520,7 @@ function renderStylePanel(node, container) {
 	stopControlMouse(searchInput);
 	searchInput.addEventListener("input", () => {
 		node.__gjjPromptPresetStyleSearch = searchInput.value;
+		if (node.__gjjPromptPresetStylePanel) node.__gjjPromptPresetStylePanel.page = 1;
 		updateStylePanelContents(node);
 	});
 
@@ -1493,17 +1547,38 @@ function renderStylePanel(node, container) {
 	grid.style.cssText = [
 		"display:grid",
 		"grid-template-columns:repeat(3, minmax(0, 1fr))",
-		"gap:8px",
+		"gap:0",
 		"overflow:visible",
-		"padding-right:2px",
+		"padding:0",
 	].join(";");
 	container.appendChild(grid);
+
+	const pager = document.createElement("div");
+	pager.style.cssText = "display:none;align-items:center;justify-content:center;gap:8px;padding-top:4px";
+	const previousButton = createPillButton("上一页", () => {
+		node.__gjjPromptPresetStylePanel.page -= 1;
+		updateStylePanelContents(node);
+	});
+	const pageLabel = document.createElement("span");
+	pageLabel.style.cssText = "min-width:58px;text-align:center;font-size:11px;color:#9fb1b8";
+	const nextButton = createPillButton("下一页", () => {
+		node.__gjjPromptPresetStylePanel.page += 1;
+		updateStylePanelContents(node);
+	});
+	pager.append(previousButton, pageLabel, nextButton);
+	container.appendChild(pager);
 
 	node.__gjjPromptPresetStylePanel = {
 		searchInput,
 		clearButton,
 		summary,
 		grid,
+		pager,
+		previousButton,
+		nextButton,
+		pageLabel,
+		page: 1,
+		totalPages: 1,
 	};
 	updateStylePanelContents(node);
 }
@@ -1652,9 +1727,6 @@ function renderNode(node) {
 	if (!schemaLoaded) {
 		loadSchema().then(() => renderNode(node));
 	}
-	if (getCurrentSection(node) === "style" && !stylesLoaded) {
-		loadStyleCatalog().then(() => renderNode(node));
-	}
 }
 
 function patchWidgetHitTest(node) {
@@ -1742,7 +1814,6 @@ app.registerExtension({
 
 	setup() {
 		loadSchema();
-		loadStyleCatalog();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass || node?.type)) {
 				ensureNode(node);

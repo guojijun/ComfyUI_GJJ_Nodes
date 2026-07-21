@@ -1040,7 +1040,41 @@ def _apply_style_mix(core_positive: str, base_negative: str, style_items: list[d
 
 
 async def get_prompt_preset_styles_api(request):
-	return web.json_response({"styles": load_prompt_preset_style_cards()})
+	styles = load_prompt_preset_style_cards()
+	if not any(key in request.query for key in ("page", "page_size", "query")):
+		return web.json_response({"styles": styles})
+
+	query = _normalize_key(request.query.get("query", ""))
+	if query:
+		styles = [
+			item for item in styles
+			if query in _normalize_key(" ".join([
+				_normalize_text(item.get("name")),
+				_normalize_text(item.get("name_cn")),
+				_normalize_text(item.get("label")),
+			]))
+		]
+
+	try:
+		page = max(1, int(request.query.get("page", "1")))
+	except (TypeError, ValueError):
+		page = 1
+	try:
+		page_size = min(48, max(1, int(request.query.get("page_size", "12"))))
+	except (TypeError, ValueError):
+		page_size = 12
+
+	total = len(styles)
+	total_pages = max(1, (total + page_size - 1) // page_size)
+	page = min(page, total_pages)
+	start = (page - 1) * page_size
+	return web.json_response({
+		"styles": styles[start:start + page_size],
+		"page": page,
+		"page_size": page_size,
+		"total": total,
+		"total_pages": total_pages,
+	})
 
 
 def _build_prompt_preset_defaults() -> dict[str, Any]:

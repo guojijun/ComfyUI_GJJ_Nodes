@@ -67,6 +67,7 @@ DEFAULT_NEGATIVE_PROMPT = "(worst quality, low quality, normal quality:1.3), (bl
 NO_LORA_TOKENS = {"不使用", "不使用lora", "不使用 lora", "no lora", "none", "off", "disable", "disabled", "🚫 不使用 lora"}
 DEFAULT_SCAIL2_ACCEL_LORA = "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
 DEFAULT_SCAIL2_DPO_LORA = "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors"
+DEFAULT_SCAIL2_SLOP_BOUNCE_LORA = "wan/Wan2.2 - I2V -Slop Bounce-Low-i2v-(弹跳lora不变脸).safetensors"
 DEFAULT_SCAIL2_RELIGHTING_LORA = "Scail-2_relighting-lora.safetensors"
 DEFAULT_QWEN2511_LIGHTNING_LORA = "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
@@ -537,7 +538,7 @@ async def _get_scail2_aio_models(request):
     fields = [
         _model_field("model_file", "SCAIL2基本 / SCAIL模型", "diffusion_models", "models/diffusion_models", ["wan", "scail"], [".safetensors", ".gguf"], "【SCAIL2基本模型】SCAIL-2 主扩散模型；文件名建议同时包含 wan 和 scail。", True),
         _model_field("vae_file", "SCAIL2基本 / VAE", "vae", "models/vae", ["wan", "2.1", "vae"], [".safetensors"], "【SCAIL2基本模型】Wan 2.1 视频 VAE，用于条件编码、续段锚定解码和最终视频帧解码。", True),
-        _model_field("text_encoder_file", "SCAIL2基本 / T5", "text_encoders", "models/text_encoders", ["umt5", "xxl"], [".safetensors"], "【SCAIL2基本模型】Wan T5 文本编码器，用于正向提示词和负向提示词编码。", True),
+        _model_field("text_encoder_file", "SCAIL2基本 / T5", "text_encoders", "models/text_encoders", ["umt5_xxl"], [".safetensors", ".gguf"], "【SCAIL2基本模型】Wan T5 文本编码器，用于正向提示词和负向提示词编码。", True),
         _model_field("clip_vision_file", "SCAIL2基本 / CLIP Vision", "clip_vision", "models/clip_vision", ["clip", "vision"], [".safetensors"], "【SCAIL2基本模型】CLIP Vision 参考图编码器，用于增强参考图语义一致性。", True),
         _model_field("accel_lora_file", "SCAIL2基本 / 加速LoRA", "loras", "models/loras", ["lightx2v", "i2v", "14b"], [".safetensors"], "【SCAIL2基本模型】LightX2V I2V 14B 加速 LoRA；开启“使用加速LoRA”时叠加，也可选择“不使用 LoRA”。"),
         _model_field("dpo_lora_file", "SCAIL2基本 / DPO LoRA", "loras", "models/loras", ["scail", "dpo"], [".safetensors"], "【SCAIL2基本模型】SCAIL-2 DPO 修正 LoRA，可增强动作迁移/人物替换效果，也可选择“不使用 LoRA”。"),
@@ -752,7 +753,7 @@ class GJJ_SCAIL2LongVideoAIO:
             {
                 "label": "【SCAIL2基本模型】文件名包含 slop + bounce 的 LoRA",
                 "path": "models/loras",
-                "filename": "i2v_slop_bounce.safetensors",
+                "filename": DEFAULT_SCAIL2_SLOP_BOUNCE_LORA,
                 "required": False,
                 "description": "Slop Bounce 弹跳 LoRA，关键词 wan / i2v / slop / bounce；可在 🧠 列表选择“不使用 LoRA”禁用。",
             },
@@ -992,7 +993,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "accel_lora_file": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "加速LoRA"},
+                    {"default": DEFAULT_SCAIL2_ACCEL_LORA, "hidden": True, "display": "hidden", "display_name": "加速LoRA"},
                 ),
                 "sam3_checkpoint": (
                     "STRING",
@@ -1056,11 +1057,11 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "dpo_lora_file": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "DPO LoRA"},
+                    {"default": DEFAULT_SCAIL2_DPO_LORA, "hidden": True, "display": "hidden", "display_name": "DPO LoRA"},
                 ),
                 "slop_bounce_lora_file": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "Slop Bounce LoRA"},
+                    {"default": DEFAULT_SCAIL2_SLOP_BOUNCE_LORA, "hidden": True, "display": "hidden", "display_name": "Slop Bounce LoRA"},
                 ),
                 "director_storyboard_json": (
                     "STRING",
@@ -1120,7 +1121,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "relighting_lora_file": (
                     "STRING",
-                    {"default": "", "hidden": True, "display": "hidden", "display_name": "Relighting LoRA"},
+                    {"default": DEFAULT_SCAIL2_RELIGHTING_LORA, "hidden": True, "display": "hidden", "display_name": "Relighting LoRA"},
                 ),
             },
             "optional": {
