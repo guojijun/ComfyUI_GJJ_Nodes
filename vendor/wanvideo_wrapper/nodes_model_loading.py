@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import os, gc, uuid
+import os, gc, uuid, json
 from .utils import log, apply_lora
 import numpy as np
 from tqdm import tqdm
@@ -38,6 +38,80 @@ except:
 
 attention_modes = ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "sageattn_3", "radial_sage_attention", "sageattn_compiled",
                     "sageattn_ultravico", "comfy"]
+
+
+def _restore_comfy_quantized_weights(state_dict, compute_dtype):
+    """Wrap safetensors comfy_quant payloads before WanVideo model loading."""
+    quant_keys = [key for key in state_dict if key.endswith(".comfy_quant")]
+    if not quant_keys:
+        return 0
+
+    if compute_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        compute_dtype = torch.bfloat16
+
+    try:
+        from comfy.quant_ops import (
+            QuantizedTensor,
+            TensorCoreConvRotW4A4Layout,
+            TensorWiseINT8Layout,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "该 WanVideo 模型包含 ComfyUI ConvRot 量化权重，但当前 ComfyUI/"
+            "comfy_kitchen 不支持相应的量化运行时。"
+        ) from exc
+
+    restored = 0
+    for quant_key in quant_keys:
+        prefix = quant_key[: -len(".comfy_quant")]
+        weight_key = f"{prefix}.weight"
+        scale_key = f"{prefix}.weight_scale"
+        weight = state_dict.get(weight_key)
+        scale = state_dict.get(scale_key)
+        if weight is None or scale is None:
+            raise RuntimeError(f"量化层 {prefix} 缺少 weight 或 weight_scale。")
+
+        try:
+            config = json.loads(bytes(state_dict[quant_key].detach().cpu().tolist()).decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"量化层 {prefix} 的 comfy_quant 元数据无效。") from exc
+
+        params_config = config.get("params", {})
+        if not isinstance(params_config, dict):
+            params_config = {}
+        quant_format = str(config.get("format", "")).lower()
+
+        if quant_format == "convrot_w4a4":
+            layout_name = "TensorCoreConvRotW4A4Layout"
+            orig_shape = (int(weight.shape[0]), int(weight.shape[1]) * 2)
+            params = TensorCoreConvRotW4A4Layout.Params(
+                scale=scale,
+                orig_dtype=compute_dtype,
+                orig_shape=orig_shape,
+                convrot_groupsize=int(config.get("convrot_groupsize", params_config.get("convrot_groupsize", 256))),
+                quant_group_size=int(config.get("quant_group_size", params_config.get("quant_group_size", 64))),
+                linear_dtype=config.get("linear_dtype", params_config.get("linear_dtype", "int4")),
+            )
+        elif quant_format == "int8_tensorwise":
+            layout_name = "TensorWiseINT8Layout"
+            orig_shape = tuple(int(value) for value in weight.shape)
+            params = TensorWiseINT8Layout.Params(
+                scale=scale,
+                orig_dtype=compute_dtype,
+                orig_shape=orig_shape,
+                is_weight=True,
+                convrot=bool(config.get("convrot", params_config.get("convrot", False))),
+                convrot_groupsize=int(config.get("convrot_groupsize", params_config.get("convrot_groupsize", 256))),
+            )
+        else:
+            raise RuntimeError(f"WanVideo Wrapper 暂不支持量化格式：{quant_format or 'unknown'}（层：{prefix}）。")
+
+        state_dict[weight_key] = QuantizedTensor(weight, layout_name, params)
+        state_dict.pop(scale_key, None)
+        state_dict.pop(quant_key, None)
+        restored += 1
+
+    return restored
 
 #from city96's gguf nodes
 def update_folder_names_and_paths(key, targets=[]):
@@ -1160,6 +1234,23 @@ class WanVideoModelLoader:
         gguf_reader = None
         if not gguf:
             sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
+            has_comfy_quant = any(key.endswith(".comfy_quant") for key in sd)
+            if has_comfy_quant and quantization != "disabled":
+                log.warning(
+                    f"Ignoring incompatible secondary quantization '{quantization}' because "
+                    "the selected model already contains ComfyUI INT4/INT8 quantized weights"
+                )
+                quantization = "disabled"
+            supported_quant_compute_dtypes = (torch.float16, torch.bfloat16, torch.float32)
+            if has_comfy_quant and base_dtype not in supported_quant_compute_dtypes:
+                log.warning(
+                    f"ComfyUI ConvRot does not support {base_dtype} as its output dtype; "
+                    "using bfloat16 compute while keeping the model weights quantized"
+                )
+                base_dtype = torch.bfloat16
+            restored_quantized = _restore_comfy_quantized_weights(sd, base_dtype)
+            if restored_quantized:
+                log.info(f"Restored {restored_quantized} ComfyUI ConvRot quantized WanVideo weights")
         else:
             gguf_reader=[]
             from .gguf.gguf import load_gguf

@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 const PANEL_ID = "gjj-common-execution-timer";
 const STYLE_ID = "gjj-common-execution-timer-style";
 const COLLAPSED_KEY = "gjj_common_execution_timer_collapsed";
+const NEWEST_FIRST_KEY = "gjj_common_execution_timer_newest_first";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "execution_timer";
 const MAX_VISIBLE_ROWS = 80;
@@ -22,6 +23,7 @@ let positionLoaded = false;
 let positionLoadPromise = null;
 let panelHasCustomPosition = false;
 let panelPositionTouched = false;
+let newestFirst = localStorage.getItem(NEWEST_FIRST_KEY) === "1";
 
 function nowMs() {
 	return performance.now();
@@ -434,6 +436,11 @@ function ensureStyles() {
 			line-height: 22px;
 		}
 		#${PANEL_ID} button:hover { background: rgba(255, 255, 255, 0.16); }
+		#${PANEL_ID} .gjj-exec-order.gjj-active {
+			border-color: rgba(255, 196, 82, 0.72);
+			background: rgba(255, 174, 46, 0.22);
+			box-shadow: inset 0 0 0 1px rgba(255, 210, 118, 0.12);
+		}
 		#${PANEL_ID} .gjj-exec-body {
 			display: flex;
 			flex-direction: column;
@@ -601,6 +608,14 @@ function ensurePanel() {
 	summary.className = "gjj-exec-summary";
 	summary.textContent = "等待执行";
 
+	const order = button("⏰", "切换记录顺序", () => {
+		newestFirst = !newestFirst;
+		localStorage.setItem(NEWEST_FIRST_KEY, newestFirst ? "1" : "0");
+		updateOrderButton(order);
+		render();
+	});
+	order.classList.add("gjj-exec-order");
+	updateOrderButton(order);
 	const collapse = button("🔼", "收起/展开计时器", () => {
 		root.classList.toggle("gjj-collapsed");
 		localStorage.setItem(COLLAPSED_KEY, root.classList.contains("gjj-collapsed") ? "1" : "0");
@@ -619,7 +634,7 @@ function ensurePanel() {
 		root.style.display = "none";
 	});
 
-	header.append(dragHandle, title, summary, collapse, copy, clear, close);
+	header.append(dragHandle, title, summary, order, collapse, copy, clear, close);
 
 	const body = document.createElement("div");
 	body.className = "gjj-exec-body";
@@ -650,7 +665,7 @@ function ensurePanel() {
 	body.append(total, memory, list);
 	root.append(header, body);
 
-	root.__gjjTimer = { summary, totalLabel, memory, list, collapse };
+	root.__gjjTimer = { summary, totalLabel, memory, list, order, collapse };
 	if (localStorage.getItem(COLLAPSED_KEY) === "1") {
 		root.classList.add("gjj-collapsed");
 		collapse.textContent = "🔽";
@@ -684,11 +699,20 @@ function rowDuration(row, now = nowMs()) {
 	return Math.max(0, Number(row.duration || 0) + active);
 }
 
+function updateOrderButton(orderButton) {
+	if (!orderButton) return;
+	orderButton.classList.toggle("gjj-active", newestFirst);
+	orderButton.title = newestFirst
+		? "当前：最新记录在上；点击切换为最新记录在下"
+		: "当前：最新记录在下；点击切换为最新记录在上";
+}
+
 function visibleRows() {
 	if (!currentRun) return [];
-	return Array.from(currentRun.rows.values())
+	const rows = Array.from(currentRun.rows.values())
 		.sort((a, b) => a.order - b.order)
 		.slice(-MAX_VISIBLE_ROWS);
+	return newestFirst ? rows.reverse() : rows;
 }
 
 function updatePeakStats(sample) {

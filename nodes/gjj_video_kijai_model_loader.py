@@ -1427,6 +1427,8 @@ def _quantization_from_model_name(value: str) -> str:
     if raw.endswith(".gguf"):
         return "disabled"
     text = re.sub(r"[\s.\-]+", "_", raw)
+    if "int4_convrot" in text or "int8_convrot" in text:
+        return "disabled"
     for marker in (
         "fp8_e4m3fn_scaled_fast",
         "fp8_e4m3fn_scaled",
@@ -1477,6 +1479,10 @@ def _slot_with_overrides(slot: dict[str, Any], index: int, kwargs: dict[str, Any
             kwargs, index, "base_precision", WAN_BASE_PRECISIONS, current.get("base_precision", "bf16"), "bf16"
         )
         current["quantization"] = _setting_quantization_choice(kwargs, index, current.get("quantization", "disabled"))
+        model_name = str(kwargs.get(f"file_{index}", current.get("name", "")) or "").replace("\\", "/").lower()
+        if "int4_convrot" in model_name or "int8_convrot" in model_name:
+            current["base_precision"] = "bf16"
+            current["quantization"] = "disabled"
         current["load_device"] = _setting_choice(
             kwargs, index, "load_device", WAN_LOAD_DEVICES, current.get("load_device", "offload_device"), "offload_device"
         )

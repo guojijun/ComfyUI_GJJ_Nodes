@@ -609,6 +609,7 @@ function quantizationFromModelName(value) {
 	if (!raw) return "";
 	if (/\.gguf(?:$|[?#])/.test(raw)) return "disabled";
 	const text = raw.replace(/[\s.\-]+/g, "_");
+	if (text.includes("int4_convrot") || text.includes("int8_convrot")) return "disabled";
 	if (!text.includes("fp8")) return "";
 	const e5 = text.includes("e5m2");
 	if (/fp8_(?:e4m3fn_|e5m2_)?scaled_fast|fp8_scaled_(?:e4m3fn_|e5m2_)?fast/.test(text)) {
@@ -619,6 +620,15 @@ function quantizationFromModelName(value) {
 	}
 	if (e5) return text.includes("fast") ? "fp8_e5m2_fast" : "fp8_e5m2";
 	return text.includes("fast") ? "fp8_e4m3fn_fast" : "fp8_e4m3fn";
+}
+
+function syncBasePrecisionFromModelName(node, slot, index, fileValue) {
+	if (String(slot?.kind || "") !== "wanvideo_model") return;
+	const text = String(fileValue || "").replaceAll("\\", "/").toLowerCase().replace(/[\s.\-]+/g, "_");
+	if (!text.includes("int4_convrot") && !text.includes("int8_convrot")) return;
+	const name = settingName("base_precision", index);
+	if (String(getWidget(node, name)?.value ?? "") === "bf16") return;
+	syncWidget(node, name, "bf16");
 }
 
 function dtypeFromModelName(value) {
@@ -667,6 +677,7 @@ function syncWeightDtypeFromModelName(node, slot, index, fileValue) {
 }
 
 function syncDerivedSettingsFromModelName(node, slot, index, fileValue) {
+	syncBasePrecisionFromModelName(node, slot, index, fileValue);
 	syncQuantizationFromModelName(node, slot, index, fileValue);
 	syncDtypeFromModelName(node, slot, index, fileValue);
 	syncWeightDtypeFromModelName(node, slot, index, fileValue);

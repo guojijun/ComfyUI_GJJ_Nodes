@@ -1103,6 +1103,14 @@ function installModelHelpProvider(node) {
 				tooltip: "调用方法：执行时读取外部 GJJ · LoRA串联配置，并优先/合并到当前 LoRA 应用流程。",
 			});
 		}
+		entries.push({
+			label: "🧠 Opus-MT 中英翻译模型",
+			value: "opus-mt-zh-en.safetensors",
+			folder: "translation",
+			kind: "translation",
+			name: "opus-mt-zh-en",
+			tooltip: "调用方法：提示词翻译功能从 models/translation/opus-mt-zh-en.safetensors 加载本地翻译模型。",
+		});
 		return entries;
 	};
 }
@@ -2782,17 +2790,16 @@ function renderSizePanelControls(node, body) {
 
 function lazyModelTreeEntries(node) {
 	const useCheckpoint = checkpointModelSourceEnabled(node);
-	if (useCheckpoint) {
-		return [{
+	const entries = useCheckpoint
+		? [{
 			widget: CHECKPOINT_WIDGET_NAME,
 			label: "底模 checkpoint",
 			folder: "models/checkpoints",
 			icon: "🟣",
 			fallback: widgetValue(node, CHECKPOINT_WIDGET_NAME) || "未找到可用 checkpoint",
 			description: "作为底模直接加载，内部拆出 MODEL / CLIP / VAE。",
-		}];
-	}
-	return [
+		}]
+		: [
 		{
 			widget: "unet_name",
 			label: "UNET 主模型",
@@ -2821,6 +2828,16 @@ function lazyModelTreeEntries(node) {
 			description: "VAE 解码器；把采样 latent 解码成最终图片。",
 		},
 	];
+	entries.push({
+		label: "Opus-MT 中英翻译模型",
+		folder: "models/translation",
+		icon: "🧠",
+		models: ["opus-mt-zh-en.safetensors"],
+		fallback: "opus-mt-zh-en.safetensors",
+		autoSelect: false,
+		description: "提示词翻译模型；完整路径为 models/translation/opus-mt-zh-en.safetensors。",
+	});
+	return entries;
 }
 
 function renderModelPanelControls(node, body) {

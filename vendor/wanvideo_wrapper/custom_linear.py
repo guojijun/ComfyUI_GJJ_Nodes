@@ -1,6 +1,12 @@
 import torch
 import torch.nn as nn
+from dataclasses import replace
 from accelerate import init_empty_weights
+try:
+    from comfy.quant_ops import QuantizedTensor
+except ImportError:
+    class QuantizedTensor:
+        pass
 try:
     from .gguf.gguf_utils import GGUFParameter, dequantize_gguf_tensor
 except ModuleNotFoundError as error:
@@ -251,7 +257,22 @@ class CustomLinear(nn.Linear):
         if self.is_gguf:
             weight = dequantize_gguf_tensor(self.weight).to(self.compute_dtype)
         else:
-            weight = self.weight.to(input)
+            weight = self.weight
+            if isinstance(weight, QuantizedTensor):
+                supported_dtypes = (torch.float16, torch.bfloat16, torch.float32)
+                params = weight.params
+                if getattr(params, "orig_dtype", None) not in supported_dtypes:
+                    output_dtype = input.dtype if input.dtype in supported_dtypes else torch.bfloat16
+                    params = replace(params, orig_dtype=output_dtype)
+                    weight = QuantizedTensor(weight._qdata, weight._layout_cls, params)
+                if weight.device != input.device:
+                    weight = weight.to(device=input.device)
+                # WanVideo LoRAs are trained against dense activations. Keep the
+                # checkpoint compressed in memory, but use dense BF16/FP16 math
+                # consistently for both patched and unpatched linear layers.
+                weight = weight.dequantize().to(input)
+            else:
+                weight = weight.to(input)
         return weight
 
     def forward(self, input):

@@ -11,6 +11,7 @@ from comfy.model_patcher import get_key_weight, string_to_seed
 from comfy.lora import calculate_weight
 
 from comfy.float import stochastic_rounding
+from comfy.quant_ops import QuantizedTensor
 from .custom_linear import remove_lora_from_module
 import folder_paths
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -166,6 +167,11 @@ def set_module_tensor_to_device(module, tensor_name, device, value=None, dtype=N
     param = module._parameters[tensor_name] if tensor_name in module._parameters else None
     param_cls = type(param)
 
+    def wrap_parameter(tensor, requires_grad=False):
+        if isinstance(tensor, QuantizedTensor) or issubclass(param_cls, QuantizedTensor):
+            return torch.nn.Parameter(tensor, requires_grad=requires_grad)
+        return param_cls(tensor, requires_grad=requires_grad)
+
     if value is not None:
         if dtype is None:
             value = value.to(old_value.dtype)
@@ -181,7 +187,7 @@ def set_module_tensor_to_device(module, tensor_name, device, value=None, dtype=N
                     new_value = new_value.to(dtype)
 
                 if not is_buffer:
-                    module._parameters[tensor_name] = param_cls(new_value, requires_grad=old_value.requires_grad)
+                    module._parameters[tensor_name] = wrap_parameter(new_value, requires_grad=old_value.requires_grad)
         elif isinstance(value, torch.Tensor):
             new_value = value.to(device)
         else:
@@ -192,7 +198,7 @@ def set_module_tensor_to_device(module, tensor_name, device, value=None, dtype=N
             module._buffers[tensor_name] = new_value
         elif value is not None or not check_device_same(device, module._parameters[tensor_name].device):
             param_cls = type(module._parameters[tensor_name])
-            new_value = param_cls(new_value, requires_grad=False)
+            new_value = wrap_parameter(new_value, requires_grad=False)
             module._parameters[tensor_name] = new_value
 
     #if device != "cpu":
