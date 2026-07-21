@@ -952,17 +952,10 @@ function helpModelFileForSlot(node, state, slot, index, secondary = false) {
 function videoLoaderHelpEntries(node) {
 	const state = ensureState(node);
 	try { saveWidgetValues(node); } catch (_) {}
-	// 帮助树必须与主面板当前实际渲染的预设完全一致。不要在这里仅凭
-	// widget / properties 再推断一次配置；刷新或恢复工作流期间这些值可能
-	// 短暂不同步，导致帮助树串到另一个官方流。
+	// 帮助树只读取当前下拉键对应的预设槽位。配置尚未就绪时返回空树，
+	// 不能使用旧快照兜底，否则会显示上一个预设的模型。
 	const key = currentHelpConfigKey(node, state);
-	const appliedKey = String(node?.__gjjVUAppliedConfigKey || node?.properties?.gjj_vu_applied_config_key || "").trim();
-	const appliedSnapshot = node?.__gjjVUAppliedConfigSnapshot;
-	const cfg = (appliedSnapshot?.key === appliedKey ? appliedSnapshot.config : null)
-		|| node?.__gjjVUAppliedConfig
-		|| state.configs?.[appliedKey]
-		|| state.configs?.[key]
-		|| null;
+	const cfg = state.configs?.[key] || null;
 	if (!cfg) return [];
 	const entries = [];
 	const loraEnabled = effectiveUseLora(node);

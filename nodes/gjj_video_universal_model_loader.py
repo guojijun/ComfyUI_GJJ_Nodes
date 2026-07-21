@@ -3147,7 +3147,7 @@ class GJJ_VideoUniversalModelLoader:
         "model_download_url": MODEL_DOWNLOAD_URL,
         "notice": "模型树按当前选择的官方流和面板下拉动态生成；若刚刷新页面还没读取到模型列表，请先点一次节点或刷新模型列表。",
         "dependencies": [
-            "ComfyUI 官方节点：UNETLoader / DualCLIPLoader / LTXAVTextEncoderLoader",
+            "ComfyUI 对应预设所需的官方模型加载节点",
             "torch（ComfyUI 运行时基础依赖）",
         ],
     }
