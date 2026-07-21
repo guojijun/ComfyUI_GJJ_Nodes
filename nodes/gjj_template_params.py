@@ -1427,7 +1427,7 @@ class GJJ_TemplateParams:
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_template = "帧率 (frame_rate) [INT,FLOAT]：8.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\n宽度（width）：512\n高度（height）：512\nLora加速（use_accel_lora）：true{开启加速|关闭加速} # 布尔按钮\n提示词（positive_text_input）:首尾帧\n首帧（start_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/start_image.png\n尾帧（end_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/end_image.png"
+        default_template = "帧率 (frame_rate) [INT,FLOAT]：8.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\n宽度（width）：<min=320,max=2048,step=32,default=480>\n高度（height）：<min=320,max=2048,step=32,default=832>\nLora加速（use_accel_lora）：true{开启加速|关闭加速} # 布尔按钮\n提示词（positive_text_input）:首尾帧\n首帧（start_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/start_image.png\n尾帧（end_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/end_image.png"
         return {
             "required": {
                 "template_text": (

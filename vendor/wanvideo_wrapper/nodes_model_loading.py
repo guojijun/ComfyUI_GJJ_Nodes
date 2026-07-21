@@ -2066,6 +2066,14 @@ class LoadWanVideoT5TextEncoder:
         model_path = folder_paths.get_full_path_or_raise("text_encoders", model_name)
         sd = load_torch_file(model_path, safe_load=True)
 
+        has_comfy_quant = any(key.endswith(".comfy_quant") for key in sd)
+        if has_comfy_quant and quantization != "disabled":
+            log.warning(
+                "T5 checkpoint already contains ConvRot quantized weights; "
+                "disabling secondary quantization."
+            )
+            quantization = "disabled"
+
         if quantization == "disabled":
             for k, v in sd.items():
                 if isinstance(v, torch.Tensor):
@@ -2077,6 +2085,10 @@ class LoadWanVideoT5TextEncoder:
             raise ValueError("Invalid T5 text encoder model, this node expects the 'umt5-xxl' model")
         if "scaled_fp8" in sd:
             raise ValueError("Invalid T5 text encoder model, fp8 scaled is not supported by this node")
+
+        restored_quantized = _restore_comfy_quantized_weights(sd, dtype)
+        if restored_quantized:
+            log.info(f"Restored {restored_quantized} ComfyUI ConvRot quantized T5 weights")
 
         # Convert state dict keys from T5 format to the expected format
         if "shared.weight" in sd:
@@ -2139,6 +2151,8 @@ class LoadWanVideoT5TextEncoder:
             tokenizer_path=tokenizer_path,
             quantization=quantization
         )
+        if restored_quantized:
+            _replace_linear(T5_text_encoder.model, dtype, sd)
         text_encoder = {
             "model": T5_text_encoder,
             "dtype": dtype,

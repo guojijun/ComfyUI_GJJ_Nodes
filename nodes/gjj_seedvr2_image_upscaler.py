@@ -13,7 +13,7 @@ from comfy_api.latest import InputImpl, Types
 
 NODE_NAME = "GJJ_SeedVR2ImageUpscaler"
 NODE_DISPLAY_NAME = "GJJ · 🔍 SeedVR2图像视频放大器"
-DEFAULT_DIT_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
+DEFAULT_DIT_MODEL = "seedvr2_3b_int8_convrot.safetensors"
 DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
 MODEL_CATEGORY = "SEEDVR2"
 LEGACY_MODEL_CATEGORY = "seedvr2"
@@ -62,10 +62,13 @@ except ImportError:
 SEEDVR2_MODEL_TREE = """ComfyUI/
 └── models/
     └── SEEDVR2/
-        ├── seedvr2_ema_3b_fp8_e4m3fn.safetensors  或可模糊匹配的 SeedVR2 主模型
-        └── ema_vae_fp16.safetensors                或可模糊匹配的 SeedVR2 VAE
+        ├── seedvr2_3b_int8_convrot.safetensors
+        ├── seedvr2_7b_int8_convrot.safetensors
+        ├── seedvr2_ema_7b_sharp_int4_convrot.safetensors
+        ├── seedvr2_ema_3b_fp16.safetensors         也支持其它 3B/7B safetensors
+        └── ema_vae_fp16.safetensors
 """
-_DESCRIPTION_INTRO = "将 SeedVR2 的图像/视频放大整合成单节点；单输入口兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO，接 VIDEO 时保留原音频与帧率。"
+_DESCRIPTION_INTRO = "将 ComfyUI 官方 SeedVR2 图像/视频放大工作流整合成单节点；支持 3B/7B、FP/INT4 ConvRot/INT8 ConvRot 模型，接 VIDEO 时保留原音频与帧率。"
 
 
 class AnyType(str):
@@ -81,16 +84,9 @@ def _seedvr2_runtime_root() -> Path:
 
 
 def _missing_runtime_specs() -> list[dict[str, str]]:
-    root = _seedvr2_runtime_root()
-    if root.exists() and (root / "src").exists():
-        return []
-    return [
-        {
-            "module_name": "GJJ 内置 SeedVR2 运行时",
-            "display_name": "GJJ 内置 SeedVR2 运行时文件",
-            "description": "GJJ 扩展安装不完整，请重新下载或更新 ComfyUI_GJJ_Nodes。",
-        }
-    ]
+    # The node now executes ComfyUI's official SeedVR2 graph.  The vendored
+    # legacy runtime is deliberately not an installation dependency anymore.
+    return []
 
 
 def _ensure_seedvr2_model_folder() -> None:
@@ -154,9 +150,9 @@ def _default_model_choice(seed_name: str) -> str:
 
 _ENVIRONMENT_REPORT = build_dependency_model_report(
     node_name=NODE_DISPLAY_NAME,
-    missing_dependencies=_missing_runtime_specs(),
+    missing_dependencies=[],
     install_packages=None,
-    description="SeedVR2 推理运行时已内置在 GJJ 扩展中，不依赖任何第三方自定义节点。",
+    description="使用 ComfyUI 官方 SeedVR2 实现，不依赖第三方自定义节点或 GJJ 旧版内置运行时。",
 )
 if _ENVIRONMENT_REPORT.get("missing_dependencies"):
     _ENVIRONMENT_REPORT["install_cmd"] = ""
@@ -171,16 +167,16 @@ _GJJ_HELP = build_node_help_payload(
     description=_DESCRIPTION_INTRO,
     dependencies=[
         {
-            "name": "GJJ 内置 SeedVR2 运行时",
-            "type": "内置运行时",
+            "name": "ComfyUI 官方 SeedVR2",
+            "type": "ComfyUI 核心功能",
             "required": True,
-            "description": "推理、显存优化和视频处理代码随 GJJ 扩展提供，无需安装第三方节点。",
+            "description": "节点直接调用当前 ComfyUI 的官方 SeedVR2 预处理、条件、采样和后处理实现，无需安装第三方 SeedVR2 节点。",
         }
     ],
     model_tree=[
         {
             "label": "SeedVR2 主模型",
-            "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+            "path": f"{MODEL_SUBDIR}/seedvr2_3b_int8_convrot.safetensors",
             "required": True,
             "description": "下拉列表会去扩展名与量化标记后在 models/SEEDVR2 深度搜索，优先取匹配项。",
         },
@@ -197,7 +193,7 @@ _GJJ_HELP = build_node_help_payload(
         "布尔选项在节点顶部按钮行切换，其余参数默认隐藏，点击 ⚙️设置 展开。",
     ],
     runtime=[
-        "无需安装 ComfyUI-SeedVR2_VideoUpscaler；执行期如果内置运行时或模型不可用，会给出中文说明。",
+        "无需安装 ComfyUI-SeedVR2_VideoUpscaler；推理由当前 ComfyUI 官方 SeedVR2 实现完成。",
     ],
     install_cmd=_ENVIRONMENT_REPORT.get("install_cmd", ""),
     copy_text=_ENVIRONMENT_REPORT.get("copy_text", ""),
@@ -208,7 +204,7 @@ _GJJ_HELP = build_node_help_payload(
         "模型树信息": [
             {
                 "label": "SeedVR2 主模型",
-                "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+                "path": f"{MODEL_SUBDIR}/seedvr2_3b_int8_convrot.safetensors",
                 "folder": MODEL_CATEGORY,
                 "required": True,
                 "match_rule": "去扩展名、去量化标记后在 models/SEEDVR2 含子目录中大小写不敏感搜索。",
@@ -223,11 +219,11 @@ _GJJ_HELP = build_node_help_payload(
         ],
         "依赖信息": [
             {
-                "name": "GJJ 内置 SeedVR2 运行时",
-                "type": "内置运行时",
-                "path": "custom_nodes/ComfyUI_GJJ_Nodes/vendor/seedvr2_runtime",
+                "name": "ComfyUI 官方 SeedVR2",
+                "type": "ComfyUI 核心功能",
+                "path": "comfy_extras/nodes_seedvr.py",
                 "required": True,
-                "description": "随 GJJ 扩展提供，不需要安装第三方自定义节点。",
+                "description": "随新版 ComfyUI 提供，不需要安装第三方自定义节点。",
             },
             {
                 "name": "PyTorch / comfy_api.latest / folder_paths",
@@ -496,6 +492,233 @@ def _raise_seedvr2_runtime_error(original_error: str, unique_id=None):
     raise err
 
 
+def _resolve_seedvr2_model_path(model_name: str, label: str) -> Path:
+    _ensure_seedvr2_model_folder()
+    try:
+        full_path = folder_paths.get_full_path(MODEL_CATEGORY, str(model_name))
+    except Exception:
+        full_path = None
+    if not full_path or not Path(full_path).is_file():
+        raise RuntimeError(f"未在 {MODEL_SUBDIR} 中找到{label}：{model_name}")
+    return Path(full_path)
+
+
+def _load_seedvr2_conditioning_tensors(exclude_path: Path | None = None) -> dict[str, torch.Tensor]:
+    """Read the official embedded text conditioning from a compatible local model."""
+    from safetensors import safe_open
+
+    required = ("positive_conditioning", "negative_conditioning")
+    try:
+        roots = [Path(path) for path in folder_paths.get_folder_paths(MODEL_CATEGORY)]
+    except Exception:
+        roots = [Path(folder_paths.models_dir) / MODEL_CATEGORY]
+    candidates: list[Path] = []
+    for root in roots:
+        if root.exists():
+            candidates.extend(root.rglob("*.safetensors"))
+    candidates.sort(key=lambda path: ("int8_convrot" not in path.name.lower(), path.name.lower()))
+    excluded = exclude_path.resolve() if exclude_path is not None else None
+    for path in candidates:
+        try:
+            if excluded is not None and path.resolve() == excluded:
+                continue
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                keys = set(handle.keys())
+                if not all(key in keys for key in required):
+                    continue
+                return {key: handle.get_tensor(key) for key in required}
+        except Exception:
+            continue
+    raise RuntimeError(
+        "所选 SeedVR2 模型缺少官方条件张量，且未能在 models/SEEDVR2 中找到可提供条件张量的官方模型。"
+        "请至少保留 seedvr2_3b_int8_convrot.safetensors 或 seedvr2_7b_int8_convrot.safetensors。"
+    )
+
+
+def _dequantize_seedvr2_vae_convrot(sd: dict[str, Any]) -> int:
+    """Restore the eight W4A4 attention matrices unsupported by the core VAE loader."""
+    quantized = [str(key)[:-12] for key in sd if str(key).endswith(".comfy_quant")]
+    if not quantized:
+        return 0
+    try:
+        from .gjj_video_universal_model_loader import _dequantize_convrot_weight_tensor
+    except ImportError:
+        from nodes.gjj_video_universal_model_loader import _dequantize_convrot_weight_tensor
+    restored_count = 0
+    for prefix in quantized:
+        weight = sd.get(f"{prefix}.weight")
+        if weight is None or getattr(weight, "ndim", 0) != 2:
+            continue
+        out_features = int(weight.shape[0])
+        # ConvRot W4A4 packs two signed int4 values into each stored column.
+        in_features = int(weight.shape[1]) * 2
+        restored = _dequantize_convrot_weight_tensor(
+            sd, prefix, (out_features, in_features), torch.float16,
+        )
+        if restored is None:
+            continue
+        sd[f"{prefix}.weight"] = restored
+        sd.pop(f"{prefix}.weight_scale", None)
+        sd.pop(f"{prefix}.comfy_quant", None)
+        restored_count += 1
+    if restored_count != len(quantized):
+        raise RuntimeError(
+            f"SeedVR2 ConvRot VAE 量化层还原不完整：需要 {len(quantized)} 层，成功 {restored_count} 层。"
+        )
+    return restored_count
+
+
+def _load_official_seedvr2_components(dit_model: str, vae_model: str):
+    """Load the same MODEL/VAE objects used by ComfyUI's official workflow."""
+    import comfy.sd
+    import comfy.utils
+
+    dit_path = _resolve_seedvr2_model_path(dit_model, "SeedVR2 主模型")
+    vae_path = _resolve_seedvr2_model_path(vae_model, "SeedVR2 VAE")
+    dit_sd, dit_metadata = comfy.utils.load_torch_file(str(dit_path), return_metadata=True)
+    required_conditioning = ("positive_conditioning", "negative_conditioning")
+    if not all(key in dit_sd for key in required_conditioning):
+        conditioning = _load_seedvr2_conditioning_tensors(exclude_path=dit_path)
+        for key in required_conditioning:
+            dit_sd.setdefault(key, conditioning[key])
+    if "int4_convrot" in dit_path.name.lower():
+        try:
+            from .gjj_video_universal_model_loader import _patch_int4_convrot_embedding_tensors
+        except ImportError:
+            from nodes.gjj_video_universal_model_loader import _patch_int4_convrot_embedding_tensors
+        _patch_int4_convrot_embedding_tensors(dit_sd)
+    model = comfy.sd.load_diffusion_model_state_dict(dit_sd, model_options={}, metadata=dit_metadata)
+    if model is None:
+        raise RuntimeError(f"ComfyUI 无法识别 SeedVR2 主模型：{dit_model}")
+    vae_sd, vae_metadata = comfy.utils.load_torch_file(str(vae_path), return_metadata=True)
+    _dequantize_seedvr2_vae_convrot(vae_sd)
+    vae = comfy.sd.VAE(sd=vae_sd, metadata=vae_metadata)
+    vae.throw_exception_if_invalid()
+    # ComfyUI 0.28 creates VAEs with CoreModelPatcher unconditionally.  When a
+    # chunked dynamic DiT is replaced by that dynamic VAE, free_memory() can
+    # iterate stale current_loaded_models indices.  SeedVR2's VAE is small
+    # enough to use the stable non-dynamic patcher without compromising DiT
+    # low-VRAM loading.
+    from comfy.model_patcher import ModelPatcher
+
+    dynamic_vae_patcher = vae.patcher
+    vae.patcher = ModelPatcher(
+        vae.first_stage_model,
+        load_device=dynamic_vae_patcher.load_device,
+        offload_device=dynamic_vae_patcher.offload_device,
+    )
+    return model, vae
+
+
+def _resize_for_seedvr2(images: torch.Tensor, resolution: int, max_resolution: int) -> torch.Tensor:
+    from comfy.utils import common_upscale
+
+    height, width = int(images.shape[1]), int(images.shape[2])
+    short_edge = max(2, min(height, width))
+    scale = max(2, int(resolution)) / short_edge
+    target_h = max(2, round(height * scale))
+    target_w = max(2, round(width * scale))
+    longest = max(target_h, target_w)
+    if int(max_resolution) > 0 and longest > int(max_resolution):
+        cap_scale = int(max_resolution) / longest
+        target_h = max(2, round(target_h * cap_scale))
+        target_w = max(2, round(target_w * cap_scale))
+    target_h += target_h % 2
+    target_w += target_w % 2
+    samples = images.movedim(-1, 1)
+    return common_upscale(samples, target_w, target_h, "lanczos", "disabled").movedim(1, -1)
+
+
+def _run_official_seedvr2_flow(
+    images: torch.Tensor,
+    *,
+    dit_model: str,
+    vae_model: str,
+    resolution: int,
+    max_resolution: int,
+    seed: int,
+    encode_tiled: bool,
+    encode_tile_size: int,
+    encode_tile_overlap: int,
+    decode_tiled: bool,
+    decode_tile_size: int,
+    decode_tile_overlap: int,
+    color_correction: str,
+    is_video: bool,
+    video_chunk_mode: str,
+    frames_per_chunk: int,
+    temporal_overlap: int,
+    vae_temporal_size: int,
+    vae_temporal_overlap: int,
+    unique_id: Any = None,
+) -> torch.Tensor:
+    """Execute the official SeedVR2 graph in-process, without third-party nodes."""
+    from comfy_extras.nodes_seedvr import (
+        SeedVR2Conditioning,
+        SeedVR2PostProcessing,
+        SeedVR2Preprocess,
+        SeedVR2TemporalChunk,
+        SeedVR2TemporalMerge,
+    )
+    from nodes import KSampler, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled
+
+    _send_status(unique_id, "2/6 加载官方 SeedVR2 模型...")
+    model, vae = _load_official_seedvr2_components(dit_model, vae_model)
+    resized = _resize_for_seedvr2(images, resolution, max_resolution)
+
+    _send_status(unique_id, "3/6 官方预处理与 VAE 编码...")
+    prepared = SeedVR2Preprocess.execute(resized)[0]
+    if encode_tiled:
+        latent = VAEEncodeTiled().encode(
+            vae, prepared, int(encode_tile_size), int(encode_tile_overlap),
+            temporal_size=int(vae_temporal_size), temporal_overlap=int(vae_temporal_overlap),
+        )[0]
+    else:
+        latent = VAEEncode().encode(vae, prepared)[0]
+
+    mode = str(video_chunk_mode)
+    use_chunks = bool(is_video and mode != "关闭" and latent["samples"].shape[2] > 1)
+    if use_chunks:
+        chunking_mode = {"chunking_mode": "auto"}
+        if mode == "手动":
+            chunking_mode = {"chunking_mode": "manual", "frames_per_chunk": int(frames_per_chunk)}
+        latent_chunks, effective_overlap = SeedVR2TemporalChunk.execute(
+            latent, int(temporal_overlap), chunking_mode,
+        ).result
+    else:
+        latent_chunks, effective_overlap = [latent], 0
+
+    sampled_chunks = []
+    total_chunks = len(latent_chunks)
+    for index, latent_chunk in enumerate(latent_chunks, start=1):
+        _send_status(unique_id, f"4/6 构建条件并采样视频段 {index}/{total_chunks}...")
+        positive, negative = SeedVR2Conditioning.execute(model, latent_chunk).result
+        sampled_chunks.append(KSampler().sample(
+            model, int(seed) + index - 1, 1, 1.0, "euler", "simple",
+            positive, negative, latent_chunk, denoise=1.0,
+        )[0])
+    if len(sampled_chunks) > 1:
+        sampled = SeedVR2TemporalMerge.execute(sampled_chunks, [effective_overlap])[0]
+    else:
+        sampled = sampled_chunks[0]
+
+    _send_status(unique_id, "5/6 VAE 分块解码...")
+    if decode_tiled:
+        decoded = VAEDecodeTiled().decode(
+            vae, sampled, int(decode_tile_size), int(decode_tile_overlap),
+            temporal_size=int(vae_temporal_size), temporal_overlap=int(vae_temporal_overlap),
+        )[0]
+    else:
+        decoded = VAEDecode().decode(vae, sampled)[0]
+
+    correction = str(color_correction)
+    if correction == "wavelet_adaptive" or correction == "hsv":
+        correction = "wavelet"
+    if correction not in ("lab", "wavelet", "adain", "none"):
+        correction = "none"
+    return SeedVR2PostProcessing.execute(decoded, resized, correction)[0]
+
+
 class GJJ_SeedVR2ImageUpscaler:
     CATEGORY = "GJJ"
     FUNCTION = "upscale_image"
@@ -668,6 +891,43 @@ class GJJ_SeedVR2ImageUpscaler:
                     "display_name": "开启调试模式",
                     "tooltip": "打印 SeedVR2 的详细执行和显存日志。",
                 }),
+                "video_chunk_mode": (["自动", "手动", "关闭"], {
+                    "default": "自动",
+                    "display_name": "视频时间分块",
+                    "tooltip": "自动会按可用显存估算每段帧数；手动使用“每段视频帧数”；关闭会一次采样整段视频。",
+                }),
+                "frames_per_chunk": ("INT", {
+                    "default": 13,
+                    "min": 1,
+                    "max": 1001,
+                    "step": 4,
+                    "display_name": "每段视频帧数",
+                    "tooltip": "手动时间分块使用，必须为 4n+1，例如 9、13、21。",
+                }),
+                "temporal_overlap": ("INT", {
+                    "default": 1,
+                    "min": 0,
+                    "max": 64,
+                    "step": 1,
+                    "display_name": "潜空间时间重叠",
+                    "tooltip": "相邻采样段共享并交叉淡化的潜空间帧数；通常使用 1–2。",
+                }),
+                "vae_temporal_size": ("INT", {
+                    "default": 32,
+                    "min": 8,
+                    "max": 4096,
+                    "step": 4,
+                    "display_name": "VAE 时间块大小",
+                    "tooltip": "VAE 编码和解码一次处理的时间帧数；视频建议 16–32。",
+                }),
+                "vae_temporal_overlap": ("INT", {
+                    "default": 8,
+                    "min": 4,
+                    "max": 1024,
+                    "step": 4,
+                    "display_name": "VAE 时间重叠",
+                    "tooltip": "VAE 时间块之间的重叠帧数；通常使用 4–8。",
+                }),
             },
             "optional": {
                 "media": (MEDIA_INPUT_TYPE, {
@@ -710,6 +970,11 @@ class GJJ_SeedVR2ImageUpscaler:
         input_noise_scale,
         latent_noise_scale,
         enable_debug,
+        video_chunk_mode,
+        frames_per_chunk,
+        temporal_overlap,
+        vae_temporal_size,
+        vae_temporal_overlap,
         media=None,
         unique_id=None,
         **kwargs,
@@ -720,6 +985,50 @@ class GJJ_SeedVR2ImageUpscaler:
             media = kwargs.get("image", None)
         if media is None:
             media = kwargs.get("video", None)
+
+        _send_status(unique_id, "1/6 读取输入媒体...")
+        image, source_audio, source_fps, output_mode = _coerce_media_to_image_batch(media)
+        if str(common_video_height) != "手动输入":
+            try:
+                resolution = int(common_video_height)
+            except (TypeError, ValueError):
+                pass
+        sample = _run_official_seedvr2_flow(
+            image,
+            dit_model=str(dit_model),
+            vae_model=str(vae_model),
+            resolution=int(resolution),
+            max_resolution=int(max_resolution),
+            seed=int(seed),
+            encode_tiled=bool(encode_tiled),
+            encode_tile_size=int(encode_tile_size),
+            encode_tile_overlap=int(encode_tile_overlap),
+            decode_tiled=bool(decode_tiled),
+            decode_tile_size=int(decode_tile_size),
+            decode_tile_overlap=int(decode_tile_overlap),
+            color_correction=str(color_correction),
+            is_video=(output_mode == "video"),
+            video_chunk_mode=str(video_chunk_mode),
+            frames_per_chunk=int(frames_per_chunk),
+            temporal_overlap=int(temporal_overlap),
+            vae_temporal_size=int(vae_temporal_size),
+            vae_temporal_overlap=int(vae_temporal_overlap),
+            unique_id=unique_id,
+        )
+        if sample.is_cuda or sample.is_mps:
+            sample = sample.cpu()
+        sample = sample.to(torch.float32)
+        if output_mode == "video":
+            _send_status(unique_id, "6/6 创建视频...")
+            return (InputImpl.VideoFromComponents(
+                Types.VideoComponents(
+                    images=sample,
+                    audio=source_audio,
+                    frame_rate=Fraction(source_fps if source_fps and source_fps > 0 else 24.0),
+                )
+            ),)
+        _send_status(unique_id, f"完成：图像 {int(sample.shape[2])} × {int(sample.shape[1])}")
+        return (sample,)
 
         try:
             api = _get_seedvr2_api()

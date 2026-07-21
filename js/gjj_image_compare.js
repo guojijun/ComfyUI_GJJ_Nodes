@@ -164,6 +164,30 @@ function normalizeImagesFromOutput(output) {
 	return { images };
 }
 
+function imagePairInfo(item) {
+	const match = /^([AB])(\d+)$/.exec(String(item?.name || ""));
+	if (!match) return null;
+	return { group: match[1], index: Number.parseInt(match[2], 10) };
+}
+
+function matchingPair(images, anchor) {
+	const info = imagePairInfo(anchor);
+	if (!info) return [];
+	const imageA = images.find((item) => String(item?.name || "") === `A${info.index}`);
+	const imageB = images.find((item) => String(item?.name || "") === `B${info.index}`);
+	return imageA && imageB ? [imageA, imageB] : [];
+}
+
+function normalizeNumberedPairSelection(images) {
+	const selectedA = images.find((item) => item?.selected && String(item?.name || "").startsWith("A"));
+	const selectedB = images.find((item) => item?.selected && String(item?.name || "").startsWith("B"));
+	const pair = matchingPair(images, selectedA);
+	const resolved = pair.length === 2 ? pair : matchingPair(images, selectedB);
+	if (resolved.length !== 2) return;
+	const names = new Set(resolved.map((item) => item.name));
+	for (const item of images) item.selected = names.has(item.name);
+}
+
 function coerceImageState(node, payload) {
 	let images = [];
 	if (Array.isArray(payload)) {
@@ -208,6 +232,7 @@ function coerceImageState(node, payload) {
 			second.selected = true;
 		}
 	}
+	normalizeNumberedPairSelection(images);
 
 	return {
 		images,
@@ -819,6 +844,11 @@ function setSelectedPair(node, nextPair) {
 
 function onSelectionDown(node, imageData) {
 	const state = getCurrentState(node);
+	const numberedPair = matchingPair(state.images, imageData);
+	if (numberedPair.length === 2) {
+		setSelectedPair(node, numberedPair);
+		return;
+	}
 	const selected = [...state.selected];
 	if (String(imageData?.name || "").startsWith("A")) {
 		selected[0] = imageData;

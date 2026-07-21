@@ -6,6 +6,10 @@ const TARGET_NODES = new Set(["GJJ_SeedVR2ImageUpscaler"]);
 const STATUS_WIDGET_NAME = "gjj_seedvr2_status";
 const CONTROL_WIDGET_NAME = "gjj_seedvr2_controls";
 const SETTINGS_OPEN_PROPERTY = "gjj_seedvr2_settings_open";
+const MODEL_OPEN_PROPERTY = "gjj_seedvr2_model_open";
+const TILE_OPEN_PROPERTY = "gjj_seedvr2_tile_open";
+const SIZE_OPEN_PROPERTY = "gjj_seedvr2_size_open";
+const COLOR_OPEN_PROPERTY = "gjj_seedvr2_color_open";
 const MEDIA_INPUT_NAME = "media";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const LEGACY_INPUT_NAMES = new Set(["image", "video", "输入图像", "输入视频"]);
@@ -16,9 +20,6 @@ const SEED_CONTROL_DEFAULT = "randomize";
 const SEED_CONTROL_VALUES = new Set(["fixed", "randomize", "increment", "decrement"]);
 const MODEL_FILE_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft|pkl)$/i;
 const BOOLEAN_WIDGETS = [
-	{ name: "swap_io_components", on: "卸载IO 开", off: "卸载IO", title: "进一步降低显存占用，但可能降低速度。" },
-	{ name: "encode_tiled", on: "分块编码 开", off: "分块编码", title: "降低 VAE 编码显存占用。" },
-	{ name: "decode_tiled", on: "分块解码 开", off: "分块解码", title: "降低 VAE 解码显存占用。" },
 	{ name: "enable_debug", on: "调试 开", off: "调试", title: "打印 SeedVR2 的详细执行和显存日志。" },
 ];
 const BOOLEAN_WIDGET_NAMES = new Set(BOOLEAN_WIDGETS.map((item) => item.name));
@@ -41,7 +42,52 @@ const HIDDEN_SETTING_WIDGETS = [
 	"color_correction",
 	"input_noise_scale",
 	"latent_noise_scale",
+	"video_chunk_mode",
+	"frames_per_chunk",
+	"temporal_overlap",
+	"vae_temporal_size",
+	"vae_temporal_overlap",
 ];
+const MODEL_SETTING_WIDGETS = [
+	"dit_model",
+	"vae_model",
+	"device",
+	"model_offload_device",
+	"tensor_offload_device",
+	"attention_mode",
+	"blocks_to_swap",
+	"swap_io_components",
+];
+const TILE_SETTING_WIDGETS = [
+	"encode_tiled",
+	"encode_tile_size",
+	"encode_tile_overlap",
+	"decode_tiled",
+	"decode_tile_size",
+	"decode_tile_overlap",
+	"tile_debug",
+	"video_chunk_mode",
+	"frames_per_chunk",
+	"temporal_overlap",
+	"vae_temporal_size",
+	"vae_temporal_overlap",
+];
+const SIZE_SETTING_WIDGETS = [COMMON_VIDEO_HEIGHT_WIDGET, RESOLUTION_WIDGET, "max_resolution"];
+const COLOR_SETTING_WIDGETS = ["color_correction"];
+const COLOR_METHODS = [
+	{ value: "lab", label: "LAB 色彩匹配 / LAB Color Match" },
+	{ value: "wavelet", label: "小波匹配 / Wavelet" },
+	{ value: "wavelet_adaptive", label: "自适应小波 / Adaptive Wavelet" },
+	{ value: "hsv", label: "HSV 色彩匹配 / HSV Color Match" },
+	{ value: "adain", label: "AdaIN 色彩匹配 / AdaIN Color Match" },
+	{ value: "none", label: "关闭 / None" },
+];
+const ADVANCED_SETTING_WIDGETS = HIDDEN_SETTING_WIDGETS.filter(
+	(name) => !MODEL_SETTING_WIDGETS.includes(name)
+		&& !TILE_SETTING_WIDGETS.includes(name)
+		&& !SIZE_SETTING_WIDGETS.includes(name)
+		&& !COLOR_SETTING_WIDGETS.includes(name),
+);
 const LEGACY_HIDDEN_SETTING_WIDGETS = [
 	COMMON_VIDEO_HEIGHT_WIDGET,
 	...HIDDEN_SETTING_WIDGETS,
@@ -71,6 +117,11 @@ const REQUIRED_WIDGET_ORDER = [
 	"input_noise_scale",
 	"latent_noise_scale",
 	"enable_debug",
+	"video_chunk_mode",
+	"frames_per_chunk",
+	"temporal_overlap",
+	"vae_temporal_size",
+	"vae_temporal_overlap",
 ];
 const SETTING_LABELS = {
 	common_video_height: "目标短边预设",
@@ -93,6 +144,11 @@ const SETTING_LABELS = {
 	color_correction: "色彩校正",
 	input_noise_scale: "输入噪声强度",
 	latent_noise_scale: "潜空间噪声强度",
+	video_chunk_mode: "视频时间分块",
+	frames_per_chunk: "每段视频帧数",
+	temporal_overlap: "潜空间时间重叠",
+	vae_temporal_size: "VAE 时间块大小",
+	vae_temporal_overlap: "VAE 时间重叠",
 };
 const SETTING_SOCKET_TYPES = {
 	common_video_height: "STRING",
@@ -114,6 +170,11 @@ const SETTING_SOCKET_TYPES = {
 	color_correction: "STRING",
 	input_noise_scale: "FLOAT",
 	latent_noise_scale: "FLOAT",
+	video_chunk_mode: "STRING",
+	frames_per_chunk: "INT",
+	temporal_overlap: "INT",
+	vae_temporal_size: "INT",
+	vae_temporal_overlap: "INT",
 };
 
 function refreshNode(node) {
@@ -272,6 +333,9 @@ function restoreSerializedValues(node, serializedNode) {
 		} else if (!isWidgetValueCompatible(firstWidget, values[0]) && isWidgetValueCompatible(secondWidget, values[1])) {
 			values = values.slice(1);
 		}
+	} else if (values.length === REQUIRED_WIDGET_ORDER.length - 5) {
+		// Workflows saved before video temporal chunk controls were appended.
+		names = REQUIRED_WIDGET_ORDER.slice(0, values.length);
 	} else if (values.length === HIDDEN_SETTING_WIDGETS.length) {
 		names = HIDDEN_SETTING_WIDGETS;
 	} else if (values.length === LEGACY_HIDDEN_SETTING_WIDGETS.length) {
@@ -520,9 +584,21 @@ function injectStyle() {
 	style.textContent = `
 		.gjj-seedvr2-status{min-height:24px;padding:6px 10px;border:1px solid #41535b;border-radius:8px;background:#121a1f;color:#dce7e2;font:12px sans-serif;line-height:1.35;white-space:pre-wrap;word-break:break-word;box-sizing:border-box;}
 		.gjj-seedvr2-controls{display:flex;flex-wrap:wrap;gap:5px;width:100%;box-sizing:border-box;padding:2px 0;color:#d8e5e8;font:12px sans-serif;pointer-events:auto;}
-		.gjj-seedvr2-controls button{flex:1 1 0;min-width:0;height:26px;border:1px solid #465960;border-radius:5px;background:#263136;color:#cfdde1;cursor:pointer;font:700 12px sans-serif;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+		.gjj-seedvr2-controls button{flex:1 1 0;min-width:0;height:26px;border:1px solid #7b4b52;border-radius:5px;background:#39272b;color:#d8c8cb;cursor:pointer;font:700 12px sans-serif;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background-color .12s,border-color .12s,color .12s;}
 		.gjj-seedvr2-controls button:hover{border-color:#59c38f;color:#fff;}
-		.gjj-seedvr2-controls button.on{background:#1f6b43;border-color:#48ad73;color:#fff;}
+		.gjj-seedvr2-controls button.on{background:#175c38;border-color:#5bd28b;color:#fff;box-shadow:inset 0 0 0 1px rgba(91,210,139,.18);}
+		.gjj-seedvr2-controls .model-settings{font-size:16px;background:#2b2538;border-color:#64557f;color:#d8cfee;}
+		.gjj-seedvr2-controls .model-settings.on{background:#59408a;border-color:#b99aff;color:#fff;box-shadow:inset 0 0 0 1px rgba(185,154,255,.25);}
+		.gjj-seedvr2-controls .tile-settings{font-size:16px;background:#243238;border-color:#4c6975;color:#c8dce4;}
+		.gjj-seedvr2-controls .tile-settings.on{background:#176270;border-color:#62d6e8;color:#fff;box-shadow:inset 0 0 0 1px rgba(98,214,232,.22);}
+		.gjj-seedvr2-controls .size-settings{font-size:16px;background:#353024;border-color:#766b48;color:#e5dbbd;}
+		.gjj-seedvr2-controls .size-settings.on{background:#76601b;border-color:#f2cf55;color:#fff;box-shadow:inset 0 0 0 1px rgba(242,207,85,.22);}
+		.gjj-seedvr2-controls .color-settings{font-size:16px;background:#382737;border-color:#7d5579;color:#ead1e7;}
+		.gjj-seedvr2-controls .color-settings.on{background:#873f7e;border-color:#f09be5;color:#fff;box-shadow:inset 0 0 0 1px rgba(240,155,229,.22);}
+		.gjj-seedvr2-color-methods{display:none;flex:1 0 100%;width:100%;grid-template-columns:1fr 1fr;gap:5px;padding:3px 0 1px;box-sizing:border-box;}
+		.gjj-seedvr2-color-methods.open{display:grid;}
+		.gjj-seedvr2-controls .gjj-seedvr2-color-methods button{height:auto;min-height:30px;padding:4px 6px;white-space:normal;line-height:1.2;background:#2d2731;border-color:#624f67;color:#ddcfe0;}
+		.gjj-seedvr2-controls .gjj-seedvr2-color-methods button.selected{background:#7a356f;border-color:#f1a1e6;color:#fff;box-shadow:inset 0 0 0 1px rgba(241,161,230,.22);}
 		.gjj-seedvr2-controls .settings.on{background:#334155;border-color:#94a3b8;}
 	`;
 	document.head.appendChild(style);
@@ -544,7 +620,7 @@ function fitNode(node) {
 
 function renderSettingsPanel(node) {
 	const open = Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
-	for (const name of HIDDEN_SETTING_WIDGETS) {
+	for (const name of ADVANCED_SETTING_WIDGETS) {
 		const widget = getWidget(node, name);
 		if (open) {
 			restoreNativeWidget(widget);
@@ -553,6 +629,66 @@ function renderSettingsPanel(node) {
 			removeWidgetInput(node, name);
 			setWidgetHidden(widget, true);
 		}
+	}
+	requestAnimationFrame(() => fitNode(node));
+}
+
+function renderModelPanel(node) {
+	const open = Boolean(node?.properties?.[MODEL_OPEN_PROPERTY]);
+	for (const name of MODEL_SETTING_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (open) {
+			restoreNativeWidget(widget);
+			ensureWidgetInput(node, name);
+		} else {
+			removeWidgetInput(node, name);
+			setWidgetHidden(widget, true);
+		}
+	}
+	requestAnimationFrame(() => fitNode(node));
+}
+
+function renderTilePanel(node) {
+	const open = Boolean(node?.properties?.[TILE_OPEN_PROPERTY]);
+	for (const name of TILE_SETTING_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (open) {
+			restoreNativeWidget(widget);
+			ensureWidgetInput(node, name);
+		} else {
+			removeWidgetInput(node, name);
+			setWidgetHidden(widget, true);
+		}
+	}
+	requestAnimationFrame(() => fitNode(node));
+}
+
+function renderSizePanel(node) {
+	const open = Boolean(node?.properties?.[SIZE_OPEN_PROPERTY]);
+	for (const name of SIZE_SETTING_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (open) {
+			restoreNativeWidget(widget);
+			ensureWidgetInput(node, name);
+		} else {
+			removeWidgetInput(node, name);
+			setWidgetHidden(widget, true);
+		}
+	}
+	requestAnimationFrame(() => fitNode(node));
+}
+
+function renderColorPanel(node) {
+	const state = node?.__gjjSeedvr2Controls;
+	const open = Boolean(node?.properties?.[COLOR_OPEN_PROPERTY]);
+	const widget = getWidget(node, "color_correction");
+	removeWidgetInput(node, "color_correction");
+	setWidgetHidden(widget, true);
+	state?.colorMethods?.classList.toggle("open", open);
+	const current = String(widget?.value || "lab");
+	for (const [value, button] of Object.entries(state?.colorMethodButtons || {})) {
+		button.classList.toggle("selected", value === current);
+		button.setAttribute("aria-pressed", value === current ? "true" : "false");
 	}
 	requestAnimationFrame(() => fitNode(node));
 }
@@ -573,6 +709,22 @@ function refreshButtons(node) {
 	state.settingsButton.classList.toggle("on", open);
 	state.settingsButton.setAttribute("aria-pressed", open ? "true" : "false");
 	state.settingsButton.textContent = open ? "⚙️收起" : "⚙️设置";
+	const modelOpen = Boolean(node?.properties?.[MODEL_OPEN_PROPERTY]);
+	state.modelButton.classList.toggle("on", modelOpen);
+	state.modelButton.setAttribute("aria-pressed", modelOpen ? "true" : "false");
+	state.modelButton.textContent = "🧠";
+	const tileOpen = Boolean(node?.properties?.[TILE_OPEN_PROPERTY]);
+	state.tileButton.classList.toggle("on", tileOpen);
+	state.tileButton.setAttribute("aria-pressed", tileOpen ? "true" : "false");
+	state.tileButton.textContent = "🧩";
+	const sizeOpen = Boolean(node?.properties?.[SIZE_OPEN_PROPERTY]);
+	state.sizeButton.classList.toggle("on", sizeOpen);
+	state.sizeButton.setAttribute("aria-pressed", sizeOpen ? "true" : "false");
+	state.sizeButton.textContent = "📐";
+	const colorOpen = Boolean(node?.properties?.[COLOR_OPEN_PROPERTY]);
+	state.colorButton.classList.toggle("on", colorOpen);
+	state.colorButton.setAttribute("aria-pressed", colorOpen ? "true" : "false");
+	state.colorButton.textContent = "🎨";
 }
 
 function applyWidgetVisibility(node) {
@@ -583,7 +735,11 @@ function applyWidgetVisibility(node) {
 		removeWidgetInput(node, config.name);
 		setWidgetHidden(getWidget(node, config.name), true);
 	}
+	renderModelPanel(node);
+	renderTilePanel(node);
+	renderSizePanel(node);
 	renderSettingsPanel(node);
+	renderColorPanel(node);
 	refreshButtons(node);
 	updateOutputType(node);
 	syncWidgetValuesCache(node);
@@ -611,19 +767,131 @@ function ensureControlWidget(node) {
 		root.appendChild(button);
 		buttons[config.name] = button;
 	}
+	const modelButton = document.createElement("button");
+	modelButton.type = "button";
+	modelButton.className = "model-settings";
+	modelButton.textContent = "🧠";
+	modelButton.title = "展开或收起 SeedVR2 模型、运行设备与模型卸载设置。";
+	modelButton.setAttribute("aria-label", "模型设置");
+	modelButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		node.properties ||= {};
+		node.properties[MODEL_OPEN_PROPERTY] = !Boolean(node.properties[MODEL_OPEN_PROPERTY]);
+		if (node.properties[MODEL_OPEN_PROPERTY]) {
+			node.properties[SETTINGS_OPEN_PROPERTY] = false;
+			node.properties[TILE_OPEN_PROPERTY] = false;
+			node.properties[SIZE_OPEN_PROPERTY] = false;
+			node.properties[COLOR_OPEN_PROPERTY] = false;
+		}
+		applyWidgetVisibility(node);
+	});
+	stopProp(modelButton);
+	root.appendChild(modelButton);
+	const tileButton = document.createElement("button");
+	tileButton.type = "button";
+	tileButton.className = "tile-settings";
+	tileButton.textContent = "🧩";
+	tileButton.title = "展开或收起全部 VAE 分块设置。";
+	tileButton.setAttribute("aria-label", "分块设置");
+	tileButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		node.properties ||= {};
+		node.properties[TILE_OPEN_PROPERTY] = !Boolean(node.properties[TILE_OPEN_PROPERTY]);
+		if (node.properties[TILE_OPEN_PROPERTY]) {
+			node.properties[MODEL_OPEN_PROPERTY] = false;
+			node.properties[SETTINGS_OPEN_PROPERTY] = false;
+			node.properties[SIZE_OPEN_PROPERTY] = false;
+			node.properties[COLOR_OPEN_PROPERTY] = false;
+		}
+		applyWidgetVisibility(node);
+	});
+	stopProp(tileButton);
+	root.appendChild(tileButton);
+	const sizeButton = document.createElement("button");
+	sizeButton.type = "button";
+	sizeButton.className = "size-settings";
+	sizeButton.textContent = "📐";
+	sizeButton.title = "展开或收起输出尺寸设置。";
+	sizeButton.setAttribute("aria-label", "尺寸设置");
+	sizeButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		node.properties ||= {};
+		node.properties[SIZE_OPEN_PROPERTY] = !Boolean(node.properties[SIZE_OPEN_PROPERTY]);
+		if (node.properties[SIZE_OPEN_PROPERTY]) {
+			node.properties[MODEL_OPEN_PROPERTY] = false;
+			node.properties[TILE_OPEN_PROPERTY] = false;
+			node.properties[SETTINGS_OPEN_PROPERTY] = false;
+			node.properties[COLOR_OPEN_PROPERTY] = false;
+		}
+		applyWidgetVisibility(node);
+	});
+	stopProp(sizeButton);
+	root.appendChild(sizeButton);
+	const colorButton = document.createElement("button");
+	colorButton.type = "button";
+	colorButton.className = "color-settings";
+	colorButton.textContent = "🎨";
+	colorButton.title = "展开或收起色彩校正方式 / Color correction methods。";
+	colorButton.setAttribute("aria-label", "色彩设置 / Color settings");
+	colorButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		node.properties ||= {};
+		node.properties[COLOR_OPEN_PROPERTY] = !Boolean(node.properties[COLOR_OPEN_PROPERTY]);
+		if (node.properties[COLOR_OPEN_PROPERTY]) {
+			node.properties[MODEL_OPEN_PROPERTY] = false;
+			node.properties[TILE_OPEN_PROPERTY] = false;
+			node.properties[SIZE_OPEN_PROPERTY] = false;
+			node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		}
+		applyWidgetVisibility(node);
+	});
+	stopProp(colorButton);
+	root.appendChild(colorButton);
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
 	settingsButton.className = "settings";
-	settingsButton.title = "展开或收起模型、设备、分辨率与高级参数。";
+	settingsButton.title = "展开或收起随机种子、噪声与其它高级参数。";
 	settingsButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		node.properties ||= {};
 		node.properties[SETTINGS_OPEN_PROPERTY] = !Boolean(node.properties[SETTINGS_OPEN_PROPERTY]);
+		if (node.properties[SETTINGS_OPEN_PROPERTY]) {
+			node.properties[MODEL_OPEN_PROPERTY] = false;
+			node.properties[TILE_OPEN_PROPERTY] = false;
+			node.properties[SIZE_OPEN_PROPERTY] = false;
+			node.properties[COLOR_OPEN_PROPERTY] = false;
+		}
 		applyWidgetVisibility(node);
 	});
 	stopProp(settingsButton);
 	root.appendChild(settingsButton);
+	const colorMethods = document.createElement("div");
+	colorMethods.className = "gjj-seedvr2-color-methods";
+	const colorMethodButtons = {};
+	for (const method of COLOR_METHODS) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = method.label;
+		button.title = method.label;
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			setWidgetValue(getWidget(node, "color_correction"), method.value);
+			renderColorPanel(node);
+			syncWidgetValuesCache(node);
+			app.graph?.setDirtyCanvas?.(true, true);
+		});
+		stopProp(button);
+		colorMethods.appendChild(button);
+		colorMethodButtons[method.value] = button;
+	}
+	stopProp(colorMethods);
+	root.appendChild(colorMethods);
 	stopProp(root);
 
 	const widget = node.addDOMWidget(CONTROL_WIDGET_NAME, "HTML", root, {
@@ -643,7 +911,10 @@ function ensureControlWidget(node) {
 		node.widgets.splice(widgetIndex, 1);
 		node.widgets.unshift(widget);
 	}
-	node.__gjjSeedvr2Controls = { widget, root, buttons, settingsButton };
+	node.__gjjSeedvr2Controls = {
+		widget, root, buttons, modelButton, tileButton, sizeButton, colorButton, settingsButton,
+		colorMethods, colorMethodButtons,
+	};
 	if (typeof ResizeObserver !== "undefined") {
 		const layoutObserver = new ResizeObserver(() => requestAnimationFrame(() => fitNode(node)));
 		layoutObserver.observe(root);
