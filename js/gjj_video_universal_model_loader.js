@@ -741,7 +741,9 @@ function slotPairText(slot) {
 }
 
 function isPairableModelSlot(slot) {
-	if (isLoraSlot(slot)) return false;
+	// High/Low 主模型与加速 LoRA 使用同一套配对规则。LoRA 槽位的
+	// kind 通常是 name，但 folder=loras，可以安全地和普通模型区分。
+	if (isLoraSlot(slot)) return true;
 	const kind = String(slot?.kind || "");
 	return ["diffusion", "checkpoint_model", "wanvideo_model"].includes(kind);
 }

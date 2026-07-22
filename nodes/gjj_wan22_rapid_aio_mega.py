@@ -73,6 +73,23 @@ GGUF_DEFAULT_CLIP = "umt5-xxl-encoder-Q4_K_M.gguf"
 GGUF_DEFAULT_VAE = "wan_2.1_vae.safetensors"
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 RAPID_AIO_SEARCH_SEED = "wan2.2-rapid-mega-aio"
+# 这些是“视频通用模型加载器”里已经提供给用户的 Wan2.2 预设族。
+# Rapid 节点只有一个主模型槽，因此这里负责发现单个可加载的主模型文件；
+# high/low、精度和量化后缀不参与预设族判断。
+WAN22_COMPATIBLE_MODEL_KEYWORDS = (
+    ("wan2.2", "rapid"),
+    ("wan22", "rapid"),
+    ("wan2.2", "i2v"),
+    ("wan22", "i2v"),
+    ("wan2.2", "is2v"),
+    ("wan22", "is2v"),
+    ("wan", "is2v"),
+    ("remix", "i2v"),
+    ("smooth", "mix"),
+    ("smoothmix",),
+    ("dasiwa", "wan"),
+    ("dasiwa", "i2v"),
+)
 WAN22_RAPID_AIO_MODEL_DOWNLOAD_URL = "https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne"
 WAN22_RAPID_AIO_MODEL_TREE = [
     {
@@ -394,6 +411,17 @@ def _main_model_choice(category: str, name: str) -> str:
     return clean
 
 
+def _is_compatible_wan22_main_model(name: str) -> bool:
+    """Return whether a filename belongs to a supported Wan2.2 single-model preset.
+
+    Normalising first deliberately makes names such as ``Wan2_2``, ``Wan2.2`` and
+    ``Smooth-Mix`` equivalent.  Quantisation markers (int4/int8, Q4/Q8, fp8) are
+    left unrestricted; file format is checked separately by the caller.
+    """
+    compact = _normalize_text(gjjutils_model_stem_without_quant(name))
+    return any(all(_normalize_text(token) in compact for token in keywords) for keywords in WAN22_COMPATIBLE_MODEL_KEYWORDS)
+
+
 def _list_rapid_checkpoints() -> list[str]:
     _ensure_checkpoint_gguf_extension()
     _ensure_unet_gguf_folder()
@@ -402,7 +430,6 @@ def _list_rapid_checkpoints() -> list[str]:
         ("diffusion_models", _safe_filename_list("diffusion_models") + _scan_model_folder_files("diffusion_models", {".safetensors", ".gguf"})),
         ("unet_gguf", _safe_filename_list("unet_gguf") + _scan_model_folder_files("unet_gguf", {".gguf"})),
     )
-    seed_stem = gjjutils_model_stem_without_quant(RAPID_AIO_SEARCH_SEED)
     filtered: list[str] = []
     seen: set[str] = set()
     for _category, names in sources:
@@ -417,10 +444,7 @@ def _list_rapid_checkpoints() -> list[str]:
             suffix = Path(item).suffix.lower()
             if suffix not in {".safetensors", ".gguf"}:
                 continue
-            stem = gjjutils_model_stem_without_quant(item)
-            compact_seed = _normalize_text(seed_stem)
-            compact_item = _normalize_text(stem)
-            if compact_seed not in compact_item and compact_item not in compact_seed:
+            if not _is_compatible_wan22_main_model(item):
                 continue
             seen.add(key)
             filtered.append(choice)
@@ -437,17 +461,30 @@ def _list_rapid_checkpoints() -> list[str]:
 
 def _list_wan_gguf_clip_models() -> list[str]:
     _ensure_clip_gguf_folder()
-    names = _safe_filename_list("clip_gguf") + _scan_model_folder_files("clip_gguf", {".gguf"})
+    names = (
+        _safe_filename_list("clip_gguf")
+        + _scan_model_folder_files("clip_gguf", {".gguf"})
+        + _safe_filename_list("text_encoders")
+        + _scan_model_folder_files("text_encoders", {".safetensors", ".gguf"})
+    )
     filtered: list[str] = []
     seen: set[str] = set()
     for item in names:
         item = str(item or "").replace("\\", "/")
         key = item.lower()
-        if not item or key in seen or not key.endswith(".gguf"):
+        suffix = Path(item).suffix.lower()
+        normalized_stem = re.sub(r"[^a-z0-9]+", "_", Path(item).stem.lower()).strip("_")
+        if not item or key in seen or suffix not in {".safetensors", ".gguf"}:
+            continue
+        if "umt5" not in normalized_stem:
+            continue
+        # convrot 的独立 `enc` Safetensors 不是这里使用的完整 Wan T5；
+        # 正常的 `encoder` GGUF（例如 Q3_K_M）仍然受支持。
+        if suffix == ".safetensors" and "enc" in normalized_stem.split("_"):
             continue
         seen.add(key)
         filtered.append(item)
-    filtered.sort(key=lambda name: (0 if "umt5" in str(name).lower() else 1, str(name).lower()))
+    filtered.sort(key=lambda name: (0 if str(name).lower().endswith(".gguf") else 1, str(name).lower()))
     return [""] + (filtered or [GGUF_DEFAULT_CLIP])
 
 
@@ -688,12 +725,14 @@ def _load_wan_split_workflow_models(
             f"主模型：{resolved_unet}\n"
             "请改用 Q4_K / Q4_K_M / 更高量化 GGUF，或使用同仓库 .safetensors AIO。"
         )
+    requested_clip = clip_name or GGUF_DEFAULT_CLIP
+    clip_is_gguf = _is_gguf_model(requested_clip)
     resolved_clip = gjjutils_resolve_model_name(
-        clip_name or GGUF_DEFAULT_CLIP,
-        "clip_gguf",
+        requested_clip,
+        "clip_gguf" if clip_is_gguf else "text_encoders",
         candidates=[clip_name, GGUF_DEFAULT_CLIP, "umt5 xxl encoder"],
-        extensions={".gguf"},
-        label="Wan GGUF CLIP",
+        extensions={".gguf"} if clip_is_gguf else {".safetensors"},
+        label="Wan CLIP / T5",
     )
     resolved_vae = gjjutils_resolve_model_name(
         vae_name or GGUF_DEFAULT_VAE,
@@ -1903,7 +1942,7 @@ class GJJ_Wan22RapidAIOMega:
                     {
                         "default": default_checkpoint,
                         "display_name": "Wan 基础模型",
-                        "tooltip": "优先筛出本机已有的 Wan2.2 Rapid / AIO / Mega 系列 checkpoint。",
+                        "tooltip": "显示本机已有的 Wan2.2 Rapid、I2V/IS2V、REMIX、SmoothMix、Dasiwa 等兼容主模型；支持 INT4/INT8 的 GGUF 与 safetensors。",
                     },
                 ),
                 "width": (
@@ -2084,8 +2123,8 @@ class GJJ_Wan22RapidAIOMega:
                         "default": _prefer_model(wan_clip_models, ("umt5", "gguf")),
                         "display": "hidden",
                         "hidden": True,
-                        "display_name": "Wan GGUF CLIP",
-                        "tooltip": "仅主模型选择 .gguf 时使用；对应工作流 CLIPLoaderGGUF，type=wan。",
+                        "display_name": "Wan CLIP / T5",
+                        "tooltip": "分体主模型使用；支持 UMT5 INT4/INT8/FP8 safetensors 与 GGUF，独立 enc Safetensors 除外。",
                     },
                 ),
                 "wan_vae_model": (
@@ -2095,7 +2134,7 @@ class GJJ_Wan22RapidAIOMega:
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "Wan VAE",
-                        "tooltip": "仅主模型选择 .gguf 时使用；对应工作流 VAELoader。",
+                        "tooltip": "diffusion_models 分体 safetensors / GGUF 主模型使用；对应工作流 VAELoader。",
                     },
                 ),
                 "image_fit_mode": (

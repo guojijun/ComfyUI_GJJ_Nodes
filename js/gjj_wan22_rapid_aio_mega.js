@@ -121,6 +121,38 @@ function setWidgetValue(widget, value) {
 	widget.callback?.(value);
 }
 
+function normalizedModelName(value) {
+	return String(value || "").replaceAll("\\", "/").split("/").pop().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function repairMissingModelWidget(node, widgetName, preferredTokens = []) {
+	const widget = getWidget(node, widgetName);
+	const values = Array.isArray(widget?.options?.values) ? widget.options.values.map(String) : [];
+	const current = String(widget?.value ?? "");
+	if (!widget || !values.length || values.includes(current)) return;
+
+	const normalizedCurrent = normalizedModelName(current);
+	let replacement = values.find((value) => value && normalizedModelName(value) === normalizedCurrent);
+	if (!replacement) {
+		const tokens = preferredTokens.map((token) => String(token).toLowerCase());
+		replacement = values.find((value) => {
+			const lowered = value.toLowerCase();
+			return value && tokens.every((token) => lowered.includes(token));
+		});
+	}
+	replacement ||= values.find(Boolean);
+	if (replacement) setWidgetValue(widget, replacement);
+}
+
+function repairMissingModelDefaults(node) {
+	// 旧工作流可能保存了已删除的文件名，或仅使用了不同的横线/下划线。
+	// ComfyUI 会在执行前把这种 combo 值判为“缺失模型”，因此节点加载时
+	// 同时修复主模型以及被界面隐藏的 Wan CLIP / VAE。
+	repairMissingModelWidget(node, CHECKPOINT_WIDGET);
+	repairMissingModelWidget(node, WAN_CLIP_MODEL_WIDGET, ["umt5"]);
+	repairMissingModelWidget(node, WAN_VAE_MODEL_WIDGET, ["wan", "vae"]);
+}
+
 function safeJsonParse(value, fallback) {
 	if (value && typeof value === "object") return value;
 	try {
@@ -258,7 +290,9 @@ function syncTemplateBindings(node) {
 
 function syncAllTemplateBindings() {
 	for (const graphNode of app.graph?._nodes || []) {
-		if (TARGET_NODES.has(nodeType(graphNode))) syncTemplateBindings(graphNode);
+		if (!TARGET_NODES.has(nodeType(graphNode))) continue;
+		repairMissingModelDefaults(graphNode);
+		syncTemplateBindings(graphNode);
 	}
 }
 
@@ -2569,6 +2603,7 @@ function patchNode(node) {
 		return;
 	}
 	installTemplateBindingSync();
+	repairMissingModelDefaults(node);
 	if (node.__gjjWan22RapidMegaPatched) {
 		ensureToolbarWidget(node);
 		ensureMaterialTimelineWidget(node);

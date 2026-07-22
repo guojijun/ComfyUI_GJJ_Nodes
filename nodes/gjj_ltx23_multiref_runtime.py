@@ -2860,6 +2860,7 @@ def run_ltx23_multiref_video(
 	test_lora_name: Any = "",
 	branch_debug: Any = None,
 	unique_id: Any = None,
+	source_video: Any = None,
 ):
 	_ensure_runtime_dependencies()
 	run_started_at = time.perf_counter()
@@ -2919,6 +2920,8 @@ def run_ltx23_multiref_video(
 	if isinstance(branch_debug, dict):
 		debug_route_key = str(branch_debug.get("route_key") or "").strip()
 		debug_source_summary = str(branch_debug.get("source_summary") or "").strip()
+		if debug_route_key == "video_resample":
+			route_label = "视频重采样"
 		# Clean v40：双图首尾帧时，route_label 必须稳定保持“首尾帧”，
 		# 不能再被 debug_route_key=multi_frame 覆盖。只有 3 张及以上时才显示多帧参考。
 		if debug_route_key == "multi_frame" and visual_scene_count > 2:
@@ -2947,7 +2950,9 @@ def run_ltx23_multiref_video(
 			resolved_video_vae = _pick_first_candidate("vae", tuple(x for x in (str(video_vae_name or "").strip(), "video_vae") if x), "LTX 视频 VAE")
 			resolved_audio_vae = _pick_first_candidate("vae", tuple(x for x in (str(audio_vae_name or "").strip(), "audio_vae") if x), "LTX 音频 VAE")
 			resolved_text_encoder = _pick_first_candidate("text_encoders", tuple(x for x in (str(text_encoder_name or "").strip(), "gemma_3_12B_it_fp8_e4m3fn.safetensors", "gemma_3_12B_it.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj", "gemma_3_12B_it") if x), "LTX 文本编码器")
-			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models", tuple(x for x in (str(latent_upscaler_name or "").strip(), "ltx-2.3-spatial-upscaler") if x), "LTX latent 放大模型")
+			resolved_latent_upscaler = ""
+			if source_video is None:
+				resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models", tuple(x for x in (str(latent_upscaler_name or "").strip(), "ltx-2.3-spatial-upscaler") if x), "LTX latent 放大模型")
 
 			model = None
 			resolved_ckpt = ""
@@ -2974,7 +2979,7 @@ def run_ltx23_multiref_video(
 			clip = _load_ltx_text_encoder(resolved_text_encoder, resolved_ckpt, text_projection_name)
 			video_vae = _load_video_vae(resolved_video_vae)
 			audio_vae = _load_audio_vae(resolved_audio_vae)
-			latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0]
+			latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0] if source_video is None else None
 
 			model, clip = _apply_chain_loras(model, clip, prepared_lora_chain_config)
 			if transition_lora_enabled:
@@ -2999,6 +3004,51 @@ def run_ltx23_multiref_video(
 			model = _apply_ff_chunking(model, DEFAULT_FF_CHUNKS, DEFAULT_FF_DIM_THRESHOLD)
 		except Exception as exc:
 			raise RuntimeError(f"LTX 多图参考节点加载模型失败：{exc}") from exc
+
+		if source_video is not None:
+			_send_status(unique_id, "视频重采样 2/5：按 LTX视频重采样 工作流编码源视频...")
+			try:
+				encoder_module = importlib.import_module(".gjj_encode_video_components", __package__)
+				encoder = encoder_module.GJJ_EncodeVideoComponents
+				encode_width = int(target_width or 0)
+				encode_height = int(target_height or 0)
+				video_latent, source_audio, source_fps, source_frame_count = encoder.encode(
+					source_video, video_vae, encode_width, encode_height, 0,
+					"Lanczos", "拉伸", "居中", "0, 0, 0", "居中",
+				)
+				resample_fps = max(1, int(round(float(source_fps or fps))))
+				aligned_frame_count = max(1, ((max(1, int(source_frame_count)) - 1) // 8) * 8 + 1)
+				audio_latent = LTXVEmptyLatentAudio.execute(aligned_frame_count, resample_fps, 1, audio_vae)[0]
+				av_latent = LTXVConcatAVLatent.execute(video_latent, audio_latent)[0]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 视频重采样分支编码源视频失败：{exc}") from exc
+
+			_send_status(unique_id, "视频重采样 3/5：8步 euler/simple、降噪0.25 采样...")
+			try:
+				positive = CLIPTextEncode().encode(clip, prompt_text)[0]
+				negative = CLIPTextEncode().encode(clip, negative_text)[0]
+				ksampler = getattr(core_nodes, "KSampler")()
+				sampled = ksampler.sample(
+					model, int(seed), 8, 1.0, "euler", "simple",
+					positive, negative, av_latent, 0.25,
+				)[0]
+				video_result, audio_result = LTXVSeparateAVLatent.execute(sampled)[0:2]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 视频重采样分支采样失败：{exc}") from exc
+
+			_send_status(unique_id, "视频重采样 4/5：解码视频与音频...")
+			try:
+				frames = VAEDecodeTiled().decode(
+					video_vae, video_result, DEFAULT_VAE_TILE_SIZE, DEFAULT_VAE_OVERLAP,
+					DEFAULT_VAE_TEMPORAL_SIZE, DEFAULT_VAE_TEMPORAL_OVERLAP,
+				)[0]
+				frames = frames[:max(1, int(source_frame_count))]
+				output_audio = LTXVAudioVAEDecode.execute(audio_result, audio_vae)[0]
+				video = _create_video(frames, float(resample_fps), output_audio)
+				_send_status(unique_id, f"视频重采样 5/5：完成（{len(frames)}帧 / {resample_fps}fps）。")
+				return {"ui": {}, "result": (video, frames.detach().float().cpu().clamp(0.0, 1.0).contiguous())}
+			except Exception as exc:
+				raise RuntimeError(f"LTX 视频重采样分支解码失败：{exc}") from exc
 
 		def _branch_kind_label(branch_kind: str) -> str:
 			if branch_kind == "first_last_workflow":

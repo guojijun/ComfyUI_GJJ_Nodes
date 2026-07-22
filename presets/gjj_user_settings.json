@@ -129,14 +129,17 @@
     "align_multiple": 8
   },
   "execution_timer": {
-    "position": null
+    "position": {
+      "left": 1446,
+      "top": 400.8125
+    }
   },
   "text_merge": {
     "template_text": "{文本1}{文本2}"
   },
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "vivid",
+    "selected_style_id": "safe",
     "custom_palette": [
       "#00AEEF",
       "#6F5CC4",
@@ -155,74 +158,74 @@
       {
         "id": "input",
         "label": "输入",
-        "styleId": "vivid",
-        "color": "#3B82F6"
+        "styleId": "safe",
+        "color": "#00AEEF"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "vivid",
-        "color": "#8B5CF6"
+        "styleId": "safe",
+        "color": "#7A5FA8"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "vivid",
-        "color": "#20242C"
+        "styleId": "safe",
+        "color": "#8A6F00"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "vivid",
-        "color": "#10B981"
+        "styleId": "safe",
+        "color": "#009E73"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "vivid",
-        "color": "#06B6D4"
+        "styleId": "safe",
+        "color": "#56B4E9"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "vivid",
-        "color": "#22D3EE"
+        "styleId": "safe",
+        "color": "#E69F00"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "vivid",
-        "color": "#7C3AED"
+        "styleId": "safe",
+        "color": "#785EF0"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "vivid",
-        "color": "#D946EF"
+        "styleId": "safe",
+        "color": "#F0E442"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "vivid",
-        "color": "#0EA5E9"
+        "styleId": "safe",
+        "color": "#00A6A6"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "vivid",
-        "color": "#F59E0B"
+        "styleId": "safe",
+        "color": "#263238"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "vivid",
-        "color": "#84CC16"
+        "styleId": "safe",
+        "color": "#6B6FAF"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "vivid",
-        "color": "#64748B"
+        "styleId": "safe",
+        "color": "#666666"
       }
     ]
   }

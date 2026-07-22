@@ -65,10 +65,10 @@ SEEDVR2_MODEL_TREE = """ComfyUI/
         ├── seedvr2_3b_int8_convrot.safetensors
         ├── seedvr2_7b_int8_convrot.safetensors
         ├── seedvr2_ema_7b_sharp_int4_convrot.safetensors
-        ├── seedvr2_ema_3b_fp16.safetensors         也支持其它 3B/7B safetensors
+        ├── seedvr2_ema_3b_fp16.safetensors         其他模型也必须是完整官方格式
         └── ema_vae_fp16.safetensors
 """
-_DESCRIPTION_INTRO = "将 ComfyUI 官方 SeedVR2 图像/视频放大工作流整合成单节点；支持 3B/7B、FP/INT4 ConvRot/INT8 ConvRot 模型，接 VIDEO 时保留原音频与帧率。"
+_DESCRIPTION_INTRO = "将 ComfyUI 官方 SeedVR2 图像/视频放大工作流整合成单节点；支持包含完整条件张量的 3B/7B SeedVR2 模型，接 VIDEO 时保留原音频与帧率。"
 
 
 class AnyType(str):
@@ -503,38 +503,6 @@ def _resolve_seedvr2_model_path(model_name: str, label: str) -> Path:
     return Path(full_path)
 
 
-def _load_seedvr2_conditioning_tensors(exclude_path: Path | None = None) -> dict[str, torch.Tensor]:
-    """Read the official embedded text conditioning from a compatible local model."""
-    from safetensors import safe_open
-
-    required = ("positive_conditioning", "negative_conditioning")
-    try:
-        roots = [Path(path) for path in folder_paths.get_folder_paths(MODEL_CATEGORY)]
-    except Exception:
-        roots = [Path(folder_paths.models_dir) / MODEL_CATEGORY]
-    candidates: list[Path] = []
-    for root in roots:
-        if root.exists():
-            candidates.extend(root.rglob("*.safetensors"))
-    candidates.sort(key=lambda path: ("int8_convrot" not in path.name.lower(), path.name.lower()))
-    excluded = exclude_path.resolve() if exclude_path is not None else None
-    for path in candidates:
-        try:
-            if excluded is not None and path.resolve() == excluded:
-                continue
-            with safe_open(str(path), framework="pt", device="cpu") as handle:
-                keys = set(handle.keys())
-                if not all(key in keys for key in required):
-                    continue
-                return {key: handle.get_tensor(key) for key in required}
-        except Exception:
-            continue
-    raise RuntimeError(
-        "所选 SeedVR2 模型缺少官方条件张量，且未能在 models/SEEDVR2 中找到可提供条件张量的官方模型。"
-        "请至少保留 seedvr2_3b_int8_convrot.safetensors 或 seedvr2_7b_int8_convrot.safetensors。"
-    )
-
-
 def _dequantize_seedvr2_vae_convrot(sd: dict[str, Any]) -> int:
     """Restore the eight W4A4 attention matrices unsupported by the core VAE loader."""
     quantized = [str(key)[:-12] for key in sd if str(key).endswith(".comfy_quant")]
@@ -578,9 +546,12 @@ def _load_official_seedvr2_components(dit_model: str, vae_model: str):
     dit_sd, dit_metadata = comfy.utils.load_torch_file(str(dit_path), return_metadata=True)
     required_conditioning = ("positive_conditioning", "negative_conditioning")
     if not all(key in dit_sd for key in required_conditioning):
-        conditioning = _load_seedvr2_conditioning_tensors(exclude_path=dit_path)
-        for key in required_conditioning:
-            dit_sd.setdefault(key, conditioning[key])
+        missing = ", ".join(key for key in required_conditioning if key not in dit_sd)
+        raise RuntimeError(
+            f"所选模型不是 ComfyUI SeedVR2 完整格式：{dit_model}。"
+            f"缺少必需张量：{missing}。请使用 Comfy-Org/SeedVR2 完整模型，"
+            "或将转换模型重新封装为包含这两个条件张量的完整文件。"
+        )
     if "int4_convrot" in dit_path.name.lower():
         try:
             from .gjj_video_universal_model_loader import _patch_int4_convrot_embedding_tensors

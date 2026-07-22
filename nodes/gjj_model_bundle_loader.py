@@ -59,6 +59,7 @@ CLIP_TYPE_OPTIONS = [
     "newbie",
     "longcat_image",
     "boogu",
+    "joyimage",
 ]
 CLIP_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32"]
 CLIP_DEVICE_OPTIONS = ["default", "cpu"]
@@ -1360,6 +1361,22 @@ class GJJ_ModelBundleLoader:
         )
 
     def _load_vae(self, vae_name: str, vae_dtype: str):
+        if "upscale2ximageonly" in _normalize_text(vae_name):
+            try:
+                import nodes as comfy_nodes
+
+                loader_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("VAEUtils_CustomVAELoader")
+                if loader_class is None:
+                    raise RuntimeError("没有注册 VAEUtils_CustomVAELoader")
+                return loader_class().load_vae(vae_name, True)[0]
+            except Exception as exc:
+                raise RuntimeError(
+                    f"加载 JoyAI 专用 2× VAE 失败：{vae_name}\n"
+                    "该 VAE 需要 ComfyUI-VAE-Utils 的 VAEUtils_CustomVAELoader；"
+                    "请确认插件已启用并重启 ComfyUI。\n"
+                    f"详细错误：{exc}"
+                ) from exc
+
         vae_path = _resolve_full_path(("vae",), vae_name)
         sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
         dtype = _torch_dtype_from_name(vae_dtype)

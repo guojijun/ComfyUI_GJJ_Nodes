@@ -30,7 +30,7 @@ except ImportError as exc:
 # 零依赖导入模式：顶层不导入 torch / ComfyUI / 其它本地运行时模块。
 # ComfyUI 扫描节点时只需要 INPUT_TYPES / NODE_CLASS_MAPPINGS，真正执行时再懒加载运行依赖。
 GJJ_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
-IMAGE_SEQUENCE_INPUT_TYPE = GJJ_BATCH_IMAGE_TYPE
+IMAGE_SEQUENCE_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 DEFAULT_SEGMENT_VIDEO_FORMAT = "video/h264-mp4"
 MODE_GENERATED_AUDIO = "generated_audio"
 MODE_AUDIO_CONDITIONED = "audio_conditioned"
@@ -632,6 +632,41 @@ def _scene_image_size(value: Any) -> tuple[int, int] | None:
         h, w = int(tensor.shape[1]), int(tensor.shape[2])
         return (w, h) if w > 0 and h > 0 else None
     return None
+
+
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_input_metadata(value: Any) -> tuple[bool, float, Any]:
+    """按工作流约定识别 VIDEO：有有效帧率或音频即视为视频。"""
+    if value is None:
+        return False, 0.0, None
+    components = None
+    getter = getattr(value, "get_components", None)
+    if callable(getter):
+        try:
+            components = getter()
+        except Exception:
+            components = None
+    elif isinstance(value, dict):
+        components = value
+    if components is None:
+        return False, 0.0, None
+    fps_value = 0.0
+    for key in ("frame_rate", "fps", "source_fps"):
+        try:
+            fps_value = float(_component_value(components, key) or 0.0)
+        except Exception:
+            fps_value = 0.0
+        if fps_value > 0:
+            break
+    audio = _component_value(components, "audio")
+    return bool(fps_value > 0 or audio is not None), fps_value, audio
 
 
 def _resolve_target_size_from_config_and_scenes(config: dict[str, Any], raw_scene_images: list[Any]) -> tuple[int, int, str]:
@@ -1773,7 +1808,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     IMAGE_SEQUENCE_INPUT_TYPE,
                     {
                         "display_name": "🖼️ 图片/帧序列",
-                        "tooltip": "🖼️ 可选图片或帧序列。支持单张 IMAGE、批量 IMAGE 和 GJJ_BATCH_IMAGE。",
+                        "tooltip": "🖼️ 可选图片、帧序列或 VIDEO。输入含帧率或音频时自动走 LTX 视频重采样分支。",
                     },
                 ),
                 "lora_chain_config": (
@@ -1848,7 +1883,9 @@ class GJJ_LTX23ImageToVideoMultiRef:
 
         moved_scene_payloads = _pop_miswired_scene_payloads(kwargs)
         image_sequence = _unwrap_single_value(image_sequence if image_sequence is not None else kwargs.get("image_sequence"))
-        legacy_batch_scene_images = _split_scene_batch(image_sequence)
+        source_video_detected, source_video_fps, source_video_audio = _video_input_metadata(image_sequence)
+        source_video = image_sequence if source_video_detected else None
+        legacy_batch_scene_images = [] if source_video_detected else _split_scene_batch(image_sequence)
         legacy_batch_scene_images.extend(_split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch"))))
         if moved_scene_payloads:
             legacy_batch_scene_images.extend(_flatten_scene_values(moved_scene_payloads))
@@ -1890,7 +1927,14 @@ class GJJ_LTX23ImageToVideoMultiRef:
         input_audio = _unwrap_single_value(kwargs.get("input_audio"))
         has_input_audio = input_audio is not None
 
-        route_key, route_label, route_tip = _resolve_auto_route(len(scene_images), has_input_audio)
+        if source_video_detected:
+            route_key, route_label, route_tip = (
+                "video_resample",
+                "视频重采样",
+                f"图片/帧序列输入含{'帧率' if source_video_fps > 0 else '音频'}，走 LTX 视频重采样工作流分支。",
+            )
+        else:
+            route_key, route_label, route_tip = _resolve_auto_route(len(scene_images), has_input_audio)
         resolved_payload = _resolve_prompt_payload(
             positive_prompt=config["positive_prompt"],
             negative_prompt=config["negative_prompt"],
@@ -1959,6 +2003,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
             seed=config["seed"],
             duration_seconds=duration_seconds,
             input_audio=input_audio,
+            source_video=source_video,
             lora_chain_config=lora_chain_config_for_run,
             decode_generated_audio=bool(resolved_payload["decode_generated_audio"]),
             frame_trim_start=frame_trim_start,
@@ -1982,6 +2027,8 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 "scene_count": len(scene_images),
                 "source_summary": f"{scene_source_summary}；目标{target_width}x{target_height}",
                 "has_audio": has_input_audio,
+                "source_video_fps": source_video_fps,
+                "source_video_has_audio": source_video_audio is not None,
             },
             unique_id=unique_id,
         )
