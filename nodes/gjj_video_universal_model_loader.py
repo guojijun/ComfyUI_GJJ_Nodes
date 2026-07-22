@@ -336,7 +336,7 @@ def _folder_search_hint(folders: list[str] | tuple[str, ...]) -> str:
 
 
 # 官方文件名种子用于默认选择：匹配时会去子目录、扩展名、量化/精度标识后做最长公共片段匹配。
-WAN_T5_NAMES = ["umt5_xxl_fp8_e4m3fn_scaled.safetensors", "umt5_xxl_fp16.safetensors", "umt5-xxl-enc-bf16.safetensors"]
+WAN_T5_NAMES = ["umt5_xxl_int4_convrot.safetensors","umt5_xxl_fp8_e4m3fn_scaled.safetensors", "umt5_xxl_fp16.safetensors"]
 WAN21_VAE_NAMES = ["wan_2.1_vae.safetensors", "ComfyUI-wan_2.1_vae.safetensors", "Wan2_1_VAE_bf16.safetensors", "Wan2.1_VAE_bf16.safetensors"]
 WAN22_VAE_NAMES = ["wan2.2_vae.safetensors"]
 CLIP_VISION_H_NAMES = ["clip_vision_h.safetensors"]
@@ -609,7 +609,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "slots": [
             S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "i2v"], preferred_name="wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors", official_names=["wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors", "wan2.1_i2v_720p_14B_fp16.safetensors", "wan2.1_i2v_480p_14B_fp16.safetensors"]),
             S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5_xxl_fp"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5_xxl_in","umt5_xxl_fp"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },

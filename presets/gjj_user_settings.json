@@ -129,10 +129,7 @@
     "align_multiple": 8
   },
   "execution_timer": {
-    "position": {
-      "left": 1446,
-      "top": 400.8125
-    }
+    "position": null
   },
   "text_merge": {
     "template_text": "{文本1}{文本2}"

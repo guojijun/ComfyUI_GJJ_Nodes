@@ -715,6 +715,24 @@ function modelMatchKey(value) {
 		.replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
 }
 
+function exactLowPairKeyFromHigh(value) {
+	const replaced = modelBaseName(value).toLowerCase().replace(
+		/(^|[^a-z0-9])high(?=$|[^a-z0-9])/,
+		"$1low"
+	);
+	return replaced.replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+}
+
+function exactModelKey(value) {
+	return modelBaseName(value).toLowerCase().replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+}
+
+function modelQuantizationKey(value) {
+	const text = modelBaseName(value).toLowerCase();
+	const match = text.match(/(?:^|[^a-z0-9])(int4|int8|fp8|fp16|fp32|bf16|q[2-8](?:[_-][kms])?)(?=$|[^a-z0-9])/i);
+	return String(match?.[1] || "").replaceAll("-", "_").toLowerCase();
+}
+
 function modelPrefixBeforeMarker(value, marker) {
 	const raw = matchText(modelBaseName(value));
 	const index = raw.indexOf(String(marker || "").toLowerCase());
@@ -787,6 +805,8 @@ function findPairedLowSlot(cfg, highSlot, highIndex) {
 }
 
 function scoreLowModelCandidate(highValue, lowValue) {
+	const exactLowKey = exactLowPairKeyFromHigh(highValue);
+	const exactCandidateKey = exactModelKey(lowValue);
 	const highPrefixRaw = modelPrefixBeforeMarker(highValue, "high");
 	const highPrefix = highPrefixRaw.length >= 4 ? highPrefixRaw : "";
 	const highToLowKey = highPrefix
@@ -797,11 +817,17 @@ function scoreLowModelCandidate(highValue, lowValue) {
 	if (!lowKey) return -Infinity;
 
 	let score = -Infinity;
+	if (exactLowKey && exactCandidateKey === exactLowKey) score = Math.max(score, 100000);
 	if (highToLowKey && lowKey === highToLowKey) score = Math.max(score, 50000);
 	if (highPrefix && lowPrefix && lowPrefix === highPrefix) score = Math.max(score, 40000 + Math.min(highPrefix.length, 200));
 	if (highPrefix && lowKey.startsWith(highPrefix)) score = Math.max(score, 30000 + Math.min(highPrefix.length, 200));
 	if (highPrefix && lowKey.includes(highPrefix)) score = Math.max(score, 20000 + Math.min(highPrefix.length, 200));
 	if (!Number.isFinite(score)) return -Infinity;
+	const highQuantization = modelQuantizationKey(highValue);
+	const lowQuantization = modelQuantizationKey(lowValue);
+	if (highQuantization && lowQuantization) {
+		score += highQuantization === lowQuantization ? 5000 : -5000;
+	}
 	if (matchText(lowValue).includes("low") || String(lowValue || "").includes("低")) score += 500;
 	return score;
 }
