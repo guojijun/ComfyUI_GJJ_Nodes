@@ -626,6 +626,16 @@ def as_bool(value: Any) -> bool:
     return text in {"1", "true", "yes", "on", "开启", "启用", "开"}
 
 
+def contains_chinese_text(text: Any) -> bool:
+    """Return whether text contains a CJK Unified Ideograph."""
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in str(text or "")
+    )
+
+
 def split_chinese_quote_segments(text: str) -> list[tuple[str, bool]]:
     segments: list[tuple[str, bool]] = []
     buffer: list[str] = []
@@ -767,6 +777,8 @@ def translate_zh_to_en(
 ) -> str:
     if not str(text or "").strip():
         return ""
+    if not contains_chinese_text(text):
+        return str(text)
     ensure_translation_environment(unique_id=unique_id, node_name=node_name)
     torch_device = pick_translation_device(device)
     try:

@@ -7,6 +7,9 @@ const TEMPLATE_PARAMS_NODE = "GJJ_TemplateParams";
 const TEMPLATE_WIDGET = "template_text";
 const VALUES_WIDGET = "values_json";
 const SCHEMA_WIDGET = "schema_json";
+const SAVED_TEMPLATE_PROPERTY = "gjj_template_params_template";
+const SAVED_VALUES_PROPERTY = "gjj_template_params_values";
+const SAVED_SCHEMA_PROPERTY = "gjj_template_params_schema";
 const PARAM_ENABLED_PROPERTY = "gjj_wan_unified_template_params_enabled";
 const PARAM_SOURCE_PROPERTY = "gjj_wan_unified_template_params_source";
 const PARAM_WIDGETS = ["width", "height", "length"];
@@ -168,8 +171,16 @@ function splitTemplateLine(line) {
 }
 
 function templateParamsState(templateNode) {
-	const values = safeJsonParse(getWidgetValue(templateNode, VALUES_WIDGET, "{}"), {});
-	const schema = safeJsonParse(getWidgetValue(templateNode, SCHEMA_WIDGET, "[]"), []);
+	const savedValues = templateNode?.properties?.[SAVED_VALUES_PROPERTY] || "{}";
+	const savedSchema = templateNode?.properties?.[SAVED_SCHEMA_PROPERTY] || "[]";
+	let values = safeJsonParse(getWidgetValue(templateNode, VALUES_WIDGET, savedValues), {});
+	let schema = safeJsonParse(getWidgetValue(templateNode, SCHEMA_WIDGET, savedSchema), []);
+	// During workflow restoration the target node can configure before the hidden
+	// TemplateParams widgets receive their serialized values. Use the mirrored
+	// properties in that short window so automatic synchronization does not report
+	// parameters as missing.
+	if (!Object.keys(values || {}).length) values = safeJsonParse(savedValues, {});
+	if (!schema.length) schema = safeJsonParse(savedSchema, []);
 	const entries = new Map();
 	const addEntry = (key, value) => {
 		const cleanKey = String(key || "").trim();
@@ -190,7 +201,11 @@ function templateParamsState(templateNode) {
 		}
 	}
 
-	const template = String(getWidgetValue(templateNode, TEMPLATE_WIDGET, "") || "");
+	const template = String(
+		getWidgetValue(templateNode, TEMPLATE_WIDGET, "")
+		|| templateNode?.properties?.[SAVED_TEMPLATE_PROPERTY]
+		|| "",
+	);
 	for (const line of template.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
 		const parsed = splitTemplateLine(line);
 		if (!parsed) continue;
@@ -245,7 +260,7 @@ function paramsEnabled(node) {
 	return Boolean(node?.properties?.[PARAM_ENABLED_PROPERTY] && node?.properties?.[PARAM_SOURCE_PROPERTY]);
 }
 
-function applyTemplateParams(targetNode, templateNode) {
+function applyTemplateParams(targetNode, templateNode, { alertMissing = true } = {}) {
 	const entries = templateParamsState(templateNode);
 	const width = asFiniteNumber(getParam(entries, ["width", "宽度"]));
 	const height = asFiniteNumber(getParam(entries, ["height", "高度"]));
@@ -258,7 +273,7 @@ function applyTemplateParams(targetNode, templateNode) {
 	if (duration == null) missing.push("duration/时长");
 	if (fps == null) missing.push("frame_rate/fps/帧率");
 	if (missing.length) {
-		alert(`模板参数缺少：${missing.join("、")}`);
+		if (alertMissing) alert(`模板参数缺少：${missing.join("、")}`);
 		return;
 	}
 	const length = Math.trunc(Math.floor((duration * fps) / 8) * 8 + 1);
@@ -338,7 +353,10 @@ function syncActiveTemplateParams(node) {
 	if (!sourceNode) return false;
 	node.__gjjWanUnifiedSyncingTemplateParams = true;
 	try {
-		return applyTemplateParams(node, sourceNode);
+		// Automatic synchronization also runs while a workflow is being restored.
+		// At that point TemplateParams may not have configured its widgets yet;
+		// silently retry through the scheduled patches and its update event.
+		return applyTemplateParams(node, sourceNode, { alertMissing: false });
 	} finally {
 		node.__gjjWanUnifiedSyncingTemplateParams = false;
 	}
