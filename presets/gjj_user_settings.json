@@ -107,6 +107,12 @@
     }
   },
   "user": {},
+  "execution_timer": {
+    "enabled": true,
+    "position": null,
+    "newest_first": false,
+    "collapsed": false
+  },
   "workflow_screenshot_toolbar": {
     "position": null
   },
@@ -127,9 +133,6 @@
   "region_crop": {
     "total_pixels": 80,
     "align_multiple": 8
-  },
-  "execution_timer": {
-    "position": null
   },
   "text_merge": {
     "template_text": "{文本1}{文本2}"

@@ -158,6 +158,12 @@ def _gjj_default_user_settings() -> dict:
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
 		"user": {},
+		"execution_timer": {
+			"enabled": True,
+			"position": None,
+			"newest_first": False,
+			"collapsed": False,
+		},
 	}
 
 def _gjj_merge_dict(defaults: dict, value) -> dict:

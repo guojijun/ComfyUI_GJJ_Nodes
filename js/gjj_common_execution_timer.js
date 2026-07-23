@@ -3,8 +3,6 @@ import { api } from "/scripts/api.js";
 
 const PANEL_ID = "gjj-common-execution-timer";
 const STYLE_ID = "gjj-common-execution-timer-style";
-const COLLAPSED_KEY = "gjj_common_execution_timer_collapsed";
-const NEWEST_FIRST_KEY = "gjj_common_execution_timer_newest_first";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "execution_timer";
 const MAX_VISIBLE_ROWS = 80;
@@ -23,7 +21,84 @@ let positionLoaded = false;
 let positionLoadPromise = null;
 let panelHasCustomPosition = false;
 let panelPositionTouched = false;
-let newestFirst = localStorage.getItem(NEWEST_FIRST_KEY) === "1";
+let timerSettingsLoaded = false;
+let timerSettingsPromise = null;
+let timerEnabled = true;
+let newestFirst = false;
+let timerCollapsed = false;
+
+async function saveTimerSettings(values) {
+	try {
+		const body = JSON.stringify({ section: USER_SETTINGS_SECTION, values });
+		const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
+		const response = api?.fetchApi
+			? await api.fetchApi(USER_SETTINGS_ENDPOINT, options)
+			: await fetch(USER_SETTINGS_ENDPOINT, options);
+		if (!response?.ok) throw new Error("保存计时器设置失败");
+	} catch (error) {
+		console.warn("[GJJ ExecutionTimer] 保存设置失败", error);
+	}
+}
+
+function applyTimerSettings(root = panel) {
+	if (!root) return;
+	root.classList.toggle("gjj-collapsed", timerCollapsed);
+	if (root.__gjjTimer?.collapse) {
+		root.__gjjTimer.collapse.textContent = timerCollapsed ? "🔽" : "🔼";
+	}
+	updateOrderButton(root.__gjjTimer?.order);
+	if (!timerEnabled) {
+		stopRefresh();
+		root.style.display = "none";
+	} else if (currentRun && !panelClosedForRun) {
+		render();
+	}
+}
+
+async function loadTimerSettings(root = panel) {
+	if (timerSettingsPromise) return timerSettingsPromise;
+	timerSettingsPromise = (async () => {
+		try {
+			const response = api?.fetchApi
+				? await api.fetchApi(USER_SETTINGS_ENDPOINT)
+				: await fetch(USER_SETTINGS_ENDPOINT);
+			const data = await response.json();
+			const values = data?.settings?.[USER_SETTINGS_SECTION] || {};
+			timerEnabled = values.enabled !== false;
+			newestFirst = values.newest_first === true;
+			timerCollapsed = values.collapsed === true;
+		} catch (_) {
+			// 后端不可用时保留安全默认值。
+		}
+		timerSettingsLoaded = true;
+		applyTimerSettings(root);
+		globalThis.dispatchEvent?.(new CustomEvent("gjj-execution-timer-settings-loaded", {
+			detail: getTimerSettings(),
+		}));
+	})();
+	return timerSettingsPromise;
+}
+
+function getTimerSettings() {
+	return {
+		enabled: timerEnabled,
+		newest_first: newestFirst,
+		collapsed: timerCollapsed,
+		position: panelHasCustomPosition && panel
+			? { left: panel.getBoundingClientRect().left, top: panel.getBoundingClientRect().top }
+			: null,
+	};
+}
+
+async function setTimerSettings(values = {}) {
+	if (!timerSettingsLoaded) await loadTimerSettings(panel);
+	if (Object.hasOwn(values, "enabled")) timerEnabled = values.enabled !== false;
+	if (Object.hasOwn(values, "newest_first")) newestFirst = values.newest_first === true;
+	if (Object.hasOwn(values, "collapsed")) timerCollapsed = values.collapsed === true;
+	applyTimerSettings(panel);
+	await saveTimerSettings(values);
+	return getTimerSettings();
+}
 
 function nowMs() {
 	return performance.now();
@@ -610,16 +685,17 @@ function ensurePanel() {
 
 	const order = button("⏰", "切换记录顺序", () => {
 		newestFirst = !newestFirst;
-		localStorage.setItem(NEWEST_FIRST_KEY, newestFirst ? "1" : "0");
+		void saveTimerSettings({ newest_first: newestFirst });
 		updateOrderButton(order);
 		render();
 	});
 	order.classList.add("gjj-exec-order");
 	updateOrderButton(order);
 	const collapse = button("🔼", "收起/展开计时器", () => {
-		root.classList.toggle("gjj-collapsed");
-		localStorage.setItem(COLLAPSED_KEY, root.classList.contains("gjj-collapsed") ? "1" : "0");
-		collapse.textContent = root.classList.contains("gjj-collapsed") ? "🔽" : "🔼";
+		timerCollapsed = !root.classList.contains("gjj-collapsed");
+		root.classList.toggle("gjj-collapsed", timerCollapsed);
+		void saveTimerSettings({ collapsed: timerCollapsed });
+		collapse.textContent = timerCollapsed ? "🔽" : "🔼";
 	});
 	const copy = button("📋", "复制本次耗时统计", () => copySummary());
 	const clear = button("🧹", "清除本次计时结果", () => {
@@ -666,16 +742,14 @@ function ensurePanel() {
 	root.append(header, body);
 
 	root.__gjjTimer = { summary, totalLabel, memory, list, order, collapse };
-	if (localStorage.getItem(COLLAPSED_KEY) === "1") {
-		root.classList.add("gjj-collapsed");
-		collapse.textContent = "🔽";
-	}
+	applyTimerSettings(root);
 	resetPanelPosition(root);
 	enablePanelDrag(root, dragHandle);
 
 	document.body.appendChild(root);
 	panel = root;
 	void loadPanelPosition(root);
+	void loadTimerSettings(root);
 	return panel;
 }
 
@@ -792,6 +866,10 @@ function applyMemoryPayload(payload) {
 function render() {
 	const root = ensurePanel();
 	const state = root.__gjjTimer;
+	if (!timerEnabled) {
+		root.style.display = "none";
+		return;
+	}
 	if (!currentRun) {
 		root.classList.remove("gjj-run-error");
 		root.style.display = "none";
@@ -913,6 +991,7 @@ function startNode(id, at = nowMs()) {
 
 function startRun(event) {
 	stopRefresh();
+	if (!timerEnabled) return;
 	panelClosedForRun = false;
 	currentRun = {
 		promptId: eventPromptId(event),
@@ -1019,6 +1098,7 @@ app.registerExtension({
 	setup() {
 		ensurePanel();
 		setupListeners();
+		void loadTimerSettings(panel);
 	},
 });
 
@@ -1035,6 +1115,9 @@ globalThis.GJJ_CommonExecutionTimer = {
 		currentRun = null;
 		render();
 	},
+	getSettings: getTimerSettings,
+	setSettings: setTimerSettings,
+	resetPosition: () => resetSavedPanelPosition(ensurePanel()),
 	getCurrentRun: () => currentRun,
 	copySummary,
 };

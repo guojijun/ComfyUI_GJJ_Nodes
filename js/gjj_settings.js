@@ -8,7 +8,12 @@ import { app } from "/scripts/app.js";
 		summonModelMenu: "GJJ.SummonModel.Menu.Enabled",
 		summonModelConfirmSecondTier: "GJJ.SummonModel.SecondTierConfirm.Enabled",
 		nodeArrangerMenu: "GJJ.NodeArranger.Menu.Enabled",
+		executionTimerEnabled: "GJJ.ExecutionTimer.Enabled",
+		executionTimerNewestFirst: "GJJ.ExecutionTimer.NewestFirst",
+		executionTimerCollapsed: "GJJ.ExecutionTimer.Collapsed",
+		executionTimerResetPosition: "GJJ.ExecutionTimer.ResetPosition",
 	});
+	const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 
 	function getSettings() {
 		return app?.ui?.settings || null;
@@ -67,6 +72,50 @@ import { app } from "/scripts/app.js";
 			defaultValue: true,
 		});
 
+		addSetting(settings, {
+			id: SETTING_IDS.executionTimerEnabled,
+			name: "启用 GJJ 计时器",
+			category: ["GJJ", "系统工具", "计时器"],
+			tooltip: "工作流执行时显示 GJJ 计时器面板。",
+			type: "boolean",
+			defaultValue: true,
+			onChange: (value) => globalThis.GJJ_CommonExecutionTimer?.setSettings?.({ enabled: Boolean(value) }),
+		});
+
+		addSetting(settings, {
+			id: SETTING_IDS.executionTimerNewestFirst,
+			name: "计时记录最新项显示在顶部",
+			category: ["GJJ", "系统工具", "计时器顺序"],
+			tooltip: "关闭时按执行顺序从上到下显示。",
+			type: "boolean",
+			defaultValue: false,
+			onChange: (value) => globalThis.GJJ_CommonExecutionTimer?.setSettings?.({ newest_first: Boolean(value) }),
+		});
+
+		addSetting(settings, {
+			id: SETTING_IDS.executionTimerCollapsed,
+			name: "计时器默认折叠",
+			category: ["GJJ", "系统工具", "计时器折叠"],
+			tooltip: "此状态也会在计时器面板的折叠按钮操作后写入用户设置文件。",
+			type: "boolean",
+			defaultValue: false,
+			onChange: (value) => globalThis.GJJ_CommonExecutionTimer?.setSettings?.({ collapsed: Boolean(value) }),
+		});
+
+		addSetting(settings, {
+			id: SETTING_IDS.executionTimerResetPosition,
+			name: "计时器恢复右下角位置",
+			category: ["GJJ", "系统工具", "计时器位置"],
+			tooltip: "开启一次即可清除已保存的拖动坐标；完成后会自动关闭此开关。",
+			type: "boolean",
+			defaultValue: false,
+			onChange: async (value) => {
+				if (!value) return;
+				await globalThis.GJJ_CommonExecutionTimer?.resetPosition?.();
+				try { settings.setSettingValue?.(SETTING_IDS.executionTimerResetPosition, false); } catch (_) {}
+			},
+		});
+
 		globalThis.GJJ_Settings = {
 			ids: SETTING_IDS,
 			get: getSettingValue,
@@ -77,13 +126,29 @@ import { app } from "/scripts/app.js";
 		return true;
 	}
 
+	async function syncTimerSettingsToPanel() {
+		const settings = getSettings();
+		if (!settings) return;
+		try {
+			const response = await fetch(USER_SETTINGS_ENDPOINT);
+			if (!response.ok) return;
+			const values = (await response.json())?.settings?.execution_timer || {};
+			settings.setSettingValue?.(SETTING_IDS.executionTimerEnabled, values.enabled !== false);
+			settings.setSettingValue?.(SETTING_IDS.executionTimerNewestFirst, values.newest_first === true);
+			settings.setSettingValue?.(SETTING_IDS.executionTimerCollapsed, values.collapsed === true);
+			settings.setSettingValue?.(SETTING_IDS.executionTimerResetPosition, false);
+		} catch (_) {}
+	}
+
 	app.registerExtension({
 		name: EXTENSION_NAME,
 		setup() {
 			let attempts = 0;
 			const tryRegister = () => {
 				attempts += 1;
-				if (!registerSettings() && attempts < 10) {
+				if (registerSettings()) {
+					void syncTimerSettingsToPanel();
+				} else if (attempts < 10) {
 					setTimeout(tryRegister, 300);
 				}
 			};
