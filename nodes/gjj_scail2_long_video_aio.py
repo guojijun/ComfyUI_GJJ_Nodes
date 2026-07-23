@@ -725,7 +725,7 @@ class GJJ_SCAIL2LongVideoAIO:
             {
                 "label": "【SCAIL2基本模型】文件名包含 umt5 + xxl 的 T5 文本编码器",
                 "path": "models/text_encoders",
-                "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                "filename": "umt5_xxl_int4_convrot.safetensors",
                 "required": True,
                 "description": "Wan T5 文本编码器，用于正向提示词和负向提示词编码。默认提示词为空时可配合“条件零化”输出稳定空负向条件。",
             },
@@ -824,7 +824,7 @@ class GJJ_SCAIL2LongVideoAIO:
             "│   │   └── wan_2.1_vae.safetensors\n"
             "│   │   └── qwen_image_vae.safetensors\n"
             "│   ├── text_encoders/\n"
-            "│   │   └── umt5_xxl_fp8_e4m3fn_scaled.safetensors\n"
+            "│   │   └── umt5_xxl_int4_convrot.safetensors\n"
             "│   │   └── qwen_2.5_vl_7b_fp8_scaled.safetensors\n"
             "│   ├── clip_vision/\n"
             "│   │   └── clip_vision_h.safetensors\n"

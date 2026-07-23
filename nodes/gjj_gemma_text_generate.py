@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import inspect
 import gc
+import secrets
 from typing import Any
 
 try:
@@ -68,7 +69,7 @@ class AnyMediaType(str):
         return False
 
 
-MEDIA_INPUT_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO,*")
+MEDIA_INPUT_TYPE = AnyMediaType("IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO")
 
 CLIP_TYPES = [
     "ideogram4",
@@ -338,9 +339,10 @@ def _generate_text(
     repetition_penalty: float = 1.05,
     seed: int = 0,
     presence_penalty: float = 0.0,
+    add_output_rules: bool = True,
 ) -> str:
     effective_prompt = str(prompt or "")
-    if not bool(thinking):
+    if add_output_rules and not bool(thinking):
         assistant_rule = ollama_assistant_output_rule() or DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
         effective_prompt = f"{NO_THINK_OUTPUT_RULE}\n{assistant_rule}\n\n{effective_prompt}".strip()
     tokens = clip.tokenize(
@@ -366,9 +368,18 @@ def _generate_text(
         presence_penalty=float(presence_penalty),
         seed=int(seed),
     )
-    text = str(clip.decode(generated_ids) or "")
+    raw_text = str(clip.decode(generated_ids) or "")
+    text = _strip_after_think_end(raw_text)
     if not bool(thinking):
         text = _clean_no_think_output(text, effective_prompt)
+    if not str(text or "").strip():
+        print(
+            "[GJJ GemmaTextGenerate] 输出为空诊断: "
+            f"raw_length={len(raw_text)} "
+            f"has_think_end={bool(re.search(r'</think\\s*>', raw_text, flags=re.IGNORECASE))} "
+            f"generated_ids_type={type(generated_ids).__name__}",
+            flush=True,
+        )
     return text
 
 
@@ -392,11 +403,17 @@ def _clip_generate_compat(clip: Any, tokens: Any, **kwargs: Any) -> Any:
             usable_kwargs.pop(match.group(1), None)
 
 
-def _clean_no_think_output(text: str, prompt: str = "") -> str:
+def _strip_after_think_end(text: str) -> str:
     cleaned = str(text or "")
+    matches = list(re.finditer(r"</think\s*>", cleaned, flags=re.IGNORECASE))
+    if matches:
+        return cleaned[matches[-1].end():].lstrip()
+    return cleaned
+
+
+def _clean_no_think_output(text: str, prompt: str = "") -> str:
+    cleaned = _strip_after_think_end(text)
     cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
-        cleaned = re.sub(r"^.*?</think>\s*", "", cleaned, count=1, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<thinking\b[^>]*>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?thinking\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
@@ -652,6 +669,20 @@ def _coerce_media_for_textgen(media: Any | None):
     return _coerce_tensor_to_images(tensor, "统一媒体输入")
 
 
+def _is_audio_media(media: Any | None) -> bool:
+    if media is None:
+        return False
+    if isinstance(media, dict):
+        return "waveform" in media and ("sample_rate" in media or "sampling_rate" in media)
+    return (
+        getattr(media, "waveform", None) is not None
+        and (
+            getattr(media, "sample_rate", None) is not None
+            or getattr(media, "sampling_rate", None) is not None
+        )
+    )
+
+
 class GJJ_GemmaTextGenerate:
     CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "generate"
@@ -678,13 +709,14 @@ class GJJ_GemmaTextGenerate:
         models=[_model_spec_for_clip(DEFAULT_CLIP_NAME)],
         usage=[
             "选择 CLIP 名称和类型后，直接填写提示词执行。",
-            "可选连接统一媒体输入口：IMAGE、GJJ_BATCH_IMAGE、官方 VIDEO 和可识别张量都会统一转换为 RGB 图片批次。",
+            "可选连接统一媒体输入口：支持 IMAGE、GJJ_BATCH_IMAGE、官方 VIDEO 和 AUDIO，并按输入类型自动分流。",
             "默认类型 ideogram4 对应截图中的加载 CLIP 类型。",
             "采样模式为 off 时会关闭随机采样，仅保留最大长度等基础参数。",
         ],
         runtime=[
             "内部等价于：CLIPLoader.load_clip(...) -> clip.tokenize(...) -> clip.generate(...) -> clip.decode(...)。",
             "VIDEO 会提取全部视频帧并压平为图片批次；灰度、RGBA、通道前置和常见高维张量会自动转换为 BHWC RGB 图片。",
+            "AUDIO 保持 ComfyUI 原始音频对象，并通过 clip.tokenize(..., audio=audio) 交给模型处理。",
         ],
         model_download_url=MODEL_DOWNLOAD_URL,
         copy_text=MODEL_DOWNLOAD_URL,
@@ -802,7 +834,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "种子",
-                    "tooltip": "随机采样种子。",
+                    "tooltip": "随机采样种子。设为 0 时每次执行自动使用新种子；非 0 时固定结果，便于复现。",
                 }),
                 "presence_penalty": ("STRING", {
                     "default": "0.0",
@@ -866,14 +898,20 @@ class GJJ_GemmaTextGenerate:
             },
             "optional": {
                 "media": (MEDIA_INPUT_TYPE, {
-                    "display_name": "图片/视频",
-                    "tooltip": "统一输入口。VIDEO 与其它可识别张量会自动转换、归一化为 BHWC RGB 图片批次后喂给 Gemma。",
+                    "display_name": "媒体",
+                    "tooltip": "统一输入口，支持 IMAGE、GJJ_BATCH_IMAGE、VIDEO、AUDIO；节点会按输入类型自动分流。",
                 }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
+
+    @classmethod
+    def IS_CHANGED(cls, *args, sampling_mode: str = "on", seed: Any = 0, **kwargs):
+        if str(sampling_mode or "on") == "on" and _coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF) == 0:
+            return float("NaN")
+        return f"{sampling_mode}:{_coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF)}"
 
     def generate(
         self,
@@ -921,7 +959,12 @@ class GJJ_GemmaTextGenerate:
             import time
             start_total = time.time()
             
-            media_image = _coerce_media_for_textgen(media)
+            audio_only = _is_audio_media(media) or (media is None and _is_audio_media(audio))
+            if _is_audio_media(media):
+                audio = media
+                media_image = None
+            else:
+                media_image = _coerce_media_for_textgen(media)
             if image is None:
                 image = media_image
             elif media_image is not None:
@@ -945,9 +988,15 @@ class GJJ_GemmaTextGenerate:
             )
             
             start_gen = time.time()
+            configured_seed = _coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF)
+            effective_seed = (
+                secrets.randbits(64)
+                if str(sampling_mode or "on") == "on" and configured_seed == 0
+                else configured_seed
+            )
             text = _generate_text(
                 clip,
-                _merged_generation_prompt(system_prompt, prompt),
+                str(prompt or "") if audio_only else _merged_generation_prompt(system_prompt, prompt),
                 _coerce_int(max_length, 2048, 1, 2048),
                 sampling_mode,
                 image=image,
@@ -960,9 +1009,47 @@ class GJJ_GemmaTextGenerate:
                 top_p=_coerce_float(top_p, 0.95, 0.0, 1.0),
                 min_p=_coerce_float(min_p, 0.05, 0.0, 1.0),
                 repetition_penalty=_coerce_float(repetition_penalty, 1.05, 0.0, 5.0),
-                seed=_coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF),
+                seed=effective_seed,
                 presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
+                add_output_rules=not audio_only,
             )
+            if not str(text or "").strip():
+                retry_seed = secrets.randbits(64) if configured_seed == 0 else (effective_seed + 1) & 0xFFFFFFFFFFFFFFFF
+                base_prompt = str(prompt or "") if audio_only else _merged_generation_prompt(system_prompt, prompt)
+                retry_prompt = (
+                    f"{base_prompt}\n\n"
+                    "上一次生成没有最终正文。本次必须直接输出完整的最终答案；"
+                    "不得只输出思考过程，不得以 </think> 结束，</think> 后必须有非空正文。"
+                ).strip()
+                print(
+                    "[GJJ GemmaTextGenerate] 首次生成在输出清理后为空，"
+                    f"使用强制正文约束重新生成一次（原 thinking={bool(thinking)}）。",
+                    flush=True,
+                )
+                text = _generate_text(
+                    clip,
+                    retry_prompt,
+                    _coerce_int(max_length, 2048, 1, 2048),
+                    sampling_mode,
+                    image=image,
+                    video=video,
+                    audio=audio,
+                    thinking=False,
+                    use_default_template=use_default_template,
+                    temperature=_coerce_float(temperature, 0.7, 0.01, 2.0),
+                    top_k=_coerce_int(top_k, 64, 0, 1000),
+                    top_p=_coerce_float(top_p, 0.95, 0.0, 1.0),
+                    min_p=_coerce_float(min_p, 0.05, 0.0, 1.0),
+                    repetition_penalty=_coerce_float(repetition_penalty, 1.05, 0.0, 5.0),
+                    seed=retry_seed,
+                    presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
+                    add_output_rules=not audio_only,
+                )
+            if not str(text or "").strip():
+                raise RuntimeError(
+                    "模型连续两次生成空文本。请尝试提高最大长度，"
+                    "或改用 gemma4_e4b / qwen3.5_4b 等更大的多模态文本编码器。"
+                )
             gen_time = time.time() - start_gen
             total_time = time.time() - start_total
             print(f"[GJJ GemmaTextGenerate] 文本生成耗时: {gen_time:.2f} 秒 | 总耗时: {total_time:.2f} 秒 | thinking={thinking}", flush=True)

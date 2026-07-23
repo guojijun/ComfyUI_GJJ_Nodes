@@ -296,6 +296,9 @@ class GJJ_WanUnifiedVideoConditioning:
                     },
                 ),
             },
+            "hidden": {
+                "prompt": "PROMPT",
+            },
         }
 
     def generate(
@@ -312,7 +315,38 @@ class GJJ_WanUnifiedVideoConditioning:
         clip_vision_end_image: Any = None,
         start_image: Any = None,
         end_image: Any = None,
+        prompt: Any = None,
     ):
+        try:
+            from .gjj_video_combine_runtime import collect_prompt_variables
+
+            variables = collect_prompt_variables(prompt)
+
+            def template_value(*names):
+                return next(
+                    (variables.get(name) for name in names if variables.get(name) not in (None, "")),
+                    None,
+                )
+
+            template_width = template_value("width", "宽度")
+            template_height = template_value("height", "高度")
+            template_duration = template_value("duration", "时长")
+            template_fps = template_value("frame_rate", "fps", "帧率")
+            template_mode = template_value("wan_mode", "video_mode", "mode", "模式", "视频模式", "生成模式")
+
+            if template_width is not None:
+                width = int(float(template_width))
+            if template_height is not None:
+                height = int(float(template_height))
+            if template_duration is not None and template_fps is not None:
+                duration_value = max(0.0, float(template_duration))
+                fps_value = max(0.01, float(template_fps))
+                length = max(1, int((duration_value * fps_value // 8) * 8 + 1))
+            if template_mode is not None:
+                gjj_mode = str(template_mode)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"GJJ 模板视频参数无效：{exc}") from exc
+
         mode = _normalize_mode(gjj_mode)
         width = _align_to_16(width)
         height = _align_to_16(height)

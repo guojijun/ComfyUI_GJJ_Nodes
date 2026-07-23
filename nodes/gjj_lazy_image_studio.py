@@ -6,6 +6,7 @@ import math
 import os
 import re
 import time
+import weakref
 from typing import Any
 
 import comfy.lora
@@ -697,7 +698,7 @@ def _apply_krea2_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict
         "id": "krea2_turbo",
         "keywords": ["krea2", "krea2_turbo", "krea2-turbo"],
         "clip_type": "krea2",
-        "clip_names": ["qwen3vl_4b_fp8_scaled.safetensors"],
+        "clip_names": ["qwen3vl_4b_int4_convrot.safetensors","qwen3vl_4b_fp8_scaled.safetensors"],
         "vae_name": "qwen_image_vae.safetensors",
         "steps": 8,
         "cfg": 1.0,
@@ -2057,11 +2058,13 @@ class GJJ_LazyImageStudio:
     _shared_gpu_pin_cache: dict[str, Any] = {}
     _shared_result_cache: dict[str, dict[str, Any]] = {}
     _shared_result_order: list[str] = []
+    _instances: weakref.WeakSet = weakref.WeakSet()
     _MAX_RESULT_CACHE = 8
 
     def __init__(self):
         self._lora_cache: dict[str, Any] = {}
         self._kept_runtime: tuple[Any, Any, Any] | None = None
+        self._instances.add(self)
 
     @classmethod
     def _remember_result_cache(cls, key: str, image: torch.Tensor, preview_images: list[Any], effective_params: dict[str, Any]) -> None:
@@ -3568,12 +3571,20 @@ class GJJ_LazyImageStudio:
                 preset_driven_model = bool(unet_name_is_linked and not clip_name_is_linked)
                 exposed_clip_name = "" if preset_driven_model else clip_name1
                 legacy_clip_names = [] if preset_driven_model else [clip_name1]
-                resolved_clip_names = resolve_clip_names_for_preset(
-                    preset,
-                    clip_models,
-                    exposed_clip_name=exposed_clip_name,
-                    legacy_clip_names=legacy_clip_names,
+                selected_clip_name = (
+                    ""
+                    if preset_driven_model
+                    else _pick_available_name(exposed_clip_name, clip_models, "")
                 )
+                if selected_clip_name:
+                    resolved_clip_names = [selected_clip_name]
+                else:
+                    resolved_clip_names = resolve_clip_names_for_preset(
+                        preset,
+                        clip_models,
+                        exposed_clip_name=exposed_clip_name,
+                        legacy_clip_names=legacy_clip_names,
+                    )
                 if not resolved_clip_names:
                     resolved_clip_names.append(
                         _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
@@ -4252,6 +4263,18 @@ try:
             return web.json_response({"kind": kind, "models": models})
         except Exception as e:
             return web.json_response({"kind": "unet", "models": [], "error": str(e)}, status=500)
+
+    @PromptServer.instance.routes.post("/gjj/lazy-image-studio/clear-cache")
+    async def clear_lazy_image_studio_cache_api(request):
+        try:
+            for instance in list(GJJ_LazyImageStudio._instances):
+                instance._kept_runtime = None
+                instance._lora_cache.clear()
+            GJJ_LazyImageStudio._clear_shared_caches(runtime=True, results=True)
+            _clear_torch_and_comfy_cache()
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 except Exception:
     pass

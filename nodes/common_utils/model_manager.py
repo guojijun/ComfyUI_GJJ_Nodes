@@ -382,7 +382,7 @@ _GJJ_QUANT_TOKEN_RE = re.compile(
     r"(?i)(^|[_\-. ])("
     r"fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:8|16|32)|bf16|f16|f32|"
     r"q[2-8](?:_[a-z0-9]+)?|int(?:4|8)|"
-    r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed"
+    r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed|convrot|w4a4|padded"
     r")(?=$|[_\-. ])"
 )
 

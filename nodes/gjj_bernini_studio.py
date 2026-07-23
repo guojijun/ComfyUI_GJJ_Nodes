@@ -96,7 +96,7 @@ REMOVE_SUBTITLE_PROMPT = "将视频中字幕、背景、logo删除，其它地�
 DEFAULT_HIGH_MODEL = "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors"
 DEFAULT_LOW_MODEL = "wan2.2_bernini_r_low_noise_fp8_scaled.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
-DEFAULT_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+DEFAULT_CLIP = "umt5_xxl_int4_convrot.safetensors"
 DEFAULT_HIGH_LORA = "Bernini\\Bernini-R_LightX2V_high_noise.safetensors"
 DEFAULT_LOW_LORA = "Bernini\\Bernini-R_LightX2V_low_noise.safetensors"
 

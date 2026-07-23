@@ -352,6 +352,28 @@ class GJJ_VideoCombine:
             resolved_frame_rate = float(_frame_rate_from_input(frame_rate))
         except Exception as exc:
             raise RuntimeError(f"帧率必须是可转换为数字的 INT/FLOAT，或包含帧率的 VIDEO：{frame_rate!r}") from exc
+        template_frame_rate = None
+        try:
+            from .gjj_video_combine_runtime import collect_prompt_variables
+
+            variables = collect_prompt_variables(prompt)
+            template_frame_rate = next(
+                (
+                    variables.get(name)
+                    for name in ("frame_rate", "fps", "帧率")
+                    if variables.get(name) not in (None, "")
+                ),
+                None,
+            )
+            prompt_node = (prompt or {}).get(str(unique_id), {}) if isinstance(prompt, dict) else {}
+            frame_rate_linked = isinstance(prompt_node, dict) and isinstance(
+                (prompt_node.get("inputs") or {}).get("frame_rate"),
+                (list, tuple),
+            )
+            if template_frame_rate is not None and not frame_rate_linked:
+                resolved_frame_rate = float(template_frame_rate)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"模板帧率必须是可转换为数字的 INT/FLOAT：{template_frame_rate!r}") from exc
         resolved_audio = _audio_from_input(audio)
         format_overrides: dict[str, Any] = {}
         raw_overrides = str(format_overrides_json or "").strip()

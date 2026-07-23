@@ -947,7 +947,7 @@ function applyReferenceBrowserButtonState(node) {
 		? REFERENCE_BROWSER_BUTTON_STYLES.disabled
 		: (hasReference ? REFERENCE_BROWSER_BUTTON_STYLES.ready : REFERENCE_BROWSER_BUTTON_STYLES.empty);
 	button.textContent = "📂";
-	button.disabled = disabledByBatchLink || !hasReference;
+	button.disabled = disabledByBatchLink;
 	button.style.opacity = button.disabled ? "0.55" : "1";
 	button.style.cursor = button.disabled ? "not-allowed" : "pointer";
 	button.style.borderColor = style.border;
@@ -958,7 +958,9 @@ function applyReferenceBrowserButtonState(node) {
 	button.__gjjReferenceBrowserUrls = urls;
 	button.title = disabledByBatchLink
 		? style.title
-		: (hasReference ? `${style.title}\n共 ${urls.length} 张。` : style.title);
+		: (hasReference
+			? `点击重新选择本地参考图片。\n当前共 ${urls.length} 张。`
+			: "选择本地参考图片；支持一次选择多张。");
 	button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
 }
 
@@ -2788,8 +2790,35 @@ function renderSizePanelControls(node, body) {
 	}
 }
 
+function modelFamilyStem(value) {
+	return String(value || "")
+		.replaceAll("\\", "/")
+		.split("/")
+		.pop()
+		.replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
+		.replace(
+			/[_-](?:fp8mixed|fp\d+|bf16|float\d+|int\d+|q\d+(?:_\d+)?|e4m3fn|e5m2|nvfp4|mxfp4)(?:[_-].*)?$/i,
+			"",
+		);
+}
+
 function lazyModelTreeEntries(node) {
 	const useCheckpoint = checkpointModelSourceEnabled(node);
+	const selectedUnet = widgetValue(node, "unet_name") || "";
+	const preset = matchPreset(selectedUnet);
+	const presetKeywords = Array.isArray(preset?.keywords) ? preset.keywords : [];
+	const normalizedUnet = normalizeText(selectedUnet);
+	const canonicalUnet = canonicalizeText(selectedUnet);
+	const familyKeyword = presetKeywords
+		.map((keyword) => String(keyword || "").trim())
+		.filter(Boolean)
+		.sort((left, right) => right.length - left.length)
+		.find((keyword) => {
+			const normalizedKeyword = normalizeText(keyword);
+			const canonicalKeyword = canonicalizeText(keyword);
+			return normalizedUnet.includes(normalizedKeyword)
+				|| Boolean(canonicalKeyword && canonicalUnet.includes(canonicalKeyword));
+		}) || String(presetKeywords[0] || "").trim();
 	const entries = useCheckpoint
 		? [{
 			widget: CHECKPOINT_WIDGET_NAME,
@@ -2806,6 +2835,7 @@ function lazyModelTreeEntries(node) {
 			folder: "models/diffusion_models",
 			icon: "🟣",
 			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "gguf"],
+			searchValue: familyKeyword,
 			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
 			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
 		},
@@ -2815,6 +2845,9 @@ function lazyModelTreeEntries(node) {
 			folder: "models/text_encoders",
 			icon: "🟡",
 			anyKeywords: ["qwen", "t5", "clip", "mistral"],
+			searchValue: modelFamilyStem(
+				widgetValue(node, "clip_name1") || (preset?.clipNames || [])[0],
+			),
 			fallback: widgetValue(node, "clip_name1") || "未找到可用 CLIP 编码器",
 			description: "文本编码器；将提示词编码为当前模型族需要的条件。",
 		},
@@ -2824,6 +2857,9 @@ function lazyModelTreeEntries(node) {
 			folder: "models/vae",
 			icon: "🔴",
 			anyKeywords: ["flux2", "vae", "qwen", "ae", "default"],
+			searchValue: modelFamilyStem(
+				widgetValue(node, "vae_name") || preset?.vaeName,
+			),
 			fallback: widgetValue(node, "vae_name") || "未找到可用 VAE 解码器",
 			description: "VAE 解码器；把采样 latent 解码成最终图片。",
 		},
@@ -3482,17 +3518,21 @@ function preferredValue(values, desired) {
 	}
 	const wantedBase = wanted.split(/[\\/]/).pop() || wanted;
 	const wantedCanonical = canonicalizeText(wantedBase);
+	const wantedFamily = canonicalizeText(modelFamilyStem(wantedBase));
 	let best = "";
 	let bestScore = -1;
 	for (const candidate of list) {
 		const candidateBase = candidate.split(/[\\/]/).pop() || candidate;
 		const candidateCanonical = canonicalizeText(candidateBase);
 		const fullCanonical = canonicalizeText(candidate);
+		const candidateFamily = canonicalizeText(modelFamilyStem(candidateBase));
 		let score = -1;
 		if (candidate === wanted || candidateBase === wantedBase) {
 			score = 1000;
 		} else if (candidateCanonical === wantedCanonical || fullCanonical === wantedCanonical) {
 			score = 900;
+		} else if (wantedFamily && candidateFamily === wantedFamily) {
+			score = 850;
 		} else if (wantedCanonical && (candidateCanonical.includes(wantedCanonical) || fullCanonical.includes(wantedCanonical))) {
 			score = 700 - Math.max(0, candidateCanonical.length - wantedCanonical.length);
 		}
@@ -3637,14 +3677,12 @@ function syncBatchSourceWidget(node) {
 	const primary = getInput(node, PRIMARY_IMAGE_INPUT);
 	const linkId = primary?.link;
 	if (!linkId || !app.graph?.links) {
-		widget.value = "[]";
 		applyReferenceBrowserButtonState(node);
 		return;
 	}
 	const link = app.graph.links[linkId];
 	const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
 	if (sourceNode?.comfyClass !== "GJJ_MultiImageLoader" || Number(link?.origin_slot) !== 0) {
-		widget.value = "[]";
 		applyReferenceBrowserButtonState(node);
 		return;
 	}
@@ -4418,11 +4456,64 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjReferenceBrowserButton = referenceBrowserButton;
 
+	function hideReferenceHoverPreview() {
+		node.__gjjReferenceHoverPreview?.remove();
+		node.__gjjReferenceHoverPreview = null;
+	}
+
+	function showReferenceHoverPreview() {
+		hideReferenceHoverPreview();
+		if (referenceBrowserButton.disabled) {
+			return;
+		}
+		const urls = referenceBrowserUrls(node).slice(0, 8);
+		if (!urls.length) {
+			return;
+		}
+		const preview = document.createElement("div");
+		const columns = Math.min(4, Math.max(1, urls.length));
+		preview.style.cssText = [
+			"position:fixed",
+			"z-index:100001",
+			"display:grid",
+			`grid-template-columns:repeat(${columns},96px)`,
+			"gap:5px",
+			"padding:6px",
+			"border:1px solid #41535b",
+			"border-radius:8px",
+			"background:#10171b",
+			"box-shadow:0 10px 28px rgba(0,0,0,0.48)",
+			"pointer-events:none",
+		].join(";");
+		for (const url of urls) {
+			const image = document.createElement("img");
+			image.src = url;
+			image.alt = "参考图片预览";
+			image.loading = "eager";
+			image.style.cssText = "display:block;width:96px;height:96px;object-fit:cover;border:1px solid #33454c;border-radius:6px;background:#172026;";
+			preview.appendChild(image);
+		}
+		document.body.appendChild(preview);
+		node.__gjjReferenceHoverPreview = preview;
+		const anchor = referenceBrowserButton.getBoundingClientRect();
+		const bounds = preview.getBoundingClientRect();
+		const left = Math.max(8, Math.min(anchor.left, window.innerWidth - bounds.width - 8));
+		const below = anchor.bottom + 7;
+		const top = below + bounds.height <= window.innerHeight - 8
+			? below
+			: Math.max(8, anchor.top - bounds.height - 7);
+		preview.style.left = `${left}px`;
+		preview.style.top = `${top}px`;
+	}
+
+	referenceBrowserButton.addEventListener("mouseenter", showReferenceHoverPreview);
+	referenceBrowserButton.addEventListener("mouseleave", hideReferenceHoverPreview);
+
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
 	refreshButton.innerHTML = "🔄";
-	refreshButton.title = "刷新LoRA选项列表";
+	refreshButton.title = "刷新当前节点并清理节点缓存";
 	refreshButton.style.cssText = [
 		...emojiButtonStyle,
 		"border:1px solid #3b82f6",
@@ -4634,44 +4725,46 @@ function createButtons(node) {
 		btn.addEventListener("click", wrappedHandler, true);
 	}
 
-	// 刷新LoRA按钮
+	// 刷新当前节点并清理节点缓存
 	async function handleRefresh(event) {
 		protectEvent(event);
-		console.log("[GJJ] 刷新Lora按钮被点击", node?.id, node?.comfyClass);
-
-		const originalText = refreshButton.innerHTML;
-		refreshButton.innerHTML = "⏳ 刷新中";
+		console.log("[GJJ] 刷新节点并清理缓存", node?.id, node?.comfyClass);
 		refreshButton.disabled = true;
 		refreshButton.style.opacity = "0.7";
 
 		try {
+			const response = await api.fetchApi("/gjj/lazy-image-studio/clear-cache", {
+				method: "POST",
+			});
+			if (!response.ok) {
+				throw new Error(`清理节点缓存失败：HTTP ${response.status}`);
+			}
+			hideReferenceHoverPreview();
+			const batchSourceWidget = getWidget(node, BATCH_SOURCE_WIDGET);
+			if (batchSourceWidget) {
+				batchSourceWidget.value = "[]";
+			}
+			node.properties = node.properties || {};
+			node.properties[BATCH_SOURCE_WIDGET] = "[]";
+			if (node.__gjjLazyReferenceFileInput) {
+				node.__gjjLazyReferenceFileInput.value = "";
+			}
+			writeLiveParamSnapshot(node);
+			applyReferenceBrowserButtonState(node);
 			await refreshLoraOptions(node, false);
 			resolveLoraRowsToAvailable(node);
-			node.properties = node.properties || {};
 			node.properties[LAST_PRESET_KEY] = "";
 			applyPreset(node, true);
-			closeLazyFloatingSurfaces(node, "model");
-			node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = true;
+			closeLazyFloatingSurfaces(node);
 			stabilizeNode(node, true);
 			applySettingsVisibility(node);
 			scheduleNativePreviewClear(node);
 			GJJ_Utils.refreshNode(node);
-			refreshButton.innerHTML = "✅ 已刷新";
-			refreshButton.style.background = "linear-gradient(135deg, #064e3b, #059669)";
-			refreshButton.style.borderColor = "#10b981";
 		} catch (error) {
-			console.error("[GJJ] 刷新LoRA时发生错误:", error);
-			refreshButton.innerHTML = "❌ 失败";
-			refreshButton.style.background = "linear-gradient(135deg, #7f1d1d, #dc2626)";
-			refreshButton.style.borderColor = "#ef4444";
+			console.error("[GJJ] 刷新节点或清理缓存失败:", error);
 		} finally {
-			setTimeout(() => {
-				refreshButton.innerHTML = originalText;
-				refreshButton.disabled = false;
-				refreshButton.style.opacity = "1";
-				refreshButton.style.background = "linear-gradient(135deg, #1e3a5f, #1e40af)";
-				refreshButton.style.borderColor = "#3b82f6";
-			}, 1000);
+			refreshButton.disabled = false;
+			refreshButton.style.opacity = "1";
 		}
 	}
 
@@ -4763,16 +4856,71 @@ function createButtons(node) {
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
-	function handleReferenceBrowser(event) {
-		protectEvent(event);
-		applyReferenceBrowserButtonState(node);
-		const urls = Array.isArray(referenceBrowserButton.__gjjReferenceBrowserUrls)
-			? referenceBrowserButton.__gjjReferenceBrowserUrls
-			: [];
-		if (referenceBrowserButton.disabled || !urls.length) {
+	async function chooseLocalReferenceImages() {
+		if (!node.__gjjLazyReferenceFileInput) {
+			const fileInput = document.createElement("input");
+			fileInput.type = "file";
+			fileInput.accept = "image/png,image/jpeg,image/webp,image/bmp,image/gif,image/avif,image/tiff";
+			fileInput.multiple = true;
+			fileInput.style.display = "none";
+			document.body.appendChild(fileInput);
+			node.__gjjLazyReferenceFileInput = fileInput;
+		}
+		const fileInput = node.__gjjLazyReferenceFileInput;
+		fileInput.value = "";
+		const files = await new Promise((resolve) => {
+			fileInput.onchange = () => resolve(Array.from(fileInput.files || []));
+			fileInput.click();
+		});
+		if (!files.length) {
 			return;
 		}
-		window.open(urls[0], "_blank", "noopener,noreferrer");
+		const selected = [];
+		for (const file of files) {
+			const form = new FormData();
+			form.append("image", file, file.name);
+			form.append("type", "input");
+			form.append("overwrite", "true");
+			const response = await api.fetchApi("/upload/image", { method: "POST", body: form });
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok) {
+				throw new Error(data?.error || `图片上传失败：${file.name}`);
+			}
+			const filename = String(data?.name || data?.filename || data?.image || file.name || "");
+			if (filename) {
+				selected.push({
+					filename,
+					subfolder: String(data?.subfolder || ""),
+					type: String(data?.type || "input"),
+				});
+			}
+		}
+		const raw = JSON.stringify(selected);
+		const widget = getWidget(node, BATCH_SOURCE_WIDGET);
+		if (widget) {
+			widget.value = raw;
+		}
+		node.properties = node.properties || {};
+		node.properties[BATCH_SOURCE_WIDGET] = raw;
+		writeLiveParamSnapshot(node);
+		applyReferenceBrowserButtonState(node);
+		node.graph?.change?.();
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+
+	async function handleReferenceBrowser(event) {
+		protectEvent(event);
+		hideReferenceHoverPreview();
+		applyReferenceBrowserButtonState(node);
+		if (referenceBrowserButton.disabled) {
+			return;
+		}
+		try {
+			await chooseLocalReferenceImages();
+		} catch (error) {
+			console.error("[GJJ] 本地参考图片选择失败:", error);
+			referenceBrowserButton.title = String(error?.message || error || "本地参考图片选择失败");
+		}
 	}
 
 	function handleModelSettings(event) {
@@ -5494,8 +5642,12 @@ function applyPreset(node, force = false) {
 	const vaeWidget = getWidget(node, "vae_name");
 	const clipValues = Array.isArray(clipWidget?.options?.values) ? clipWidget.options.values : [];
 	const vaeValues = Array.isArray(vaeWidget?.options?.values) ? vaeWidget.options.values : [];
+	const currentClipName = String(clipWidget?.value || "");
+	const prioritizedClipValues = currentClipName
+		? [currentClipName, ...clipValues.filter((value) => String(value) !== currentClipName)]
+		: clipValues;
 
-	setWidgetValue(clipWidget, preferredValue(clipValues, (preset.clipNames || [])[0] || ""));
+	setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, (preset.clipNames || [])[0] || ""));
 	setWidgetValue(vaeWidget, preferredValue(vaeValues, preset.vaeName || ""));
 	if (Number.isFinite(preset.steps)) {
 		setWidgetValue(getWidget(node, "steps"), Number(preset.steps));

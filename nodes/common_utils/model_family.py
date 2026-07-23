@@ -17,6 +17,7 @@ from .text_tools import (
     gjjutils_pick_available_name as _pick_available_name,
     gjjutils_dedupe_keep_order as _dedupe_keep_order,
 )
+from .model_manager import gjjutils_model_stem_without_quant
 
 # ============================================================================
 # 公共函数（供其他节点复用）
@@ -332,8 +333,20 @@ def gjjutils_model_family_resolve_clip_names(
 
     # 通用处理：逐个匹配推荐名称
     resolved = []
-    for recommended_name in recommended_clip_names:
-        chosen = matcher(recommended_name, clip_models, recommended_name)
+    for index, recommended_name in enumerate(recommended_clip_names):
+        requested_name = exposed_clip_name if index == 0 and exposed_clip_name else recommended_name
+        chosen = matcher(requested_name, clip_models, recommended_name)
+        if chosen not in clip_models:
+            recommended_family = gjjutils_model_stem_without_quant(recommended_name)
+            chosen = next(
+                (
+                    candidate
+                    for candidate in clip_models
+                    if recommended_family
+                    and gjjutils_model_stem_without_quant(candidate) == recommended_family
+                ),
+                "",
+            )
         if chosen:
             resolved.append(chosen)
     return resolved

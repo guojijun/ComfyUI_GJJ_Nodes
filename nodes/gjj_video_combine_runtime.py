@@ -382,10 +382,15 @@ def _collect_setnode_direct_variables(inputs: dict[str, Any], node_data: dict[st
 
 
 def _collect_setnode_variables(prompt: Any) -> dict[str, Any]:
-    variables: dict[str, Any] = {}
+    try:
+        from .gjj_template_params import collect_template_prompt_values
+
+        variables: dict[str, Any] = collect_template_prompt_values(prompt)
+    except Exception:
+        variables = {}
     for _node_id, node_data in _prompt_node_items(prompt):
         class_type = str(node_data.get("class_type") or node_data.get("type") or "")
-        if class_type not in {"GJJ_TemplateSetVariables", "GJJ_SETNODE", "GJJ_SetNode", "GJJ_TemplateParams"}:
+        if class_type not in {"GJJ_TemplateSetVariables", "GJJ_SETNODE", "GJJ_SetNode"}:
             continue
         inputs = node_data.get("inputs")
         if not isinstance(inputs, dict):
@@ -397,41 +402,27 @@ def _collect_setnode_variables(prompt: Any) -> dict[str, Any]:
         schema_json = inputs.get("schema_json", "[]")
         value_map = _safe_json_object(values_json)
         try:
-            if class_type == "GJJ_TemplateParams":
-                from .gjj_template_params import _apply_schema_field_settings, parse_template
+            from .gjj_template_set_variables import parse_template
 
-                fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
-                for field in fields:
-                    key = str(field.get("key") or "")
-                    label = str(field.get("label") or "")
-                    if not key and not label:
-                        continue
-                    value = value_map.get(key, value_map.get(label, field.get("default", field.get("value", ""))))
-                    for name in (key, label, field.get("broadcast_key")):
-                        name = str(name or "").strip()
-                        if name:
-                            variables[name] = value
-                    for name in field.get("broadcast_keys") or []:
-                        name = str(name or "").strip()
-                        if name:
-                            variables[name] = value
-            else:
-                from .gjj_template_set_variables import parse_template
-
-                for field in parse_template(template_text):
-                    key = str(field.get("key") or "")
-                    label = str(field.get("label") or "")
-                    input_key = str(field.get("input_key") or f"var_{key}")
-                    if not key and not label:
-                        continue
-                    value = value_map.get(key, value_map.get(input_key, field.get("value", field.get("default", ""))))
-                    for name in (key, label, input_key):
-                        name = str(name or "").strip()
-                        if name:
-                            variables[name] = value
+            for field in parse_template(template_text):
+                key = str(field.get("key") or "")
+                label = str(field.get("label") or "")
+                input_key = str(field.get("input_key") or f"var_{key}")
+                if not key and not label:
+                    continue
+                value = value_map.get(key, value_map.get(input_key, field.get("value", field.get("default", ""))))
+                for name in (key, label, input_key):
+                    name = str(name or "").strip()
+                    if name:
+                        variables[name] = value
         except Exception:
             LOGGER.debug("收集 GJJ 文件名变量失败：%s", class_type, exc_info=True)
     return variables
+
+
+def collect_prompt_variables(prompt: Any) -> dict[str, Any]:
+    """Return template/set-node values, including direct API param_* overrides."""
+    return _collect_setnode_variables(prompt)
 
 
 def _workflow_link_lookup(extra_pnginfo: Any) -> dict[str, tuple[str, int]]:

@@ -1233,6 +1233,10 @@ export class GJJ_Utils {
         const search = document.createElement("input");
         search.type = "text";
         search.placeholder = "输入关键词过滤；回车使用第一个匹配模型";
+        const initialSearch = typeof entry?.searchValue === "function"
+            ? entry.searchValue(entry, widget, node)
+            : entry?.searchValue;
+        search.value = String(initialSearch || "");
         search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
         const list = document.createElement("div");
         list.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;";

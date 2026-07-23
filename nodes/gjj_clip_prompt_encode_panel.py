@@ -308,7 +308,10 @@ class GJJ_CLIPPromptEncodePanel:
                     },
                 ),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+            },
         }
 
     @classmethod
@@ -331,6 +334,21 @@ class GJJ_CLIPPromptEncodePanel:
             raise RuntimeError("请连接 CLIP 输入。")
 
         external_positive = kwargs.get("positive_prompt_input", None)
+        if external_positive is None:
+            try:
+                from .gjj_video_combine_runtime import collect_prompt_variables
+
+                variables = collect_prompt_variables(kwargs.get("prompt"))
+                external_positive = next(
+                    (
+                        variables.get(name)
+                        for name in ("positive_text_input", "positive_prompt", "prompt", "提示词", "正向提示词")
+                        if variables.get(name) not in (None, "")
+                    ),
+                    None,
+                )
+            except Exception:
+                external_positive = None
         translation_enabled = as_bool(kwargs.get("translation_enabled", False))
         translation_device = str(kwargs.get("translation_device", "auto") or "auto")
         translation_unload_after_use = as_bool(kwargs.get("translation_unload_after_use", False))

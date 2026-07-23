@@ -11,8 +11,9 @@ const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "ollama_assistant";
 const WORKFLOW_VALUES_PROPERTY = "gjj_gemma_text_generate_values";
 const MEDIA_INPUT = "media";
-const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
 const LEGACY_MEDIA_INPUTS = new Set(["image", "video", "图像", "视频帧", "媒体", "图片/视频"]);
+const AUDIO_INPUT = "audio";
 const HIDDEN_WIDGETS = new Set([
 	"clip_name",
 	"clip_type",
@@ -633,6 +634,7 @@ function normalizeMediaInput(node) {
 	let mediaInput = node.inputs.find((input) => String(input?.name || "") === MEDIA_INPUT);
 	if (!mediaInput) {
 		mediaInput = node.inputs.find((input) => LEGACY_MEDIA_INPUTS.has(String(input?.name || "")) && input?.link != null)
+			|| node.inputs.find((input) => String(input?.name || "") === AUDIO_INPUT && input?.link != null)
 			|| node.inputs.find((input) => LEGACY_MEDIA_INPUTS.has(String(input?.name || "")));
 	}
 	if (!mediaInput) {
@@ -642,9 +644,54 @@ function normalizeMediaInput(node) {
 	if (!mediaInput) return;
 	mediaInput.name = MEDIA_INPUT;
 	mediaInput.type = MEDIA_INPUT_TYPE;
-	mediaInput.label = "图片/视频";
-	mediaInput.localized_name = "图片/视频";
-	mediaInput.tooltip = "兼容 GJJ_BATCH_IMAGE、IMAGE 和官方 VIDEO；VIDEO 与其它张量会先转换为 RGB 图片批次。";
+	mediaInput.label = "媒体";
+	mediaInput.localized_name = "媒体";
+	mediaInput.tooltip = "统一支持 IMAGE、GJJ_BATCH_IMAGE、VIDEO、AUDIO；节点会按输入类型自动分流。";
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		if (input !== mediaInput && String(input?.name || "") === AUDIO_INPUT) {
+			node.removeInput?.(index);
+		}
+	}
+}
+
+function graphLink(node, linkId) {
+	if (linkId && typeof linkId === "object") return linkId;
+	const links = node?.graph?.links ?? app?.graph?.links;
+	if (links instanceof Map) return links.get(linkId) ?? links.get(String(linkId)) ?? null;
+	if (Array.isArray(links)) return links[Number(linkId)] ?? null;
+	return links?.[linkId] ?? links?.[String(linkId)] ?? null;
+}
+
+function syncMediaInputRoute(node) {
+	const input = node?.inputs?.find((item) => String(item?.name || "") === MEDIA_INPUT);
+	if (!input) return;
+	if (input.link == null) {
+		input.type = MEDIA_INPUT_TYPE;
+		input.label = "媒体";
+		input.localized_name = "媒体";
+		return;
+	}
+	const link = graphLink(node, input.link);
+	const originId = Array.isArray(link) ? link[1] : (link?.origin_id ?? link?.originId);
+	const originSlot = Number(Array.isArray(link) ? link[2] : (link?.origin_slot ?? link?.originSlot));
+	const graph = node?.graph ?? app?.graph;
+	const origin = graph?.getNodeById?.(originId)
+		?? graph?._nodes_by_id?.[originId]
+		?? graph?._nodes?.find?.((item) => String(item?.id) === String(originId));
+	const linkType = Array.isArray(link) ? link[5] : link?.type;
+	const rememberedType = String(node.__gjjGemmaMediaSourceType || "").toUpperCase();
+	const sourceType = String(origin?.outputs?.[originSlot]?.type || rememberedType || linkType || "").toUpperCase();
+	const sourceTypes = sourceType.split(",").map((part) => part.trim()).filter(Boolean);
+	const actualType = sourceTypes.length === 1 && ["IMAGE", "GJJ_BATCH_IMAGE", "VIDEO", "AUDIO"].includes(sourceTypes[0])
+		? sourceTypes[0]
+		: null;
+	if (!actualType) return;
+	input.type = actualType;
+	input.label = actualType === "AUDIO" ? "媒体 · 音频" : `媒体 · ${actualType}`;
+	input.localized_name = input.label;
+	if (Array.isArray(link)) link[5] = actualType;
+	else if (link) link.type = actualType;
 }
 
 function placePromptAfterPanel(node) {
@@ -692,7 +739,7 @@ function buildSettings(node) {
 	const minP = numericControl(node, "min_p", "Min P", 0, 1, 0.01);
 	const repetitionPenalty = numericControl(node, "repetition_penalty", "重复惩罚", 0, 5, 0.01);
 	const presencePenalty = numericControl(node, "presence_penalty", "出现惩罚", 0, 5, 0.01);
-	const seed = numericControl(node, "seed", "随机采样种子", 0, Number.MAX_SAFE_INTEGER, 1, true);
+	const seed = numericControl(node, "seed", "随机采样种子；0 表示每次自动使用新种子，非 0 表示固定结果", 0, Number.MAX_SAFE_INTEGER, 1, true);
 	numeric.append(
 		parameterField("📐 最大长度", maxLength),
 		parameterField("🌡 温度", temperature),
@@ -861,7 +908,9 @@ function syncPanel(node) {
 	state.settingsButton.title = state.expanded ? "收起生成参数和提示词设置" : "展开生成参数和提示词设置";
 	state.settings.style.display = state.expanded ? "flex" : "none";
 	state.modelPanel.style.display = state.modelExpanded ? "flex" : "none";
-	state.modelPanelButton.classList.toggle("active", state.modelExpanded || keepModel);
+	state.modelPanelButton.classList.toggle("active", state.modelExpanded);
+	state.modelPanelButton.classList.toggle("keep-model-on", keepModel);
+	state.modelPanelButton.classList.toggle("keep-model-off", !keepModel);
 	state.modelPanelButton.title = state.modelExpanded
 		? "收起模型设置"
 		: `展开模型设置。${keepModel ? "保持模型已开启。" : "保持模型未开启。"}`;
@@ -909,6 +958,9 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-button:disabled { opacity:.72; cursor:wait; }
 		.gjj-gemma-assistant-panel .gjj-ia-button:hover { background:#24333b; border-color:#5f8590; }
 		.gjj-gemma-assistant-panel .gjj-ia-button.active { background:#24452d; border-color:#65a271; color:#ebffee; }
+		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-off { background:#272127; border-color:#66505f; color:#e4d9df; }
+		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-on { background:#1f5131; border-color:#72c58a; color:#f0fff4; box-shadow:0 0 0 1px rgba(114,197,138,.18) inset; }
+		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-on:hover { background:#28633d; border-color:#91d8a4; }
 		.gjj-gemma-assistant-panel .gjj-ia-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.88); }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-panel { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(91,121,130,.78); border-radius:8px; background:rgba(13,22,25,.94); box-shadow:0 10px 28px rgba(0,0,0,.32); }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
@@ -1031,6 +1083,7 @@ function stabilize(node) {
 	restorePromptWidget(node);
 	ensurePromptInput(node);
 	normalizeMediaInput(node);
+	syncMediaInputRoute(node);
 	placePromptAfterPanel(node);
 	syncPanel(node);
 }
@@ -1068,6 +1121,24 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
+			const link = args[3];
+			const targetSlot = Number(Array.isArray(link) ? link[4] : (link?.target_slot ?? link?.targetSlot));
+			const mediaSlot = this.inputs?.findIndex?.((input) =>
+				String(input?.name || "") === MEDIA_INPUT || LEGACY_MEDIA_INPUTS.has(String(input?.name || "")));
+			if (mediaSlot >= 0 && targetSlot === mediaSlot) {
+				const connected = args[2] !== false && link != null;
+				if (connected) {
+					const originId = Array.isArray(link) ? link[1] : (link?.origin_id ?? link?.originId);
+					const originSlot = Number(Array.isArray(link) ? link[2] : (link?.origin_slot ?? link?.originSlot));
+					const graph = this.graph ?? app?.graph;
+					const origin = graph?.getNodeById?.(originId)
+						?? graph?._nodes_by_id?.[originId]
+						?? graph?._nodes?.find?.((item) => String(item?.id) === String(originId));
+					this.__gjjGemmaMediaSourceType = String(origin?.outputs?.[originSlot]?.type || "");
+				} else {
+					this.__gjjGemmaMediaSourceType = "";
+				}
+			}
 			schedule(this);
 			return result;
 		};

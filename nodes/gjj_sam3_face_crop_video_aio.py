@@ -54,7 +54,7 @@ MODEL_QUANT_RE = re.compile(
 BERNINI_AIO_HIGH_MODEL = "wan2.2_bernini_r_high_noise_int8_convrot_s2v.safetensors"
 BERNINI_AIO_LOW_MODEL = "wan2.2_bernini_r_low_noise_int8_convrot_s2v.safetensors"
 BERNINI_AIO_VAE = "wan_2.1_vae.safetensors"
-BERNINI_AIO_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+BERNINI_AIO_CLIP = "umt5_xxl_int4_convrot.safetensors"
 BERNINI_AIO_AUDIO_ENCODER = "wav2vec2_large_english_fp16.safetensors"
 BERNINI_AIO_HIGH_LORA = "Bernini/Bernini-R_LightX2V_high_noise.safetensors"
 BERNINI_AIO_LOW_LORA = "Bernini/Bernini-R_LightX2V_low_noise.safetensors"
@@ -2113,7 +2113,7 @@ class GJJ_BerniniSpeakerSegmentAIO:
             "wan2.2_bernini_r_low_noise_int8_convrot_s2v.safetensors",
         )
         vae_models, vae_default = _filtered_model_choices("vae", ["wan", "2.1", "vae"], "wan_2.1_vae.safetensors")
-        clip_models, clip_default = _filtered_model_choices("text_encoders", ["umt5", "xxl"], "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
+        clip_models, clip_default = _filtered_model_choices("text_encoders", ["umt5", "xxl"], "umt5_xxl_int4_convrot.safetensors")
         audio_models, audio_default = _filtered_model_choices("audio_encoders", ["wav2vec2"], "wav2vec2_large_english_fp16.safetensors")
         high_loras, high_lora_default = _filtered_model_choices("loras", ["bernini", "lightx2v", "high"], "Bernini/Bernini-R_LightX2V_high_noise.safetensors")
         low_loras, low_lora_default = _filtered_model_choices("loras", ["bernini", "lightx2v", "low"], "Bernini/Bernini-R_LightX2V_low_noise.safetensors")

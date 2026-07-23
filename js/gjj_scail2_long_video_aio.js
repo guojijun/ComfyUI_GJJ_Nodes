@@ -113,7 +113,7 @@ const MODEL_FIELDS = [
 const MODEL_FIELD_FALLBACKS = {
 	model_file: "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors",
 	vae_file: "wan_2.1_vae.safetensors",
-	text_encoder_file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+	text_encoder_file: "umt5_xxl_int4_convrot.safetensors",
 	clip_vision_file: "clip_vision_h.safetensors",
 	accel_lora_file: "wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
 	dpo_lora_file: "wan/wan2.1_SCAIL_2_DPO_lora_bf16.safetensors",

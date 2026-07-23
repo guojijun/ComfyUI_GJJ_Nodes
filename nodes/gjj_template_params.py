@@ -1429,6 +1429,123 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _field_names(field: dict[str, Any]) -> list[str]:
+    names = [
+        field.get("key"),
+        field.get("label"),
+        field.get("broadcast_key"),
+        *(field.get("broadcast_keys") or []),
+    ]
+    result: list[str] = []
+    for name in names:
+        text = str(name or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _api_input_value(
+    inputs: dict[str, Any],
+    field: dict[str, Any],
+    *,
+    raw_prompt_inputs: bool = False,
+    prompt_node_ids: set[str] | None = None,
+) -> tuple[bool, Any]:
+    candidates: list[str] = []
+    for name in _field_names(field):
+        for candidate in (f"param_{name}", name):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    for candidate in candidates:
+        if candidate not in inputs:
+            continue
+        value = inputs.get(candidate)
+        # ComfyUI 的 [node_id, slot] 表示连线，不是第三方直接提交的常量。
+        is_prompt_link = (
+            raw_prompt_inputs
+            and isinstance(value, list)
+            and len(value) == 2
+            and str(value[0]) in (prompt_node_ids or set())
+            and isinstance(value[1], int)
+        )
+        if is_prompt_link:
+            continue
+        return True, value
+    return False, None
+
+
+def resolve_template_values(
+    template_text: Any,
+    values_json: Any = "{}",
+    schema_json: Any = "[]",
+    api_inputs: Any = None,
+    *,
+    raw_prompt_inputs: bool = False,
+    prompt_node_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Resolve arbitrary TemplateParams API payloads from the declared schema."""
+    fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
+    stored = values_from_json(values_json)
+    supplied = api_inputs if isinstance(api_inputs, dict) else {}
+    resolved: dict[str, Any] = {}
+    for field in fields:
+        names = _field_names(field)
+        if not names:
+            continue
+        found, value = _api_input_value(
+            supplied,
+            field,
+            raw_prompt_inputs=raw_prompt_inputs,
+            prompt_node_ids=prompt_node_ids,
+        )
+        if not found:
+            value = next(
+                (stored.get(name) for name in names if name in stored),
+                field.get("default", field.get("value", "")),
+            )
+        for name in names:
+            resolved[name] = value
+    # 兼容第三方直接追加任意 param_xxx，而模板结构尚未同步到 schema_json 的情况。
+    for name, value in supplied.items():
+        text = str(name or "").strip()
+        is_prompt_link = (
+            raw_prompt_inputs
+            and isinstance(value, list)
+            and len(value) == 2
+            and str(value[0]) in (prompt_node_ids or set())
+            and isinstance(value[1], int)
+        )
+        if not text.startswith("param_") or is_prompt_link:
+            continue
+        resolved[text[6:]] = value
+    return fields, resolved
+
+
+def collect_template_prompt_values(prompt: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if not isinstance(prompt, dict):
+        return values
+    prompt_node_ids = {str(node_id) for node_id in prompt}
+    for node_data in prompt.values():
+        if not isinstance(node_data, dict):
+            continue
+        if str(node_data.get("class_type") or node_data.get("type") or "") != NODE_NAME:
+            continue
+        inputs = node_data.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        _, resolved = resolve_template_values(
+            inputs.get("template_text", ""),
+            inputs.get("values_json", "{}"),
+            inputs.get("schema_json", "[]"),
+            inputs,
+            raw_prompt_inputs=True,
+            prompt_node_ids=prompt_node_ids,
+        )
+        values.update(resolved)
+    return values
+
+
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
@@ -1498,14 +1615,12 @@ class GJJ_TemplateParams:
         )
 
     def output_params(self, template_text: str = "", values_json: str = "{}", schema_json: str = "[]", **kwargs):
-        fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
-        value_map = values_from_json(values_json)
+        fields, value_map = resolve_template_values(template_text, values_json, schema_json, kwargs)
         externally_supplied: set[str] = set()
         for field in fields:
             key = str(field.get("key") or "")
-            input_name = f"param_{key}"
-            if key and input_name in kwargs and kwargs[input_name] is not None:
-                value_map[key] = kwargs[input_name]
+            supplied, _value = _api_input_value(kwargs, field)
+            if key and supplied:
                 externally_supplied.add(key)
         outputs: list[Any] = []
         warnings: list[str] = []

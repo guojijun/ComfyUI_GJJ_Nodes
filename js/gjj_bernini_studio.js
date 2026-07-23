@@ -167,7 +167,7 @@ const DEFAULT_VALUES = {
 	high_model: "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors",
 	low_model: "wan2.2_bernini_r_low_noise_fp8_scaled.safetensors",
 	vae_name: "wan_2.1_vae.safetensors",
-	clip_name: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+	clip_name: "umt5_xxl_int4_convrot.safetensors",
 	high_lora: "Bernini-R_LightX2V_high_noise.safetensors",
 	low_lora: "Bernini-R_LightX2V_low_noise.safetensors",
 	translation_enabled: false,
