@@ -108,8 +108,12 @@ from .gjj_multi_image_loader import (
     parse_selected_images,
     resolve_input_image_path,
 )
-from .gjj_krea2_edit_rebalance import (
-    GJJ_Krea2EditRebalance as _GJJKrea2EditRebalance,
+from .gjj_krea2_grounded_encode import (
+    GJJ_Krea2EditGroundedEncode as _GJJKrea2EditGroundedEncode,
+)
+from .gjj_krea2_edit_model_patch import (
+    GJJ_Krea2EditModelPatch as _GJJKrea2EditModelPatch,
+    LORA_FILENAME as KREA2_IDENTITY_EDIT_LORA,
 )
 from .gjj_text_encode_boogu_edit import GJJ_TextEncodeBooguEdit
 
@@ -2784,41 +2788,57 @@ class GJJ_LazyImageStudio:
 
     def _encode_krea2_image_edit(
         self,
+        model,
         clip,
+        vae,
         prompt: str,
+        negative_prompt: str,
         pairs: list[dict[str, Any]],
         width: int,
         height: int,
         batch_size: int,
-        image_tokens: str = "normal",
+        identity_lora_strength: float = 1.0,
     ):
         if not pairs:
             raise RuntimeError("Krea2 图生图分支至少需要一张有效参考图。")
 
         reference_images = [
             pair["image"]
-            for pair in pairs
+            for pair in pairs[:2]
             if isinstance(pair.get("image"), torch.Tensor)
         ]
         if not reference_images:
             raise RuntimeError("Krea2 图生图分支没有解析到有效参考图张量。")
+        if len(pairs) > 2:
+            print(
+                f"[GJJ_LazyImageStudio] Krea2 Identity Edit 最多支持两张参考图，"
+                f"当前收到 {len(pairs)} 张，仅使用前两张。"
+            )
 
-        positive = _GJJKrea2EditRebalance().main(
-            text=str(prompt or ""),
+        positive, negative = _GJJKrea2EditGroundedEncode().encode(
             clip=clip,
-            refocus_strength=0.80,
-            guidance_strength=0.500,
-            enable_split=True,
             image=reference_images,
-            image_tokens=image_tokens,
-        )[0]
-        negative = zero_out_conditioning(positive)
-        latent_out = EmptyLatentImage().generate(
+            positive_prompt=str(prompt or ""),
+            negative_prompt=str(negative_prompt or ""),
+            grounding_px=768,
+            system_prompt="",
+        )
+        patched_model, _output_vae = _GJJKrea2EditModelPatch().patch(
+            model=model,
+            vae=vae,
+            source_image=reference_images,
+            lora_name=KREA2_IDENTITY_EDIT_LORA,
+            lora_strength=float(identity_lora_strength),
+            fit_mode="适配",
+            reference_strength=4.0,
+            earlier_reference_strength=1.0,
+        )
+        latent_out = _empty_sd3_latent(
             int(width),
             int(height),
             max(1, int(batch_size)),
-        )[0]
-        return positive, negative, latent_out
+        )
+        return patched_model, positive, negative, latent_out
 
     def _rewrite_qwen_image_references(self, prompt: str, image_count: int = QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES) -> str:
         text = str(prompt or "")
@@ -3815,6 +3835,7 @@ class GJJ_LazyImageStudio:
                 local_height = int(height)
                 flux2_sample_size = None
                 krea2_reference_sample = False
+                krea2_patched_model = None
                 boogu_turbo_sample = False
                 effective_negative_prompt = (
                     _ltx_negative_prompt_text(negative_prompt)
@@ -3889,18 +3910,38 @@ class GJJ_LazyImageStudio:
                     local_height = int(boogu_height)
                     boogu_turbo_sample = True
                 elif pairs and _is_krea2_family(unet_name, resolved_clip_type, preset):
+                    ordered_krea2_pairs = _reorder_pairs_by_main_index(
+                        pairs, int(main_image_index)
+                    )
+                    configured_lora_text = (
+                        f"{str(lora_data or '')}\n{str(lora_chain_config or '')}"
+                    ).lower()
+                    identity_lora_strength = (
+                        0.0
+                        if KREA2_IDENTITY_EDIT_LORA.lower() in configured_lora_text
+                        else 1.0
+                    )
                     _send_status(
                         unique_id,
-                        f"4/6 编码 Krea2 图生图条件{status_suffix}（{len(pairs)} 张，溶图模式）...",
+                        f"4/6 按 Krea2 Identity Edit 工作流编码{status_suffix}"
+                        f"（{min(len(ordered_krea2_pairs), 2)} 张参考图）...",
                     )
-                    positive, negative, latent_out = self._encode_krea2_image_edit(
+                    (
+                        krea2_patched_model,
+                        positive,
+                        negative,
+                        latent_out,
+                    ) = self._encode_krea2_image_edit(
+                        model=model,
                         clip=clip,
+                        vae=vae,
                         prompt=prompt_text,
-                        pairs=pairs,
+                        negative_prompt=effective_negative_prompt,
+                        pairs=ordered_krea2_pairs,
                         width=local_width,
                         height=local_height,
                         batch_size=int(batch_size),
-                        image_tokens="normal",
+                        identity_lora_strength=identity_lora_strength,
                     )
                     krea2_reference_sample = True
                 elif pairs and resolved_clip_type == "flux2":
@@ -3987,7 +4028,11 @@ class GJJ_LazyImageStudio:
                 _send_status(unique_id, f"5/6 采样生成图像{status_suffix}...")
                 positive = _limit_conditioning_batch(positive, int(batch_size))
                 negative = _limit_conditioning_batch(negative, int(batch_size))
-                sample_model = model
+                sample_model = (
+                    krea2_patched_model
+                    if krea2_patched_model is not None
+                    else model
+                )
                 if is_ltx_runtime:
                     _send_status(unique_id, f"5/6 应用 LTX NAG 引导{status_suffix}...")
                     nag_conditioning = self._encode_text_conditioning(

@@ -158,6 +158,58 @@ def _default_clip_name(options: list[str]) -> str:
     return options[0] if options else DEFAULT_CLIP_NAME
 
 
+def _resolve_available_clip_name(clip_name: str) -> str:
+    requested = str(clip_name or "").strip()
+    if requested and _find_text_encoder_path(requested):
+        return requested
+
+    compatible = [
+        item for item in _text_encoder_options()
+        if _find_text_encoder_path(item)
+        and not _basename(item).lower().endswith(".gguf")
+        and (
+            "qwen3.5" in _basename(item).lower()
+            or "qwen35" in _basename(item).lower()
+            or "gemma4" in _basename(item).lower()
+        )
+    ]
+    if not compatible:
+        return requested or DEFAULT_CLIP_NAME
+
+    requested_name = _basename(requested).lower()
+    requested_tokens = {
+        token for token in re.split(r"[^a-z0-9.]+", requested_name)
+        if token and token not in {"safetensors", "mixed", "hybrid", "scaled"}
+    }
+
+    def score(candidate: str) -> tuple[int, int, int, int, str]:
+        name = _basename(candidate).lower()
+        tokens = {
+            token for token in re.split(r"[^a-z0-9.]+", name)
+            if token and token not in {"safetensors", "mixed", "hybrid", "scaled"}
+        }
+        same_family = 0
+        if "gemma4" in requested_name and "gemma4" in name:
+            same_family = 200
+        elif (
+            ("qwen3.5" in requested_name or "qwen35" in requested_name)
+            and ("qwen3.5" in name or "qwen35" in name)
+        ):
+            same_family = 200
+        keyword_priority = 2 if ("qwen3.5" in name or "qwen35" in name) else 1
+        default_priority = 1 if _basename(candidate) == DEFAULT_CLIP_NAME else 0
+        return same_family, len(requested_tokens & tokens), keyword_priority, default_priority, name
+
+    replacement = max(compatible, key=score)
+    if requested and replacement != requested:
+        print(
+            f"[GJJ GemmaTextGenerate] 模型名称已失效，自动替换："
+            f"{requested} -> {replacement}",
+            flush=True,
+        )
+    return replacement
+
+
 def _model_spec_for_clip(clip_name: str) -> dict[str, str]:
     filename = _basename(clip_name) or DEFAULT_CLIP_NAME
     # 确保 subdir 使用相对路径格式（不带 models/ 前缀）
@@ -341,10 +393,13 @@ def _generate_text(
     presence_penalty: float = 0.0,
     add_output_rules: bool = True,
 ) -> str:
+    import time
+
     effective_prompt = str(prompt or "")
     if add_output_rules and not bool(thinking):
         assistant_rule = ollama_assistant_output_rule() or DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
         effective_prompt = f"{NO_THINK_OUTPUT_RULE}\n{assistant_rule}\n\n{effective_prompt}".strip()
+    tokenize_started = time.perf_counter()
     tokens = clip.tokenize(
         effective_prompt,
         image=image,
@@ -354,7 +409,9 @@ def _generate_text(
         video=video,
         audio=audio,
     )
+    tokenize_seconds = time.perf_counter() - tokenize_started
     do_sample = str(sampling_mode or "on") == "on"
+    generate_started = time.perf_counter()
     generated_ids = _clip_generate_compat(
         clip,
         tokens,
@@ -368,10 +425,35 @@ def _generate_text(
         presence_penalty=float(presence_penalty),
         seed=int(seed),
     )
+    generate_seconds = time.perf_counter() - generate_started
+    decode_started = time.perf_counter()
     raw_text = str(clip.decode(generated_ids) or "")
+    decode_seconds = time.perf_counter() - decode_started
+    print(
+        "[GJJ GemmaTextGenerate] 推理分段耗时: "
+        f"tokenize={tokenize_seconds:.2f}s "
+        f"generate={generate_seconds:.2f}s "
+        f"decode={decode_seconds:.2f}s "
+        f"raw_chars={len(raw_text)}",
+        flush=True,
+    )
     text = _strip_after_think_end(raw_text)
     if not bool(thinking):
         text = _clean_no_think_output(text, effective_prompt)
+        if not str(text or "").strip() and str(raw_text or "").strip():
+            # 部分 Gemma/Qwen 模型即使关闭 thinking，也可能把全部正文包在
+            # <think> 中且不再追加最终段。保留这次推理的可用正文，避免完整生成第二次。
+            text = re.sub(r"</?(?:think|thinking|analysis|reasoning|scratchpad)\b[^>]*>", "", raw_text, flags=re.IGNORECASE)
+            text = re.sub(r"<\|im_(?:start|end)\|>|<end_of_turn>", "", text)
+            text = re.sub(r"<start_of_turn>\s*(?:model|assistant|user)?", "", text, flags=re.IGNORECASE)
+            text = _strip_labeled_thinking_block(text)
+            text = _strip_common_preface(text).strip()
+            if text:
+                print(
+                    "[GJJ GemmaTextGenerate] 模型仅返回 thinking 包裹正文，"
+                    "已直接提取本次结果，跳过二次生成。",
+                    flush=True,
+                )
     if not str(text or "").strip():
         print(
             "[GJJ GemmaTextGenerate] 输出为空诊断: "
@@ -882,7 +964,7 @@ class GJJ_GemmaTextGenerate:
                     "tooltip": "点击模板按钮时追加到系统提示词正文之后；与 GJJ_OllamaAssistant 共用预设。",
                 }),
                 "keep_model": ("BOOLEAN", {
-                    "default": False,
+                    "default": True,
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "保持模型",
@@ -895,6 +977,14 @@ class GJJ_GemmaTextGenerate:
                     "display_name": "GPU/CPU优先",
                     "tooltip": "GPU优先使用 ComfyUI 默认 GPU 加载策略；CPU优先强制把 CLIP/Gemma 加载到 CPU。",
                 }),
+                "workflow_values_json": ("STRING", {
+                    "default": "{}",
+                    "multiline": False,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "前端参数存储",
+                    "tooltip": "由 GJJ_GemmaTextGenerate 前端面板自动维护，不占用节点布局空间。",
+                }),
             },
             "optional": {
                 "media": (MEDIA_INPUT_TYPE, {
@@ -906,6 +996,10 @@ class GJJ_GemmaTextGenerate:
                 "unique_id": "UNIQUE_ID",
             },
         }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **_kwargs):
+        return True
 
     @classmethod
     def IS_CHANGED(cls, *args, sampling_mode: str = "on", seed: Any = 0, **kwargs):
@@ -938,9 +1032,11 @@ class GJJ_GemmaTextGenerate:
         system_prompt: str = "",
         system_prompt_templates: str = "",
         system_prompt_output_rule: str = "",
-        keep_model: bool = False,
+        keep_model: bool = True,
         device_preference: str = "GPU优先",
+        workflow_values_json: str = "{}",
     ):
+        clip_name = _resolve_available_clip_name(clip_name)
         if not _find_text_encoder_path(clip_name):
             missing = [_model_spec_for_clip(clip_name)]
             raise_dependency_model_error(

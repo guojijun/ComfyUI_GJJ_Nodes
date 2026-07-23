@@ -10,8 +10,11 @@ const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "ollama_assistant";
 const WORKFLOW_VALUES_PROPERTY = "gjj_gemma_text_generate_values";
+const WORKFLOW_VALUES_WIDGET = "workflow_values_json";
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
+const PROMPT_HEIGHT = 74;
+const NODE_EXTRA_HEIGHT = 78;
 const LEGACY_MEDIA_INPUTS = new Set(["image", "video", "图像", "视频帧", "媒体", "图片/视频"]);
 const AUDIO_INPUT = "audio";
 const HIDDEN_WIDGETS = new Set([
@@ -34,6 +37,7 @@ const HIDDEN_WIDGETS = new Set([
 	OUTPUT_RULE_WIDGET,
 	"keep_model",
 	"device_preference",
+	WORKFLOW_VALUES_WIDGET,
 ]);
 const BACKEND_WIDGETS = [
 	"clip_name",
@@ -56,7 +60,9 @@ const BACKEND_WIDGETS = [
 	OUTPUT_RULE_WIDGET,
 	"keep_model",
 	"device_preference",
+	WORKFLOW_VALUES_WIDGET,
 ];
+const STATE_WIDGETS = BACKEND_WIDGETS.filter((name) => name !== WORKFLOW_VALUES_WIDGET);
 const REORDERED_WIDGETS = [
 	PROMPT_WIDGET,
 	...BACKEND_WIDGETS.filter((name) => name !== PROMPT_WIDGET),
@@ -117,7 +123,7 @@ function setWidgetValue(node, name, value) {
 
 function collectWorkflowValues(node) {
 	const values = {};
-	for (const name of BACKEND_WIDGETS) {
+	for (const name of STATE_WIDGETS) {
 		const target = widget(node, name);
 		if (target) values[name] = target.value ?? "";
 	}
@@ -127,9 +133,13 @@ function collectWorkflowValues(node) {
 function rememberWorkflowValues(node, serializedNode = null) {
 	if (!node || node.__gjjGemmaRestoring) return;
 	const values = collectWorkflowValues(node);
+	const storage = widget(node, WORKFLOW_VALUES_WIDGET);
+	const storageText = JSON.stringify(values);
+	if (storage) storage.value = storageText;
 	node.properties ||= {};
 	node.properties[WORKFLOW_VALUES_PROPERTY] = { ...values };
-	const ordered = BACKEND_WIDGETS.map((name) => values[name] ?? "");
+	const ordered = BACKEND_WIDGETS.map((name) =>
+		name === WORKFLOW_VALUES_WIDGET ? storageText : (values[name] ?? ""));
 	node.widgets_values = ordered.slice();
 	if (serializedNode) {
 		serializedNode.properties ||= {};
@@ -180,8 +190,24 @@ function restoreWorkflowValues(node, serializedNode) {
 	const saved = serializedNode?.properties?.[WORKFLOW_VALUES_PROPERTY]
 		|| node?.properties?.[WORKFLOW_VALUES_PROPERTY];
 	let values = saved && typeof saved === "object" ? { ...saved } : null;
+	const raw = Array.isArray(serializedNode?.widgets_values) ? serializedNode.widgets_values : [];
+	const jsonIndex = BACKEND_WIDGETS.indexOf(WORKFLOW_VALUES_WIDGET);
+	const jsonCandidates = [
+		widget(node, WORKFLOW_VALUES_WIDGET)?.value,
+		jsonIndex >= 0 ? raw[jsonIndex] : null,
+		jsonIndex >= 0 ? raw[jsonIndex + 1] : null,
+	];
+	for (const candidate of jsonCandidates) {
+		if (typeof candidate !== "string" || !candidate.trim()) continue;
+		try {
+			const parsed = JSON.parse(candidate);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				values = { ...(values || {}), ...parsed };
+				break;
+			}
+		} catch (_) {}
+	}
 	if (!values) {
-		const raw = Array.isArray(serializedNode?.widgets_values) ? serializedNode.widgets_values : [];
 		const candidates = [];
 		for (const order of [BACKEND_WIDGETS, REORDERED_WIDGETS]) {
 			for (const offset of [0, 1]) {
@@ -193,7 +219,7 @@ function restoreWorkflowValues(node, serializedNode) {
 		values = candidates[0]?.values || null;
 	}
 	if (!values) return;
-	if (values.keep_model === undefined) values.keep_model = false;
+	if (values.keep_model === undefined) values.keep_model = true;
 	if (values.device_preference === undefined) values.device_preference = String(values.clip_device || "") === "cpu" ? "CPU优先" : "GPU优先";
 	node.__gjjGemmaRestoring = true;
 	try {
@@ -219,6 +245,7 @@ function restoreWorkflowValues(node, serializedNode) {
 	} finally {
 		node.__gjjGemmaRestoring = false;
 	}
+	repairMissingClipName(node);
 	rememberWorkflowValues(node);
 }
 
@@ -486,7 +513,10 @@ function searchableSelectField(title, placeholder = "关键词过滤：空格=�
 	window.addEventListener("resize", () => {
 		if (popup.style.display !== "none") positionPopup();
 	});
-	window.addEventListener("scroll", close, true);
+	window.addEventListener("scroll", (event) => {
+		if (popup.contains(event.target)) return;
+		close();
+	}, true);
 	root.__gjjSearchSelectClose = close;
 	root.__gjjSearchSelectOpen = open;
 	root.__gjjSearchSelectRender = render;
@@ -546,6 +576,57 @@ function choices(name, node) {
 	return Array.isArray(values) ? values.map(String) : [];
 }
 
+function repairMissingClipName(node) {
+	const target = widget(node, "clip_name");
+	if (!target) return false;
+	const values = choices("clip_name", node).filter((value) => {
+		const name = String(value || "").toLowerCase();
+		return !name.endsWith(".gguf")
+			&& (name.includes("qwen3.5") || name.includes("qwen35") || name.includes("gemma4"));
+	});
+	if (!values.length) return false;
+
+	const current = String(target.value || "");
+	if (values.includes(current)) return false;
+	const basename = (value) => String(value || "").replaceAll("\\", "/").split("/").pop().toLowerCase();
+	const requestedName = basename(current);
+	const ignored = new Set(["safetensors", "mixed", "hybrid", "scaled"]);
+	const tokens = (value) => new Set(
+		basename(value).split(/[^a-z0-9.]+/).filter((token) => token && !ignored.has(token)));
+	const requestedTokens = tokens(current);
+	const score = (candidate) => {
+		const name = basename(candidate);
+		const candidateTokens = tokens(candidate);
+		const requestedQwen = requestedName.includes("qwen3.5") || requestedName.includes("qwen35");
+		const candidateQwen = name.includes("qwen3.5") || name.includes("qwen35");
+		let sameFamily = 0;
+		if (requestedName.includes("gemma4") && name.includes("gemma4")) sameFamily = 200;
+		else if (requestedQwen && candidateQwen) sameFamily = 200;
+		let shared = 0;
+		for (const token of requestedTokens) if (candidateTokens.has(token)) shared += 1;
+		const preferred = name === "qwen3.5_4b_fp8_mixed.safetensors" ? 1 : 0;
+		return [sameFamily, shared, candidateQwen ? 2 : 1, preferred];
+	};
+	const replacement = values.reduce((best, candidate) => {
+		if (!best) return candidate;
+		const left = score(candidate);
+		const right = score(best);
+		for (let index = 0; index < left.length; index += 1) {
+			if (left[index] !== right[index]) return left[index] > right[index] ? candidate : best;
+		}
+		return best;
+	}, "");
+	if (!replacement) return false;
+
+	target.value = replacement;
+	if (target.inputEl && "value" in target.inputEl) target.inputEl.value = replacement;
+	if (target.element && "value" in target.element) target.element.value = replacement;
+	node.properties ||= {};
+	node.properties[WORKFLOW_VALUES_PROPERTY] ||= {};
+	node.properties[WORKFLOW_VALUES_PROPERTY].clip_name = replacement;
+	return true;
+}
+
 function syncSelectOptions(control, values, selected) {
 	const signature = JSON.stringify(values);
 	if (control.__gjjOptionsSignature !== signature) {
@@ -587,7 +668,44 @@ function numericControl(node, name, title, min, max, step, integer = false) {
 }
 
 function hideBackendWidgets(node) {
-	for (const name of HIDDEN_WIDGETS) GJJ_Utils.hideWidget(widget(node, name));
+	for (const name of HIDDEN_WIDGETS) {
+		const target = widget(node, name);
+		GJJ_Utils.hideWidget(target);
+		if (target) {
+			target.options ||= {};
+			target.options.hidden = true;
+			target.options.display = "hidden";
+		}
+	}
+	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_WIDGETS);
+	if (Array.isArray(node?.inputs)) {
+		for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+			const input = node.inputs[index];
+			const candidates = [
+				input?.name,
+				input?.label,
+				input?.localized_name,
+				input?.widget?.name,
+				String(input?.type || "").replace(/^converted-widget:/, ""),
+			].map((value) => String(value || ""));
+			if (!candidates.some((name) => HIDDEN_WIDGETS.has(name))) continue;
+			try { node.disconnectInput?.(index); } catch (_) {}
+			if (typeof node.removeInput === "function") node.removeInput(index);
+			else node.inputs.splice(index, 1);
+		}
+	}
+	const storage = widget(node, WORKFLOW_VALUES_WIDGET);
+	if (storage) {
+		storage.hidden = true;
+		storage.type = `converted-widget:${WORKFLOW_VALUES_WIDGET}`;
+		storage.computeSize = () => [0, 0];
+		storage.getHeight = () => 0;
+		storage.draw = () => {};
+		storage.last_y = 0;
+		storage.computedHeight = 0;
+		storage.margin_top = 0;
+		storage.size = [0, 0];
+	}
 	GJJ_Utils.reorderWidgets(node, HIDDEN_WIDGETS);
 }
 
@@ -603,10 +721,16 @@ function restorePromptWidget(node) {
 	delete target.options.hidden;
 	delete target.options.display;
 	target.options.multiline = true;
-	target.computeSize = undefined;
-	target.getHeight = undefined;
+	target.computeSize = (width) => [
+		Math.max(260, Number(width || node.size?.[0] || 470)),
+		PROMPT_HEIGHT,
+	];
+	target.getHeight = () => PROMPT_HEIGHT;
 	target.draw = undefined;
 	target.last_y = 0;
+	target.computedHeight = PROMPT_HEIGHT;
+	target.margin_top = 0;
+	target.size = [Math.max(260, Number(node.size?.[0] || 470)), PROMPT_HEIGHT];
 	if (target.element?.style) target.element.style.display = "";
 	if (target.inputEl?.style) target.inputEl.style.display = "";
 	return target;
@@ -704,12 +828,66 @@ function placePromptAfterPanel(node) {
 	node.widgets.splice(panelIndex + 1, 0, prompt);
 }
 
-function resizeNode(node) {
-	GJJ_Utils.scheduleRefreshNode(node, {
-		minWidth: 470,
-		minHeight: 92,
-		preserveWidth: true,
-	});
+function compactWidgetLayout(node) {
+	if (!Array.isArray(node?.widgets)) return;
+	const panel = widget(node, PANEL_WIDGET);
+	const prompt = widget(node, PROMPT_WIDGET);
+	const visible = [];
+	const hidden = [];
+	for (const item of node.widgets) {
+		if (!item || item === panel || item === prompt) continue;
+		const isHidden = item.hidden
+			|| item.__gjjUtilsHidden
+			|| HIDDEN_WIDGETS.has(String(item.name || ""));
+		(isHidden ? hidden : visible).push(item);
+	}
+	node.widgets = [panel, prompt, ...visible, ...hidden].filter(Boolean);
+	for (const item of hidden) {
+		item.last_y = 0;
+		item.computedHeight = 0;
+		item.margin_top = 0;
+		item.size = [0, 0];
+	}
+	if (prompt) {
+		prompt.last_y = 0;
+		prompt.computedHeight = PROMPT_HEIGHT;
+		prompt.margin_top = 0;
+		prompt.size = [Math.max(260, Number(node.size?.[0] || 470)), PROMPT_HEIGHT];
+	}
+}
+
+function visibleWidgetHeight(node) {
+	let total = 0;
+	for (const item of node?.widgets || []) {
+		if (!item || item.hidden || item.__gjjUtilsHidden || HIDDEN_WIDGETS.has(String(item.name || ""))) continue;
+		try {
+			const size = item.computeSize?.(node.size?.[0] || 470);
+			if (Array.isArray(size) && Number.isFinite(Number(size[1]))) {
+				total += Math.max(0, Number(size[1]));
+				continue;
+			}
+		} catch (_) {}
+		if (Number.isFinite(Number(item.computedHeight))) total += Math.max(0, Number(item.computedHeight));
+		else if (Number.isFinite(Number(item.size?.[1]))) total += Math.max(0, Number(item.size[1]));
+		else total += 20;
+	}
+	return total;
+}
+
+function resizeNode(node, delay = 0) {
+	const run = () => {
+		if (!node) return;
+		compactWidgetLayout(node);
+		const width = Math.max(470, Number(node.size?.[0] || 470));
+		const height = Math.max(92, Math.ceil(visibleWidgetHeight(node) + NODE_EXTRA_HEIGHT));
+		node.setSize?.([width, height]);
+		GJJ_Utils.dirtyCanvas(node);
+	};
+	if (delay > 0) {
+		setTimeout(() => requestAnimationFrame(run), delay);
+		return;
+	}
+	requestAnimationFrame(run);
 }
 
 function buildSettings(node) {
@@ -949,6 +1127,13 @@ function createPanel(node) {
 	protect(root);
 	const style = document.createElement("style");
 	style.textContent = `
+		.lg-node-widget:has(> [node-type="${NODE_TYPE}"] > canvas) {
+			display:none !important;
+			height:0 !important;
+			min-height:0 !important;
+			margin:0 !important;
+			padding:0 !important;
+		}
 		.gjj-gemma-assistant-panel, .gjj-gemma-assistant-panel * { box-sizing:border-box; }
 		.gjj-gemma-assistant-panel { display:flex; flex-direction:column; gap:7px; width:100%; padding:2px 0 4px; color:#dce6e8; font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
 		.gjj-gemma-assistant-panel .gjj-ia-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:5px; overflow:visible; padding:0 0 3px; scrollbar-width:thin; }
@@ -1076,8 +1261,9 @@ function stabilize(node) {
 		setWidgetValue(node, "device_preference", String(widgetValue(node, "clip_device", "default")) === "cpu" ? "CPU优先" : "GPU优先");
 	}
 	if (widgetValue(node, "keep_model", undefined) === undefined) {
-		setWidgetValue(node, "keep_model", false);
+		setWidgetValue(node, "keep_model", true);
 	}
+	if (repairMissingClipName(node)) rememberWorkflowValues(node);
 	hideBackendWidgets(node);
 	createPanel(node);
 	restorePromptWidget(node);
@@ -1114,6 +1300,7 @@ app.registerExtension({
 		};
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			repairMissingClipName(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			rememberWorkflowValues(this, serializedNode);
 			return result;
