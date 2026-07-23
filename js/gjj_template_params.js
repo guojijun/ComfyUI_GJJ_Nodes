@@ -463,6 +463,8 @@ async function localMediaExists(value, mediaType = "") {
 function currentInputForField(node, field, fallback = null) {
 	const current = node?.__gjjTemplateParamsRows?.get?.(String(field?.key || ""));
 	if (current && "value" in current) return current;
+	const nativeWidget = getWidget(node, dynamicInputName(field));
+	if (nativeWidget && "value" in nativeWidget) return nativeWidget;
 	return fallback;
 }
 
@@ -1065,8 +1067,8 @@ function removeDynamicWidget(node, name) {
 }
 
 function nativeWidgetType(field, rawValue) {
-	if (isBooleanField(field, { [field.key]: rawValue })) return "gjj_template_bool";
-	if (field?.type === "ENUM" && Array.isArray(field.options) && field.options.length) return "gjj_template_enum";
+	if (isBooleanField(field, { [field.key]: rawValue })) return "toggle";
+	if (field?.type === "ENUM" && Array.isArray(field.options) && field.options.length) return "combo";
 	if (field?.slider) return "slider";
 	if (field?.multiline) return "gjj_template_multiline";
 	const parsed = parseValue(rawValue);
@@ -1096,7 +1098,7 @@ function quantizeSliderValue(field, rawValue) {
 }
 
 function nativeWidgetValue(field, rawValue, type) {
-	if (type === "gjj_template_bool") return parseValue(rawValue) === true;
+	if (type === "toggle") return parseValue(rawValue) === true;
 	if (type === "number" || type === "slider") {
 		let value = field?.slider ? quantizeSliderValue(field, rawValue) : Number.parseFloat(rawValue);
 		if (!Number.isFinite(value)) value = Number(field?.slider?.default ?? 0);
@@ -1120,79 +1122,6 @@ function nativeWidgetOptions(field, type) {
 	return {};
 }
 
-function addButtonParamWidget(node, field, name, value, type, callback) {
-	const isBool = type === "gjj_template_bool";
-	const boolLabels = field?.bool_labels || {};
-	const items = isBool
-		? [
-			{ label: String(boolLabels.true_label || "true"), value: true },
-			{ label: String(boolLabels.false_label || "false"), value: false },
-		]
-		: (field.options || []).map((option) => ({ label: optionLabel(option), value: optionValue(option) }));
-	const widget = {
-		name,
-		type,
-		label: field.label || field.key,
-		value,
-		options: {},
-		serialize: true,
-		computeSize(width) { return [width || 260, 30]; },
-		draw(ctx, _node, width, y, height) {
-			const h = height || 28;
-			const labelWidth = 86;
-			const gap = 5;
-			const startX = labelWidth;
-			const buttonWidth = Math.max(42, (width - startX - 10 - gap * Math.max(0, items.length - 1)) / Math.max(1, items.length));
-			ctx.save();
-			ctx.font = "13px Arial";
-			ctx.textBaseline = "middle";
-			ctx.textAlign = "left";
-			ctx.fillStyle = "#b8c0cc";
-			ctx.fillText(this.label, 12, y + h / 2);
-			this.__gjjButtonBounds = [];
-			const selected = isBool ? [Boolean(this.value)] : normalizeEnumSelection(field, this.value);
-			for (let index = 0; index < items.length; index += 1) {
-				const item = items[index];
-				const x = startX + index * (buttonWidth + gap);
-				const active = selected.includes(item.value);
-				this.__gjjButtonBounds.push({ x, width: buttonWidth, value: item.value });
-				ctx.fillStyle = active ? "#234c3b" : "#252b31";
-				ctx.strokeStyle = active ? "#69b980" : "#44565f";
-				ctx.beginPath();
-				ctx.roundRect?.(x, y + 2, buttonWidth, h - 4, 7);
-				if (!ctx.roundRect) ctx.rect(x, y + 2, buttonWidth, h - 4);
-				ctx.fill();
-				ctx.stroke();
-				ctx.fillStyle = active ? "#ecfff1" : "#dce7e2";
-				ctx.textAlign = "center";
-				ctx.fillText(item.label, x + buttonWidth / 2, y + h / 2);
-			}
-			ctx.restore();
-		},
-		mouse(event, pos) {
-			const hit = this.__gjjButtonBounds?.find((item) => pos[0] >= item.x && pos[0] <= item.x + item.width);
-			if (!hit) return false;
-			if (isBool) {
-				this.value = Boolean(hit.value);
-			} else if (event?.ctrlKey || event?.shiftKey) {
-				let selected = normalizeEnumSelection(field, this.value);
-				selected = selected.includes(hit.value)
-					? selected.filter((item) => item !== hit.value)
-					: [...selected, hit.value];
-				this.value = enumStoredValue(selected.length ? selected : [hit.value]);
-			} else {
-				this.value = String(hit.value);
-			}
-			callback?.(this.value);
-			node.setDirtyCanvas?.(true, true);
-			return true;
-		},
-	};
-	node.addCustomWidget?.(widget);
-	if (!node.widgets?.includes(widget)) node.widgets?.push(widget);
-	return widget;
-}
-
 function ensureNativeParamWidget(node, field, values) {
 	const name = dynamicInputName(field);
 	const rawValue = values?.[field.key] ?? field.default ?? "";
@@ -1204,13 +1133,11 @@ function ensureNativeParamWidget(node, field, values) {
 	}
 	if (!widget) {
 		const commit = (next) => {
-				const text = type === "gjj_template_bool" ? boolToText(next) : String(next ?? "");
+				const text = type === "toggle" ? boolToText(next) : String(next ?? "");
 				values[field.key] = text;
 				saveFieldValue(node, field, values, text);
 			};
-		if (["gjj_template_bool", "gjj_template_enum"].includes(type)) {
-			widget = addButtonParamWidget(node, field, name, nativeWidgetValue(field, rawValue, type), type, commit);
-		} else if (type === "gjj_template_multiline") {
+		if (type === "gjj_template_multiline") {
 			widget = ComfyWidgets.STRING?.(
 				node,
 				name,
@@ -1235,7 +1162,7 @@ function ensureNativeParamWidget(node, field, values) {
 	widget.callback = (next) => {
 		const normalized = type === "slider" ? quantizeSliderValue(field, next) : next;
 		if (type === "slider") widget.value = normalized;
-		const text = type === "gjj_template_bool" ? boolToText(normalized) : String(normalized ?? "");
+		const text = type === "toggle" ? boolToText(normalized) : String(normalized ?? "");
 		values[field.key] = text;
 		saveFieldValue(node, field, values, text);
 		if (isMediaType(field?.type)) {
