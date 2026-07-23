@@ -23,6 +23,26 @@ from .common_utils.network_media import (
     gjjutils_is_network_url as _is_network_url,
 )
 
+
+class FlexibleOptionalInputType(dict):
+    def __init__(self, input_type: Any):
+        super().__init__()
+        self.input_type = input_type
+
+    def __getitem__(self, key):
+        return (self.input_type,)
+
+    def __contains__(self, key):
+        return True
+
+
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+any_type = AnyType("*")
+
 # =========================
 # GJJ MEDIA V2 PATCH
 # =========================
@@ -1460,16 +1480,33 @@ class GJJ_TemplateParams:
                         "tooltip": "由前端维护的参数结构，不建议手动修改。",
                     },
                 ),
-            }
+            },
+            "optional": FlexibleOptionalInputType(any_type),
         }
 
     @classmethod
-    def IS_CHANGED(cls, template_text: str = "", values_json: str = "{}", schema_json: str = "[]"):
-        return "|".join([_normalize_text(template_text), _normalize_text(values_json), _normalize_text(schema_json)])
+    def IS_CHANGED(cls, template_text: str = "", values_json: str = "{}", schema_json: str = "[]", **kwargs):
+        dynamic = {
+            str(key): repr(value)
+            for key, value in sorted(kwargs.items())
+            if str(key).startswith("param_")
+        }
+        return json.dumps(
+            [_normalize_text(template_text), _normalize_text(values_json), _normalize_text(schema_json), dynamic],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
-    def output_params(self, template_text: str = "", values_json: str = "{}", schema_json: str = "[]"):
+    def output_params(self, template_text: str = "", values_json: str = "{}", schema_json: str = "[]", **kwargs):
         fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
         value_map = values_from_json(values_json)
+        externally_supplied: set[str] = set()
+        for field in fields:
+            key = str(field.get("key") or "")
+            input_name = f"param_{key}"
+            if key and input_name in kwargs and kwargs[input_name] is not None:
+                value_map[key] = kwargs[input_name]
+                externally_supplied.add(key)
         outputs: list[Any] = []
         warnings: list[str] = []
         
@@ -1496,6 +1533,9 @@ class GJJ_TemplateParams:
             ) or _detect_media_type(str(raw_value)) or _detect_media_type(str(default_value))
             
             if media_type:
+                if key in externally_supplied and not isinstance(raw_value, (str, os.PathLike)):
+                    outputs.append(raw_value)
+                    continue
                 # 媒体参数常用于模板占位或可选引用。资源缺失时只提示并跳过，
                 # 避免未使用的图片/音频/视频文件打断整个工作流。
                 try:

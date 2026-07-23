@@ -5,6 +5,7 @@
 
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { ComfyWidgets } from "/scripts/widgets.js";
 import {
 	gjjDetectMediaKind,
 	gjjMediaRefToItem,
@@ -1039,6 +1040,263 @@ function pruneLegacyWidgetInputs(node) {
 	});
 }
 
+function dynamicInputName(field) {
+	return `param_${String(field?.key || "").trim()}`;
+}
+
+function removeDynamicInput(node, index) {
+	if (index < 0) return;
+	try {
+		node.disconnectInput?.(index);
+		node.removeInput?.(index);
+	} catch (_) {
+		node.inputs?.splice?.(index, 1);
+	}
+}
+
+function removeDynamicWidget(node, name) {
+	const index = node.widgets?.findIndex((widget) => widget?.name === name) ?? -1;
+	if (index >= 0) {
+		const [widget] = node.widgets.splice(index, 1);
+		try { widget?.onRemove?.(); } catch (_) {}
+		widget?.element?.remove?.();
+		widget?.inputEl?.remove?.();
+	}
+}
+
+function nativeWidgetType(field, rawValue) {
+	if (isBooleanField(field, { [field.key]: rawValue })) return "gjj_template_bool";
+	if (field?.type === "ENUM" && Array.isArray(field.options) && field.options.length) return "gjj_template_enum";
+	if (field?.slider) return "slider";
+	if (field?.multiline) return "gjj_template_multiline";
+	const parsed = parseValue(rawValue);
+	return typeof parsed === "number" ? "number" : "text";
+}
+
+function quantizeSliderValue(field, rawValue) {
+	const slider = field?.slider;
+	if (!slider) return Number.parseFloat(rawValue);
+	const min = Number(slider.min);
+	const max = Number(slider.max);
+	const step = Math.abs(Number(slider.step));
+	let value = Number.parseFloat(rawValue);
+	if (!Number.isFinite(value)) value = Number(slider.default);
+	value = Math.max(min, Math.min(max, value));
+	if (Number.isFinite(step) && step > 0) {
+		value = min + Math.round((value - min) / step) * step;
+		value = Math.max(min, Math.min(max, value));
+	}
+	const precision = sliderOutputsFloat(slider)
+		? Math.min(12, Math.max(0, ...[slider.min, slider.max, slider.step, slider.default].map((item) => {
+			const text = String(item ?? "");
+			return text.includes(".") ? text.split(".")[1].length : 0;
+		})))
+		: 0;
+	return Number(value.toFixed(precision));
+}
+
+function nativeWidgetValue(field, rawValue, type) {
+	if (type === "gjj_template_bool") return parseValue(rawValue) === true;
+	if (type === "number" || type === "slider") {
+		let value = field?.slider ? quantizeSliderValue(field, rawValue) : Number.parseFloat(rawValue);
+		if (!Number.isFinite(value)) value = Number(field?.slider?.default ?? 0);
+		return value;
+	}
+	return String(rawValue ?? "");
+}
+
+function nativeWidgetOptions(field, type) {
+	if (type === "combo") return { values: field.options.map((option) => optionValue(option)) };
+	if ((type === "number" || type === "slider") && field?.slider) {
+		return {
+			min: Number(field.slider.min),
+			max: Number(field.slider.max),
+			step: Number(field.slider.step),
+			round: Number(field.slider.step),
+			default: Number(field.slider.default),
+			precision: sliderOutputsFloat(field.slider) ? 3 : 0,
+		};
+	}
+	return {};
+}
+
+function addButtonParamWidget(node, field, name, value, type, callback) {
+	const isBool = type === "gjj_template_bool";
+	const boolLabels = field?.bool_labels || {};
+	const items = isBool
+		? [
+			{ label: String(boolLabels.true_label || "true"), value: true },
+			{ label: String(boolLabels.false_label || "false"), value: false },
+		]
+		: (field.options || []).map((option) => ({ label: optionLabel(option), value: optionValue(option) }));
+	const widget = {
+		name,
+		type,
+		label: field.label || field.key,
+		value,
+		options: {},
+		serialize: true,
+		computeSize(width) { return [width || 260, 30]; },
+		draw(ctx, _node, width, y, height) {
+			const h = height || 28;
+			const labelWidth = 86;
+			const gap = 5;
+			const startX = labelWidth;
+			const buttonWidth = Math.max(42, (width - startX - 10 - gap * Math.max(0, items.length - 1)) / Math.max(1, items.length));
+			ctx.save();
+			ctx.font = "13px Arial";
+			ctx.textBaseline = "middle";
+			ctx.textAlign = "left";
+			ctx.fillStyle = "#b8c0cc";
+			ctx.fillText(this.label, 12, y + h / 2);
+			this.__gjjButtonBounds = [];
+			const selected = isBool ? [Boolean(this.value)] : normalizeEnumSelection(field, this.value);
+			for (let index = 0; index < items.length; index += 1) {
+				const item = items[index];
+				const x = startX + index * (buttonWidth + gap);
+				const active = selected.includes(item.value);
+				this.__gjjButtonBounds.push({ x, width: buttonWidth, value: item.value });
+				ctx.fillStyle = active ? "#234c3b" : "#252b31";
+				ctx.strokeStyle = active ? "#69b980" : "#44565f";
+				ctx.beginPath();
+				ctx.roundRect?.(x, y + 2, buttonWidth, h - 4, 7);
+				if (!ctx.roundRect) ctx.rect(x, y + 2, buttonWidth, h - 4);
+				ctx.fill();
+				ctx.stroke();
+				ctx.fillStyle = active ? "#ecfff1" : "#dce7e2";
+				ctx.textAlign = "center";
+				ctx.fillText(item.label, x + buttonWidth / 2, y + h / 2);
+			}
+			ctx.restore();
+		},
+		mouse(event, pos) {
+			const hit = this.__gjjButtonBounds?.find((item) => pos[0] >= item.x && pos[0] <= item.x + item.width);
+			if (!hit) return false;
+			if (isBool) {
+				this.value = Boolean(hit.value);
+			} else if (event?.ctrlKey || event?.shiftKey) {
+				let selected = normalizeEnumSelection(field, this.value);
+				selected = selected.includes(hit.value)
+					? selected.filter((item) => item !== hit.value)
+					: [...selected, hit.value];
+				this.value = enumStoredValue(selected.length ? selected : [hit.value]);
+			} else {
+				this.value = String(hit.value);
+			}
+			callback?.(this.value);
+			node.setDirtyCanvas?.(true, true);
+			return true;
+		},
+	};
+	node.addCustomWidget?.(widget);
+	if (!node.widgets?.includes(widget)) node.widgets?.push(widget);
+	return widget;
+}
+
+function ensureNativeParamWidget(node, field, values) {
+	const name = dynamicInputName(field);
+	const rawValue = values?.[field.key] ?? field.default ?? "";
+	const type = nativeWidgetType(field, rawValue);
+	let widget = getWidget(node, name);
+	if (widget && String(widget.gjj_template_widget_type || widget.type) !== type) {
+		removeDynamicWidget(node, name);
+		widget = null;
+	}
+	if (!widget) {
+		const commit = (next) => {
+				const text = type === "gjj_template_bool" ? boolToText(next) : String(next ?? "");
+				values[field.key] = text;
+				saveFieldValue(node, field, values, text);
+			};
+		if (["gjj_template_bool", "gjj_template_enum"].includes(type)) {
+			widget = addButtonParamWidget(node, field, name, nativeWidgetValue(field, rawValue, type), type, commit);
+		} else if (type === "gjj_template_multiline") {
+			widget = ComfyWidgets.STRING?.(
+				node,
+				name,
+				["STRING", {
+					default: String(rawValue ?? ""),
+					multiline: true,
+					dynamicPrompts: false,
+					tooltip: field.tooltip || "",
+				}],
+				app,
+			)?.widget;
+		} else {
+			widget = node.addWidget?.(type, name, nativeWidgetValue(field, rawValue, type), commit, nativeWidgetOptions(field, type));
+		}
+	}
+	if (!widget) return null;
+	widget.name = name;
+	widget.gjj_template_widget_type = type;
+	widget.label = field.label || field.key;
+	widget.options = { ...(widget.options || {}), ...nativeWidgetOptions(field, type) };
+	widget.value = nativeWidgetValue(field, values?.[field.key] ?? field.default ?? "", type);
+	widget.callback = (next) => {
+		const normalized = type === "slider" ? quantizeSliderValue(field, next) : next;
+		if (type === "slider") widget.value = normalized;
+		const text = type === "gjj_template_bool" ? boolToText(normalized) : String(normalized ?? "");
+		values[field.key] = text;
+		saveFieldValue(node, field, values, text);
+		if (isMediaType(field?.type)) {
+			renderGroupedMediaPreview(node);
+			scheduleNetworkMediaToInput(node, field, widget, values, null, 0);
+		}
+	};
+	widget.serialize = true;
+	return widget;
+}
+
+function ensureDynamicInputs(node, fields, values) {
+	if (!Array.isArray(node.inputs)) node.inputs = [];
+	const wanted = new Map(fields
+		.filter((field) => String(field?.key || "").trim() && !field?.template_prompt)
+		.map((field) => [dynamicInputName(field), field]));
+
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "");
+		if (name.startsWith("param_") && !wanted.has(name)) {
+			removeDynamicInput(node, index);
+			removeDynamicWidget(node, name);
+		}
+	}
+	for (const widget of [...(node.widgets || [])]) {
+		const name = String(widget?.name || "");
+		if (name.startsWith("param_") && !wanted.has(name)) removeDynamicWidget(node, name);
+	}
+
+	for (const field of fields) {
+		if (field?.template_prompt) continue;
+		const name = dynamicInputName(field);
+		if (name === "param_") continue;
+		const widget = ensureNativeParamWidget(node, field, values);
+		if (!widget) continue;
+		const rawValue = values?.[field.key] ?? field.default ?? "";
+		const parsedValue = parseValue(rawValue);
+		const type = field.socket_type
+			? normalizeSocketType(field.socket_type)
+			: (field.type === "ENUM" ? "*" : inferTypeFromRaw(rawValue, parsedValue));
+		let input = node.inputs.find((item) => item?.name === name);
+		if (!input) {
+			node.addInput?.(name, type);
+			input = node.inputs.find((item) => item?.name === name);
+		}
+		if (!input) continue;
+		input.type = type;
+		// 参数名称已由 DOM 控件显示；插槽本身只保留圆点，避免顶部重复一行文字。
+		input.label = " ";
+		input.localized_name = " ";
+		input.display_name = field.label || field.key;
+		input.tooltip = `外接值会覆盖面板参数；API 字段名：${name}`;
+		input.gjj_template_param_key = field.key;
+		input.hidden = false;
+		input.visible = true;
+		input.widget = { name };
+		delete input.widget_name;
+	}
+}
+
 function safeJsonParse(text, fallback) {
 	try {
 		const value = JSON.parse(String(text || ""));
@@ -1418,6 +1676,13 @@ function isStringLiteralText(text) {
 	const raw = String(text ?? "").trim();
 	return (raw.length >= 6 && (raw.startsWith('"""') || raw.startsWith("'''")) && raw.endsWith(raw.slice(0, 3)))
 		|| (raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))));
+}
+
+function isTripleQuotedText(text) {
+	const raw = String(text ?? "").trim();
+	return raw.length >= 6
+		&& (raw.startsWith('"""') || raw.startsWith("'''"))
+		&& raw.endsWith(raw.slice(0, 3));
 }
 
 function scanTripleQuoteState(text, quote = "") {
@@ -1953,6 +2218,7 @@ function parseTemplate(template) {
 			socket_type: socketType,
 			type: boolSpec ? "BOOLEAN" : (sliderSpec ? (socketType || (sliderOutputsFloat(sliderSpec) ? "FLOAT" : "INT")) : (enumOptions.length ? "ENUM" : (socketType || inferType(value)))),
 			options: enumOptions,
+			multiline: isTripleQuotedText(defaultText),
 		};
 		if (boolSpec) field.bool_labels = boolSpec.labels;
 		if (sliderSpec) field.slider = sliderSpec;
@@ -2917,9 +3183,57 @@ function buildGroupedMediaPreview(node, fields, values) {
 	return group;
 }
 
+function removeMediaPreviewWidget(node) {
+	const widget = node?.__gjjTemplateParamsMediaPreviewWidget;
+	if (!widget) return;
+	const index = node.widgets?.indexOf(widget) ?? -1;
+	if (index >= 0) node.widgets.splice(index, 1);
+	widget.element?.remove?.();
+	node.__gjjTemplateParamsMediaPreviewWidget = null;
+	node.__gjjTemplateParamsMediaGroup = null;
+}
+
+function ensureMediaPreviewWidget(node, fields, values) {
+	const mediaFields = fields.filter((field) => isMediaType(field?.type));
+	if (!mediaFields.length) {
+		removeMediaPreviewWidget(node);
+		return;
+	}
+	let widget = node.__gjjTemplateParamsMediaPreviewWidget;
+	if (!widget) {
+		const group = document.createElement("div");
+		group.className = "gjj-template-param-media-preview-group";
+		group.style.cssText = "width:100%;min-width:0;box-sizing:border-box;";
+		widget = node.addDOMWidget?.("gjj_template_params_media_preview", "HTML", group, {
+			serialize: false,
+			hideOnZoom: false,
+		});
+		if (!widget) return;
+		widget.computeSize = (width) => [
+			Math.round(Number(width || currentNodeWidth(node))),
+			Math.round(Math.max(80, Math.ceil(group.scrollHeight || 168))),
+		];
+		widget.getHeight = () => Math.round(Math.max(80, Math.ceil(group.scrollHeight || 168)));
+		node.__gjjTemplateParamsMediaPreviewWidget = widget;
+		node.__gjjTemplateParamsMediaGroup = group;
+	}
+	const widgetIndex = node.widgets?.indexOf(widget) ?? -1;
+	if (widgetIndex >= 0 && widgetIndex !== node.widgets.length - 1) {
+		node.widgets.splice(widgetIndex, 1);
+		node.widgets.push(widget);
+	}
+	node.__gjjTemplateParamsMediaFieldKeys = mediaFields.map((field) => String(field.key || ""));
+	renderGroupedMediaPreview(node, fields, values);
+	for (const field of mediaFields) {
+		const nativeWidget = getWidget(node, dynamicInputName(field));
+		if (nativeWidget) scheduleNetworkMediaToInput(node, field, nativeWidget, values, null, 0);
+	}
+}
+
 function renderRows(node) {
 	const state = normalizeState(node);
 	saveState(node, state.template, state.fields, state.values, { notify: false });
+	ensureDynamicInputs(node, state.fields, state.values);
 	node.__gjjTemplateParamsUpdateCount?.();
 	const rows = node.__gjjTemplateParamsRowsWrap;
 	if (!rows) return;
@@ -2935,22 +3249,10 @@ function renderRows(node) {
 		empty.textContent = "点击 ⚙ 设置，按“名称：默认值 # 说明”填写模板。";
 		rows.appendChild(empty);
 	} else {
-		const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
-		const useGroupedMediaPreview = mediaFields.length > 0;
-		const lastMediaIndex = useGroupedMediaPreview
-			? state.fields.reduce((last, field, index) => isMediaType(field?.type) ? index : last, -1)
-			: -1;
-
-		for (let i = 0; i < state.fields.length; i += 1) {
-			const field = state.fields[i];
-			const row = buildInputForField(node, field, state.values, { groupedMediaPreview: useGroupedMediaPreview });
-			if (row) rows.appendChild(row);
-			if (useGroupedMediaPreview && i === lastMediaIndex) {
-				const mediaGroup = buildGroupedMediaPreview(node, state.fields, state.values);
-				if (mediaGroup) rows.appendChild(mediaGroup);
-			}
-		}
+		// 参数控件使用 ComfyUI 原生 widget-input；DOM 仅保留工具栏和设置面板。
+		rows.style.display = "none";
 	}
+	ensureMediaPreviewWidget(node, state.fields, state.values);
 	updateOutputs(node, state.fields, state.values);
 	refreshNode(node);
 }
@@ -3310,6 +3612,13 @@ app.registerExtension({
 			}
 			refreshNode(this, { resize: false });
 			setTimeout(() => scheduleDomControlSizeSync(this), 50);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			scheduleStabilize(this, 32);
 			return result;
 		};
 	},

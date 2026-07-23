@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+wan_360_epoch20	wan_360_epoch20	360旋转视频	r0t4tion 360 degrees rotation	1	物体被360度旋转	https://civitai.com/models/1346623/360-degree-rotation-microwave-rotation-wan21-i2v-lora
 boogu edit_9500	boogu edit_9500	三宫格	根据图一生成三宫格叙事连贯的镜头，原图是…。后续镜头为…，随后…	1	啦啦啦的小黄瓜的三宫格分镜头	
 qwen_edit_action	qwen_edit_action	动作人偶	action the scene	1	把任何东西变成玩具和动作人偶，配有关节、逼真的塑料材料和涂装细节	https://huggingface.co/systms/SYSTMS-ACTION-LoRA-Qwen-Image-Edit-2511
 breast_size_v2_krea2_loraholic	breast_size_v2_krea2_loraholic	胸部滑块		14	Krea2胸部大小调节，越大越趋动画风格	

@@ -88,6 +88,12 @@ from .common_utils.model_family import (
     DEFAULT_VAE_NAME,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.mage_flow_runtime import (
+    encode_conditioning as encode_mage_flow_conditioning,
+    is_mage_flow_name,
+    make_empty_latent as make_mage_flow_empty_latent,
+    safe_bf16_accumulation as mage_flow_safe_bf16_accumulation,
+)
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import (
     apply_lora_chain_config,
@@ -1458,8 +1464,12 @@ def _load_model(
             model = _load_model_with_native_unet_loader(unet_name, unet_dtype)
         else:
             _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
+            model_options = _build_unet_model_options(unet_dtype)
+            if is_mage_flow_name(unet_name):
+                model_options = dict(model_options)
+                model_options["dtype"] = torch.bfloat16
             model = comfy.sd.load_diffusion_model(
-                unet_path, model_options=_build_unet_model_options(unet_dtype)
+                unet_path, model_options=model_options
             )
         print(f"[DEBUG] Successfully loaded UNET model: {unet_name}")
         # 彩色打印 UNET 信息
@@ -1570,6 +1580,13 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
     try:
         if normalized_type == "boogu":
             clip = _load_boogu_clip_compatible(clip_paths, "default", "default")
+        elif normalized_type == "mage_flow":
+            clip = comfy.sd.load_clip(
+                ckpt_paths=clip_paths,
+                embedding_directory=embedding_directory,
+                clip_type=_clip_type_enum(clip_type),
+                model_options={"dtype": torch.bfloat16},
+            )
         elif normalized_type == "hidream":
             clip = comfy.sd.load_clip(
                 ckpt_paths=clip_paths,
@@ -2025,6 +2042,8 @@ class GJJ_LazyImageStudio:
         "文生图",
         "boogu",
         "flux",
+        "mage flow",
+        "mage-flow",
         "hidream",
         "omnigen2",
         "采样器",
@@ -2103,7 +2122,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "gguf"]
+        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "gguf"]
         _filtered = [
             m
             for m in _raw_diffusion_models
@@ -3599,6 +3618,13 @@ class GJJ_LazyImageStudio:
             if is_flux2_runtime:
                 resolved_clip_type = "flux2"
             is_ltx_runtime = _is_ltx_family(unet_name, resolved_clip_type, preset)
+            is_mage_flow_runtime = (
+                not use_checkpoint_model
+                and (
+                    str(resolved_clip_type or "") == "mage_flow"
+                    or is_mage_flow_name(unet_name)
+                )
+            )
             pairs = [
                 pair
                 for pair in collect_image_pairs(
@@ -3726,14 +3752,20 @@ class GJJ_LazyImageStudio:
                 )
 
                 _send_status(unique_id, "3/6 应用 LoRA 与模型补丁...")
-                model, clip = self._apply_loras(
-                    model,
-                    clip,
-                    resolved_clip_type,
-                    lora_chain_config,
-                    lora_data,
-                    use_checkpoint_model,
-                )
+                if is_mage_flow_runtime:
+                    if str(lora_data or "").strip() not in {"", "[]"} or str(
+                        lora_chain_config or ""
+                    ).strip() not in {"", "[]"}:
+                        print("[GJJ_LazyImageStudio] Mage-Flow 内置分支暂不应用 LoRA 配置。")
+                else:
+                    model, clip = self._apply_loras(
+                        model,
+                        clip,
+                        resolved_clip_type,
+                        lora_chain_config,
+                        lora_data,
+                        use_checkpoint_model,
+                    )
                 if not is_boogu_image_edit_turbo:
                     model = _patch_model_sampling(
                         model,
@@ -3741,16 +3773,19 @@ class GJJ_LazyImageStudio:
                         float(preset.get("model_shift", 0.0)),
                     )
                     model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
-                model, _ = GJJ_ModelPatchBundle().patch(
-                    MODEL=model,
-                    启用SageAttention=enable_sage_attention,
-                    SageAttention模式=sage_attention_mode,
-                    允许Sage编译=allow_sage_compile,
-                    启用FP16累积设置=enable_fp16_accumulation_setting,
-                    FP16累积=fp16_accumulation,
-                    缺SageAttention处理=missing_sage_attention_policy,
-                    unique_id=unique_id,
-                )
+                if is_mage_flow_runtime:
+                    print("[GJJ_LazyImageStudio] Mage-Flow 使用 BF16 原生计算，跳过通用 Sage/FP16 模型补丁。")
+                else:
+                    model, _ = GJJ_ModelPatchBundle().patch(
+                        MODEL=model,
+                        启用SageAttention=enable_sage_attention,
+                        SageAttention模式=sage_attention_mode,
+                        允许Sage编译=allow_sage_compile,
+                        启用FP16累积设置=enable_fp16_accumulation_setting,
+                        FP16累积=fp16_accumulation,
+                        缺SageAttention处理=missing_sage_attention_policy,
+                        unique_id=unique_id,
+                    )
                 if keep_model_loaded:
                     self._remember_runtime(runtime_key, model, clip, vae)
 
@@ -3777,7 +3812,50 @@ class GJJ_LazyImageStudio:
                 )
 
                 _send_status(unique_id, f"4/6 编码条件与 latent{status_suffix}...")
-                if is_boogu_image_edit_turbo:
+                if is_mage_flow_runtime:
+                    local_width = max(16, (local_width // 16) * 16)
+                    local_height = max(16, (local_height // 16) * 16)
+                    ordered_pairs = _reorder_pairs_by_main_index(
+                        pairs, int(main_image_index)
+                    )
+                    reference_images = [
+                        pair["image"]
+                        for pair in ordered_pairs[:3]
+                        if isinstance(pair.get("image"), torch.Tensor)
+                    ]
+                    if mask is not None:
+                        print("[GJJ_LazyImageStudio] Mage-Flow 分支暂不使用遮罩输入。")
+                    _send_status(
+                        unique_id,
+                        (
+                            f"4/6 Mage-Flow Edit 内置编码{status_suffix}"
+                            f"（{len(reference_images)} 张参考图）..."
+                            if reference_images
+                            else f"4/6 Mage-Flow 文生图内置编码{status_suffix}..."
+                        ),
+                    )
+                    positive = encode_mage_flow_conditioning(
+                        clip,
+                        vae,
+                        prompt_text,
+                        reference_images,
+                        local_width,
+                        local_height,
+                    )
+                    negative = encode_mage_flow_conditioning(
+                        clip,
+                        vae,
+                        effective_negative_prompt or " ",
+                        reference_images,
+                        local_width,
+                        local_height,
+                    )
+                    latent_out = make_mage_flow_empty_latent(
+                        local_width,
+                        local_height,
+                        int(batch_size),
+                    )
+                elif is_boogu_image_edit_turbo:
                     if not pairs:
                         raise RuntimeError("Boogu Image Edit Turbo 工作流需要至少连接一张参考图。")
                     _send_status(
@@ -3967,6 +4045,20 @@ class GJJ_LazyImageStudio:
                         latent_out,
                         denoise=float(denoise),
                     )[0]
+                elif is_mage_flow_runtime:
+                    with mage_flow_safe_bf16_accumulation():
+                        sampled_latent = common_ksampler(
+                            sample_model,
+                            sample_seed,
+                            effective_steps,
+                            float(cfg),
+                            "euler",
+                            "simple",
+                            positive,
+                            negative,
+                            latent_out,
+                            denoise=1.0,
+                        )[0]
                 else:
                     sampled_latent = common_ksampler(
                         sample_model,
@@ -4143,7 +4235,7 @@ try:
                 names = [str(f) for f in folder_paths.get_filename_list("checkpoints") if str(f or "").strip()]
             else:
                 raw_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-                keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "gguf"]
+                keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "gguf"]
                 filtered = [m for m in raw_models if any(k in str(m).lower() for k in keywords)]
                 names = filtered if filtered else raw_models
                 kind = "unet"

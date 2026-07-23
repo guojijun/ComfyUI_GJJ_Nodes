@@ -1,0 +1,19 @@
+[project]
+name = "gjj-nodes"
+version = "1.0.0"
+description = "A comprehensive collection of ComfyUI custom nodes for image, video, audio, prompting, model management, and workflow utilities."
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.urls]
+Repository = "https://github.com/guojijun/ComfyUI_GJJ_Nodes"
+Documentation = "https://github.com/guojijun/ComfyUI_GJJ_Nodes#readme"
+"Bug Tracker" = "https://github.com/guojijun/ComfyUI_GJJ_Nodes/issues"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.comfy]
+PublisherId = "guojijun"
+DisplayName = "GJJ Nodes"

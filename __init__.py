@@ -7,6 +7,11 @@ print("\033[1;92m" + r"""
 💛 ╚═════╝  ╚═════╝ ╚══════╝  ╚═════╝  ╚═╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝💛
 """.strip() + "\033[0m")
 import traceback
+try:
+	from .vendor.mage_flow_comfy import apply as _apply_bundled_mage_flow_support
+	_apply_bundled_mage_flow_support()
+except Exception as _mage_flow_support_error:
+	print(f"[GJJ] 内置 Mage-Flow 兼容层初始化失败：{_mage_flow_support_error}")
 from .nodes import *
 WEB_DIRECTORY = "./js"
 def _serialize_help_value(value):

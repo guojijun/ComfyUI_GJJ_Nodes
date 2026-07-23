@@ -3,6 +3,7 @@
 <div align="center">
 
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Nodes-blue?logo=python)](https://github.com/comfyanonymous/ComfyUI)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](./pyproject.toml)
 [![License](https://img.shields.io/badge/License-Personal%20Use%20Only-red)](./LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-green?logo=python)](https://www.python.org/)
 [![GitHub Stars](https://img.shields.io/github/stars/guojijun/ComfyUI_GJJ_Nodes?style=social)](https://github.com/guojijun/ComfyUI_GJJ_Nodes)

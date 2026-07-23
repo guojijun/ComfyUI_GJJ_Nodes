@@ -4052,6 +4052,7 @@ import { api } from "/scripts/api.js";
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
+	overflow: hidden;
 	padding: 14px;
 	border: 1px solid rgba(117, 137, 148, .46);
 	border-radius: 8px;
@@ -4226,10 +4227,10 @@ import { api } from "/scripts/api.js";
 	display: grid;
 	grid-template-columns: repeat(auto-fill, 256px);
 	gap: 10px;
-	flex: 0 0 auto;
+	flex: 1 1 auto;
+	min-height: 0;
 	align-content: start;
 	justify-content: start;
-	max-height: 522px;
 	overflow: auto;
 	padding-right: 2px;
 }
@@ -4296,6 +4297,7 @@ import { api } from "/scripts/api.js";
 	background: rgba(6, 10, 12, .76);
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination {
+	flex: 0 0 auto;
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
