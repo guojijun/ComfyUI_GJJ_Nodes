@@ -253,7 +253,17 @@ function templateNodeLabel(node) {
 function getTemplateParamsSourceNode(node) {
 	const sourceId = String(node?.properties?.[PARAM_SOURCE_PROPERTY] || "").trim();
 	if (!sourceId) return null;
-	return (app.graph?._nodes || []).find((item) => String(item?.id ?? "") === sourceId) || null;
+	const source = (app.graph?._nodes || []).find((item) => String(item?.id ?? "") === sourceId) || null;
+	if (source) return source;
+	// 复制、导入或旧工作流迁移后节点 ID 可能变化。只有一个模板参数节点时，
+	// 可以无歧义地恢复绑定，避免目标节点继续沿用旧模式。
+	const candidates = templateParamsNodes();
+	if (candidates.length === 1) {
+		node.properties ||= {};
+		node.properties[PARAM_SOURCE_PROPERTY] = String(candidates[0]?.id ?? "");
+		return candidates[0];
+	}
+	return null;
 }
 
 function paramsEnabled(node) {

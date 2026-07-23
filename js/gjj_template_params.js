@@ -1067,8 +1067,8 @@ function removeDynamicWidget(node, name) {
 }
 
 function nativeWidgetType(field, rawValue) {
-	if (isBooleanField(field, { [field.key]: rawValue })) return "toggle";
-	if (field?.type === "ENUM" && Array.isArray(field.options) && field.options.length) return "combo";
+	if (isBooleanField(field, { [field.key]: rawValue })) return "gjj_template_buttons_bool";
+	if (field?.type === "ENUM" && Array.isArray(field.options) && field.options.length) return "gjj_template_buttons_enum";
 	if (field?.slider) return "slider";
 	if (field?.multiline) return "gjj_template_multiline";
 	const parsed = parseValue(rawValue);
@@ -1098,7 +1098,7 @@ function quantizeSliderValue(field, rawValue) {
 }
 
 function nativeWidgetValue(field, rawValue, type) {
-	if (type === "toggle") return parseValue(rawValue) === true;
+	if (type === "gjj_template_buttons_bool") return parseValue(rawValue) === true;
 	if (type === "number" || type === "slider") {
 		let value = field?.slider ? quantizeSliderValue(field, rawValue) : Number.parseFloat(rawValue);
 		if (!Number.isFinite(value)) value = Number(field?.slider?.default ?? 0);
@@ -1122,6 +1122,91 @@ function nativeWidgetOptions(field, type) {
 	return {};
 }
 
+function addButtonParamWidget(node, field, name, initialValue, type) {
+	const isBool = type === "gjj_template_buttons_bool";
+	const labels = field?.bool_labels || {};
+	const items = isBool
+		? [
+			{ label: String(labels.true_label || "true"), value: true },
+			{ label: String(labels.false_label || "false"), value: false },
+		]
+		: (field.options || []).map((option) => ({ label: optionLabel(option), value: optionValue(option) }));
+	let storedValue = isBool ? Boolean(initialValue) : String(initialValue ?? "");
+	let widget = null;
+	const root = document.createElement("div");
+	root.style.cssText = "width:100%;height:30px;display:grid;grid-template-columns:86px minmax(0,1fr);gap:5px;align-items:center;box-sizing:border-box;padding:0 10px 0 12px;pointer-events:auto;";
+	const label = document.createElement("span");
+	label.textContent = field.label || field.key;
+	label.style.cssText = "color:#b8c0cc;font:13px Arial;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;";
+	const buttons = document.createElement("div");
+	buttons.style.cssText = `display:grid;grid-template-columns:repeat(${Math.max(1, items.length)},minmax(0,1fr));gap:5px;min-width:0;pointer-events:auto;`;
+	root.append(label, buttons);
+
+	const selectedValues = () => isBool ? [Boolean(storedValue)] : normalizeEnumSelection(field, storedValue);
+	const sync = () => {
+		const selected = selectedValues();
+		for (const button of buttons.children) {
+			const active = selected.includes(button.__gjjValue);
+			button.dataset.active = active ? "true" : "false";
+			button.style.borderColor = active ? "#69b980" : "#44565f";
+			button.style.background = active ? "#234c3b" : "#252b31";
+			button.style.color = active ? "#ecfff1" : "#dce7e2";
+			button.style.fontWeight = active ? "700" : "400";
+		}
+	};
+	const commit = (nextValue) => {
+		storedValue = isBool ? Boolean(nextValue) : String(nextValue ?? "");
+		sync();
+		widget?.callback?.(storedValue);
+	};
+
+	for (const item of items) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = item.label;
+		button.__gjjValue = item.value;
+		button.style.cssText = "height:28px;min-width:0;padding:2px 7px;border:1px solid #44565f;border-radius:7px;background:#252b31;color:#dce7e2;cursor:pointer;pointer-events:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px Arial;";
+		for (const eventName of ["pointerdown", "mousedown", "mouseup"]) {
+			button.addEventListener(eventName, (event) => event.stopPropagation());
+		}
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			if (isBool) {
+				commit(item.value);
+				return;
+			}
+			if (event.ctrlKey || event.shiftKey) {
+				let selected = normalizeEnumSelection(field, storedValue);
+				selected = selected.includes(item.value)
+					? selected.filter((entry) => entry !== item.value)
+					: [...selected, item.value];
+				commit(enumStoredValue(selected.length ? selected : [item.value]));
+				return;
+			}
+			commit(item.value);
+		});
+		buttons.appendChild(button);
+	}
+
+	widget = node.addDOMWidget?.(name, "HTML", root, {
+		serialize: true,
+		hideOnZoom: false,
+		getValue: () => storedValue,
+		setValue: (nextValue) => {
+			storedValue = isBool ? parseValue(nextValue) === true : String(nextValue ?? "");
+			sync();
+		},
+	});
+	if (!widget) return null;
+	widget.gjj_template_widget_type = type;
+	widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), 30];
+	widget.getHeight = () => 30;
+	widget.serializeValue = () => storedValue;
+	sync();
+	return widget;
+}
+
 function ensureNativeParamWidget(node, field, values) {
 	const name = dynamicInputName(field);
 	const rawValue = values?.[field.key] ?? field.default ?? "";
@@ -1133,11 +1218,13 @@ function ensureNativeParamWidget(node, field, values) {
 	}
 	if (!widget) {
 		const commit = (next) => {
-				const text = type === "toggle" ? boolToText(next) : String(next ?? "");
+				const text = type === "gjj_template_buttons_bool" ? boolToText(next) : String(next ?? "");
 				values[field.key] = text;
 				saveFieldValue(node, field, values, text);
 			};
-		if (type === "gjj_template_multiline") {
+		if (["gjj_template_buttons_bool", "gjj_template_buttons_enum"].includes(type)) {
+			widget = addButtonParamWidget(node, field, name, nativeWidgetValue(field, rawValue, type), type);
+		} else if (type === "gjj_template_multiline") {
 			widget = ComfyWidgets.STRING?.(
 				node,
 				name,
@@ -1162,7 +1249,7 @@ function ensureNativeParamWidget(node, field, values) {
 	widget.callback = (next) => {
 		const normalized = type === "slider" ? quantizeSliderValue(field, next) : next;
 		if (type === "slider") widget.value = normalized;
-		const text = type === "toggle" ? boolToText(normalized) : String(normalized ?? "");
+		const text = type === "gjj_template_buttons_bool" ? boolToText(normalized) : String(normalized ?? "");
 		values[field.key] = text;
 		saveFieldValue(node, field, values, text);
 		if (isMediaType(field?.type)) {
@@ -2436,12 +2523,21 @@ function valuesForNewTemplate(oldState, nextFields) {
 	return nextValues;
 }
 
+function resetTemplateMediaState(node) {
+	for (const timer of node?.__gjjTemplateParamsNetworkTimers?.values?.() || []) clearTimeout(timer);
+	node.__gjjTemplateParamsNetworkTimers?.clear?.();
+	node.__gjjTemplateParamsNetworkDisplay?.clear?.();
+	node.__gjjTemplateParamsNetworkMappings?.clear?.();
+	node.__gjjTemplateParamsNetworkWarnings?.clear?.();
+}
+
 function forceRefreshTemplate(node, templateText = null) {
 	node.__gjjTemplateParamsPreferSavedSize = false;
 	const old = normalizeState(node);
 	const template = templateText ?? getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE) ?? DEFAULT_TEMPLATE;
 	const fields = applySavedFieldSettings(parseTemplate(template), old.fields);
 	const values = valuesForNewTemplate(old, fields);
+	resetTemplateMediaState(node);
 	saveState(node, template, fields, values);
 	renderRows(node);
 	node.__gjjTemplateParamsUpdateCount?.();
@@ -3141,8 +3237,14 @@ function ensureMediaPreviewWidget(node, fields, values) {
 			Math.round(Math.max(80, Math.ceil(group.scrollHeight || 168))),
 		];
 		widget.getHeight = () => Math.round(Math.max(80, Math.ceil(group.scrollHeight || 168)));
+		widget.__gjjTemplateParamsMediaRoot = group;
 		node.__gjjTemplateParamsMediaPreviewWidget = widget;
 		node.__gjjTemplateParamsMediaGroup = group;
+	}
+	const previewRoot = widget.__gjjTemplateParamsMediaRoot || widget.element || widget.inputEl || null;
+	if (previewRoot) {
+		widget.__gjjTemplateParamsMediaRoot = previewRoot;
+		node.__gjjTemplateParamsMediaGroup = previewRoot;
 	}
 	const widgetIndex = node.widgets?.indexOf(widget) ?? -1;
 	if (widgetIndex >= 0 && widgetIndex !== node.widgets.length - 1) {
@@ -3168,7 +3270,10 @@ function renderRows(node) {
 	rows.innerHTML = "";
 	node.__gjjTemplateParamsRows = new Map();
 	node.__gjjTemplateParamsPreviewMap = new Map();
-	node.__gjjTemplateParamsMediaGroup = null;
+	node.__gjjTemplateParamsMediaGroup = node.__gjjTemplateParamsMediaPreviewWidget?.__gjjTemplateParamsMediaRoot
+		|| node.__gjjTemplateParamsMediaPreviewWidget?.element
+		|| node.__gjjTemplateParamsMediaPreviewWidget?.inputEl
+		|| null;
 	node.__gjjTemplateParamsMediaFieldKeys = [];
 	if (!state.fields.length) {
 		const empty = document.createElement("div");
@@ -3354,6 +3459,7 @@ function buildDom(node) {
 		const old = normalizeState(node);
 		const fields = parseTemplate(template.value);
 		const values = valuesForNewTemplate(old, fields);
+		resetTemplateMediaState(node);
 		saveState(node, template.value, fields, values);
 		panel.style.display = "none";
 		node.__gjjTemplateParamsPreferSavedSize = false;
