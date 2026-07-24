@@ -879,6 +879,11 @@ def _multiview_allowed_unets() -> list[str]:
 		preset = _match_multiview_family(model_name)
 		if preset.get("id") in ALLOWED_PRESET_IDS or preset.get("supports_multi_image_edit"):
 			filtered.append(model_name)
+	# 旧工作流通常序列化了推荐的 fp8mixed 文件名。只要本地已有同模型族的
+	# 其它量化，就保留这个兼容别名供 ComfyUI 通过运行前的 Combo 校验；
+	# generate 会在加载前将它解析为 filtered 中实际存在的量化文件。
+	if filtered and DEFAULT_QWEN2511_UNET not in filtered:
+		filtered.append(DEFAULT_QWEN2511_UNET)
 	return filtered
 
 
@@ -2223,6 +2228,13 @@ class GJJ_CharacterMultiViewStudio:
 		unet_models = _multiview_allowed_unets()
 		clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
 		vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+		try:
+			import comfy.samplers
+			sampler_names = ["自动", *list(comfy.samplers.KSampler.SAMPLERS)]
+			scheduler_names = ["自动", *list(comfy.samplers.KSampler.SCHEDULERS)]
+		except Exception:
+			sampler_names = ["自动", "euler", "dpmpp_2m", "dpmpp_2m_sde", "lcm"]
+			scheduler_names = ["自动", "simple", "normal", "karras", "exponential", "sgm_uniform"]
 		rmbg_models = _safe_filename_list("RMBG") or ["rmbg1.4.safetensors"]
 		lora_models = _multiview_lora_models()
 		default_unet_name = _pick_default_multiview_unet(unet_models)
@@ -2428,7 +2440,66 @@ class GJJ_CharacterMultiViewStudio:
 						"multiline": False,
 						"display_name": "当前模板名",
 						"tooltip": "前端模板按钮写入，用于后端识别人物资产等专用拼接分支。",
-					}
+						}
+					),
+				),
+				"sampling_steps": (
+					"INT",
+					_hidden_multiview_param(
+						{
+							"default": 0,
+							"min": 0,
+							"max": 100,
+							"step": 1,
+							"display_name": "采样步数",
+							"tooltip": "0 表示自动使用模型预设；大于 0 时覆盖预设步数。",
+						}
+					),
+				),
+				"sampling_cfg": (
+					"FLOAT",
+					_hidden_multiview_param(
+						{
+							"default": -1.0,
+							"min": -1.0,
+							"max": 30.0,
+							"step": 0.1,
+							"display_name": "CFG",
+							"tooltip": "-1 表示自动使用模型预设；大于等于 0 时覆盖预设 CFG。",
+						}
+					),
+				),
+				"sampling_sampler": (
+					sampler_names,
+					_hidden_multiview_param(
+						{
+							"default": "自动",
+							"display_name": "采样器",
+							"tooltip": "自动表示使用模型预设采样器。",
+						}
+					),
+				),
+				"sampling_scheduler": (
+					scheduler_names,
+					_hidden_multiview_param(
+						{
+							"default": "自动",
+							"display_name": "调度器",
+							"tooltip": "自动表示使用模型预设调度器。",
+						}
+					),
+				),
+				"sampling_denoise": (
+					"FLOAT",
+					_hidden_multiview_param(
+						{
+							"default": -1.0,
+							"min": -1.0,
+							"max": 1.0,
+							"step": 0.01,
+							"display_name": "降噪强度",
+							"tooltip": "-1 表示自动使用模型预设；0–1 时覆盖预设降噪强度。",
+						}
 					),
 				),
 			},
@@ -2472,7 +2543,9 @@ class GJJ_CharacterMultiViewStudio:
 		}
 
 	@classmethod
-	def VALIDATE_INPUTS(cls, **_kwargs):
+	def VALIDATE_INPUTS(cls, unet_name=None, **_kwargs):
+		# 旧工作流可能保存了当前已不存在的量化文件名。显式接管主模型
+		# 校验，使其能进入 generate，再由去量化名称解析器匹配本地兼容量化。
 		return True
 
 	@classmethod
@@ -2527,6 +2600,11 @@ class GJJ_CharacterMultiViewStudio:
 				str(vae_name),
 				str(rmbg_model_name),
 				str(template_name),
+				str(kwargs.get("sampling_steps", 0)),
+				str(kwargs.get("sampling_cfg", -1.0)),
+				str(kwargs.get("sampling_sampler", "自动")),
+				str(kwargs.get("sampling_scheduler", "自动")),
+				str(kwargs.get("sampling_denoise", -1.0)),
 			]
 		)
 
@@ -2738,6 +2816,11 @@ class GJJ_CharacterMultiViewStudio:
 		lora_2_name: str,
 		lora_2_strength: float,
 		unique_id: str | None = None,
+		sampling_steps: int = 0,
+		sampling_cfg: float = -1.0,
+		sampling_sampler: str = "自动",
+		sampling_scheduler: str = "自动",
+		sampling_denoise: float = -1.0,
 	):
 		target_width, target_height = _resolve_target_size_from_image(
 			main_image,
@@ -2906,34 +2989,48 @@ class GJJ_CharacterMultiViewStudio:
 				preset=preset,
 			)
 
-		effective_steps = _resolve_effective_steps(
-			int(preset.get("steps", 20)),
-			preset,
-			lora_1_name,
-			lora_1_strength,
-			lora_2_name,
-			lora_2_strength,
-		)
+		effective_steps = int(sampling_steps)
+		if effective_steps <= 0:
+			effective_steps = _resolve_effective_steps(
+				int(preset.get("steps", 20)),
+				preset,
+				lora_1_name,
+				lora_1_strength,
+				lora_2_name,
+				lora_2_strength,
+			)
+		effective_cfg = float(sampling_cfg)
+		if effective_cfg < 0:
+			effective_cfg = float(preset.get("cfg", 1.0))
+		requested_sampler = str(sampling_sampler or "").strip()
+		if not requested_sampler or requested_sampler == "自动":
+			requested_sampler = preset.get("sampler_name", "euler")
+		requested_scheduler = str(sampling_scheduler or "").strip()
+		if not requested_scheduler or requested_scheduler == "自动":
+			requested_scheduler = preset.get("scheduler", "simple")
+		effective_denoise = float(sampling_denoise)
+		if effective_denoise < 0:
+			effective_denoise = float(preset.get("denoise", 1.0))
 		sampler_name, scheduler = _resolve_native_sampler_scheduler(
-			preset.get("sampler_name", "euler"),
-			preset.get("scheduler", "simple"),
+			requested_sampler,
+			requested_scheduler,
 			unique_id,
 		)
 		_send_status(
 			unique_id,
-			f"采样参数：steps={effective_steps}, cfg={float(preset.get('cfg', 1.0)):g}, sampler={sampler_name}, scheduler={scheduler}",
+			f"采样参数：steps={effective_steps}, cfg={effective_cfg:g}, sampler={sampler_name}, scheduler={scheduler}, denoise={effective_denoise:g}",
 		)
 		sampled_latent = common_ksampler(
 			model,
 			int(seed),
 			effective_steps,
-			float(preset.get("cfg", 1.0)),
+			effective_cfg,
 			sampler_name,
 			scheduler,
 			positive,
 			negative,
 			latent_out,
-			denoise=float(preset.get("denoise", 1.0)),
+			denoise=effective_denoise,
 		)[0]
 		return VAEDecode().decode(vae, sampled_latent)[0]
 
@@ -3209,6 +3306,11 @@ class GJJ_CharacterMultiViewStudio:
 					lora_2_name=effective_lora_2_name,
 					lora_2_strength=effective_lora_2_strength,
 					unique_id=unique_id,
+					sampling_steps=kwargs.get("sampling_steps", 0),
+					sampling_cfg=kwargs.get("sampling_cfg", -1.0),
+					sampling_sampler=kwargs.get("sampling_sampler", "自动"),
+					sampling_scheduler=kwargs.get("sampling_scheduler", "自动"),
+					sampling_denoise=kwargs.get("sampling_denoise", -1.0),
 				)
 			except Exception as exc:
 				raise RuntimeError(

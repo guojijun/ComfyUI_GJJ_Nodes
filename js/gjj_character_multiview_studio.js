@@ -81,7 +81,20 @@ const REQUIRED_WIDGET_ORDER = [
 	VAE_WIDGET,
 	RMBG_WIDGET,
 	TEMPLATE_NAME_WIDGET,
+	"sampling_steps",
+	"sampling_cfg",
+	"sampling_sampler",
+	"sampling_scheduler",
+	"sampling_denoise",
 ];
+const SAMPLING_WIDGET_NAMES = [
+	"sampling_steps",
+	"sampling_cfg",
+	"sampling_sampler",
+	"sampling_scheduler",
+	"sampling_denoise",
+];
+const LEGACY_REQUIRED_WIDGET_COUNT = REQUIRED_WIDGET_ORDER.length - SAMPLING_WIDGET_NAMES.length;
 const WIDGET_CHINESE_META = {
 	base_prompt: {
 		label: "主体补充提示词",
@@ -126,6 +139,26 @@ const WIDGET_CHINESE_META = {
 	seed: {
 		label: "随机种子",
 		tooltip: "基础随机种子；每个视图会在这个数值上依次加 1。",
+	},
+	sampling_steps: {
+		label: "采样步数",
+		tooltip: "0 表示自动使用当前模型预设；大于 0 时手动覆盖。",
+	},
+	sampling_cfg: {
+		label: "CFG",
+		tooltip: "-1 表示自动使用当前模型预设；大于等于 0 时手动覆盖。",
+	},
+	sampling_sampler: {
+		label: "采样器",
+		tooltip: "自动表示使用当前模型预设采样器。",
+	},
+	sampling_scheduler: {
+		label: "调度器",
+		tooltip: "自动表示使用当前模型预设调度器。",
+	},
+	sampling_denoise: {
+		label: "降噪强度",
+		tooltip: "-1 表示自动使用当前模型预设；0–1 时手动覆盖。",
 	},
 	save_each_image: {
 		label: "保存单张图片",
@@ -540,7 +573,12 @@ function coerceWidgetValue(widget, value) {
 	if (choices?.length) {
 		const text = String(value ?? "");
 		const match = choices.find((item) => item.toLowerCase() === text.toLowerCase());
-		return match ?? widget.value;
+		if (match) {
+			return match;
+		}
+		const current = String(widget.value ?? "");
+		const currentMatch = choices.find((item) => item.toLowerCase() === current.toLowerCase());
+		return currentMatch ?? choices[0];
 	}
 	const type = String(widget.type || "").toUpperCase();
 	if (type.includes("BOOLEAN") || typeof widget.value === "boolean") {
@@ -604,15 +642,20 @@ function restoreSerializedValues(node, serializedNode) {
 	if (!rawValues?.length) {
 		return;
 	}
-	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 2) {
+	if (rawValues.length === LEGACY_REQUIRED_WIDGET_COUNT - 2) {
 		rawValues.splice(8, 0, "", 0);
 	}
-	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 3) {
+	if (rawValues.length === LEGACY_REQUIRED_WIDGET_COUNT - 3) {
 		rawValues.splice(8, 0, "", 0);
 		rawValues.push(true);
 	}
-	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 1) {
+	if (rawValues.length === LEGACY_REQUIRED_WIDGET_COUNT - 1) {
 		rawValues.push(true);
+	}
+	if (rawValues.length === LEGACY_REQUIRED_WIDGET_COUNT) {
+		for (const name of SAMPLING_WIDGET_NAMES) {
+			rawValues.push(getWidget(node, name)?.value);
+		}
 	}
 	let values = legacyVisualOrderValues(rawValues);
 	let bestScore = -1;
@@ -2780,6 +2823,30 @@ function makeNumberRow(node, widgetName) {
 	return wrap;
 }
 
+function makeComboRow(node, widgetName) {
+	const widget = getWidget(node, widgetName);
+	const wrap = document.createElement("label");
+	wrap.style.cssText = "display:grid;grid-template-columns:110px minmax(0,1fr);align-items:center;gap:8px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#172026;";
+	const label = document.createElement("span");
+	label.textContent = chineseWidgetMeta(widgetName)?.label || widgetName;
+	const select = document.createElement("select");
+	select.style.cssText = "min-width:0;background:#11181c;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
+	for (const value of widgetChoices(widget) || []) {
+		const option = document.createElement("option");
+		option.value = value;
+		option.textContent = value;
+		select.appendChild(option);
+	}
+	select.value = String(widget?.value ?? "");
+	select.addEventListener("change", () => {
+		setWidgetValue(widget, select.value);
+		syncWidgetValuesCache(node);
+		refreshNode(node);
+	});
+	wrap.append(label, select);
+	return wrap;
+}
+
 function makeTextRow(node, widgetName) {
 	const widget = getWidget(node, widgetName);
 	const wrap = document.createElement("label");
@@ -3199,7 +3266,12 @@ function openSettingsFloatingPanel(node, anchor) {
 		makeTextRow(node, BASE_PROMPT_WIDGET),
 		makeTextRow(node, "negative_prompt"),
 		makeNumberRow(node, "seed"),
-		makeBooleanRow(node, "save_each_image")
+		makeBooleanRow(node, "save_each_image"),
+		makeNumberRow(node, "sampling_steps"),
+		makeNumberRow(node, "sampling_cfg"),
+		makeComboRow(node, "sampling_sampler"),
+		makeComboRow(node, "sampling_scheduler"),
+		makeNumberRow(node, "sampling_denoise")
 	);
 	popup.reposition();
 }
@@ -3227,7 +3299,7 @@ function updateFloatingButtonStates(node) {
 	if (settingsButton) {
 		const open = active === "settings";
 		settingsButton.textContent = "⚙️";
-		settingsButton.title = "打开参数窗口：提示词、种子、保存选项。";
+		settingsButton.title = "打开参数窗口：提示词、种子、采样参数、保存选项。";
 		settingsButton.style.background = open ? "#2a3f4a" : "#172026";
 		settingsButton.style.borderColor = open ? "#5a7a8a" : "#41535b";
 		settingsButton.style.color = open ? "#ffffff" : "#dce7e2";
@@ -3359,7 +3431,6 @@ function ensureToolbar(node) {
 
 	const runButton = createButton("▶", "运行当前主体一键多视图节点，不需要外接输出。", () => runCurrentCharacterMultiViewNode(node));
 	node.__gjjCharacterMultiViewRunButton = runButton;
-	container.appendChild(runButton);
 
 	const keepModelButton = createButton("🧠", "打开模型窗口：主模型、微调模型、保持模型。", (event) => {
 		openModelFloatingPanel(node, event.currentTarget || keepModelButton);
@@ -3382,11 +3453,12 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewTemplateInsertBefore = clearButton;
 	node.__gjjCharacterMultiViewTemplateButtonElements = [];
 	container.appendChild(clearButton);
-	const settingsButton = createButton("⚙️", "打开参数窗口：提示词、种子、保存选项。", (event) => {
+	const settingsButton = createButton("⚙️", "打开参数窗口：提示词、种子、采样参数、保存选项。", (event) => {
 		openSettingsFloatingPanel(node, event.currentTarget || settingsButton);
 	});
 	node.__gjjCharacterMultiViewSettingsButton = settingsButton;
 	container.appendChild(settingsButton);
+	container.appendChild(runButton);
 	refreshTemplateButtons(node).catch((error) => {
 		console.warn("[GJJ CharacterMultiViewStudio] 模板按钮刷新失败。", error);
 		node.__gjjCharacterMultiViewTemplateText = DEFAULT_TEMPLATE_TEXT;
