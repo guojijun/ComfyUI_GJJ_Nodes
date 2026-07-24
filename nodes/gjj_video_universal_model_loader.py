@@ -986,6 +986,40 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             ),
         ],
     },
+    "wan21_bernini_13b_lightx2v": {
+        "label": "Wan2.1 Bernini 1.3B",
+        "clip_type": "wan",
+        "slots": [
+            S(
+                "model",
+                "Bernini 1.3B模型",
+                "diffusion_models",
+                "diffusion",
+                ["wan2.1", "bernini", "1.3b"],
+                loader="unet",
+                preferred_name="wan2.1_bernini_1.3B_int4_convrot.safetensors",
+                official_names=["wan2.1_bernini_1.3B_int4_convrot.safetensors"],
+            ),
+            S(
+                "clip",
+                "CLIP编码器",
+                "text_encoders",
+                "clip",
+                ["umt5", "xxl"],
+                preferred_name="umt5_xxl_int4_convrot.safetensors",
+                official_names=["umt5_xxl_int4_convrot.safetensors"],
+            ),
+            S(
+                "vae",
+                "VAE",
+                "vae",
+                "vae",
+                ["wan_2.1_vae"],
+                preferred_name="wan_2.1_vae.safetensors",
+                official_names=WAN21_VAE_NAMES,
+            ),
+        ],
+    },
 }
 
 _CONFIG_FOLDERS: list[str] = []
