@@ -218,7 +218,7 @@ const PRESET_ACTION_GROUPS = {
 	],
 	characterAsset: [
 		"白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征。",
-		"白色背景,标准正面，完整全身构图，全身取景，全身照，完整人体，双脚完整在画面内，画面底部预留足够空间容纳双脚",
+		"白色背景,主体面朝画面右方的标准全身侧面照片，完整全身构图，从头到脚无裁剪，双脚完整在画面内，画面底部预留足够空间容纳双脚。",
 		"白色背景,主体45°斜侧身，全身无裁剪，从头到脚，姿态自然。顶部、底部各留白5%，居中。",
 		"白色背景,主体后视图，全身无裁剪，从头到脚，轮廓标准。顶部、底部各留白5%，居中。",
 	],
@@ -275,10 +275,46 @@ const ACTION_MIGRATION_LORA_2_STRENGTH = 1.0;
 
 const MODEL_PRESETS = [
 	{
-		keywords: ["qwen_image_edit_2511", "firered-image-edit", "realfire"],
-		lora1: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		keywords: ["qwen_image_edit_2511"],
+		clip: "",
+		clipKeywords: ["qwen", "2.5", "vl", "7b"],
+		vae: "",
+		vaeKeywords: ["qwenimagevae"],
+		lora1: "",
+		lora1Keywords: ["qwen", "image", "edit", "2511", "lightning", "4steps"],
 		lora1Strength: 1.0,
-		lora2: DEFAULT_MULTI_ANGLES_LORA,
+		lora2: "",
+		lora2Keywords: ["qwen", "image", "edit", "2511", "multiple", "angles"],
+		lora2Strength: 1.0,
+		lora3: "",
+		lora3Strength: 0.0,
+	},
+	{
+		keywords: ["firered-image-edit", "firered_image_edit", "realfire"],
+		clip: "",
+		clipKeywords: ["qwen", "2.5", "vl", "7b"],
+		vae: "",
+		vaeKeywords: ["qwenimagevae"],
+		lora1: "",
+		lora1Keywords: ["firered", "image", "edit", "lightning"],
+		lora1Strength: 1.0,
+		lora2: "",
+		lora2Keywords: ["qwen", "image", "edit", "2511", "multiple", "angles"],
+		lora2Strength: 1.0,
+		lora3: "",
+		lora3Strength: 0.0,
+	},
+	{
+		keywords: ["krea2", "krea-2", "krea_2"],
+		clip: "",
+		clipKeywords: ["qwen3vl", "4b"],
+		vae: "",
+		vaeKeywords: ["qwenimagevae"],
+		lora1: "",
+		lora1Keywords: ["krea2", "identity", "edit", "v1", "2"],
+		lora1Strength: 1.0,
+		lora2: "",
+		lora2Keywords: ["realism", "engine", "krea2", "v2"],
 		lora2Strength: 1.0,
 		lora3: "",
 		lora3Strength: 0.0,
@@ -1097,6 +1133,20 @@ function resolveWidgetOption(widget, desiredValue) {
 	return desiredValue;
 }
 
+function resolvePresetModelOption(widget, desiredValue, keywords = []) {
+	const exact = resolveWidgetOption(widget, desiredValue);
+	const values = widgetChoices(widget) || [];
+	if (String(desiredValue || "").trim() && values.includes(exact)) {
+		return exact;
+	}
+	const normalizedKeywords = keywords.map(normalizeModelText).filter(Boolean);
+	const matched = values.find((value) => {
+		const text = normalizeModelText(value);
+		return normalizedKeywords.length && normalizedKeywords.every((keyword) => text.includes(keyword));
+	});
+	return matched || (String(desiredValue || "").trim() ? exact : "");
+}
+
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
 	refreshOpenModelFloatingPanel(node);
@@ -1361,14 +1411,23 @@ function matchPreset(unetName) {
 }
 
 function applyModelPreset(node, force = false) {
-	const actionInputs = getActionInputs(node);
-	const hasActionInput = actionInputs.some(input => input?.link);
-	if (hasActionInput) {
-		return;
-	}
 	const unetName = String(getWidget(node, UNET_WIDGET)?.value || "");
 	const preset = matchPreset(unetName);
 	if (!preset) {
+		return;
+	}
+	setWidgetValue(
+		getWidget(node, CLIP_WIDGET),
+		resolvePresetModelOption(getWidget(node, CLIP_WIDGET), preset.clip || "", preset.clipKeywords || []),
+	);
+	setWidgetValue(
+		getWidget(node, VAE_WIDGET),
+		resolvePresetModelOption(getWidget(node, VAE_WIDGET), preset.vae || "", preset.vaeKeywords || []),
+	);
+	const actionInputs = getActionInputs(node);
+	const hasActionInput = actionInputs.some(input => input?.link);
+	if (hasActionInput) {
+		syncWidgetValuesCache(node);
 		return;
 	}
 	if (
@@ -1378,9 +1437,15 @@ function applyModelPreset(node, force = false) {
 	) {
 		return;
 	}
-	setWidgetValue(getWidget(node, LORA1_WIDGET), resolveWidgetOption(getWidget(node, LORA1_WIDGET), preset.lora1 || ""));
+	setWidgetValue(
+		getWidget(node, LORA1_WIDGET),
+		resolvePresetModelOption(getWidget(node, LORA1_WIDGET), preset.lora1 || "", preset.lora1Keywords || []),
+	);
 	setWidgetValue(getWidget(node, LORA1_STRENGTH_WIDGET), preset.lora1Strength ?? 0);
-	setWidgetValue(getWidget(node, LORA2_WIDGET), resolveWidgetOption(getWidget(node, LORA2_WIDGET), preset.lora2 || ""));
+	setWidgetValue(
+		getWidget(node, LORA2_WIDGET),
+		resolvePresetModelOption(getWidget(node, LORA2_WIDGET), preset.lora2 || "", preset.lora2Keywords || []),
+	);
 	setWidgetValue(getWidget(node, LORA2_STRENGTH_WIDGET), preset.lora2Strength ?? 0);
 	setWidgetValue(getWidget(node, LORA3_WIDGET), resolveWidgetOption(getWidget(node, LORA3_WIDGET), preset.lora3 || ""));
 	setWidgetValue(getWidget(node, LORA3_STRENGTH_WIDGET), preset.lora3Strength ?? 0);
@@ -1990,7 +2055,15 @@ function enforceRequiredModelChoices(node) {
 	const unetWidget = getWidget(node, UNET_WIDGET);
 	const unetValues = mutableWidgetChoices(unetWidget);
 	if (unetValues?.length) {
-		const filtered = unetValues.filter((value) => String(value || "").toLowerCase().includes("2511"));
+		const filtered = unetValues.filter((value) => {
+			const text = normalizeModelText(value);
+			return (
+				text.includes("qwenimageedit2511")
+				|| text.includes("fireredimageedit")
+				|| text.includes("realfire")
+				|| text.includes("krea2")
+			);
+		});
 		if (filtered.length) {
 			filtered.sort((a, b) => {
 				const left = modelNameScore(a, [], 0);
@@ -2012,9 +2085,6 @@ function enforceRequiredModelChoices(node) {
 				const right = modelNameScore(b, [], 1);
 				return (left?.[0] ?? 9) - (right?.[0] ?? 9) || String(a).localeCompare(String(b));
 			});
-			if (values.length && !String(widget.value || "").trim()) {
-				setWidgetValue(widget, values[0]);
-			}
 		}
 	}
 	if (!String(getWidget(node, LORA3_STRENGTH_WIDGET)?.value ?? "").trim()) {
@@ -3088,6 +3158,7 @@ function makeModelChoicePanel(node, widget, onApply, strengthWidget = null) {
 }
 
 function characterModelTreeEntries(node) {
+	const familyPreset = matchPreset(String(getWidget(node, UNET_WIDGET)?.value || ""));
 	return [
 		{
 			widget: UNET_WIDGET,
@@ -3095,9 +3166,10 @@ function characterModelTreeEntries(node) {
 			folder: "diffusion_models",
 			icon: "🟣",
 			models: widgetChoices(getWidget(node, UNET_WIDGET)) || [],
-			keywords: ["qwen", "image", "edit", "2511"],
+			keywords: [],
 			fallback: "qwen_image_edit_2511_int8_convrot.safetensors",
-			description: "Qwen Image Edit 2511 多视图主生成模型。",
+			description: "支持 Qwen Image Edit 2511、FireRed Image Edit 与 Krea2 的多视图主模型。",
+			autoSelect: false,
 		},
 		{
 			widget: LORA2_WIDGET,
@@ -3105,10 +3177,11 @@ function characterModelTreeEntries(node) {
 			folder: "loras",
 			icon: "🟠",
 			models: widgetChoices(getWidget(node, LORA2_WIDGET)) || [],
-			keywords: [],
+			keywords: familyPreset?.lora2Keywords || [],
 			fallback: DEFAULT_MULTI_ANGLES_LORA,
 			description: "多视图角度一致性 LoRA。",
 			strengthWidgetName: LORA2_STRENGTH_WIDGET,
+			autoSelect: false,
 		},
 		{
 			widget: LORA1_WIDGET,
@@ -3116,10 +3189,11 @@ function characterModelTreeEntries(node) {
 			folder: "loras",
 			icon: "🟠",
 			models: widgetChoices(getWidget(node, LORA1_WIDGET)) || [],
-			keywords: [],
+			keywords: familyPreset?.lora1Keywords || [],
 			fallback: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 			description: "Qwen Image Edit 2511 加速 LoRA。",
 			strengthWidgetName: LORA1_STRENGTH_WIDGET,
+			autoSelect: false,
 		},
 		{
 			widget: RMBG_WIDGET,
@@ -3130,6 +3204,7 @@ function characterModelTreeEntries(node) {
 			keywords: ["rmbg", "1.4"],
 			fallback: DEFAULT_RMBG14_MODEL,
 			description: "人物资产分支使用的 RMBG 抠图模型。",
+			autoSelect: false,
 		},
 		{
 			widget: CLIP_WIDGET,
@@ -3137,9 +3212,10 @@ function characterModelTreeEntries(node) {
 			folder: "text_encoders",
 			icon: "🟡",
 			models: widgetChoices(getWidget(node, CLIP_WIDGET)) || [],
-			keywords: ["qwen", "2.5", "vl"],
+			keywords: familyPreset?.clipKeywords || [],
 			fallback: DEFAULT_QWEN2511_CLIP,
-			description: "Qwen Image Edit 2511 文本/视觉编码器。",
+			description: "跟随当前主模型族匹配的文本/视觉编码器。",
+			autoSelect: false,
 		},
 		{
 			widget: VAE_WIDGET,
@@ -3147,9 +3223,10 @@ function characterModelTreeEntries(node) {
 			folder: "vae",
 			icon: "🔴",
 			models: widgetChoices(getWidget(node, VAE_WIDGET)) || [],
-			keywords: ["qwen", "image", "vae"],
+			keywords: familyPreset?.vaeKeywords || [],
 			fallback: DEFAULT_QWEN2511_VAE,
-			description: "Qwen Image VAE。",
+			description: "跟随当前主模型族匹配的 VAE。",
+			autoSelect: false,
 		},
 	];
 }
@@ -3157,7 +3234,8 @@ function characterModelTreeEntries(node) {
 function makeClickableModelTreeFile(node, widgetName, prefix, icon, fallback = "", afterApply = null, strengthWidgetName = "", popup = null) {
 	const widget = getWidget(node, widgetName);
 	const strengthWidget = strengthWidgetName ? getWidget(node, strengthWidgetName) : null;
-	if (widget && !String(widget.value || "").trim()) {
+	const isOptionalLora = [LORA1_WIDGET, LORA2_WIDGET, LORA3_WIDGET].includes(widgetName);
+	if (widget && !isOptionalLora && !String(widget.value || "").trim()) {
 		const first = filteredModelChoices(widget, "", 1).find((item) => String(item || "").trim());
 		if (first) {
 			setWidgetValue(widget, first);
@@ -3245,6 +3323,7 @@ function openModelFloatingPanel(node, anchor) {
 				onApply: (entry, value) => {
 					if (entry.widget === UNET_WIDGET) {
 						applyPresetForCurrentModel(node, true);
+						setTimeout(renderTree, 0);
 					}
 					syncWidgetValuesCache(node);
 				},

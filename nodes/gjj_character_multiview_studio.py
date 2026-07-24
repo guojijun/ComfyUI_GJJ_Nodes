@@ -16,6 +16,10 @@ from comfy.cli_args import args
 from PIL import Image, ImageDraw, ImageFont
 from PIL.PngImagePlugin import PngInfo
 from nodes import VAEDecode, common_ksampler
+try:
+	from nodes import EmptySD3LatentImage
+except ImportError:
+	EmptySD3LatentImage = None
 
 from .common_utils.text_tools import (
 	gjjutils_canonical_model_text as _canonical_model_text,
@@ -62,6 +66,13 @@ from .gjj_comprehensive_matting import (
 	_resolve_model_path,
 	_run_rmbg14,
 	_select_device,
+)
+from .gjj_krea2_grounded_encode import (
+	GJJ_Krea2EditGroundedEncode as _GJJKrea2EditGroundedEncode,
+)
+from .gjj_krea2_edit_model_patch import (
+	GJJ_Krea2EditModelPatch as _GJJKrea2EditModelPatch,
+	LORA_FILENAME as KREA2_IDENTITY_EDIT_LORA,
 )
 
 
@@ -336,7 +347,7 @@ DEFAULT_PRODUCT_ACTION_LINES = [
 ]
 DEFAULT_MULTIVIEW_TEMPLATE_TEXT = """《人物资产》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
 白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征。
-白色背景,标准正面，完整全身构图，全身取景，全身照，完整人体，双脚完整在画面内，画面底部预留足够空间容纳双脚
+白色背景,主体面朝画面右方的标准全身侧面照片，完整全身构图，从头到脚无裁剪，双脚完整在画面内，画面底部预留足够空间容纳双脚。
 白色背景,主体45°斜侧身，全身无裁剪，从头到脚，姿态自然。顶部、底部各留白5%，居中。
 白色背景,主体后视图，全身无裁剪，从头到脚，轮廓标准。顶部、底部各留白5%，居中。
 ---
@@ -388,8 +399,18 @@ ALLOWED_PRESET_IDS = {
 	"flux1_dev_kontext",
 	"flux1_canny_dev",
 	"lotus_depth",
+	"krea2",
+	"krea2_turbo",
 }
 SPECIAL_EDIT_KEYWORDS = ("fireredimageedit", "realfire")
+QWEN_IMAGE_EDIT_LLAMA_TEMPLATE = (
+	"<|im_start|>system\n"
+	"Describe the key features of the input image (color, shape, size, texture, objects, background), "
+	"then explain how the user's text instruction should alter or modify the image. Generate a new image "
+	"that meets the user's requirements while maintaining consistency with the original input where appropriate."
+	"<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+)
+QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 CAPTION_HEIGHT = 48
 CAPTION_PADDING_X = 8
 CAPTION_PADDING_Y = 6
@@ -871,7 +892,13 @@ def _conditioning_set_values(conditioning, values: dict[str, Any], append: bool 
 
 
 def _multiview_allowed_unets() -> list[str]:
-	models = gjjutils_find_model_list(["qwen", "image", "edit", "2511"], "diffusion_models", "AND")
+	models = _dedupe_keep_order([
+		*gjjutils_find_model_list(["qwen", "image", "edit", "2511"], "diffusion_models", "AND"),
+		*gjjutils_find_model_list(["firered", "image", "edit"], "diffusion_models", "AND"),
+		*gjjutils_find_model_list(["realfire"], "diffusion_models", "AND"),
+		*gjjutils_find_model_list(["krea2"], "diffusion_models", "AND"),
+		*gjjutils_find_model_list(["krea", "2"], "diffusion_models", "AND"),
+	])
 	filtered: list[str] = []
 	for model_name in models:
 		if not str(model_name or "").replace("\\", "/").lower().endswith((".safetensors", ".gguf")):
@@ -915,7 +942,8 @@ def _resolve_model_any_subdir(folder_type: str, seed_name: str, extensions: list
 
 
 def _match_multiview_family(unet_name: str) -> dict[str, Any]:
-	preset = match_model_family(unet_name)
+	matched_preset = match_model_family(unet_name)
+	preset = dict(matched_preset) if matched_preset is not None else None
 	if preset is None:
 		# 如果找不到预设，返回一个默认的 generic 预设
 		return {"id": "generic", "clip_type": "stable_diffusion"}
@@ -923,6 +951,22 @@ def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 		return preset
 
 	canonical = _canonical_model_text(unet_name)
+	if "krea2" in canonical:
+		return {
+			"id": "krea2_turbo",
+			"keywords": ["krea2", "krea2_turbo", "krea2-turbo"],
+			"clip_type": "krea2",
+			"clip_names": ["qwen3vl_4b_int4_convrot.safetensors", "qwen3vl_4b_fp8_scaled.safetensors"],
+			"vae_name": "qwen_image_vae.safetensors",
+			"steps": 8,
+			"cfg": 1.0,
+			"sampler_name": "euler",
+			"scheduler": "simple",
+			"denoise": 1.0,
+			"supports_multi_image_edit": False,
+			"width": 1024,
+			"height": 1024,
+		}
 	if any(keyword in canonical for keyword in SPECIAL_EDIT_KEYWORDS):
 		fallback_preset = match_model_family("qwen_image_edit_2511")
 		if fallback_preset is not None:
@@ -930,6 +974,80 @@ def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 			override["id"] = "realfire_like_edit"
 			return override
 	return preset
+
+
+def _is_krea2_family(unet_name: str, clip_type: str = "", preset: dict[str, Any] | None = None) -> bool:
+	text = _canonical_model_text(
+		"|".join([str(unet_name or ""), str(clip_type or ""), str((preset or {}).get("id", ""))])
+	)
+	return "krea2" in text or _normalize_text(clip_type) in {"krea", "krea2", "krea2turbo"}
+
+
+def _is_firered_image_edit(unet_name: str, preset: dict[str, Any] | None = None) -> bool:
+	text = _canonical_model_text(
+		"|".join([str(unet_name or ""), str((preset or {}).get("id", "")), str((preset or {}).get("keywords", ""))])
+	)
+	return ("firered" in text and "image" in text and "edit" in text) or "realfire" in text
+
+
+def _krea2_single_subject_edit_prompt(prompt: str) -> str:
+	"""移除 Qwen 多角度触发词，并把 Krea2 约束为单镜头原位编辑。"""
+	original_text = str(prompt or "")
+	instruction = (
+		"A clean photograph of one main subject standing alone at the center of one frame. "
+		"The subject fills the composition naturally. Preserve the subject's identity and "
+		"appearance while applying the requested framing and body orientation."
+	)
+	lines = [
+		line.strip()
+		for line in str(prompt or "").splitlines()
+		if line.strip() and "<sks>" not in line.lower()
+	]
+	text = "\n".join(lines)
+	is_full_body = bool(re.search(r"全身|从头到脚|full[- ]body|head to toe", original_text, re.IGNORECASE))
+	is_back_facing = bool(re.search(r"后视|背面|背对|back view|rear view", original_text, re.IGNORECASE))
+	is_side_facing = bool(re.search(r"侧面|右侧|面朝右|朝右|side profile|profile", original_text, re.IGNORECASE))
+	is_quarter_turn = bool(re.search(r"45\s*[°度]|斜侧身|three[- ]quarter", original_text, re.IGNORECASE))
+	if is_full_body:
+		instruction += (
+			" Use a full-length composition showing the entire body continuously from the "
+			"top of the head through both legs to the soles of both shoes, with clear margin "
+			"above the head and below the feet."
+		)
+	if is_back_facing:
+		instruction += (
+			" The subject faces directly away from the camera. The camera sees the back of "
+			"the head, hair, shoulders, torso, hips, legs, and heels in one centered standing pose."
+		)
+	elif is_side_facing and not is_quarter_turn:
+		instruction += (
+			" The subject stands in a clean right-facing profile. The nose points toward the "
+			"right edge of the frame; the head, shoulders, torso, hips, and feet align in profile."
+		)
+	if is_quarter_turn:
+		text = re.sub(
+			r"(?:主体|人物|角色)?\s*(?:正面)?\s*(?:左|右)?\s*45\s*[°度]?\s*(?:斜侧身|侧身|朝向|视图)?",
+			"",
+			text,
+			flags=re.IGNORECASE,
+		)
+		text = re.sub(r"(?:主体|人物|角色)?\s*斜侧身", "", text)
+		instruction += (
+			" The subject stands alone with the torso gently turned toward the right edge "
+			"of the frame. The nose points slightly toward the right edge; both eyes remain "
+			"visible, with one shoulder closer to the camera."
+		)
+	for source, replacement in (
+		("全身正面右45°视图", "全身正面右45°朝向的单主体照片"),
+		("全身正面左45°视图", "全身正面左45°朝向的单主体照片"),
+		("左侧视图", "主体左侧朝向镜头的单主体照片"),
+		("右侧视图", "主体右侧朝向镜头的单主体照片"),
+		("后视图", "主体背对镜头的单主体照片"),
+		("正视图", "主体正面朝向镜头的单主体照片"),
+		("视图", "单主体照片"),
+	):
+		text = text.replace(source, replacement)
+	return f"{instruction}\n{text}" if text else instruction
 
 
 def _is_qwen2511_unet_name(unet_name: str) -> bool:
@@ -1320,6 +1438,31 @@ def _resolve_target_size_from_image(
 	target_width = _align_size_multiple(max(8, int(round(width * scale))))
 	target_height = _align_size_multiple(max(8, int(round(height * scale))))
 	return target_width, target_height
+
+
+def _resize_image_to_long_edge(
+	image: torch.Tensor,
+	longest_edge: int,
+	upscale: str = "lanczos",
+) -> torch.Tensor:
+	"""保持宽高比缩放 BHWC 图像，使长边与目标图长边一致。"""
+	if not isinstance(image, torch.Tensor):
+		return image
+	width, height = _resolve_image_hw(image, 1, 1)
+	current_long_edge = max(width, height)
+	target_long_edge = max(8, int(longest_edge))
+	if current_long_edge <= 0 or current_long_edge == target_long_edge:
+		return image
+	scale = float(target_long_edge) / float(current_long_edge)
+	target_width = _align_size_multiple(max(8, int(round(width * scale))))
+	target_height = _align_size_multiple(max(8, int(round(height * scale))))
+	return comfy.utils.common_upscale(
+		image.movedim(-1, 1),
+		target_width,
+		target_height,
+		upscale,
+		"disabled",
+	).movedim(1, -1).contiguous()
 
 
 def _resolve_image_aspect(image: torch.Tensor, fallback: float = 1.0) -> float:
@@ -2746,6 +2889,85 @@ class GJJ_CharacterMultiViewStudio:
 		import torch
 		return [[torch.zeros_like(positive[0][0]), positive[0][1]]]
 
+	def _encode_equal_reference_image_edit(
+		self, clip, vae, prompt: str, negative_prompt: str,
+		pairs: list[dict[str, Any]], width: int, height: int,
+	):
+		from nodes import EmptyLatentImage, node_helpers
+
+		ref_latents: list[torch.Tensor] = []
+		vl_images: list[torch.Tensor] = []
+		image_prompt = ""
+		for slot, pair in enumerate(pairs[:3]):
+			prepared, _mask, _outpaint = _prepare_primary_image_for_target(
+				pair["image"], int(width), int(height), None
+			)
+			ref_latents.append(vae.encode(prepared[:, :, :, :3]))
+			vl_image, _mask, _outpaint = _prepare_primary_image_for_target(prepared, 384, 384, None)
+			vl_images.append(vl_image[:, :, :, :3])
+			image_prompt += f"image{slot + 1}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
+		tokens = clip.tokenize(
+			image_prompt + str(prompt or ""),
+			images=vl_images,
+			llama_template=QWEN_IMAGE_EDIT_LLAMA_TEMPLATE,
+		)
+		conditioning = clip.encode_from_tokens_scheduled(tokens)
+		positive = node_helpers.conditioning_set_values(
+			conditioning, {"reference_latents": ref_latents}, append=True
+		)
+		negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
+		if EmptySD3LatentImage is not None:
+			latent_out = EmptySD3LatentImage().generate(int(width), int(height), 1)[0]
+		else:
+			latent_out = EmptyLatentImage().generate(int(width), int(height), 1)[0]
+		return positive, negative, latent_out
+
+	def _encode_krea2_image_edit(
+		self, model, clip, vae, prompt: str, negative_prompt: str,
+		pairs: list[dict[str, Any]], width: int, height: int,
+		identity_lora_strength: float = 1.0,
+	):
+		from nodes import EmptyLatentImage
+
+		reference_images = [
+			pair["image"] for pair in pairs[:2]
+			if isinstance(pair.get("image"), torch.Tensor)
+		]
+		if not reference_images:
+			raise RuntimeError("Krea2 图生图分支至少需要一张有效参考图。")
+		target_long_edge = max(int(width), int(height))
+		reference_images = [
+			_resize_image_to_long_edge(image, target_long_edge)
+			for image in reference_images
+		]
+		system_prompt = (
+			"Extract the identity and appearance of the single main subject: face, hair, "
+			"clothing, colors, and materials. Describe that one subject clearly and consistently."
+		)
+		positive, negative = _GJJKrea2EditGroundedEncode().encode(
+			clip=clip,
+			image=reference_images,
+			positive_prompt=str(prompt or ""),
+			negative_prompt=str(negative_prompt or ""),
+			grounding_px=768,
+			system_prompt=system_prompt,
+		)
+		patched_model, _output_vae = _GJJKrea2EditModelPatch().patch(
+			model=model,
+			vae=vae,
+			source_image=reference_images,
+			lora_name=KREA2_IDENTITY_EDIT_LORA,
+			lora_strength=float(identity_lora_strength),
+			fit_mode="适配",
+			reference_strength=1.0 if len(reference_images) == 1 else 2.0,
+			earlier_reference_strength=1.0,
+		)
+		if EmptySD3LatentImage is not None:
+			latent_out = EmptySD3LatentImage().generate(int(width), int(height), 1)[0]
+		else:
+			latent_out = EmptyLatentImage().generate(int(width), int(height), 1)[0]
+		return patched_model, positive, negative, latent_out
+
 	def _collect_action_pairs(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
 		return [
 			{"slot_index": index - 1, "image": image}
@@ -2758,17 +2980,25 @@ class GJJ_CharacterMultiViewStudio:
 		exposed_clip_name: str,
 		visible_vae_name: str,
 	):
-		preset = _match_multiview_family(unet_name)
+		# 模型族预设可能来自全局缓存；每个节点实例必须使用独立副本，
+		# 避免同一工作流中的多个多视图节点互相覆盖运行时字段。
+		preset = dict(_match_multiview_family(unet_name))
 		clip_models = _dedupe_keep_order(list_clip_models() or [])
 		vae_models = _dedupe_keep_order(list_vae_models() or [])
-		if str(exposed_clip_name or "").strip():
+		selected_clip_name = str(exposed_clip_name or "").strip()
+		is_krea2 = _is_krea2_family(unet_name, preset=preset)
+		# 旧工作流可能序列化了任意 Qwen 2.5 VL 量化名。Krea2 只能使用
+		# Qwen3-VL，并且必须通过 CLIPLoader 的 krea2 类型加载。
+		if is_krea2 and "qwen3vl" not in _canonical_model_text(selected_clip_name):
+			selected_clip_name = ""
+		if selected_clip_name:
 			resolved_clip_names = [str(exposed_clip_name or "").strip()]
 		else:
 			resolved_clip_names = resolve_clip_names_for_preset(
 				preset,
 				clip_models,
-				exposed_clip_name=exposed_clip_name,
-				legacy_clip_names=[exposed_clip_name],
+				exposed_clip_name=selected_clip_name,
+				legacy_clip_names=[selected_clip_name],
 			)
 		clean_clip_names: list[str] = []
 		for clip_name in resolved_clip_names:
@@ -2780,6 +3010,24 @@ class GJJ_CharacterMultiViewStudio:
 			if resolved:
 				clean_clip_names.append(resolved)
 		resolved_clip_names = _dedupe_keep_order(clean_clip_names)
+		if is_krea2:
+			resolved_clip_names = [
+				name for name in resolved_clip_names
+				if "qwen3vl" in _canonical_model_text(name)
+			]
+			if not resolved_clip_names:
+				krea2_clip = _first_model_from_keywords(
+					"text_encoders",
+					["qwen3vl", "4b"],
+					[".safetensors", ".gguf"],
+				)
+				if krea2_clip:
+					resolved_clip_names.append(krea2_clip)
+			if not resolved_clip_names:
+				raise RuntimeError(
+					"Krea2 未找到兼容的 Qwen3-VL 4B 文本编码器。"
+					"请将名称含 qwen3vl、4b 的模型放入 models/text_encoders。"
+				)
 		if not resolved_clip_names:
 			fallback_clip = _resolve_model_any_subdir(
 				"text_encoders",
@@ -2798,6 +3046,8 @@ class GJJ_CharacterMultiViewStudio:
 			resolved_clip_names,
 			str(preset.get("clip_type", "stable_diffusion")),
 		)
+		if is_krea2:
+			resolved_clip_type = "krea2"
 		return preset, resolved_clip_names, resolved_clip_type, resolved_vae_name
 
 	def _generate_single_view(
@@ -2821,6 +3071,8 @@ class GJJ_CharacterMultiViewStudio:
 		sampling_sampler: str = "自动",
 		sampling_scheduler: str = "自动",
 		sampling_denoise: float = -1.0,
+		runtime_unet_name: str = "",
+		runtime_clip_type: str = "",
 	):
 		target_width, target_height = _resolve_target_size_from_image(
 			main_image,
@@ -2828,6 +3080,7 @@ class GJJ_CharacterMultiViewStudio:
 			int(preset.get("width", 1024)),
 			int(preset.get("height", 1024)),
 		)
+		sample_model = model
 		if main_image is None:
 			positive = self._encode_text_conditioning(clip, view_prompt)
 			negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
@@ -2841,6 +3094,33 @@ class GJJ_CharacterMultiViewStudio:
 				grow_mask_by=0,
 				preset=preset,
 			)
+		elif _is_krea2_family(runtime_unet_name, runtime_clip_type, preset):
+			krea_pairs = [{"slot_index": 0, "image": main_image}]
+			if action_image is not None:
+				krea_pairs.append({"slot_index": 1, "image": action_image})
+			configured_identity_lora = any(
+				"krea2identityedit" in _canonical_model_text(name)
+				and abs(float(strength)) > 1e-6
+				for name, strength in (
+					(lora_1_name, lora_1_strength),
+					(lora_2_name, lora_2_strength),
+				)
+			)
+			sample_model, positive, negative, latent_out = self._encode_krea2_image_edit(
+				model, clip, vae, _krea2_single_subject_edit_prompt(view_prompt), negative_prompt,
+				krea_pairs, target_width, target_height,
+				identity_lora_strength=0.0 if configured_identity_lora else 1.0,
+			)
+			_send_status(unique_id, f"Krea2 Identity Edit：使用 {len(krea_pairs)} 张参考图。")
+		elif _is_firered_image_edit(runtime_unet_name, preset):
+			firered_pairs = [{"slot_index": 0, "image": main_image}]
+			if action_image is not None:
+				firered_pairs.append({"slot_index": 1, "image": action_image})
+			positive, negative, latent_out = self._encode_equal_reference_image_edit(
+				clip, vae, view_prompt, negative_prompt,
+				firered_pairs, target_width, target_height,
+			)
+			_send_status(unique_id, f"FireRed Image Edit：使用 {len(firered_pairs)} 张平等参考图。")
 		elif bool(preset.get("supports_multi_image_edit")):
 			if action_image is not None:
 				is_skeleton, black_ratio = _is_skeleton_image(action_image)
@@ -3021,7 +3301,7 @@ class GJJ_CharacterMultiViewStudio:
 			f"采样参数：steps={effective_steps}, cfg={effective_cfg:g}, sampler={sampler_name}, scheduler={scheduler}, denoise={effective_denoise:g}",
 		)
 		sampled_latent = common_ksampler(
-			model,
+			sample_model,
 			int(seed),
 			effective_steps,
 			effective_cfg,
@@ -3264,6 +3544,7 @@ class GJJ_CharacterMultiViewStudio:
 			]
 		)
 		is_character_asset = _is_character_asset_request(character_asset_probe, jobs)
+		is_krea2_runtime = _is_krea2_family(unet_name, resolved_clip_type, preset)
 		character_asset_front_reference: torch.Tensor | None = None
 
 		total = len(jobs)
@@ -3299,7 +3580,13 @@ class GJJ_CharacterMultiViewStudio:
 					main_image=view_main_image,
 					view_prompt=view_prompt,
 					negative_prompt=negative_prompt,
-					action_image=job["image"] if bool(preset.get("supports_multi_image_edit")) else None,
+					action_image=(
+						job["image"]
+						if bool(preset.get("supports_multi_image_edit"))
+						or _is_krea2_family(unet_name, resolved_clip_type, preset)
+						or _is_firered_image_edit(unet_name, preset)
+						else None
+					),
 					seed=int(seed) + index - 1,
 					lora_1_name=lora_1_name,
 					lora_1_strength=lora_1_strength,
@@ -3311,6 +3598,8 @@ class GJJ_CharacterMultiViewStudio:
 					sampling_sampler=kwargs.get("sampling_sampler", "自动"),
 					sampling_scheduler=kwargs.get("sampling_scheduler", "自动"),
 					sampling_denoise=kwargs.get("sampling_denoise", -1.0),
+					runtime_unet_name=unet_name,
+					runtime_clip_type=resolved_clip_type,
 				)
 			except Exception as exc:
 				raise RuntimeError(
@@ -3321,6 +3610,7 @@ class GJJ_CharacterMultiViewStudio:
 			results.append(result)
 			if (
 				is_character_asset
+				and not is_krea2_runtime
 				and character_asset_front_reference is None
 				and _is_character_asset_front_job(job.get("text", ""))
 			):
