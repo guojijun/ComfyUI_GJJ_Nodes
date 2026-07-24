@@ -10,7 +10,6 @@ import comfy.model_management
 import comfy.patcher_extension
 import comfy.rmsnorm
 from comfy.ldm.modules.attention import optimized_attention
-from comfy.ldm.flux.math import apply_rope
 
 
 class MultiHeadRMSNorm(nn.Module):
@@ -108,6 +107,17 @@ def attention(q, k, v, transformer_options=None):
     return out.transpose(1, 2)
 
 
+def apply_repo_rope(xq, xk, rope_emb):
+    """Apply per-head RePo3D rotations without the standard Flux RoPE kernel."""
+    def rotate(x):
+        x_float = x.float().reshape(*x.shape[:-1], -1, 1, 2)
+        rope = rope_emb.to(device=x.device, dtype=x_float.dtype)
+        out = rope[..., 0] * x_float[..., 0] + rope[..., 1] * x_float[..., 1]
+        return out.reshape_as(x).to(dtype=x.dtype)
+
+    return rotate(xq), rotate(xk)
+
+
 # Transformer building blocks
 
 class MLP(nn.Module):
@@ -143,7 +153,7 @@ class RopeMultiHeadAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, L, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(2)
         if self.use_rope:
-            q, k = apply_rope(q, k, rope_emb)
+            q, k = apply_repo_rope(q, k, rope_emb)
         if self.qk_rms_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)

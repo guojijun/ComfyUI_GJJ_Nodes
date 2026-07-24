@@ -933,6 +933,27 @@ function missingModelForSlot(slot, values, secondary = false) {
 	return firstHelpModelFile(...seeds);
 }
 
+function includeLoraMatchesFromAnySubdirectory(slot, sourceList, filteredValues) {
+	const result = Array.isArray(filteredValues) ? filteredValues.map(String) : [];
+	if (!isLoraSlot(slot)) return result;
+	const seen = new Set(result.map((value) => value.replaceAll("\\", "/").toLowerCase()));
+	const seeds = preferredNamesForSlot(slot);
+	for (const seed of seeds) {
+		const seedBase = String(seed || "").replaceAll("\\", "/").split("/").pop()?.toLowerCase();
+		if (!seedBase) continue;
+		for (const candidate of sourceList || []) {
+			const value = String(candidate || "");
+			const candidateBase = value.replaceAll("\\", "/").split("/").pop()?.toLowerCase();
+			const key = value.replaceAll("\\", "/").toLowerCase();
+			if (candidateBase === seedBase && !seen.has(key)) {
+				seen.add(key);
+				result.push(value);
+			}
+		}
+	}
+	return result;
+}
+
 function addVideoHelpModelEntry(entries, slot, index, filename, labelOverride = "") {
 	const name = String(filename || "").trim();
 	if (!name || String(slot?.kind || "") === "empty" || !looksLikeHelpModelFile(name)) return;
@@ -953,9 +974,12 @@ function helpModelFileForSlot(node, state, slot, index, secondary = false) {
 	const folder = String(slot?.folder || "");
 	const allowAny = String(slot?.kind || "") === "name_any";
 	const sourceList = slotListForState(state, slot, folder);
-	const values = secondary
+	const filteredValues = secondary
 		? sourceList.map(String)
 		: filterList(sourceList, slot?.keywords || [], allowAny, slot?.fallback_keywords || [], slot?.file_extension || "");
+	const values = secondary
+		? filteredValues
+		: includeLoraMatchesFromAnySubdirectory(slot, sourceList, filteredValues);
 	// 与主面板共用同一缺失判定。即使 fallback 关键词能匹配到其它本地模型，
 	// 当前预设要求的官方模型不存在时，帮助树也应显示缺失的目标文件，
 	// 不能把不兼容的候选模型当作已选模型展示。
@@ -2498,7 +2522,8 @@ function applyConfig(node, opts = {}) {
 		const folder = String(slot.folder || "");
 		const list = slotListForState(state, slot, folder);
 		const allowAny = String(slot.kind || "") === "name_any";
-		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || [], slot.file_extension || "");
+		const filteredValues = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || [], slot.file_extension || "");
+		const values = includeLoraMatchesFromAnySubdirectory(slot, list, filteredValues);
 		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
 		const fileName = `file_${i}`;
 		const secondaryFileName = `secondary_file_${i}`;

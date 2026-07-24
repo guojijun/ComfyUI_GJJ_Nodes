@@ -465,6 +465,35 @@ def _load_unet_gguf(unet_name: str):
         raise _format_runtime_error("GGUF UNET 加载", exc) from exc
 
 
+def _load_clip_gguf(clip_name: str, clip_type: str):
+    """使用 GJJ 内置 GGUF 运行时加载单个 CLIP / VL 文本编码器。"""
+    try:
+        from ...vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+    except ImportError:
+        try:
+            from ..vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+        except ImportError:
+            from vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+
+    try:
+        return load_gjj_gguf_clip(clip_name, clip_type)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            raise RuntimeError(
+                "加载 GGUF 文本编码器需要安装 gguf Python 依赖。"
+                "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+            ) from exc
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            raise RuntimeError(
+                "加载 GGUF 文本编码器需要安装 gguf Python 依赖。"
+                "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+            ) from exc
+        raise _format_runtime_error("GGUF 文本编码器加载", exc) from exc
+
+
 def _clip_type_enum(name: str):
     """获取 CLIP 类型枚举值。"""
     normalized = _normalize_text(name).replace("-", "_").replace(" ", "_")
@@ -599,6 +628,12 @@ def gjjutils_load_clip_from_names(clip_names: list[str], clip_type: str):
     ]
     if not clean_names:
         raise RuntimeError("至少需要一个文本编码器模型。")
+
+    gguf_names = [name for name in clean_names if _is_gguf_model(name)]
+    if gguf_names:
+        if len(clean_names) != 1:
+            raise RuntimeError("GGUF 文本编码器当前仅支持单模型加载，不能与其他 CLIP 模型混合使用。")
+        return _load_clip_gguf(gguf_names[0], clip_type)
 
     try:
         clip_paths = [

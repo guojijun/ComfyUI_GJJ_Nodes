@@ -1936,6 +1936,92 @@ def _is_character_asset_request(probe_text: str, jobs: list[dict[str, Any]]) -> 
 	return any(token in normalized for token in (_normalize_text("斜侧身"), _normalize_text("45")))
 
 
+def _is_character_asset_front_job(action_text: str) -> bool:
+	"""Return whether a character-asset job is the canonical full-body front view."""
+	normalized = _normalize_text(action_text)
+	if not normalized:
+		return False
+	if _normalize_text("标准正面") in normalized:
+		return True
+	return (
+		_normalize_text("正面") in normalized
+		and _normalize_text("全身") in normalized
+		and not any(
+			token in normalized
+			for token in (
+				_normalize_text("45"),
+				_normalize_text("斜侧"),
+				_normalize_text("侧面"),
+				_normalize_text("后视"),
+				_normalize_text("特写"),
+				_normalize_text("半身"),
+			)
+		)
+	)
+
+
+def _is_character_asset_headshot_job(action_text: str) -> bool:
+	"""Return whether a character-asset job should only frame the head and shoulders."""
+	normalized = _normalize_text(action_text)
+	return any(
+		token in normalized
+		for token in (
+			_normalize_text("大头特写"),
+			_normalize_text("头部和肩膀"),
+			_normalize_text("头肩"),
+			_normalize_text("面部特写"),
+			_normalize_text("近距离大头"),
+		)
+	)
+
+
+def _strip_footwear_prompt_for_headshot(prompt: str) -> str:
+	"""Remove footwear-only clauses that can force a headshot into a top-down full-body view."""
+	footwear_tokens = (
+		"高跟鞋",
+		"鞋子",
+		"鞋袜",
+		"皮鞋",
+		"运动鞋",
+		"靴子",
+		"长靴",
+		"短靴",
+		"袜子",
+		"光脚",
+		"赤脚",
+		"裸足",
+		"脚丫",
+		"脚部",
+		"足部",
+		"双脚",
+		"footwear",
+		"shoes",
+		"heels",
+		"boots",
+		"socks",
+		"barefoot",
+		"feet",
+	)
+	parts = re.split(r"([，,。；;！!？?\n]+)", str(prompt or ""))
+	filtered: list[str] = []
+	skip_separator = False
+	for part in parts:
+		if not part:
+			continue
+		if re.fullmatch(r"[，,。；;！!？?\n]+", part):
+			if skip_separator:
+				skip_separator = False
+			elif filtered:
+				filtered.append(part)
+			continue
+		normalized = part.lower()
+		if any(token.lower() in normalized for token in footwear_tokens):
+			skip_separator = True
+			continue
+		filtered.append(part)
+	return "".join(filtered).strip(" \t\r\n，,。；;！!？?")
+
+
 def _is_character_asset_text_probe(probe_text: str) -> bool:
 	if "人物资产" in str(probe_text or ""):
 		return True
@@ -2611,7 +2697,7 @@ class GJJ_CharacterMultiViewStudio:
 			resolved = _resolve_model_any_subdir(
 				"text_encoders",
 				clip_name,
-				[".safetensors"],
+				[".safetensors", ".gguf"],
 			)
 			if resolved:
 				clean_clip_names.append(resolved)
@@ -2620,7 +2706,7 @@ class GJJ_CharacterMultiViewStudio:
 			fallback_clip = _resolve_model_any_subdir(
 				"text_encoders",
 				exposed_clip_name or DEFAULT_QWEN2511_CLIP,
-				[".safetensors"],
+				[".safetensors", ".gguf"],
 			)
 			if fallback_clip:
 				resolved_clip_names.append(fallback_clip)
@@ -3072,26 +3158,48 @@ class GJJ_CharacterMultiViewStudio:
 		effective_lora_2_name = lora_2_name
 		effective_lora_2_strength = lora_2_strength
 
+		character_asset_probe = "\n".join(
+			[
+				str(template_name or ""),
+				str(base_prompt or ""),
+				str(action_prompts or ""),
+				*(str(job.get("text", "") or "") for job in jobs),
+			]
+		)
+		is_character_asset = _is_character_asset_request(character_asset_probe, jobs)
+		character_asset_front_reference: torch.Tensor | None = None
+
 		total = len(jobs)
 		for index, job in enumerate(jobs, start=1):
+			job_base_prompt = base_prompt
+			is_character_asset_headshot = is_character_asset and _is_character_asset_headshot_job(job.get("text", ""))
+			if is_character_asset_headshot:
+				job_base_prompt = _strip_footwear_prompt_for_headshot(base_prompt)
 			view_prompt = _compose_view_prompt(
-				base_prompt=base_prompt,
+				base_prompt=job_base_prompt,
 				action_text=job["text"],
 				has_action_image=job["image"] is not None,
 				index=job["index"],
 			)
+			if is_character_asset_headshot:
+				view_prompt = (
+					f"{view_prompt}\n"
+					"严格使用人物眼睛高度的平视镜头，保持相机水平；只构图头部和肩膀。"
+					"不要俯视，不要展示身体下半部、腿、脚或鞋。"
+				)
 			# 根据当前模式显示不同的状态栏提示
 			if job["image"] is not None:
 				_send_status(unique_id, f" 动作迁移：生成第 {index}/{total} 张视图...")
 			else:
 				_send_status(unique_id, f"📝 文本描述：生成第 {index}/{total} 张视图...")
 			try:
+				view_main_image = character_asset_front_reference if character_asset_front_reference is not None else main_image
 				result = self._generate_single_view(
 					model=model,
 					clip=clip,
 					vae=vae,
 					preset=preset,
-					main_image=main_image,
+					main_image=view_main_image,
 					view_prompt=view_prompt,
 					negative_prompt=negative_prompt,
 					action_image=job["image"] if bool(preset.get("supports_multi_image_edit")) else None,
@@ -3109,6 +3217,13 @@ class GJJ_CharacterMultiViewStudio:
 					f"详细错误：{exc}"
 				) from exc
 			results.append(result)
+			if (
+				is_character_asset
+				and character_asset_front_reference is None
+				and _is_character_asset_front_job(job.get("text", ""))
+			):
+				character_asset_front_reference = _prepare_character_asset_reference_image(result, 1024)
+				_send_status(unique_id, "人物资产分支：标准正面已生成，后续斜侧面与背面将以标准正面作为参考。")
 			preview_image = _save_multiview_temp_preview(result, index)
 			if preview_image:
 				_send_multiview_preview(unique_id, preview_image)
@@ -3116,15 +3231,6 @@ class GJJ_CharacterMultiViewStudio:
 		captions = _resolve_job_captions(jobs)
 		_send_status(unique_id, f"3/{total_steps} 计算最优拼图布局...")
 		# 人物资产预设单独走抠图横向拼接分支。
-		character_asset_probe = "\n".join(
-			[
-				str(template_name or ""),
-				str(base_prompt or ""),
-				str(action_prompts or ""),
-				*(str(job.get("text", "") or "") for job in jobs),
-			]
-		)
-		is_character_asset = _is_character_asset_request(character_asset_probe, jobs)
 		if is_character_asset:
 			_send_status(unique_id, "人物资产分支：取消文字，RMBG1.4 抠图，只保留主体，统一高度横向紧凑拼接。")
 			collage = _make_character_asset_collage(results, rmbg_model_name, unique_id)

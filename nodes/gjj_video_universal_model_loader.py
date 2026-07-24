@@ -195,13 +195,27 @@ def _model_root_candidates(folder_name: str) -> list[str]:
     return unique
 
 
+def _folder_entry_parts(entry: Any) -> tuple[Any, set[str], tuple[Any, ...]] | None:
+    if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+        return None
+    return entry[0], set(entry[1] or set()), tuple(entry[2:])
+
+
+def _folder_entry_with_exts(
+    paths: Any,
+    extensions: set[str],
+    extra: tuple[Any, ...] = (),
+) -> tuple[Any, ...]:
+    return (paths, extensions, *extra)
+
+
 def _ensure_model_folder(folder_name: str) -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
-    current = existing.get(folder_name)
+    current = _folder_entry_parts(existing.get(folder_name))
     if current:
-        paths, exts = current
+        paths, exts, extra = current
         if not exts:
-            existing[folder_name] = (paths, MODEL_EXTENSIONS)
+            existing[folder_name] = _folder_entry_with_exts(paths, MODEL_EXTENSIONS, extra)
         return
 
     paths = [path for path in _model_root_candidates(folder_name) if os.path.isdir(path)]
@@ -215,26 +229,24 @@ def _ensure_model_folder(folder_name: str) -> None:
 
 def _ensure_folder_extensions(folder_name: str, extensions: set[str]) -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
-    current = existing.get(folder_name)
+    current = _folder_entry_parts(existing.get(folder_name))
     if not current:
         return
-    paths, exts = current
-    ext_set = set(exts or [])
+    paths, ext_set, extra = current
     merged = ext_set | set(extensions or set())
     if merged != ext_set:
-        existing[folder_name] = (paths, merged)
+        existing[folder_name] = _folder_entry_with_exts(paths, merged, extra)
 
 
 def _ensure_unet_gguf_folder() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
     for target in ("diffusion_models", "unet"):
-        current = existing.get(target)
+        current = _folder_entry_parts(existing.get(target))
         if not current:
             continue
-        paths, exts = current
-        ext_set = set(exts or [])
+        paths, ext_set, extra = current
         if ".gguf" not in ext_set:
-            existing[target] = (paths, ext_set | {".gguf"})
+            existing[target] = _folder_entry_with_exts(paths, ext_set | {".gguf"}, extra)
     if "unet_gguf" in existing:
         return
     for target in ("diffusion_models", "unet"):
@@ -252,16 +264,17 @@ def _ensure_clip_gguf_folder() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
     paths: list[str] = []
     exts: set[str] = {".gguf"}
-    current = existing.get("clip_gguf")
+    current = _folder_entry_parts(existing.get("clip_gguf"))
+    current_extra: tuple[Any, ...] = ()
     if current:
-        current_paths, current_exts = current
+        current_paths, current_exts, current_extra = current
         paths.extend(str(path) for path in current_paths or [])
         exts.update(current_exts or set())
     for source in ("text_encoders", "clip"):
-        source_entry = existing.get(source)
+        source_entry = _folder_entry_parts(existing.get(source))
         if not source_entry:
             continue
-        source_paths, _source_exts = source_entry
+        source_paths, _source_exts, _source_extra = source_entry
         paths.extend(str(path) for path in source_paths or [])
     models_dir = str(getattr(folder_paths, "models_dir", "") or "").strip()
     if models_dir:
@@ -276,7 +289,7 @@ def _ensure_clip_gguf_folder() -> None:
             unique.append(norm)
             seen.add(key)
     if unique:
-        existing["clip_gguf"] = (unique, exts | {".gguf"})
+        existing["clip_gguf"] = _folder_entry_with_exts(unique, exts | {".gguf"}, current_extra)
 
 
 _ensure_folder_extensions("checkpoints", {".gguf"})
