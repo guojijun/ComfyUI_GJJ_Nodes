@@ -260,6 +260,9 @@ function writeCropConfig(node, patch) {
 		next[key] = Math.round(toNumber(next[key], key.includes("width") || key.includes("height") ? 1 : 0));
 	}
 	next.angle = normalizeAngle(toNumber(next.angle, 0));
+	next.aspect_locked = Boolean(next.aspect_locked);
+	next.aspect_width = Math.max(0.01, toNumber(next.aspect_width, 1));
+	next.aspect_height = Math.max(0.01, toNumber(next.aspect_height, 1));
 	const serialized = JSON.stringify(next);
 	widget.value = serialized;
 	widget.serialize = true;
@@ -719,7 +722,45 @@ function clampCropConfig(node, config = readCropConfig(node)) {
 	const x = clamp(Math.round(toNumber(config.x, 0)), 0, Math.max(0, sourceW - w));
 	const y = clamp(Math.round(toNumber(config.y, 0)), 0, Math.max(0, sourceH - h));
 	const angle = normalizeAngle(toNumber(config.angle, 0));
-	return { x, y, width: w, height: h, angle, canvas_width: sourceW, canvas_height: sourceH };
+	return {
+		...config,
+		x, y, width: w, height: h, angle,
+		canvas_width: sourceW,
+		canvas_height: sourceH,
+		aspect_locked: Boolean(config.aspect_locked),
+		aspect_width: Math.max(0.01, toNumber(config.aspect_width, 1)),
+		aspect_height: Math.max(0.01, toNumber(config.aspect_height, 1)),
+	};
+}
+
+function cropAspectRatio(config) {
+	if (!config?.aspect_locked) return 0;
+	return Math.max(0.0001, toNumber(config.aspect_width, 1) / Math.max(0.0001, toNumber(config.aspect_height, 1)));
+}
+
+function fitCropToAspect(node, config, ratio = cropAspectRatio(config)) {
+	if (!(ratio > 0)) return config;
+	const panel = node.__gjjRegionCropPanel || {};
+	const sourceW = Math.max(1, panel.sourceWidth || config.canvas_width || 1);
+	const sourceH = Math.max(1, panel.sourceHeight || config.canvas_height || 1);
+	const cx = config.x + config.width / 2;
+	const cy = config.y + config.height / 2;
+	let width = Math.max(1, config.width);
+	let height = width / ratio;
+	if (height > sourceH || height > config.height && config.height * ratio <= sourceW) {
+		height = Math.max(1, config.height);
+		width = height * ratio;
+	}
+	const scale = Math.min(1, sourceW / width, sourceH / height);
+	width = Math.max(1, Math.round(width * scale));
+	height = Math.max(1, Math.round(width / ratio));
+	if (height > sourceH) {
+		height = sourceH;
+		width = Math.max(1, Math.round(height * ratio));
+	}
+	const x = clamp(Math.round(cx - width / 2), 0, Math.max(0, sourceW - width));
+	const y = clamp(Math.round(cy - height / 2), 0, Math.max(0, sourceH - height));
+	return { ...config, x, y, width, height, canvas_width: sourceW, canvas_height: sourceH };
 }
 
 function renderCropPanel(node) {
@@ -975,6 +1016,33 @@ function handleAnchorBox(anchor, mode, end) {
 	return null;
 }
 
+function aspectLockedBox(fixed, end, ratio, sourceW, sourceH) {
+	const sx = end.x < fixed.x ? -1 : 1;
+	const sy = end.y < fixed.y ? -1 : 1;
+	const dx = Math.abs(end.x - fixed.x);
+	const dy = Math.abs(end.y - fixed.y);
+	let width;
+	let height;
+	if (dx / ratio >= dy) {
+		width = dx;
+		height = width / ratio;
+	} else {
+		height = dy;
+		width = height * ratio;
+	}
+	const maxWidth = sx > 0 ? sourceW - fixed.x : fixed.x;
+	const maxHeight = sy > 0 ? sourceH - fixed.y : fixed.y;
+	const scale = Math.min(1, maxWidth / Math.max(1, width), maxHeight / Math.max(1, height));
+	width = Math.max(1, width * scale);
+	height = Math.max(1, height * scale);
+	return {
+		x1: fixed.x,
+		y1: fixed.y,
+		x2: fixed.x + sx * width,
+		y2: fixed.y + sy * height,
+	};
+}
+
 function commitCropDrag(node, start, end, mode = "new", anchor = null) {
 	const panel = node.__gjjRegionCropPanel;
 	if (!panel || !start || !end) return;
@@ -1009,13 +1077,30 @@ function commitCropDrag(node, start, end, mode = "new", anchor = null) {
 	if (handleBox) {
 		({ x1, y1, x2, y2 } = handleBox);
 	}
+	const ratio = cropAspectRatio(anchor || readCropConfig(node));
+	if (ratio > 0 && (mode === "new" || ["nw", "ne", "sw", "se"].includes(mode))) {
+		let fixed = start;
+		if (anchor && mode !== "new") {
+			fixed = {
+				nw: { x: anchor.x + anchor.width, y: anchor.y + anchor.height },
+				ne: { x: anchor.x, y: anchor.y + anchor.height },
+				sw: { x: anchor.x + anchor.width, y: anchor.y },
+				se: { x: anchor.x, y: anchor.y },
+			}[mode];
+		}
+		({ x1, y1, x2, y2 } = aspectLockedBox(fixed, end, ratio, sourceW, sourceH));
+	}
 	if (x1 > x2) [x1, x2] = [x2, x1];
 	if (y1 > y2) [y1, y2] = [y2, y1];
 	x1 = clamp(Math.round(x1), 0, sourceW - 1);
 	y1 = clamp(Math.round(y1), 0, sourceH - 1);
 	x2 = clamp(Math.round(x2), x1 + 1, sourceW);
 	y2 = clamp(Math.round(y2), y1 + 1, sourceH);
-	writeCropConfig(node, { x: x1, y: y1, width: x2 - x1, height: y2 - y1, angle: anchor?.angle || 0, canvas_width: sourceW, canvas_height: sourceH });
+	writeCropConfig(node, {
+		...(anchor || readCropConfig(node)),
+		x: x1, y: y1, width: x2 - x1, height: y2 - y1,
+		angle: anchor?.angle || 0, canvas_width: sourceW, canvas_height: sourceH,
+	});
 	renderCropPanel(node);
 	refreshNode(node);
 }
@@ -1296,11 +1381,64 @@ async function openCropSettings(node) {
 	const pixelsInput = makeSliderControl("total_pixels", Math.round(toNumber(getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value, 10)), { min: 10, max: 6400, step: 5 }, (v) => `${v}万`);
 	const alignInput = makeSliderControl("align_multiple", cropAlignPowerIndex(getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET)?.value ?? 8), { min: 0, max: CROP_ALIGN_POWERS.length - 1, step: 1 }, (v) => `${CROP_ALIGN_POWERS[v]}`);
 
+	const aspectWrap = document.createElement("div");
+	aspectWrap.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const aspectToggle = document.createElement("input");
+	aspectToggle.type = "checkbox";
+	aspectToggle.checked = Boolean(config.aspect_locked);
+	aspectToggle.style.cssText = "width:17px;height:17px;accent-color:#35e2c2;";
+	const aspectText = document.createElement("span");
+	aspectText.textContent = "固定宽高比";
+	aspectWrap.append(aspectToggle, aspectText);
+
+	const ratioWrap = document.createElement("div");
+	ratioWrap.style.cssText = "display:flex;align-items:center;gap:7px;";
+	const makeRatioInput = (value, label) => {
+		const input = document.createElement("input");
+		input.type = "number";
+		input.min = "0.01";
+		input.max = "1000";
+		input.step = "0.01";
+		input.value = String(value);
+		input.title = label;
+		input.style.cssText = "width:82px;height:28px;box-sizing:border-box;border:1px solid #52626d;border-radius:7px;background:#0b1113;color:#e8f6f8;padding:0 7px;";
+		return input;
+	};
+	const aspectWidth = makeRatioInput(config.aspect_width, "比例宽度");
+	const aspectHeight = makeRatioInput(config.aspect_height, "比例高度");
+	const ratioColon = document.createElement("span");
+	ratioColon.textContent = ":";
+	ratioWrap.append(aspectWidth, ratioColon, aspectHeight);
+	const updateRatioEnabled = () => {
+		aspectWidth.disabled = aspectHeight.disabled = !aspectToggle.checked;
+		ratioWrap.style.opacity = aspectToggle.checked ? "1" : "0.45";
+	};
+	aspectToggle.addEventListener("change", updateRatioEnabled);
+	updateRatioEnabled();
+	const initialCropConfig = { ...config };
+	const applyAspectPreview = () => {
+		const aspectPatch = {
+			aspect_locked: aspectToggle.checked,
+			aspect_width: Math.max(0.01, toNumber(aspectWidth.value, 1)),
+			aspect_height: Math.max(0.01, toNumber(aspectHeight.value, 1)),
+		};
+		const current = { ...clampCropConfig(node), ...aspectPatch };
+		writeCropConfig(node, aspectPatch.aspect_locked ? fitCropToAspect(node, current) : current);
+		renderCropPanel(node);
+	};
+	aspectToggle.addEventListener("change", applyAspectPreview);
+	aspectWidth.addEventListener("input", applyAspectPreview);
+	aspectHeight.addEventListener("input", applyAspectPreview);
+
 	body.append(
 		makeLabel("总像素(万)", "单位为万像素。30 表示约 30 万像素；最低 10 万，步长 5 万。"),
 		pixelsInput.wrap,
 		makeLabel("对齐倍数", "输出宽高按 2 的 n 次方对齐：1/2/4/8/16/32/64/128/256。"),
 		alignInput.wrap,
+		makeLabel("比例锁定", "开启后，当前裁剪框会变为指定宽高比；新建和四角缩放都只能等比变化。"),
+		aspectWrap,
+		makeLabel("宽 : 高", "例如 16 : 9、1 : 1 或 9 : 16。"),
+		ratioWrap,
 	);
 
 	const preview = document.createElement("div");
@@ -1338,22 +1476,35 @@ async function openCropSettings(node) {
 	const cancel = makeDialogButton("取消");
 	footer.append(cancel, ok);
 
-	const close = () => {
+	const close = (restoreAspect = false) => {
+		if (restoreAspect) {
+			writeCropConfig(node, initialCropConfig);
+			renderCropPanel(node);
+		}
 		if (node.__gjjRegionCropSettingsModal === overlay) node.__gjjRegionCropSettingsModal = null;
 		overlay.remove();
 	};
-	cancel.addEventListener("click", close);
+	cancel.addEventListener("click", () => close(true));
 	ok.addEventListener("click", async () => {
 		const totalPixels = Math.max(10, Math.round(toNumber(pixelsInput.value, 10)));
 		const alignMultiple = CROP_ALIGN_POWERS[clamp(Math.round(toNumber(alignInput.value, 3)), 0, CROP_ALIGN_POWERS.length - 1)] || 8;
 		const saved = await saveCropUserSettings(totalPixels, alignMultiple);
 		setWidgetValue(node, CROP_TOTAL_PIXELS_WIDGET, saved?.total_pixels ?? totalPixels);
 		setWidgetValue(node, CROP_ALIGN_MULTIPLE_WIDGET, saved?.align_multiple ?? alignMultiple);
+		const aspectPatch = {
+			aspect_locked: aspectToggle.checked,
+			aspect_width: Math.max(0.01, toNumber(aspectWidth.value, 1)),
+			aspect_height: Math.max(0.01, toNumber(aspectHeight.value, 1)),
+		};
+		const nextConfig = aspectPatch.aspect_locked
+			? fitCropToAspect(node, { ...clampCropConfig(node), ...aspectPatch })
+			: { ...clampCropConfig(node), ...aspectPatch };
+		writeCropConfig(node, nextConfig);
 		renderCropPanel(node);
 		close();
 	});
 	overlay.addEventListener("pointerdown", (event) => {
-		if (event.target === overlay) close();
+		if (event.target === overlay) close(true);
 	});
 	dialog.addEventListener("pointerdown", (event) => event.stopPropagation());
 	dialog.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -1400,7 +1551,7 @@ function mountCropPanel(node) {
 	const toolbar = document.createElement("div");
 	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-bottom:6px;";
 	const openButton = makeCropButton("📁", "打开图片文件；会上传到 ComfyUI/input，并在没有外部图像输入时使用。", (button) => openCropImageFile(node, button));
-	const settingsButton = makeCropButton("⚙️", "参数设置：总像素、对齐倍数。", () => openCropSettings(node));
+	const settingsButton = makeCropButton("⚙️", "参数设置：总像素、对齐倍数、固定宽高比。", () => openCropSettings(node));
 	const linkButton = makeCropButton("🔗", "断开/恢复外部链接。", () => toggleCropExternalLinks(node));
 	const portsButton = makeCropButton("🔌", "显示/隐藏区域数据输入和裁剪遮罩输出。", () => toggleCropExtraPorts(node));
 	node.__gjjRegionCropLinkButton = linkButton;
