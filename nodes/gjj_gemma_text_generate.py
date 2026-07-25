@@ -64,7 +64,9 @@ except Exception:
 NODE_NAME = "GJJ_GemmaTextGenerate"
 NODE_DISPLAY_NAME = "GJJ·💛Gemma🧠图片反推提示词推理"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
-DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
+MODEL_FAMILY_KEYWORDS = ("qwen3.5", "qwen35", "gemma4", "qwen3vl")
+MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl"
+MISSING_CLIP_PLACEHOLDER = "未找到匹配的反推模型"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 
@@ -101,42 +103,6 @@ CLIP_TYPES = [
     "pixeldit",
 ]
 
-GEMMA_TEXT_ENCODER_MODELS = [
-    {
-        "label": "推荐 Qwen3.5 4B FP8 mixed",
-        "folder": "text_encoders",
-        "filename": "qwen3.5_4b_fp8_mixed.safetensors",
-        "kind": "clip",
-        "required": True,
-        "description": "默认加载的 Qwen3.5 / Gemma 兼容文本生成模型；推荐作为默认。",
-    },
-    {
-        "label": "兼容 Gemma 3 12B FP8 scaled",
-        "folder": "text_encoders",
-        "filename": "gemma_3_12B_it_fp8_scaled.safetensors",
-        "kind": "clip",
-        "required": False,
-        "description": "兼容变体；本地只有该文件时也可以手动选择。",
-    },
-    {
-        "label": "兼容 Gemma 3 12B 原始精度",
-        "folder": "text_encoders",
-        "filename": "gemma_3_12B_it.safetensors",
-        "kind": "clip",
-        "required": False,
-        "description": "显存占用更高的兼容变体。",
-    },
-    {
-        "label": "兼容 Gemma 3 12B FP4 mixed",
-        "folder": "text_encoders",
-        "filename": "gemma_3_12B_it_fp4_mixed.safetensors",
-        "kind": "clip",
-        "required": False,
-        "description": "低显存兼容变体，质量与速度取决于本地 ComfyUI 支持情况。",
-    },
-]
-
-
 def _filename_list(category: str) -> list[str]:
     if folder_paths is None:
         return []
@@ -150,24 +116,26 @@ def _basename(path: str) -> str:
     return str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _is_supported_text_encoder(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", _basename(name).lower())
+    return any(re.sub(r"[^a-z0-9]+", "", keyword) in normalized for keyword in MODEL_FAMILY_KEYWORDS)
+
+
+def _text_encoder_size(name: str) -> int:
+    path = _find_text_encoder_path(name)
+    try:
+        return int(os.path.getsize(str(path)))
+    except (OSError, TypeError, ValueError):
+        return 2**63 - 1
+
+
 def _text_encoder_options() -> list[str]:
-    files = _filename_list("text_encoders")
-    if not files:
-        return [DEFAULT_CLIP_NAME]
-    preferred = [item for item in files if _basename(item) == DEFAULT_CLIP_NAME]
-    gemma = [item for item in files if "gemma" in _basename(item).lower()]
-    rest = [item for item in files if item not in preferred and item not in gemma]
-    return preferred + sorted(gemma, key=lambda item: _basename(item).lower()) + sorted(rest, key=lambda item: item.lower())
+    files = [item for item in _filename_list("text_encoders") if _is_supported_text_encoder(item)]
+    return sorted(files, key=lambda item: (_text_encoder_size(item), _basename(item).lower()))
 
 
 def _default_clip_name(options: list[str]) -> str:
-    for item in options:
-        if _basename(item) == DEFAULT_CLIP_NAME:
-            return item
-    for item in options:
-        if "gemma" in _basename(item).lower():
-            return item
-    return options[0] if options else DEFAULT_CLIP_NAME
+    return options[0] if options else MISSING_CLIP_PLACEHOLDER
 
 
 def _resolve_available_clip_name(clip_name: str) -> str:
@@ -175,18 +143,9 @@ def _resolve_available_clip_name(clip_name: str) -> str:
     if requested and _find_text_encoder_path(requested):
         return requested
 
-    compatible = [
-        item for item in _text_encoder_options()
-        if _find_text_encoder_path(item)
-        and not _basename(item).lower().endswith(".gguf")
-        and (
-            "qwen3.5" in _basename(item).lower()
-            or "qwen35" in _basename(item).lower()
-            or "gemma4" in _basename(item).lower()
-        )
-    ]
+    compatible = [item for item in _text_encoder_options() if _find_text_encoder_path(item)]
     if not compatible:
-        return requested or DEFAULT_CLIP_NAME
+        return requested or MISSING_CLIP_PLACEHOLDER
 
     requested_name = _basename(requested).lower()
     requested_tokens = {
@@ -208,9 +167,7 @@ def _resolve_available_clip_name(clip_name: str) -> str:
             and ("qwen3.5" in name or "qwen35" in name)
         ):
             same_family = 200
-        keyword_priority = 2 if ("qwen3.5" in name or "qwen35" in name) else 1
-        default_priority = 1 if _basename(candidate) == DEFAULT_CLIP_NAME else 0
-        return same_family, len(requested_tokens & tokens), keyword_priority, default_priority, name
+        return same_family, len(requested_tokens & tokens), -_text_encoder_size(candidate), 0, name
 
     replacement = max(compatible, key=score)
     if requested and replacement != requested:
@@ -223,7 +180,9 @@ def _resolve_available_clip_name(clip_name: str) -> str:
 
 
 def _model_spec_for_clip(clip_name: str) -> dict[str, str]:
-    filename = _basename(clip_name) or DEFAULT_CLIP_NAME
+    filename = _basename(clip_name)
+    if not filename or filename == MISSING_CLIP_PLACEHOLDER:
+        filename = MODEL_FILTER_EXPRESSION
     # 确保 subdir 使用相对路径格式（不带 models/ 前缀）
     subdir = "text_encoders"
     return make_missing_model_spec(
@@ -318,9 +277,8 @@ def _qwen35_runtime_issue(clip_name: str) -> str:
 
 def _available_runtime_report() -> dict[str, Any]:
     missing_models = []
-    files = _filename_list("text_encoders")
-    if not any(_basename(item) == DEFAULT_CLIP_NAME for item in files):
-        missing_models.append(_model_spec_for_clip(DEFAULT_CLIP_NAME))
+    if not _text_encoder_options():
+        missing_models.append(_model_spec_for_clip(""))
     return build_dependency_model_report(
         node_name=NODE_DISPLAY_NAME,
         missing_dependencies=[],
@@ -831,8 +789,8 @@ class GJJ_GemmaTextGenerate:
                 "description": "节点只调用 ComfyUI 自带 CLIP 对象的 tokenize / generate / decode，不依赖其它自定义节点包。",
             }
         ],
-        model_tree=GEMMA_TEXT_ENCODER_MODELS,
-        models=[_model_spec_for_clip(DEFAULT_CLIP_NAME)],
+        model_tree=[],
+        models=[],
         usage=[
             "选择 CLIP 名称和类型后，直接填写提示词执行。",
             "可选连接统一媒体输入口：支持 IMAGE、GJJ_BATCH_IMAGE、官方 VIDEO 和 AUDIO，并按输入类型自动分流。",
@@ -866,7 +824,7 @@ class GJJ_GemmaTextGenerate:
                 "clip_name": (clip_options, {
                     "default": default_clip,
                     "display_name": "反推模型",
-                    "tooltip": "选择 ComfyUI/models/text_encoders 目录下的反推模型。默认优先 qwen3.5_4b_fp8_mixed.safetensors。",
+                    "tooltip": "列出名称匹配 qwen3.5、gemma4 或 qwen3vl 的反推模型，并按文件体积从小到大排序。",
                 }),
                 "clip_type": (CLIP_TYPES, {
                     "default": "stable_diffusion",
@@ -1034,7 +992,7 @@ class GJJ_GemmaTextGenerate:
                     "tooltip": "由 GJJ_GemmaTextGenerate 前端面板自动维护，不占用节点布局空间。",
                 }),
                 "model_filter_keywords": ("STRING", {
-                    "default": "qwen3.5|gemma4|qwen3vl",
+                    "default": MODEL_FILTER_EXPRESSION,
                     "multiline": False,
                     "display": "hidden",
                     "hidden": True,
@@ -1091,7 +1049,7 @@ class GJJ_GemmaTextGenerate:
         keep_model: bool = True,
         device_preference: str = "GPU优先",
         workflow_values_json: str = "{}",
-        model_filter_keywords: str = "qwen3.5|gemma4|qwen3vl",
+        model_filter_keywords: str = MODEL_FILTER_EXPRESSION,
     ):
         received_thinking = thinking
         try:

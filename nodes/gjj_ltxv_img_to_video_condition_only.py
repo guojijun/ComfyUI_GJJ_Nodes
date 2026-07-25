@@ -65,11 +65,13 @@ class GJJ_LTXVImgToVideoConditionOnly:
                         "tooltip": "连接 LTXV 使用的视频 VAE。节点不依赖 ComfyUI-LTXVideo，只调用传入 VAE 的 encode。",
                     },
                 ),
+            },
+            "optional": {
                 "image": (
                     "IMAGE",
                     {
                         "display_name": "参考图像",
-                        "tooltip": "用于写入视频 latent 开头帧的参考图像，会自动缩放到 latent 对应的像素尺寸。",
+                        "tooltip": "可选。用于写入视频 latent 开头帧；选择“跳过”时可以不连接。",
                     },
                 ),
                 "latent": (
@@ -90,8 +92,6 @@ class GJJ_LTXVImgToVideoConditionOnly:
                         "tooltip": "写入图像条件的强度。1 表示条件帧完全固定，0 表示条件帧也允许完全加噪。",
                     },
                 ),
-            },
-            "optional": {
                 "bypass": (
                     "BOOLEAN",
                     {
@@ -149,11 +149,13 @@ class GJJ_LTXVImgToVideoConditionOnly:
             raise RuntimeError(f"LTXV 图生视频条件写入失败：VAE encode 输出维度应为 [B,C,T,H,W]，实际为 {tuple(encoded.shape)}")
         return encoded
 
-    def generate(self, image, vae, latent, strength, bypass=False):
+    def generate(self, vae, image=None, latent=None, strength=1.0, bypass=False):
         if _as_bool(bypass, False):
             return (latent,)
         if not isinstance(latent, dict) or "samples" not in latent:
             raise RuntimeError("LTXV 图生视频条件写入失败：Latent 输入缺少 samples。")
+        if image is None:
+            raise RuntimeError("LTXV 图生视频条件写入失败：未选择“跳过”时必须连接参考图像。")
 
         result = _copy_latent(latent)
         samples = result["samples"]

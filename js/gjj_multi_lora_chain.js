@@ -1237,6 +1237,8 @@ function createStyleTag(container) {
 		.gjj-lora-meta-strength { flex:0 0 auto; color:#d7c587; }
 		.gjj-lora-preview-btn { width:24px; height:22px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:13px; line-height:18px; padding:0; text-align:center; }
 		.gjj-lora-preview-btn:hover, .gjj-lora-preview-btn.open { border-color:#6aa6b8; background:#26363d; }
+		.gjj-lora-source-btn { width:24px; height:22px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:18px; padding:0; text-align:center; }
+		.gjj-lora-source-btn:hover { border-color:#6aa6b8; background:#26363d; }
 		.gjj-lora-preview-card { display:none; position:absolute; left:0; top:calc(100% + 6px); width:min(360px, 100%); padding:8px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-shadow:0 8px 24px rgba(0,0,0,0.38); z-index:9998; box-sizing:border-box; }
 		.gjj-lora-preview-card.open { display:grid; grid-template-columns:92px minmax(0,1fr); gap:8px; }
 		.gjj-lora-preview-card img { width:92px; height:92px; object-fit:cover; border-radius:6px; background:#172026; border:1px solid #2e4149; }
@@ -1262,6 +1264,8 @@ function createStyleTag(container) {
 		.gjj-lora-popup-trigger { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fd4c3; }
 		.gjj-lora-popup-strength { flex:0 0 auto; color:#d7c587; }
 		.gjj-lora-popup-preview { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:16px; padding:0; text-align:center; }
+		.gjj-lora-popup-source { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; line-height:16px; padding:0; text-align:center; }
+		.gjj-lora-popup-source:hover { border-color:#6aa6b8; background:#26363d; }
 		.gjj-lora-popup-item .gjj-lora-preview-card { position:static; width:100%; margin-top:4px; box-shadow:none; }
 		.gjj-lora-popup-item.with-thumb .gjj-lora-preview-card { grid-column:1 / -1; }
 		.gjj-lora-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
@@ -1286,6 +1290,39 @@ function populateSelectOptions(select, options, selectedValue) {
 
 function stopCanvasPointerCapture(event) {
 	event.stopPropagation();
+}
+
+function getHttpsSourceUrl(metadata) {
+	const source = String(metadata?.source || "").trim();
+	if (!source) {
+		return "";
+	}
+	try {
+		const url = new URL(source);
+		return url.protocol === "https:" ? url.href : "";
+	} catch {
+		return "";
+	}
+}
+
+function createSourceButton(metadata, className) {
+	const sourceUrl = getHttpsSourceUrl(metadata);
+	if (!sourceUrl) {
+		return null;
+	}
+
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = className;
+	button.textContent = "🌐";
+	button.title = `打开 LoRA 网页：${sourceUrl}`;
+	button.setAttribute("aria-label", "打开 LoRA 网页");
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		window.open(sourceUrl, "_blank", "noopener,noreferrer");
+	});
+	return button;
 }
 
 function stopCanvasWheelCapture(event) {
@@ -1510,6 +1547,10 @@ function ensureGlobalLoraPopup() {
 					meta.appendChild(title);
 					meta.appendChild(trigger);
 					meta.appendChild(strength);
+					const sourceButton = createSourceButton(metadata, "gjj-lora-popup-source");
+					if (sourceButton) {
+						meta.appendChild(sourceButton);
+					}
 					meta.appendChild(previewButton);
 					item.appendChild(meta);
 					item.appendChild(previewCard);
@@ -1774,6 +1815,10 @@ function buildRow(node, row, index, rowsContainer) {
 		metaRow.appendChild(title);
 		metaRow.appendChild(trigger);
 		metaRow.appendChild(defaultStrength);
+		const sourceButton = createSourceButton(metadata, "gjj-lora-source-btn");
+		if (sourceButton) {
+			metaRow.appendChild(sourceButton);
+		}
 		metaRow.appendChild(previewButton);
 		mainColumn.appendChild(metaRow);
 		mainColumn.appendChild(previewCard);
