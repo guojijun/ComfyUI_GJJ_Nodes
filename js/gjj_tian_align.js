@@ -3,6 +3,20 @@ import { app } from "/scripts/app.js";
 // GJJ - 田字格对齐面板 (Alt+A)
 app.registerExtension({
     name: "Comfy.GJJ.TianAlign",
+    commands: [
+        {
+            id: "GJJ.TianAlign.TogglePanel",
+            label: "GJJ：打开/关闭多功能对齐",
+            function: () => window.__gjj_tian_align_toggle?.(),
+        },
+    ],
+    keybindings: [
+        {
+            commandId: "GJJ.TianAlign.TogglePanel",
+            combo: { key: "a", alt: true },
+            targetElementId: "graph-canvas",
+        },
+    ],
     async setup() {
         const DEFAULT_THEME = "#FFD700";
         let THEME_COLOR = localStorage.getItem("gjj.tianAlign.themeColor") || DEFAULT_THEME;
@@ -1706,16 +1720,11 @@ app.registerExtension({
         }
 
         window.__gjj_tian_align_close = closeTianPanel;
+        window.__gjj_tian_align_toggle = toggleTianPanel;
 
-        // --- 键盘 ---
+        // Esc 仅负责关闭面板；打开快捷键由 ComfyUI 原生键位系统管理。
         document.addEventListener("keydown", (e) => {
             if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
-            if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && e.key.toLowerCase() === "a") {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                toggleTianPanel();
-                return;
-            }
             if (e.key === "Escape" && tianIsOpen) {
                 e.preventDefault();
                 if (colorMenuOpen) { hideColorMenu(); return; }

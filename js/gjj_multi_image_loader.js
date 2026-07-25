@@ -302,6 +302,7 @@ function ensureState(node) {
 		slideOutputEnabled: Boolean(node?.properties?.slide_output_enabled),
 		slideOutputIndex: Math.max(1, Number.parseInt(node?.properties?.slide_output_index || "1", 10) || 1),
 		slideOutputSize: Math.max(1, Math.min(3, Number.parseInt(node?.properties?.slide_output_size || "2", 10) || 2)),
+		slideOutputLoop: Boolean(node?.properties?.slide_output_loop),
 		thumbSize: Number(node?.properties?.thumb_size || DEFAULT_THUMB_SIZE),
 		rangeExpanded: Boolean(node?.properties?.sequence_range_expanded),
 		dragIndex: null,
@@ -1285,16 +1286,20 @@ function syncSequenceRangeInput(node) {
 	}
 }
 
-function formatSlidingRange(index, count, size = 2) {
+function formatSlidingRange(index, count, size = 2, loop = true) {
 	const total = Math.max(0, Number(count || 0));
 	if (total <= 0) {
 		return "";
 	}
-	const first = ((Math.max(1, Number(index || 1)) - 1) % total) + 1;
 	const span = Math.max(1, Math.min(3, Number(size || 1)));
+	const first = loop
+		? ((Math.max(1, Number(index || 1)) - 1) % total) + 1
+		: Math.min(Math.max(1, Number(index || 1)), Math.max(1, total - span + 1));
 	const values = [];
 	for (let offset = 0; offset < span; offset++) {
-		values.push(((first - 1 + offset) % total) + 1);
+		const value = first + offset;
+		if (!loop && value > total) break;
+		values.push(loop ? ((value - 1) % total) + 1 : value);
 	}
 	return `[${values.join(",")}]`;
 }
@@ -1305,12 +1310,16 @@ function applySlidingRange(node) {
 	if (!state.slideOutputEnabled || count <= 0) {
 		return;
 	}
-	state.slideOutputIndex = ((Math.max(1, Number(state.slideOutputIndex || 1)) - 1) % count) + 1;
+	const span = Math.max(1, Math.min(3, Number(state.slideOutputSize || 1)));
+	state.slideOutputIndex = state.slideOutputLoop
+		? ((Math.max(1, Number(state.slideOutputIndex || 1)) - 1) % count) + 1
+		: Math.min(Math.max(1, Number(state.slideOutputIndex || 1)), Math.max(1, count - span + 1));
 	node.properties = node.properties || {};
 	node.properties.slide_output_enabled = true;
 	node.properties.slide_output_index = state.slideOutputIndex;
 	node.properties.slide_output_size = state.slideOutputSize;
-	const nextRange = formatSlidingRange(state.slideOutputIndex, count, state.slideOutputSize);
+	node.properties.slide_output_loop = Boolean(state.slideOutputLoop);
+	const nextRange = formatSlidingRange(state.slideOutputIndex, count, state.slideOutputSize, state.slideOutputLoop);
 	node.properties[SEQUENCE_RANGE_WIDGET_NAME] = nextRange;
 	if (getSequenceRange(node) !== nextRange) {
 		syncSequenceRange(node, nextRange);
@@ -1332,7 +1341,14 @@ function advanceSlidingRange(node) {
 	if (count <= 0) {
 		return;
 	}
-	state.slideOutputIndex = (Math.max(1, Number(state.slideOutputIndex || 1)) % count) + 1;
+	const lastIndex = Math.max(1, count - Math.max(1, Math.min(3, Number(state.slideOutputSize || 1))) + 1);
+	if (!state.slideOutputLoop && Math.max(1, Number(state.slideOutputIndex || 1)) >= lastIndex) {
+		stopSlidingOutput(node);
+		return;
+	}
+	state.slideOutputIndex = state.slideOutputLoop
+		? (Math.max(1, Number(state.slideOutputIndex || 1)) % count) + 1
+		: Math.min(lastIndex, Math.max(1, Number(state.slideOutputIndex || 1)) + 1);
 	node.properties = node.properties || {};
 	node.properties.slide_output_index = state.slideOutputIndex;
 	applySlidingRange(node);
@@ -1485,7 +1501,7 @@ function updateSlideOutputButtonsState(node) {
 		if (!button) continue;
 		const size = Number(sizeText);
 		const active = state.slideOutputEnabled && Number(state.slideOutputSize || 1) === size;
-		const rangeText = active ? formatSlidingRange(state.slideOutputIndex, count, size) : "";
+		const rangeText = active ? formatSlidingRange(state.slideOutputIndex, count, size, state.slideOutputLoop) : "";
 		button.textContent = active ? ["１", "２", "３"][size - 1] : ["1️⃣", "2️⃣", "3️⃣"][size - 1];
 		button.style.background = active ? "#1f6f55" : "#1a2328";
 		button.style.borderColor = active ? "#33c48d" : "#465761";
@@ -1498,7 +1514,15 @@ function updateSlideOutputButtonsState(node) {
 		button.style.opacity = count > 0 ? "1" : "0.55";
 		button.title = active
 			? `滑动输出 ${size} 张已开启：当前 ${rangeText || "等待图片"}。再次点击停止。`
-			: `滑动输出 ${size} 张：点击后自动执行并循环推进。`;
+			: `滑动输出 ${size} 张：点击后自动执行并推进。`;
+	}
+	const loopButton = node.__gjjMultiImageSlideLoopButton;
+	if (loopButton) {
+		const active = Boolean(state.slideOutputLoop);
+		loopButton.style.background = active ? "#1f6f55" : "#1a2328";
+		loopButton.style.borderColor = active ? "#33c48d" : "#465761";
+		loopButton.style.boxShadow = active ? "0 0 0 1px rgba(51,196,141,.55) inset, 0 0 10px rgba(51,196,141,.32)" : "none";
+		loopButton.title = active ? "循环已开启：滑动输出会一直循环。" : "循环已关闭：输出到最后一张图片后结束。";
 	}
 	const initButton = node.__gjjMultiImageSlideInitButton;
 	if (initButton) {
@@ -1968,7 +1992,7 @@ function updateSummary(node) {
 	const externalCount = Number(state.externalCount || 0);
 	const mergedCount = Number(state.mergedCount || 0);
 	const slideSourceCount = slidingSourceCount(node);
-	const slideText = state.slideOutputEnabled ? ` · 滑动 ${formatSlidingRange(state.slideOutputIndex, slideSourceCount, state.slideOutputSize) || "等待图片"}` : "";
+	const slideText = state.slideOutputEnabled ? ` · 滑动 ${formatSlidingRange(state.slideOutputIndex, slideSourceCount, state.slideOutputSize, state.slideOutputLoop) || "等待图片"}` : "";
 	if (node.__gjjMultiImageSummary) {
 		node.__gjjMultiImageSummary.title = "";
 		if (externalCount > 0 || selectedCount > 0) {
@@ -2357,9 +2381,10 @@ function buildDom(node) {
 	const defaultImageButton = makeIconButton("🌐", "设置默认图片：输入一条或多条 http/https 网络图片地址，下载到 ComfyUI input 后作为当前默认已选图片。");
 	const rangeButton = makeIconButton("#️⃣", "序列范围：点击展开/收起设置栏。支持 [1,3,5] 和 [1:8]。");
 	const outputButton = makeIconButton("🔌", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
-	const slideButton1 = makeIconButton("1️⃣", "滑动输出 1 张：点击后自动执行并循环推进。");
-	const slideButton2 = makeIconButton("2️⃣", "滑动输出 2 张：点击后自动执行并循环推进。");
-	const slideButton3 = makeIconButton("3️⃣", "滑动输出 3 张：点击后自动执行并循环推进。");
+	const slideButton1 = makeIconButton("1️⃣", "滑动输出 1 张：点击后自动执行并推进。");
+	const slideButton2 = makeIconButton("2️⃣", "滑动输出 2 张：点击后自动执行并推进。");
+	const slideButton3 = makeIconButton("3️⃣", "滑动输出 3 张：点击后自动执行并推进。");
+	const slideLoopButton = makeIconButton("♻️", "循环：默认关闭；开启后滑动输出会一直循环。");
 	const slideInitButton = makeIconButton("🏁", "初始化滑动输出：重置为从第 1 张开始。");
 	const zoomOutButton = makeIconButton("🔎−", "缩小缩略图：减少每张预览图尺寸，节点高度会自动重算。");
 	const zoomInButton = makeIconButton("🔍+", "放大缩略图：增加每张预览图尺寸，节点高度会自动重算。");
@@ -2453,6 +2478,17 @@ function buildDom(node) {
 			toggleSlideMode(size);
 		});
 	}
+	slideLoopButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.slideOutputLoop = !state.slideOutputLoop;
+		node.properties = node.properties || {};
+		node.properties.slide_output_loop = state.slideOutputLoop;
+		applySlidingRange(node);
+		updateSlideOutputButtonsState(node);
+		updateSummary(node);
+		requestRedraw(node);
+	});
 	slideInitButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -2480,7 +2516,7 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		state.extraToolsExpanded = !state.extraToolsExpanded;
-		const extraTools = node.__gjjMultiImageExtraTools || [slideButton1, slideButton2, slideButton3, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+		const extraTools = node.__gjjMultiImageExtraTools || [slideButton1, slideButton2, slideButton3, slideLoopButton, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 		for (const item of extraTools) {
 			item.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
 		}
@@ -2551,6 +2587,7 @@ function buildDom(node) {
 	toolbar.appendChild(slideButton1);
 	toolbar.appendChild(slideButton2);
 	toolbar.appendChild(slideButton3);
+	toolbar.appendChild(slideLoopButton);
 	toolbar.appendChild(slideInitButton);
 	toolbar.appendChild(defaultImageButton);
 	toolbar.appendChild(clearErrorButton);
@@ -2626,11 +2663,12 @@ function buildDom(node) {
 	node.__gjjMultiImageContainer = container;
 	node.__gjjMultiImageToolbar = toolbar;
 	node.__gjjMultiImageLinkButton = linkButton;
-	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideLoopButton, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
 	node.__gjjMultiImageOutputButton = outputButton;
 	node.__gjjMultiImageSlideButtons = { 1: slideButton1, 2: slideButton2, 3: slideButton3 };
+	node.__gjjMultiImageSlideLoopButton = slideLoopButton;
 	node.__gjjMultiImageSlideInitButton = slideInitButton;
 	node.__gjjMultiImageZoomOutButton = zoomOutButton;
 	node.__gjjMultiImageZoomInButton = zoomInButton;
@@ -2782,6 +2820,7 @@ app.registerExtension({
 			state.slideOutputEnabled = Boolean(this.properties?.slide_output_enabled);
 			state.slideOutputIndex = Math.max(1, Number.parseInt(this.properties?.slide_output_index || "1", 10) || 1);
 			state.slideOutputSize = Math.max(1, Math.min(3, Number.parseInt(this.properties?.slide_output_size || "2", 10) || 2));
+			state.slideOutputLoop = Boolean(this.properties?.slide_output_loop);
 			state.thumbSize = Number(this.properties?.thumb_size || DEFAULT_THUMB_SIZE);
 			state.rangeExpanded = Boolean(this.properties?.sequence_range_expanded);
 			state.externalCount = 0;
@@ -2806,6 +2845,7 @@ app.registerExtension({
 				serializedNode.properties.slide_output_enabled = Boolean(ensureState(this).slideOutputEnabled);
 				serializedNode.properties.slide_output_index = Math.max(1, Number(ensureState(this).slideOutputIndex || 1));
 				serializedNode.properties.slide_output_size = Math.max(1, Math.min(3, Number(ensureState(this).slideOutputSize || 1)));
+				serializedNode.properties.slide_output_loop = Boolean(ensureState(this).slideOutputLoop);
 				serializedNode.properties.thumb_size = Number(ensureState(this).thumbSize || DEFAULT_THUMB_SIZE);
 				serializedNode.properties.sequence_range_expanded = Boolean(ensureState(this).rangeExpanded);
 				const networkUrls = persistNetworkUrls(this, networkUrlsFromProperties(this.properties || {}), { notify: false });

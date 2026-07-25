@@ -1593,10 +1593,16 @@ import { api } from "/scripts/api.js";
 			}
 			quick.appendChild(button("自定义视图", "选择一个或多个视角、景别、角度，用大头照自动生成", "gjj-cl-btn", () => generateCustomCharacterViews(character).catch((error) => setStatus(error.message))));
 		} else {
-			const hint = document.createElement("div");
-			hint.className = "gjj-cl-status";
-			hint.textContent = "添加大头照后，可用 GJJ_CharacterMultiViewStudio 自动生成任意视图";
-			quick.appendChild(hint);
+			const referenceView = (character.views || [])[0];
+			const referenceLabel = String(referenceView?.label || referenceView?.id || "").trim();
+			if (referenceLabel) {
+				quick.appendChild(button("生成大头照", `使用「${referenceLabel}」作为参考，自动生成大头照`, "gjj-cl-btn", () => generateCharacterViews(character, ["大头照"], "", referenceLabel).catch((error) => setStatus(error.message))));
+			} else {
+				const hint = document.createElement("div");
+				hint.className = "gjj-cl-status";
+				hint.textContent = "请先添加一张角色视图，再自动生成大头照";
+				quick.appendChild(hint);
+			}
 		}
 		const status = document.createElement("div");
 		status.className = "gjj-cl-status";

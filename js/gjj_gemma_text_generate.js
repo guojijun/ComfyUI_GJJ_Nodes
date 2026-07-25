@@ -622,43 +622,14 @@ function choices(name, node) {
 function repairMissingClipName(node) {
 	const target = widget(node, "clip_name");
 	if (!target) return false;
-	const values = choices("clip_name", node).filter((value) => {
-		const name = String(value || "").toLowerCase();
-		return !name.endsWith(".gguf")
-			&& (name.includes("qwen3.5") || name.includes("qwen35") || name.includes("gemma4"));
-	});
+	const values = choices("clip_name", node);
 	if (!values.length) return false;
 
 	const current = String(target.value || "");
 	if (values.includes(current)) return false;
 	const basename = (value) => String(value || "").replaceAll("\\", "/").split("/").pop().toLowerCase();
 	const requestedName = basename(current);
-	const ignored = new Set(["safetensors", "mixed", "hybrid", "scaled"]);
-	const tokens = (value) => new Set(
-		basename(value).split(/[^a-z0-9.]+/).filter((token) => token && !ignored.has(token)));
-	const requestedTokens = tokens(current);
-	const score = (candidate) => {
-		const name = basename(candidate);
-		const candidateTokens = tokens(candidate);
-		const requestedQwen = requestedName.includes("qwen3.5") || requestedName.includes("qwen35");
-		const candidateQwen = name.includes("qwen3.5") || name.includes("qwen35");
-		let sameFamily = 0;
-		if (requestedName.includes("gemma4") && name.includes("gemma4")) sameFamily = 200;
-		else if (requestedQwen && candidateQwen) sameFamily = 200;
-		let shared = 0;
-		for (const token of requestedTokens) if (candidateTokens.has(token)) shared += 1;
-		const preferred = name === "qwen3.5_4b_fp8_mixed.safetensors" ? 1 : 0;
-		return [sameFamily, shared, candidateQwen ? 2 : 1, preferred];
-	};
-	const replacement = values.reduce((best, candidate) => {
-		if (!best) return candidate;
-		const left = score(candidate);
-		const right = score(best);
-		for (let index = 0; index < left.length; index += 1) {
-			if (left[index] !== right[index]) return left[index] > right[index] ? candidate : best;
-		}
-		return best;
-	}, "");
+	const replacement = values.find((candidate) => basename(candidate) === requestedName);
 	if (!replacement) return false;
 
 	target.value = replacement;

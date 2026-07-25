@@ -5874,156 +5874,29 @@ function addTopBarButtons() {
 	}, 1000);
 }
 
-function registerKeyboardShortcuts() {
-	if (window.__gjjNodeArrangerShortcutsRegistered) return;
-	window.__gjjNodeArrangerShortcutsRegistered = true;
+const SHORTCUT_ARRANGE_MODES = [
+	["auto", "智能排列"],
+	[TOPO_SORT_MODES.TOPO_MAIN_PATH, "拓扑：主链路"],
+	[TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, "拓扑：输出锚定"],
+	[TOPO_SORT_MODES.TOPO_COMPACT, "拓扑：紧凑层级"],
+	[TOPO_SORT_MODES.TOPO_BRANCH, "拓扑：分支优先"],
+	[TOPO_SORT_MODES.TOPO_ORIGINAL_Y, "拓扑：保持上下"],
+	["horizontal", "水平排列"],
+	["vertical", "垂直排列"],
+	["grid", "正方形预览排版"],
+];
+let shortcutArrangeModeIndex = 0;
 
-	let arrangeModeIndex = 0;
+function runNextShortcutArrangement() {
+	const [mode, name] = SHORTCUT_ARRANGE_MODES[shortcutArrangeModeIndex];
+	console.log(`[GJJ_NodeArranger] 快捷键循环模式：${name}`);
+	runArrangeAction(mode, DEFAULT_SPACING);
+	shortcutArrangeModeIndex = (shortcutArrangeModeIndex + 1) % SHORTCUT_ARRANGE_MODES.length;
+}
 
-	const arrangeModes = [
-		"auto",
-		TOPO_SORT_MODES.TOPO_MAIN_PATH,
-		TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR,
-		TOPO_SORT_MODES.TOPO_COMPACT,
-		TOPO_SORT_MODES.TOPO_BRANCH,
-		TOPO_SORT_MODES.TOPO_ORIGINAL_Y,
-		"horizontal",
-		"vertical",
-		"grid",
-	];
-
-	const modeNames = [
-		"智能排列",
-		"拓扑：主链路",
-		"拓扑：输出锚定",
-		"拓扑：紧凑层级",
-		"拓扑：分支优先",
-		"拓扑：保持上下",
-		"水平排列",
-		"垂直排列",
-		"正方形预览排版",
-	];
-
-	const activeShortcutKeys = new Set();
-
-	const shortcutSignature = (event, key) => [
-		event.ctrlKey ? "ctrl" : "",
-		event.altKey ? "alt" : "",
-		event.shiftKey ? "shift" : "",
-		key,
-	].filter(Boolean).join("+");
-
-	const eventMatchesKey = (event, key, code = "") => {
-		const eventKey = String(event.key || "").toLowerCase();
-		const eventCode = String(event.code || "").toLowerCase();
-		return eventKey === key || (!!code && eventCode === code.toLowerCase());
-	};
-
-	const isEditableShortcutTarget = (target) => {
-		const element = target instanceof Element ? target : null;
-		if (!element) return false;
-		return Boolean(element.closest("input, textarea, select, [contenteditable='true'], [contenteditable=''], [contenteditable='plaintext-only']"));
-	};
-
-	const beginSingleFireShortcut = (event, key, options = {}) => {
-		if (event.repeat) return false;
-		if (!options.allowEditable && isEditableShortcutTarget(event.target)) return false;
-		const signature = shortcutSignature(event, key);
-		if (activeShortcutKeys.has(signature)) return false;
-		activeShortcutKeys.add(signature);
-		setTimeout(() => activeShortcutKeys.delete(signature), 650);
-		return true;
-	};
-
-	const releaseShortcutKey = (key) => {
-		for (const signature of [...activeShortcutKeys]) {
-			if (signature.endsWith(`+${key}`) || signature === key) {
-				activeShortcutKeys.delete(signature);
-			}
-		}
-	};
-
-	document.addEventListener("keyup", (event) => {
-		releaseShortcutKey(String(event.key || "").toLowerCase());
-	}, true);
-
-	window.addEventListener("blur", () => activeShortcutKeys.clear());
-	document.addEventListener("visibilitychange", () => {
-		if (document.hidden) activeShortcutKeys.clear();
-	});
-
-	document.addEventListener("keydown", (event) => {
-		const key = String(event.key || "").toLowerCase();
-
-		if (event.altKey && !event.ctrlKey && !event.shiftKey && ["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) {
-			if (isEditableShortcutTarget(event.target)) return;
-			event.preventDefault();
-			event.stopPropagation();
-
-			if (key === "arrowleft") adjustLayoutGap("column", -LAYOUT_GAP_STEP);
-			if (key === "arrowright") adjustLayoutGap("column", LAYOUT_GAP_STEP);
-			if (key === "arrowup") adjustLayoutGap("row", -LAYOUT_GAP_STEP);
-			if (key === "arrowdown") adjustLayoutGap("row", LAYOUT_GAP_STEP);
-
-			rerunLastArrangement();
-			return;
-		}
-
-		if (event.ctrlKey && event.altKey && eventMatchesKey(event, "a", "KeyA")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-			runArrangeAction("toggle-collapse");
-			return;
-		}
-
-		if (event.ctrlKey && event.shiftKey && !event.altKey && eventMatchesKey(event, "a", "KeyA")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-
-			const mode = arrangeModes[arrangeModeIndex];
-			const name = modeNames[arrangeModeIndex];
-
-			console.log(`[GJJ_NodeArranger] 快捷键循环模式：${name}`);
-
-			runArrangeAction(mode, DEFAULT_SPACING);
-
-			arrangeModeIndex = (arrangeModeIndex + 1) % arrangeModes.length;
-			return;
-		}
-
-		if (event.ctrlKey && event.shiftKey && eventMatchesKey(event, "t", "KeyT")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-			runArrangeAction(TOPO_SORT_MODES.TOPO_MAIN_PATH);
-			return;
-		}
-
-		if (event.ctrlKey && event.shiftKey && eventMatchesKey(event, "h", "KeyH")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-			runArrangeAction("horizontal");
-			return;
-		}
-
-		if (event.ctrlKey && event.shiftKey && eventMatchesKey(event, "v", "KeyV")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-			runArrangeAction("vertical");
-			return;
-		}
-
-		if (event.ctrlKey && event.shiftKey && eventMatchesKey(event, "g", "KeyG")) {
-			if (!beginSingleFireShortcut(event, key, { allowEditable: true })) return;
-			event.preventDefault();
-			event.stopPropagation();
-			runArrangeAction("grid");
-		}
-	}, true);
+function adjustGapAndRerun(axis, delta) {
+	adjustLayoutGap(axis, delta);
+	rerunLastArrangement();
 }
 
 function patchGraphSerializeIntegerPosition() {
@@ -6110,6 +5983,28 @@ function addButtonToArrangerNode(node) {
 
 app.registerExtension({
 	name: "Comfy.GJJ.NodeArranger",
+	commands: [
+		{ id: "GJJ.NodeArranger.SmartCycle", label: "GJJ：智能/循环排列节点", function: runNextShortcutArrangement },
+		{ id: "GJJ.NodeArranger.TopoMain", label: "GJJ：按主链路拓扑排列节点", function: () => runArrangeAction(TOPO_SORT_MODES.TOPO_MAIN_PATH) },
+		{ id: "GJJ.NodeArranger.Horizontal", label: "GJJ：水平排列节点", function: () => runArrangeAction("horizontal") },
+		{ id: "GJJ.NodeArranger.Grid", label: "GJJ：正方形预览排版", function: () => runArrangeAction("grid") },
+		{ id: "GJJ.NodeArranger.ToggleCollapse", label: "GJJ：折叠/展开选中节点", function: () => runArrangeAction("toggle-collapse") },
+		{ id: "GJJ.NodeArranger.GapLeft", label: "GJJ：减小水平排列间距", function: () => adjustGapAndRerun("column", -LAYOUT_GAP_STEP) },
+		{ id: "GJJ.NodeArranger.GapRight", label: "GJJ：增大水平排列间距", function: () => adjustGapAndRerun("column", LAYOUT_GAP_STEP) },
+		{ id: "GJJ.NodeArranger.GapUp", label: "GJJ：减小垂直排列间距", function: () => adjustGapAndRerun("row", -LAYOUT_GAP_STEP) },
+		{ id: "GJJ.NodeArranger.GapDown", label: "GJJ：增大垂直排列间距", function: () => adjustGapAndRerun("row", LAYOUT_GAP_STEP) },
+	],
+	keybindings: [
+		{ commandId: "GJJ.NodeArranger.SmartCycle", combo: { key: "a", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.TopoMain", combo: { key: "t", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.Horizontal", combo: { key: "h", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.Grid", combo: { key: "g", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.ToggleCollapse", combo: { key: "a", ctrl: true, alt: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.GapLeft", combo: { key: "ArrowLeft", alt: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.GapRight", combo: { key: "ArrowRight", alt: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.GapUp", combo: { key: "ArrowUp", alt: true }, targetElementId: "graph-canvas" },
+		{ commandId: "GJJ.NodeArranger.GapDown", combo: { key: "ArrowDown", alt: true }, targetElementId: "graph-canvas" },
+	],
 
 	async setup() {
 		installFocusedNodeTracker();
@@ -6176,7 +6071,6 @@ app.registerExtension({
 
 		addContextMenuItems();
 		addTopBarButtons();
-		registerKeyboardShortcuts();
 		patchGraphSerializeIntegerPosition();
 	},
 

@@ -94,6 +94,15 @@ import { app } from "/scripts/app.js";
 		}
 	}
 
+	function showSettingsContentBadge(row) {
+		document.querySelectorAll(".gjj-settings-content-badge").forEach((item) => item.remove());
+		const dialog = row?.closest?.("[role='dialog'], .p-dialog, .comfyui-body-left, body") || document.body;
+		const badge = makeSettingsIcon(48);
+		badge.className = "gjj-settings-content-badge";
+		badge.title = "GJJ 设置";
+		dialog.appendChild(badge);
+	}
+
 	function installSettingsCategoryIcon() {
 		if (!document.getElementById("gjj-settings-category-icon-style")) {
 			const style = document.createElement("style");
@@ -115,9 +124,29 @@ import { app } from "/scripts/app.js";
 				[data-nav-id="GJJ"]:has(> .gjj-settings-category-icon)::before {
 					display: none;
 				}
+				.gjj-settings-content-badge {
+					position: absolute;
+					top: 26px;
+					right: 74px;
+					z-index: 20;
+					width: 48px !important;
+					height: 48px !important;
+					filter: drop-shadow(0 2px 7px rgba(26,250,41,.28));
+					pointer-events: none;
+				}
 			`;
 			document.head.append(style);
 		}
+		document.addEventListener("click", (event) => {
+			const row = event.target?.closest?.("[data-nav-id]");
+			if (!row) return;
+			const navId = String(row.dataset.navId || "");
+			if (navId === "root/GJJ" || navId === "GJJ") {
+				requestAnimationFrame(() => showSettingsContentBadge(row));
+			} else {
+				document.querySelectorAll(".gjj-settings-content-badge").forEach((item) => item.remove());
+			}
+		}, true);
 		decorateSettingsCategory();
 		const observer = new MutationObserver((mutations) => {
 			for (const mutation of mutations) {
