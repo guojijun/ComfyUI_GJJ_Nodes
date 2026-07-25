@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -667,6 +668,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 class GJJ_LlamaAssistant:
     CATEGORY = "GJJ"
     FUNCTION = "run"
+    OUTPUT_NODE = True
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("文本",)
     OUTPUT_TOOLTIPS = ("本地 llama.cpp 模型生成的文本。",)
@@ -753,6 +755,7 @@ class GJJ_LlamaAssistant:
         image=None,
         unique_id=None,
     ):
+        started_at = time.perf_counter()
         if str(main_model or "").startswith("（请把模型放到"):
             raise RuntimeError("未找到可用模型文件。请把模型放到 ComfyUI/models/LLM/ 后刷新或重启。")
 
@@ -861,11 +864,25 @@ class GJJ_LlamaAssistant:
             _LlamaStorage.unload()
 
         result = text.lstrip().removeprefix(": ").strip()
+        try:
+            model_size = Path(resolve_llm_path(main_model)).stat().st_size
+            model_size_text = f"{model_size / (1024 ** 3):.2f} GB"
+        except (OSError, TypeError, ValueError):
+            model_size_text = "未知"
         return {
-            "ui": {"preview_text": (result,), "preview_kind": ("text",)},
+            "ui": {
+                "preview_text": (result,),
+                "preview_kind": ("text",),
+                "gjj_assistant_result": [{
+                    "text": result,
+                    "model": Path(str(main_model or "")).stem,
+                    "elapsed": f"{time.perf_counter() - started_at:.2f} 秒",
+                    "model_size": model_size_text,
+                }],
+            },
             "result": (result,),
         }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LlamaAssistant}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·💙图片反推提示词推理🧠LLAMA"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·💙Llama🧠图片反推提示词推理"}

@@ -53,8 +53,8 @@ import { api } from "/scripts/api.js";
 		openable_first: "可打开优先",
 	};
 	const SORT_MODE_BUTTONS = [
-		{ mode: "mtime_desc", label: "🕒最新", title: "按修改时间从新到旧排序" },
-		{ mode: "mtime_asc", label: "⏳最旧", title: "按修改时间从旧到新排序" },
+		{ mode: "mtime_desc", label: "🕒最新", title: "按文件名末尾时间戳从新到旧排序" },
+		{ mode: "mtime_asc", label: "⏳最旧", title: "按文件名末尾时间戳从旧到新排序" },
 		{ mode: "size_desc", label: "📦大文件", title: "按文件大小从大到小排序" },
 		{ mode: "size_asc", label: "📦小文件", title: "按文件大小从小到大排序" },
 		{ mode: "name_asc", label: "🔤A-Z", title: "按文件名 A-Z 排序" },
@@ -3278,6 +3278,22 @@ import { api } from "/scripts/api.js";
 		return Number.isFinite(modified) && modified > 0 ? modified / 1000 : 0;
 	}
 
+	function previewItemFilenameTimestamp(item) {
+		const name = previewItemName(item).replace(/\.[^.]+$/, "");
+		const match = name.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[T _-]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})$/);
+		if (!match) return previewItemMtime(item);
+		const [, year, month, day, hour, minute, second] = match.map(Number);
+		const timestamp = Date.UTC(year, month - 1, day, hour, minute, second) / 1000;
+		const date = new Date(timestamp * 1000);
+		const valid = date.getUTCFullYear() === year
+			&& date.getUTCMonth() === month - 1
+			&& date.getUTCDate() === day
+			&& date.getUTCHours() === hour
+			&& date.getUTCMinutes() === minute
+			&& date.getUTCSeconds() === second;
+		return valid ? timestamp : previewItemMtime(item);
+	}
+
 	function previewItemSize(item) {
 		const explicit = Number(item?.size ?? item?.size_bytes ?? item?.file_size);
 		if (Number.isFinite(explicit) && explicit >= 0) return explicit;
@@ -3308,14 +3324,14 @@ import { api } from "/scripts/api.js";
 		});
 		const sortMode = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
 		items.sort((a, b) => {
-			if (sortMode === "mtime_asc") return previewItemMtime(a) - previewItemMtime(b) || compareText(previewItemName(a), previewItemName(b));
+			if (sortMode === "mtime_asc") return previewItemFilenameTimestamp(a) - previewItemFilenameTimestamp(b) || compareText(previewItemName(a), previewItemName(b));
 			if (sortMode === "size_desc") return previewItemSize(b) - previewItemSize(a) || (previewItemMtime(b) - previewItemMtime(a)) || compareText(previewItemName(a), previewItemName(b));
 			if (sortMode === "size_asc") return previewItemSize(a) - previewItemSize(b) || (previewItemMtime(b) - previewItemMtime(a)) || compareText(previewItemName(a), previewItemName(b));
 			if (sortMode === "name_asc") return compareText(previewItemName(a), previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
 			if (sortMode === "name_desc") return compareText(previewItemName(b), previewItemName(a)) || (previewItemMtime(b) - previewItemMtime(a));
 			if (sortMode === "title_asc") return compareText(previewItemTitle(a) || previewItemName(a), previewItemTitle(b) || previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
 			if (sortMode === "openable_first") return Number(!!b.workflow) - Number(!!a.workflow) || (previewItemMtime(b) - previewItemMtime(a));
-			return previewItemMtime(b) - previewItemMtime(a) || compareText(previewItemName(a), previewItemName(b));
+			return previewItemFilenameTimestamp(b) - previewItemFilenameTimestamp(a) || compareText(previewItemName(a), previewItemName(b));
 		});
 		return items;
 	}

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 import inspect
 import gc
+import os
 import secrets
 from typing import Any
 
@@ -10,6 +12,13 @@ try:
     import folder_paths
 except Exception:
     folder_paths = None
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+except Exception:
+    web = None
+    PromptServer = None
 
 try:
     from .gjj_ollama_common import (
@@ -53,15 +62,10 @@ except Exception:
 
 
 NODE_NAME = "GJJ_GemmaTextGenerate"
-NODE_DISPLAY_NAME = "GJJ · 🧠 图像反推文本生成（Gemma）"
+NODE_DISPLAY_NAME = "GJJ·💛Gemma🧠图片反推提示词推理"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
 DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
-NO_THINK_OUTPUT_RULE = (
-    "严格输出规则：不要输出思考过程、推理过程、分析过程、草稿、步骤说明、内心独白、"
-    "<think> 标签或 thinking 内容。不要解释你如何理解任务，不要复述用户要求，不要写“我需要/首先/接下来”。"
-    "如果必须组织答案，只输出最终正文。"
-)
 
 
 class AnyMediaType(str):
@@ -100,25 +104,33 @@ CLIP_TYPES = [
 GEMMA_TEXT_ENCODER_MODELS = [
     {
         "label": "推荐 Qwen3.5 4B FP8 mixed",
-        "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors",
+        "folder": "text_encoders",
+        "filename": "qwen3.5_4b_fp8_mixed.safetensors",
+        "kind": "clip",
         "required": True,
         "description": "默认加载的 Qwen3.5 / Gemma 兼容文本生成模型；推荐作为默认。",
     },
     {
         "label": "兼容 Gemma 3 12B FP8 scaled",
-        "path": "models/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+        "folder": "text_encoders",
+        "filename": "gemma_3_12B_it_fp8_scaled.safetensors",
+        "kind": "clip",
         "required": False,
         "description": "兼容变体；本地只有该文件时也可以手动选择。",
     },
     {
         "label": "兼容 Gemma 3 12B 原始精度",
-        "path": "models/text_encoders/gemma_3_12B_it.safetensors",
+        "folder": "text_encoders",
+        "filename": "gemma_3_12B_it.safetensors",
+        "kind": "clip",
         "required": False,
         "description": "显存占用更高的兼容变体。",
     },
     {
         "label": "兼容 Gemma 3 12B FP4 mixed",
-        "path": "models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+        "folder": "text_encoders",
+        "filename": "gemma_3_12B_it_fp4_mixed.safetensors",
+        "kind": "clip",
         "required": False,
         "description": "低显存兼容变体，质量与速度取决于本地 ComfyUI 支持情况。",
     },
@@ -229,6 +241,39 @@ def _find_text_encoder_path(clip_name: str) -> str | None:
         return folder_paths.get_full_path("text_encoders", clip_name)
     except Exception:
         return None
+
+
+def _format_model_size(path: str | None) -> str:
+    try:
+        size = float(os.path.getsize(str(path)))
+    except (OSError, TypeError, ValueError):
+        return "未知"
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit = units[0]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            break
+        size /= 1024.0
+    precision = 2 if size < 10 else 1
+    return f"{size:.{precision}f} {unit}"
+
+
+async def _get_text_encoder_model_sizes(_request):
+    sizes = {}
+    for name in _filename_list("text_encoders"):
+        path = _find_text_encoder_path(name)
+        try:
+            sizes[name] = os.path.getsize(str(path))
+        except (OSError, TypeError, ValueError):
+            continue
+    return web.json_response({"ok": True, "sizes": sizes})
+
+
+if PromptServer is not None and getattr(PromptServer, "instance", None) is not None and web is not None:
+    _server = PromptServer.instance
+    if not getattr(_server, "_gjj_text_encoder_sizes_api_registered", False):
+        _server.routes.get("/gjj/text_encoder_model_sizes")(_get_text_encoder_model_sizes)
+        _server._gjj_text_encoder_sizes_api_registered = True
 
 
 def _qwen35_runtime_issue(clip_name: str) -> str:
@@ -343,7 +388,7 @@ def _load_merged_clip(clip_name: str, clip_type: str, device: str = "default"):
         clip_path = folder_paths.get_full_path("text_encoders", clip_name)
         if not clip_path:
             raise RuntimeError(f"未找到文本编码器：{clip_name}")
-        clip_type_value = getattr(comfy.sd.CLIPType, str(clip_type or "ideogram4").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
+        clip_type_value = getattr(comfy.sd.CLIPType, str(clip_type or "stable_diffusion").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
         model_options = {"dtype": torch.float8_e4m3fn}
         if device == "cpu":
             model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
@@ -395,71 +440,66 @@ def _generate_text(
 ) -> str:
     import time
 
+    thinking_enabled = _as_bool(thinking, False)
+    default_template_enabled = _as_bool(use_default_template, True)
     effective_prompt = str(prompt or "")
-    if add_output_rules and not bool(thinking):
-        assistant_rule = ollama_assistant_output_rule() or DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
-        effective_prompt = f"{NO_THINK_OUTPUT_RULE}\n{assistant_rule}\n\n{effective_prompt}".strip()
-    tokenize_started = time.perf_counter()
-    tokens = clip.tokenize(
-        effective_prompt,
-        image=image,
-        skip_template=not bool(use_default_template),
-        min_length=1,
-        thinking=bool(thinking),
-        video=video,
-        audio=audio,
-    )
-    tokenize_seconds = time.perf_counter() - tokenize_started
-    do_sample = str(sampling_mode or "on") == "on"
-    generate_started = time.perf_counter()
-    generated_ids = _clip_generate_compat(
-        clip,
-        tokens,
-        do_sample=do_sample,
-        max_length=max(1, min(2048, int(max_length or 256))),
-        temperature=float(temperature),
-        top_k=int(top_k),
-        top_p=float(top_p),
-        min_p=float(min_p),
-        repetition_penalty=float(repetition_penalty),
-        presence_penalty=float(presence_penalty),
-        seed=int(seed),
-    )
-    generate_seconds = time.perf_counter() - generate_started
-    decode_started = time.perf_counter()
-    raw_text = str(clip.decode(generated_ids) or "")
-    decode_seconds = time.perf_counter() - decode_started
+    try:
+        from comfy_extras.nodes_textgen import TextGenerate
+    except Exception as exc:
+        raise RuntimeError(f"无法导入 ComfyUI 官方 TextGenerate：{exc}") from exc
+
+    sampling_payload = {
+        "sampling_mode": "on" if str(sampling_mode or "on") == "on" else "off",
+        "temperature": float(temperature),
+        "top_k": int(top_k),
+        "top_p": float(top_p),
+        "min_p": float(min_p),
+        "repetition_penalty": float(repetition_penalty),
+        "presence_penalty": float(presence_penalty),
+        "seed": int(seed),
+    }
+    official_kwargs = {
+        "clip": clip,
+        "prompt": effective_prompt,
+        "max_length": max(1, min(32768, int(max_length or 512))),
+        "sampling_mode": sampling_payload,
+        "image": image,
+        "video": video,
+        "audio": audio,
+        "thinking": thinking_enabled,
+        "use_default_template": default_template_enabled,
+    }
+    try:
+        signature = inspect.signature(TextGenerate.execute)
+        official_kwargs = {key: value for key, value in official_kwargs.items() if key in signature.parameters}
+        official_started = time.perf_counter()
+        official_output = TextGenerate.execute(**official_kwargs)
+        official_seconds = time.perf_counter() - official_started
+    except Exception as exc:
+        raise RuntimeError(f"调用 ComfyUI 官方 TextGenerate 失败：{exc}") from exc
+
+    official_result = getattr(official_output, "result", official_output)
+    if isinstance(official_result, (tuple, list)):
+        raw_text = str(official_result[0] if official_result else "")
+    else:
+        raw_text = str(official_result or "")
     print(
-        "[GJJ GemmaTextGenerate] 推理分段耗时: "
-        f"tokenize={tokenize_seconds:.2f}s "
-        f"generate={generate_seconds:.2f}s "
-        f"decode={decode_seconds:.2f}s "
+        "[GJJ GemmaTextGenerate] 官方 TextGenerate 耗时: "
+        f"total={official_seconds:.2f}s "
+        f"thinking={thinking_enabled} "
+        f"clip_type_call=official "
         f"raw_chars={len(raw_text)}",
         flush=True,
     )
     text = _strip_after_think_end(raw_text)
-    if not bool(thinking):
+    if not thinking_enabled:
         text = _clean_no_think_output(text, effective_prompt)
-        if not str(text or "").strip() and str(raw_text or "").strip():
-            # 部分 Gemma/Qwen 模型即使关闭 thinking，也可能把全部正文包在
-            # <think> 中且不再追加最终段。保留这次推理的可用正文，避免完整生成第二次。
-            text = re.sub(r"</?(?:think|thinking|analysis|reasoning|scratchpad)\b[^>]*>", "", raw_text, flags=re.IGNORECASE)
-            text = re.sub(r"<\|im_(?:start|end)\|>|<end_of_turn>", "", text)
-            text = re.sub(r"<start_of_turn>\s*(?:model|assistant|user)?", "", text, flags=re.IGNORECASE)
-            text = _strip_labeled_thinking_block(text)
-            text = _strip_common_preface(text).strip()
-            if text:
-                print(
-                    "[GJJ GemmaTextGenerate] 模型仅返回 thinking 包裹正文，"
-                    "已直接提取本次结果，跳过二次生成。",
-                    flush=True,
-                )
     if not str(text or "").strip():
         print(
             "[GJJ GemmaTextGenerate] 输出为空诊断: "
             f"raw_length={len(raw_text)} "
             f"has_think_end={bool(re.search(r'</think\\s*>', raw_text, flags=re.IGNORECASE))} "
-            f"generated_ids_type={type(generated_ids).__name__}",
+            f"official_output_type={type(official_output).__name__}",
             flush=True,
         )
     return text
@@ -496,10 +536,13 @@ def _strip_after_think_end(text: str) -> str:
 def _clean_no_think_output(text: str, prompt: str = "") -> str:
     cleaned = _strip_after_think_end(text)
     cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<think\b[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<thinking\b[^>]*>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<thinking\b[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?thinking\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<(?:analysis|reasoning|scratchpad)\b[^>]*>.*?</(?:analysis|reasoning|scratchpad)>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<(?:analysis|reasoning|scratchpad)\b[^>]*>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?(?:analysis|reasoning|scratchpad)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<\|im_(?:start|end)\|>", "", cleaned)
     cleaned = re.sub(r"<start_of_turn>\s*(?:model|assistant|user)?", "", cleaned, flags=re.IGNORECASE)
@@ -768,6 +811,7 @@ def _is_audio_media(media: Any | None) -> bool:
 class GJJ_GemmaTextGenerate:
     CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "generate"
+    OUTPUT_NODE = True
     DESCRIPTION = (
         NODE_DESCRIPTION
         if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
@@ -792,7 +836,7 @@ class GJJ_GemmaTextGenerate:
         usage=[
             "选择 CLIP 名称和类型后，直接填写提示词执行。",
             "可选连接统一媒体输入口：支持 IMAGE、GJJ_BATCH_IMAGE、官方 VIDEO 和 AUDIO，并按输入类型自动分流。",
-            "默认类型 ideogram4 对应截图中的加载 CLIP 类型。",
+            "默认 CLIP 类型 stable_diffusion，与 ComfyUI 系统 TextGenerate 搭配 Qwen3.5 时的加载方式一致。",
             "采样模式为 off 时会关闭随机采样，仅保留最大长度等基础参数。",
         ],
         runtime=[
@@ -804,6 +848,10 @@ class GJJ_GemmaTextGenerate:
         copy_text=MODEL_DOWNLOAD_URL,
         copy_label="🌏 复制模型下载地址",
         notice=_ENVIRONMENT_REPORT.get("warning_message", ""),
+        extra={
+            "static_model_tree_only": True,
+            "model_tree_priority": "static",
+        },
     )
 
     @classmethod
@@ -817,13 +865,13 @@ class GJJ_GemmaTextGenerate:
             "required": {
                 "clip_name": (clip_options, {
                     "default": default_clip,
-                    "display_name": "CLIP 名称",
-                    "tooltip": "选择 text_encoders 目录下的 Gemma / Ideogram4 文本编码器。默认优先 qwen3.5_4b_fp8_mixed.safetensors。",
+                    "display_name": "反推模型",
+                    "tooltip": "选择 ComfyUI/models/text_encoders 目录下的反推模型。默认优先 qwen3.5_4b_fp8_mixed.safetensors。",
                 }),
                 "clip_type": (CLIP_TYPES, {
-                    "default": "ideogram4",
+                    "default": "stable_diffusion",
                     "display_name": "CLIP 类型",
-                    "tooltip": "传给官方 CLIPLoader 的类型。截图中的类型为 ideogram4。",
+                    "tooltip": "传给官方 CLIPLoader 的类型。Qwen3.5 参考系统 TextGenerate 使用 stable_diffusion，可正确应用 thinking=False 的系统模板。",
                 }),
                 "clip_device": (["default", "cpu"], {
                     "default": "default",
@@ -842,21 +890,21 @@ class GJJ_GemmaTextGenerate:
                     "tooltip": "发送给文本生成模型的用户指令；前端同时提供内置多行文本框和可外接 STRING 输入口。",
                 }),
                 "max_length": ("INT", {
-                    "default": 2048,
+                    "default": 512,
                     "min": 1,
-                    "max": 2048,
+                    "max": 32768,
                     "step": 1,
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "最大长度",
-                    "tooltip": "生成文本的最大 token 长度。",
+                    "tooltip": "限制本次输出最多生成多少 token。值越大越容易得到完整长文，但生成更慢、占用更多显存；过小可能截断正文或只留下思考段。",
                 }),
                 "sampling_mode": (["on", "off"], {
                     "default": "on",
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "采样模式",
-                    "tooltip": "on 开启随机采样参数；off 关闭随机采样。",
+                    "tooltip": "开启时使用温度、Top K、Top P、Min P、惩罚和种子进行随机采样；关闭时采用确定性生成，并忽略这些随机采样参数。",
                 }),
                 "temperature": ("FLOAT", {
                     "default": 0.7,
@@ -866,7 +914,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "温度",
-                    "tooltip": "采样温度。越高越发散，越低越稳定。",
+                    "tooltip": "控制随机程度。较低（约 0.2–0.7）更稳定、忠于指令；较高（约 0.8–1.2）更多样但更容易跑题。仅在随机采样开启时生效。",
                 }),
                 "top_k": ("INT", {
                     "default": 64,
@@ -876,7 +924,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "Top K",
-                    "tooltip": "只从概率最高的 K 个 token 中采样；0 通常表示不限制。",
+                    "tooltip": "每一步只保留概率最高的 K 个候选 token。值小更保守稳定，值大更多样；0 表示不使用 Top K 限制。会与 Top P、Min P 共同过滤候选。",
                 }),
                 "top_p": ("FLOAT", {
                     "default": 0.95,
@@ -886,7 +934,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "Top P",
-                    "tooltip": "核采样阈值。",
+                    "tooltip": "按概率从高到低累加候选，累计达到该比例后截断。较低更集中稳定，接近 1.0 更多样；1.0 表示基本不使用 Top P 截断。",
                 }),
                 "min_p": ("FLOAT", {
                     "default": 0.05,
@@ -896,7 +944,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "最小概率",
-                    "tooltip": "按最高概率 token 的相对比例过滤低概率候选。",
+                    "tooltip": "相对最高概率过滤候选：低于“最高概率 × Min P”的 token 会被排除。值越高越保守；0 表示关闭。通常 0.03–0.10，且会与 Top K、Top P 同时生效。",
                 }),
                 "repetition_penalty": ("FLOAT", {
                     "default": 1.05,
@@ -906,7 +954,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "重复惩罚",
-                    "tooltip": "抑制重复文本片段。1.0 基本不惩罚。",
+                    "tooltip": "降低已经生成过的 token 再次出现的概率。1.0 不惩罚；略高于 1（如 1.05–1.15）可减少复读，过高可能破坏语句连贯性。",
                 }),
                 "seed": ("INT", {
                     "default": 0,
@@ -923,14 +971,14 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "出现惩罚",
-                    "tooltip": "降低已出现内容再次出现的概率。",
+                    "tooltip": "只要某个 token 已出现，就施加固定惩罚，鼓励引入新内容。0 表示关闭；值过高可能导致用词生硬或偏离主题。",
                 }),
                 "thinking": ("BOOLEAN", {
                     "default": False,
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "思考模式",
-                    "tooltip": "如果模型支持，允许模型以 thinking 模式生成。",
+                    "tooltip": "开启时允许模型输出推理过程；关闭时向模型明确禁用思考，并清除 thinking/analysis/reasoning 内容。若模型仍只生成思考段，会自动重试最终正文。",
                 }),
                 "use_default_template": ("BOOLEAN", {
                     "default": True,
@@ -985,6 +1033,14 @@ class GJJ_GemmaTextGenerate:
                     "display_name": "前端参数存储",
                     "tooltip": "由 GJJ_GemmaTextGenerate 前端面板自动维护，不占用节点布局空间。",
                 }),
+                "model_filter_keywords": ("STRING", {
+                    "default": "qwen3.5|gemma4|qwen3vl",
+                    "multiline": False,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "反推模型关键词过滤",
+                    "tooltip": "反推模型选择器的关键词过滤条件；随工作流保存。空格表示同时包含，| 表示任一包含。",
+                }),
             },
             "optional": {
                 "media": (MEDIA_INPUT_TYPE, {
@@ -1035,7 +1091,32 @@ class GJJ_GemmaTextGenerate:
         keep_model: bool = True,
         device_preference: str = "GPU优先",
         workflow_values_json: str = "{}",
+        model_filter_keywords: str = "qwen3.5|gemma4|qwen3vl",
     ):
+        received_thinking = thinking
+        try:
+            saved_values = json.loads(str(workflow_values_json or "{}"))
+            if not isinstance(saved_values, dict):
+                saved_values = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            saved_values = {}
+        thinking = saved_values.get("thinking", thinking)
+        use_default_template = saved_values.get("use_default_template", use_default_template)
+        sampling_mode = saved_values.get("sampling_mode", sampling_mode)
+        thinking = _as_bool(thinking, False)
+        use_default_template = _as_bool(use_default_template, True)
+        if not thinking:
+            # Qwen3.5/Qwen3VL 依靠默认聊天模板插入空思考通道来关闭推理。
+            # skip_template=True 会绕过这段系统行为，因此关闭思考时必须保持模板开启。
+            use_default_template = True
+        print(
+            "[GJJ GemmaTextGenerate] 执行状态: "
+            f"received_thinking={received_thinking!r} "
+            f"saved_thinking={saved_values.get('thinking', '<missing>')!r} "
+            f"effective_thinking={thinking} "
+            f"use_default_template={use_default_template}",
+            flush=True,
+        )
         clip_name = _resolve_available_clip_name(clip_name)
         if not _find_text_encoder_path(clip_name):
             missing = [_model_spec_for_clip(clip_name)]
@@ -1074,7 +1155,7 @@ class GJJ_GemmaTextGenerate:
             start_load = time.time()
             effective_device = _device_from_preference(str(clip_device or "default"), str(device_preference or "GPU优先"))
             keep_loaded = _as_bool(keep_model, False)
-            clip, cache_hit = _load_clip_cached(str(clip_name), str(clip_type or "ideogram4"), effective_device, keep_loaded)
+            clip, cache_hit = _load_clip_cached(str(clip_name), str(clip_type or "stable_diffusion"), effective_device, keep_loaded)
             load_time = time.time() - start_load
             print(
                 f"[GJJ GemmaTextGenerate] CLIP 模型加载耗时: {load_time:.2f} 秒 | "
@@ -1093,7 +1174,7 @@ class GJJ_GemmaTextGenerate:
             text = _generate_text(
                 clip,
                 str(prompt or "") if audio_only else _merged_generation_prompt(system_prompt, prompt),
-                _coerce_int(max_length, 2048, 1, 2048),
+                _coerce_int(max_length, 512, 1, 32768),
                 sampling_mode,
                 image=image,
                 video=video,
@@ -1110,41 +1191,9 @@ class GJJ_GemmaTextGenerate:
                 add_output_rules=not audio_only,
             )
             if not str(text or "").strip():
-                retry_seed = secrets.randbits(64) if configured_seed == 0 else (effective_seed + 1) & 0xFFFFFFFFFFFFFFFF
-                base_prompt = str(prompt or "") if audio_only else _merged_generation_prompt(system_prompt, prompt)
-                retry_prompt = (
-                    f"{base_prompt}\n\n"
-                    "上一次生成没有最终正文。本次必须直接输出完整的最终答案；"
-                    "不得只输出思考过程，不得以 </think> 结束，</think> 后必须有非空正文。"
-                ).strip()
-                print(
-                    "[GJJ GemmaTextGenerate] 首次生成在输出清理后为空，"
-                    f"使用强制正文约束重新生成一次（原 thinking={bool(thinking)}）。",
-                    flush=True,
-                )
-                text = _generate_text(
-                    clip,
-                    retry_prompt,
-                    _coerce_int(max_length, 2048, 1, 2048),
-                    sampling_mode,
-                    image=image,
-                    video=video,
-                    audio=audio,
-                    thinking=False,
-                    use_default_template=use_default_template,
-                    temperature=_coerce_float(temperature, 0.7, 0.01, 2.0),
-                    top_k=_coerce_int(top_k, 64, 0, 1000),
-                    top_p=_coerce_float(top_p, 0.95, 0.0, 1.0),
-                    min_p=_coerce_float(min_p, 0.05, 0.0, 1.0),
-                    repetition_penalty=_coerce_float(repetition_penalty, 1.05, 0.0, 5.0),
-                    seed=retry_seed,
-                    presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
-                    add_output_rules=not audio_only,
-                )
-            if not str(text or "").strip():
                 raise RuntimeError(
-                    "模型连续两次生成空文本。请尝试提高最大长度，"
-                    "或改用 gemma4_e4b / qwen3.5_4b 等更大的多模态文本编码器。"
+                    "官方 TextGenerate 返回的内容只有思考过程，关闭思考后的正文为空。"
+                    "请确认模型设置中的 CLIP 类型为 stable_diffusion，并重新执行。"
                 )
             gen_time = time.time() - start_gen
             total_time = time.time() - start_total
@@ -1155,7 +1204,17 @@ class GJJ_GemmaTextGenerate:
                 except Exception:
                     pass
                 _clear_clip_cache()
-            return (text,)
+            return {
+                "ui": {
+                    "gjj_gemma_result": [{
+                        "text": str(text),
+                        "model": os.path.splitext(_basename(clip_name))[0],
+                        "elapsed": f"{total_time:.2f} 秒",
+                        "model_size": _format_model_size(_find_text_encoder_path(clip_name)),
+                    }],
+                },
+                "result": (text,),
+            }
         except Exception as exc:
             report = getattr(exc, "gjj_report", None)
             if report:

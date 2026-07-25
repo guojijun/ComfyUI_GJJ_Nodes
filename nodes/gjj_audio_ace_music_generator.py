@@ -16,6 +16,7 @@ from nodes import (
     CheckpointLoaderSimple,
     ConditioningZeroOut,
     DualCLIPLoader,
+    LoraLoaderModelOnly,
     UNETLoader,
     VAELoader,
     common_ksampler,
@@ -91,6 +92,12 @@ ACE_MODEL_TREE = [
         "filename": DEFAULT_VAE,
         "description": "ACE 音频 VAE；分体 safetensors / GGUF 主模型需要。",
     },
+    {
+        "label": "ACE LoRA（可选）",
+        "folder": "loras",
+        "filename": "*ace*step*.safetensors",
+        "description": "可选的主模型 LoRA；列表只显示文件名同时包含 ace 和 step 的模型，不区分大小写。",
+    },
 ]
 ACE_MODEL_TREE_TEXT = f"""models/
 ├─ checkpoints/
@@ -102,8 +109,10 @@ ACE_MODEL_TREE_TEXT = f"""models/
 ├─ text_encoders/
 │  ├─ {DEFAULT_CLIP_1}
 │  └─ {DEFAULT_CLIP_2}
-└─ vae/
-   └─ {DEFAULT_VAE}"""
+├─ vae/
+│  └─ {DEFAULT_VAE}
+└─ loras/
+   └─ *ace*step*.safetensors  # 可选 LoRA"""
 UI_PARAMETER_ORDER = (
     "model_name",
     "tags",
@@ -131,6 +140,9 @@ UI_PARAMETER_ORDER = (
     "clip_2_name",
     "vae_name",
     "model_test_mode",
+    "lora_enabled",
+    "lora_name",
+    "lora_strength",
 )
 HIDDEN_UI_PARAMETERS = tuple(
     name for name in UI_PARAMETER_ORDER
@@ -332,6 +344,15 @@ def _list_visible_vae_models() -> list[str]:
     return ordered
 
 
+def _list_visible_lora_models() -> list[str]:
+    models = []
+    for item in _safe_filename_list("loras"):
+        filename = str(item).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if "ace" in filename and "step" in filename:
+            models.append(str(item))
+    return sorted(models, key=lambda item: item.lower()) or ["[未找到 ACE LoRA]"]
+
+
 def _resolve_model_bundle(model_name: str) -> tuple[str, str]:
     checkpoints = _filter_ace_models(_safe_filename_list("checkpoints"), allow_checkpoint=True)
     diffusion_models = _filter_ace_unet_models(_safe_filename_list("diffusion_models"))
@@ -527,7 +548,7 @@ def _apply_fade_out(audio: dict[str, Any], fade_seconds: float) -> dict[str, Any
 
 def _clean_lyric_line(line: str) -> str:
     text = str(line or "").strip()
-    if re.fullmatch(r"\[[^\]]+\]", text):
+    if re.fullmatch(r"(?:\[[^\]]+\]|\([^()]+\)|（[^（）]+）)", text):
         return ""
     return text
 
@@ -868,6 +889,7 @@ class GJJ_AudioAceMusicGenerator:
         models = _list_visible_models()
         clip_models = _list_visible_clip_models()
         vae_models = _list_visible_vae_models()
+        lora_models = _list_visible_lora_models()
         return _mark_hidden_ui_parameters({
             "required": {
                 "model_name": (
@@ -1122,6 +1144,33 @@ class GJJ_AudioAceMusicGenerator:
                         "tooltip": "由 🧪 模型测试按钮自动控制；开启时输出文件名使用模型名和耗时。",
                     },
                 ),
+                "lora_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "启用 LoRA",
+                        "tooltip": "开启后把所选 ACE LoRA 应用到主模型；关闭时忽略 LoRA 名称和强度。",
+                    },
+                ),
+                "lora_name": (
+                    lora_models,
+                    {
+                        "default": lora_models[0],
+                        "display_name": "ACE LoRA",
+                        "tooltip": "从 models/loras 中选择文件名同时包含 ace 和 step 的 LoRA 模型，不区分大小写。",
+                    },
+                ),
+                "lora_strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.01,
+                        "display_name": "LoRA 强度",
+                        "tooltip": "LoRA 对主模型的影响强度；1.0 为标准强度，0 等同关闭，负值为反向应用。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1156,6 +1205,9 @@ class GJJ_AudioAceMusicGenerator:
         clip_2_name=DEFAULT_CLIP_2,
         vae_name=DEFAULT_VAE,
         model_test_mode=False,
+        lora_enabled=False,
+        lora_name="",
+        lora_strength=1.0,
         unique_id=None,
     ):
         started_at = time.perf_counter()
@@ -1168,6 +1220,15 @@ class GJJ_AudioAceMusicGenerator:
                 model, clip, vae = _load_gguf_bundle(resolved_name, clip_1_name, clip_2_name, vae_name)
             else:
                 model, clip, vae = _load_split_bundle(resolved_name, clip_1_name, clip_2_name, vae_name)
+            if bool(lora_enabled) and abs(float(lora_strength)) > 1e-8:
+                selected_lora = str(lora_name or "").strip()
+                if not selected_lora or selected_lora.startswith("[未找到"):
+                    raise RuntimeError("已启用 LoRA，但 models/loras 中没有文件名同时包含 ace 和 step 的可用模型。")
+                model = LoraLoaderModelOnly().load_lora_model_only(
+                    model,
+                    selected_lora,
+                    float(lora_strength),
+                )[0]
             model = _apply_aura_shift(model, float(shift))
         except Exception as exc:
             raise RuntimeError(
@@ -1245,10 +1306,11 @@ class GJJ_AudioAceMusicGenerator:
         _send_status(unique_id, f"6/7 保存音乐：{summary}")
 
         elapsed_seconds = max(0.0, time.perf_counter() - started_at)
+        model_output_name = _safe_output_name(resolved_name)
         if bool(model_test_mode):
-            prefix = f"audio/{_safe_output_name(resolved_name)}+{elapsed_seconds:.1f}s"
+            prefix = f"audio/{model_output_name}+{elapsed_seconds:.1f}s"
         else:
-            prefix = "audio/GJJ_ACEMusic"
+            prefix = f"audio/{model_output_name}"
         audio_ui = _save_audio_mp3_ui(audio, prefix, "320k")
         _send_audio_preview(unique_id, audio_ui)
 

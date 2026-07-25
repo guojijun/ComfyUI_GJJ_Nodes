@@ -34,6 +34,9 @@ const PARAM_ORDER = [
 	"clip_2_name",
 	"vae_name",
 	"model_test_mode",
+	"lora_enabled",
+	"lora_name",
+	"lora_strength",
 ];
 const HIDDEN_HOME_WIDGETS = new Set([
 	"model_name",
@@ -60,12 +63,15 @@ const HIDDEN_HOME_WIDGETS = new Set([
 	"clip_2_name",
 	"vae_name",
 	"model_test_mode",
+	"lora_enabled",
+	"lora_name",
+	"lora_strength",
 ]);
 const PANEL_GROUPS = {
 	seed: { title: "🎲 种子", names: ["seed"] },
 	music: { title: "🌐 音乐结构", names: ["bpm", "timesignature", "language", "keyscale"] },
 	text: { title: "🪄 文本采样", names: ["lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
-	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes"] },
+	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes", "lora_enabled", "lora_name", "lora_strength"] },
 	generate: { title: "⚡ 生成参数", names: ["duration", "steps", "cfg", "sampler_name", "scheduler", "denoise"] },
 };
 
@@ -385,6 +391,16 @@ function aceMainModelTreeEntries(node) {
 			fallback: getWidget(node, "vae_name")?.value || "ace_1.5_vae.safetensors",
 			description: "ACE 音频 VAE。",
 		},
+		{
+			widget: "lora_name",
+			label: "ACE LoRA",
+			folder: "loras",
+			icon: "🟢",
+			models: modelWidgetChoices(node, "lora_name"),
+			keywords: ["ace", "step"],
+			fallback: getWidget(node, "lora_name")?.value || "未找到 ACE LoRA",
+			description: "可选的 ACE 音乐主模型 LoRA；文件名需同时包含 ace 和 step，不区分大小写。",
+		},
 	];
 }
 
@@ -453,6 +469,42 @@ function createFloatingControl(node, name) {
 	return row;
 }
 
+function createLoraInlineControls(node) {
+	const enabled = createFloatingControl(node, "lora_enabled");
+	const model = createFloatingControl(node, "lora_name");
+	const strength = createFloatingControl(node, "lora_strength");
+	if (!enabled || !model || !strength) return null;
+
+	const row = document.createElement("div");
+	row.style.cssText = [
+		"display:grid",
+		"grid-template-columns:76px minmax(0,1fr) 112px",
+		"align-items:center",
+		"gap:8px",
+		"min-width:0",
+	].join(";");
+
+	enabled.style.cssText = "display:grid;grid-template-columns:auto 20px;align-items:center;gap:6px;min-width:0";
+	enabled.firstElementChild.textContent = "LoRA";
+	enabled.lastElementChild.style.cssText = "width:18px;height:18px;min-height:18px;margin:0;padding:0;accent-color:#8fc7ff";
+
+	model.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr);align-items:center;min-width:0";
+	model.firstElementChild.style.display = "none";
+	model.lastElementChild.style.minWidth = "0";
+
+	strength.style.cssText = "display:grid;grid-template-columns:auto minmax(58px,1fr);align-items:center;gap:6px;min-width:0";
+	strength.firstElementChild.textContent = "强度";
+
+	row.__gjjRefresh = () => {
+		enabled.__gjjRefresh?.();
+		model.__gjjRefresh?.();
+		strength.__gjjRefresh?.();
+	};
+	row.append(enabled, model, strength);
+	row.__gjjRefresh();
+	return row;
+}
+
 function ensureFloatingPanels(node) {
 	node.__gjjAudioAcePanels ||= {};
 	for (const key of Object.keys(PANEL_GROUPS)) {
@@ -514,11 +566,14 @@ function renderModelPanelControls(node, panelInfo) {
 	tree.style.maxHeight = "360px";
 	panelInfo.body.appendChild(tree);
 	for (const name of PANEL_GROUPS.model.names) {
+		if (name === "lora_enabled" || name === "lora_name" || name === "lora_strength") continue;
 		const control = createFloatingControl(node, name);
 		if (!control) continue;
 		control.__gjjRefresh?.();
 		panelInfo.body.appendChild(control);
 	}
+	const loraControls = createLoraInlineControls(node);
+	if (loraControls) panelInfo.body.appendChild(loraControls);
 }
 
 function syncFloatingPanels(node) {

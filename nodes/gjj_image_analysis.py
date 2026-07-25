@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import random
+import time
 from collections import OrderedDict
 
 import torch
@@ -24,6 +25,7 @@ from .gjj_ollama_common import (
     ollama_assistant_system_prompt,
     ollama_assistant_system_prompt_templates,
     request_chat,
+    request_json,
     resolve_model,
     send_ollama_status,
     tensor_to_png_base64,
@@ -218,6 +220,7 @@ def _strip_echoed_prompt_text(content: str, *, system_prompt: str, system_prompt
 class GJJ_OllamaAssistant:
     CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "run"
+    OUTPUT_NODE = True
     DESCRIPTION = "统一调用本机 Ollama 完成文本生成、提示词翻译与可选图片理解任务；通过模板按钮快速切换系统提示词。"
     SEARCH_ALIASES = ["ollama", "assistant", "提示词", "翻译", "图片反推", "文本生成"]
     RETURN_TYPES = ("STRING",)
@@ -454,6 +457,7 @@ class GJJ_OllamaAssistant:
         unique_id=None,
         **_kwargs,
     ):
+        started_at = time.perf_counter()
         send_ollama_status(unique_id, "1/3 检查 Ollama 参数与任务...", 0.08)
         configured_host = normalize_ollama_host(ollama_host or DEFAULT_OLLAMA_HOST)
         model_keep_alive = _coerce_choice(model_keep_alive, ("保持模型", "卸载模型"), "保持模型")
@@ -554,8 +558,30 @@ class GJJ_OllamaAssistant:
 
         completion = f"图片任务完成：{len(results)} 张" if has_images else "文本任务完成"
         send_ollama_status(unique_id, f"3/3 {completion}", 1.0)
-        return (content,)
+        model_size_text = "未知"
+        try:
+            tags = request_json("GET", "/api/tags", timeout=10, host=configured_host)
+            for item in tags.get("models", []) if isinstance(tags, dict) else []:
+                item_name = str(item.get("name") or item.get("model") or "")
+                if item_name == chosen_model:
+                    size = int(item.get("size") or 0)
+                    if size > 0:
+                        model_size_text = f"{size / (1024 ** 3):.2f} GB"
+                    break
+        except Exception:
+            pass
+        return {
+            "ui": {
+                "gjj_assistant_result": [{
+                    "text": content,
+                    "model": chosen_model.rsplit(".", 1)[0] if "." in chosen_model else chosen_model,
+                    "elapsed": f"{time.perf_counter() - started_at:.2f} 秒",
+                    "model_size": model_size_text,
+                }],
+            },
+            "result": (content,),
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_OllamaAssistant}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·💙图片反推提示词推理🧠Ollama"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🧡Ollama🧠图片反推提示词推理"}

@@ -1739,7 +1739,8 @@ def _infer_transition_prompt(method: str, model: str, pair_image: torch.Tensor, 
             unique_id=unique_id,
             system_prompt=PROMPT_INFER_SYSTEM,
         )
-        return _clean_inferred_prompt(result[0] if isinstance(result, (list, tuple)) else result)
+        payload = result.get("result") if isinstance(result, dict) else result
+        return _clean_inferred_prompt(payload[0] if isinstance(payload, (list, tuple)) else payload)
 
     if method == "GJJ_OllamaAssistant":
         from .gjj_image_analysis import DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT_TEMPLATES, GJJ_OllamaAssistant
@@ -1759,7 +1760,8 @@ def _infer_transition_prompt(method: str, model: str, pair_image: torch.Tensor, 
             image=pair_image,
             unique_id=unique_id,
         )
-        return _clean_inferred_prompt(result[0] if isinstance(result, (list, tuple)) else result)
+        payload = result.get("result") if isinstance(result, dict) else result
+        return _clean_inferred_prompt(payload[0] if isinstance(payload, (list, tuple)) else payload)
 
     raise RuntimeError(f"未知反推方式：{method}")
 

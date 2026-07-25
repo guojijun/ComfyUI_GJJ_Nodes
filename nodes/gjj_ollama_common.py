@@ -20,6 +20,8 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 REQUEST_TIMEOUT = 90
 MODEL_LIST_TIMEOUT = 8
 DEFAULT_SYSTEM_PROMPT = "请根据输入图片或文字反推出适合 AI 绘图的高质量提示词，只输出正面提示词正文。"
+LEGACY_LYRICS_TEMPLATE = "根据用户输入内容匹配对应的中文歌曲，只纯输出歌曲完整中文歌词。"
+ORIGINAL_LYRICS_TEMPLATE = "根据用户输入的主题、情绪和画面创作一首全新的原创中文歌曲歌词。不得查找、引用、改写或复现任何现有歌曲及其歌词；直接创作完整歌词，只输出歌词正文，不输出歌名、歌手、解释、分析或提示语。"
 DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE = "只输出结果文字，不输出解释、分析过程、标题、Markdown 代码块或提示性前缀。台词用中文双引号包裹。"
 DEFAULT_OLLAMA_ASSISTANT_SAMPLING = {
     "temperature": 0.7,
@@ -174,7 +176,7 @@ def ollama_assistant_system_prompt_templates() -> str:
     settings = read_ollama_assistant_settings()
     raw_text = settings.get("system_prompt_templates")
     if isinstance(raw_text, str) and raw_text.strip():
-        return raw_text.strip()
+        return raw_text.strip().replace(LEGACY_LYRICS_TEMPLATE, ORIGINAL_LYRICS_TEMPLATE)
     return ollama_assistant_templates_to_text(settings.get("templates"))
 
 

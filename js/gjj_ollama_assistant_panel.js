@@ -1,8 +1,11 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { showAssistantResultPreview } from "./gjj_assistant_result_preview.js";
 
 const NODE_TYPE = "GJJ_OllamaAssistant";
+const NODE_TITLE_PREFIX = "GJJ·🧡Ollama🧠";
+const NODE_TITLE_SUFFIX = " 图片反推提示词推理";
 const PANEL_WIDGET = "gjj_ollama_assistant_panel";
 const TEMPLATE_WIDGET = "system_prompt_templates";
 const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
@@ -123,6 +126,13 @@ function widget(node, name) {
 
 function widgetValue(node, name, fallback = "") {
 	return widget(node, name)?.value ?? fallback;
+}
+
+function syncNodeTitle(node) {
+	const model = String(widgetValue(node, "model", "") || "")
+		.replaceAll("\\", "/").split("/").pop()
+		.replace(/\.(?:safetensors|gguf|bin|pt|pth|ckpt)$/i, "");
+	node.title = `${NODE_TITLE_PREFIX}${model || "未选择模型"}${NODE_TITLE_SUFFIX}`;
 }
 
 function protect(element) {
@@ -1017,10 +1027,25 @@ async function fetchOllamaModelsForPanel(node) {
 				continue;
 			}
 			const data = await response.json();
-			const names = (Array.isArray(data?.models) ? data.models : [])
+			const modelItems = Array.isArray(data?.models) ? data.models : [];
+			const names = modelItems
 				.map((item) => String(item?.name || item?.model || "").trim())
 				.filter(Boolean);
 			if (names.length) {
+				const selected = String(widgetValue(node, "model", names[0]) || names[0]);
+				const selectedItem = modelItems.find((item) =>
+					String(item?.name || item?.model || "").trim() === selected);
+				const bytes = Number(selectedItem?.size || 0);
+				showAssistantResultPreview(node, {
+					gjj_assistant_result: [{
+						model: selected,
+						model_size: bytes > 0 ? `${(bytes / (1024 ** 3)).toFixed(2)} GB` : "未知",
+					}],
+				}, {
+					stateKey: "__gjjOllamaResultPreview",
+					widgetName: "gjj_ollama_assistant_result",
+					resize: resizeNode,
+				});
 				return setModelWidgetOptions(node, names);
 			}
 		} catch (_) {
@@ -1232,6 +1257,7 @@ function renderTemplateButtons(node, config) {
 }
 
 function syncPanel(node) {
+	syncNodeTitle(node);
 	const state = node.__gjjOllamaAssistantPanel;
 	if (!state) {
 		return;
@@ -1627,6 +1653,13 @@ function stabilize(node) {
 	}
 	hideBackerWidgets(node);
 	createPanel(node);
+	showAssistantResultPreview(node, {
+		gjj_assistant_result: [{ model: widgetValue(node, "model", "未知"), model_size: "待执行" }],
+	}, {
+		stateKey: "__gjjOllamaResultPreview",
+		widgetName: "gjj_ollama_assistant_result",
+		resize: resizeNode,
+	});
 	stabilizeUserPromptInput(node);
 	syncPanel(node);
 }
@@ -1671,6 +1704,16 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			schedule(this);
+			return result;
+		};
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			showAssistantResultPreview(this, message, {
+				stateKey: "__gjjOllamaResultPreview",
+				widgetName: "gjj_ollama_assistant_result",
+				resize: resizeNode,
+			});
 			return result;
 		};
 	},

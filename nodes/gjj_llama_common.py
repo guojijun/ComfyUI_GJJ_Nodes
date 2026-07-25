@@ -78,9 +78,15 @@ def llm_mmproj_options() -> list[str]:
 
 
 def llm_model_catalog() -> dict[str, Any]:
+    main_models = llm_main_model_options()
     return {
         "ok": True,
-        "main_models": llm_main_model_options(),
+        "main_models": main_models,
+        "model_sizes": {
+            name: os.path.getsize(resolve_llm_path(name))
+            for name in main_models
+            if os.path.isfile(resolve_llm_path(name))
+        },
         "mmproj_models": llm_mmproj_options(),
         "missing_label": MISSING_LLM_MODEL,
         "none_label": NO_MMPROJ,

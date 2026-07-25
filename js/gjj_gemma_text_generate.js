@@ -3,7 +3,10 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const NODE_TYPE = "GJJ_GemmaTextGenerate";
+const NODE_TITLE_PREFIX = "GJJ·💛Gemma🧠";
+const NODE_TITLE_SUFFIX = " 图片反推提示词推理";
 const PANEL_WIDGET = "gjj_gemma_text_generate_panel";
+const RESULT_WIDGET = "gjj_gemma_text_generate_result";
 const PROMPT_WIDGET = "prompt";
 const TEMPLATE_WIDGET = "system_prompt_templates";
 const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
@@ -11,10 +14,15 @@ const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "ollama_assistant";
 const WORKFLOW_VALUES_PROPERTY = "gjj_gemma_text_generate_values";
 const WORKFLOW_VALUES_WIDGET = "workflow_values_json";
+const MODEL_FILTER_WIDGET = "model_filter_keywords";
+const MODEL_SIZES_ENDPOINT = "/gjj/text_encoder_model_sizes";
+const CLIP_TYPE_REFERENCE_MIGRATION = "gjj_text_generate_clip_type_reference_v1";
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
 const PROMPT_HEIGHT = 74;
 const NODE_EXTRA_HEIGHT = 78;
+const LEGACY_LYRICS_TEMPLATE = "根据用户输入内容匹配对应的中文歌曲，只纯输出歌曲完整中文歌词。";
+const ORIGINAL_LYRICS_TEMPLATE = "根据用户输入的主题、情绪和画面创作一首全新的原创中文歌曲歌词。不得查找、引用、改写或复现任何现有歌曲及其歌词；直接创作完整歌词，只输出歌词正文，不输出歌名、歌手、解释、分析或提示语。";
 const LEGACY_MEDIA_INPUTS = new Set(["image", "video", "图像", "视频帧", "媒体", "图片/视频"]);
 const AUDIO_INPUT = "audio";
 const HIDDEN_WIDGETS = new Set([
@@ -38,6 +46,7 @@ const HIDDEN_WIDGETS = new Set([
 	"keep_model",
 	"device_preference",
 	WORKFLOW_VALUES_WIDGET,
+	MODEL_FILTER_WIDGET,
 ]);
 const BACKEND_WIDGETS = [
 	"clip_name",
@@ -61,6 +70,7 @@ const BACKEND_WIDGETS = [
 	"keep_model",
 	"device_preference",
 	WORKFLOW_VALUES_WIDGET,
+	MODEL_FILTER_WIDGET,
 ];
 const STATE_WIDGETS = BACKEND_WIDGETS.filter((name) => name !== WORKFLOW_VALUES_WIDGET);
 const REORDERED_WIDGETS = [
@@ -78,7 +88,7 @@ const NUMERIC_WIDGETS = new Set([
 	"presence_penalty",
 ]);
 const NUMERIC_DEFAULTS = {
-	max_length: 2048,
+	max_length: 512,
 	temperature: 0.7,
 	top_k: 64,
 	top_p: 0.95,
@@ -88,6 +98,17 @@ const NUMERIC_DEFAULTS = {
 	presence_penalty: 0,
 };
 let sharedSettingsPromise = null;
+let modelSizesPromise = null;
+
+function loadModelSizes() {
+	if (!modelSizesPromise) {
+		modelSizesPromise = api.fetchApi(MODEL_SIZES_ENDPOINT)
+			.then((response) => response.ok ? response.json() : {})
+			.then((data) => data?.sizes || {})
+			.catch(() => ({}));
+	}
+	return modelSizesPromise;
+}
 
 function widget(node, name) {
 	return GJJ_Utils.getWidget(node, name);
@@ -95,6 +116,13 @@ function widget(node, name) {
 
 function widgetValue(node, name, fallback = "") {
 	return widget(node, name)?.value ?? fallback;
+}
+
+function syncNodeTitle(node) {
+	const model = String(widgetValue(node, "clip_name", "") || "")
+		.replaceAll("\\", "/").split("/").pop()
+		.replace(/\.(?:safetensors|gguf|bin|pt|pth|ckpt)$/i, "");
+	node.title = `${NODE_TITLE_PREFIX}${model || "未选择模型"}${NODE_TITLE_SUFFIX}`;
 }
 
 function protect(element) {
@@ -170,7 +198,7 @@ function workflowScore(values) {
 	if (typeof values.use_default_template === "boolean") score += 2;
 	if (typeof values.keep_model === "boolean") score += 2;
 	for (const [name, min, max] of [
-		["max_length", 1, 2048],
+		["max_length", 1, 32768],
 		["temperature", 0.01, 2],
 		["top_k", 0, 1000],
 		["top_p", 0, 1],
@@ -286,8 +314,12 @@ function splitTemplateBlocks(rawText) {
 	return blocks.filter(Boolean);
 }
 
+function migrateLegacyTemplateText(rawText) {
+	return String(rawText || "").replaceAll(LEGACY_LYRICS_TEMPLATE, ORIGINAL_LYRICS_TEMPLATE);
+}
+
 function parseTemplateText(rawText) {
-	return splitTemplateBlocks(rawText).map((block, index) => {
+	return splitTemplateBlocks(migrateLegacyTemplateText(rawText)).map((block, index) => {
 		const match = block.match(/^【([^】]+)】\s*([\s\S]*)$/);
 		if (!match) return null;
 		return {
@@ -441,7 +473,9 @@ function searchableSelectField(title, placeholder = "关键词过滤：空格=�
 	const state = {
 		options: [],
 		value: "",
+		filterValue: "",
 		onChange: null,
+		onFilterChange: null,
 	};
 	root.__gjjSearchSelect = state;
 
@@ -491,7 +525,7 @@ function searchableSelectField(title, placeholder = "关键词过滤：空格=�
 		positionPopup();
 		popup.style.display = "flex";
 		root.classList.add("open");
-		filter.value = "";
+		filter.value = state.filterValue;
 		render();
 		requestAnimationFrame(() => filter.focus());
 	};
@@ -500,7 +534,11 @@ function searchableSelectField(title, placeholder = "关键词过滤：空格=�
 		if (popup.style.display === "none") open(trigger);
 		else close();
 	});
-	filter.addEventListener("input", render);
+	filter.addEventListener("input", () => {
+		state.filterValue = filter.value;
+		state.onFilterChange?.(filter.value);
+		render();
+	});
 	filter.addEventListener("keydown", (event) => {
 		if (event.key === "Escape") {
 			event.preventDefault();
@@ -525,7 +563,7 @@ function searchableSelectField(title, placeholder = "关键词过滤：空格=�
 	return root;
 }
 
-function syncSearchableSelect(control, values, selected) {
+function syncSearchableSelect(control, values, selected, filterValue = "") {
 	const state = control?.__gjjSearchSelect;
 	if (!state) return;
 	const normalized = Array.from(new Set((values || []).map(String)));
@@ -535,6 +573,11 @@ function syncSearchableSelect(control, values, selected) {
 		state.options = normalized;
 	}
 	state.value = String(selected ?? "");
+	const filter = control.__gjjSearchSelectPopup?.querySelector(".gjj-ia-search-filter");
+	if (document.activeElement !== filter) {
+		state.filterValue = String(filterValue ?? "");
+		if (filter) filter.value = state.filterValue;
+	}
 	const trigger = control.querySelector(".gjj-ia-search-trigger");
 	if (trigger) {
 		trigger.textContent = state.value || "未选择";
@@ -890,14 +933,120 @@ function resizeNode(node, delay = 0) {
 	requestAnimationFrame(run);
 }
 
+function showResultPreview(node, message) {
+	const payload = message?.gjj_gemma_result?.[0]
+		?? message?.ui?.gjj_gemma_result?.[0];
+	if (!payload || typeof payload !== "object") return;
+
+	let state = node.__gjjGemmaResultPreview;
+	const incomingModel = String(payload.model || "未知").replace(/\.(?:safetensors|gguf|bin|pt|pth|ckpt)$/i, "");
+	const incomingHasResult = Object.prototype.hasOwnProperty.call(payload, "text");
+	if (state && !incomingHasResult && state.model === incomingModel && state.preview.value) return;
+	if (!state) {
+		const root = protect(document.createElement("div"));
+		root.style.cssText = [
+			"display:flex",
+			"flex-direction:column",
+			"gap:5px",
+			"box-sizing:border-box",
+			"padding:6px 8px 8px",
+			"width:100%",
+			"color:var(--input-text, #ddd)",
+			"font:12px/1.35 sans-serif",
+		].join(";");
+
+		const status = document.createElement("div");
+		status.style.cssText = "display:flex;align-items:center;gap:6px;min-width:0";
+		const copy = document.createElement("button");
+		copy.type = "button";
+		copy.textContent = "复制";
+		copy.title = "复制生成结果";
+		copy.disabled = true;
+		copy.style.cssText = "flex:0 0 auto;height:22px;padding:0 8px;border:1px solid var(--border-color,#555);border-radius:5px;background:var(--comfy-input-bg,#222);color:inherit;cursor:pointer";
+		const summary = document.createElement("div");
+		summary.style.cssText = [
+			"overflow:hidden",
+			"text-overflow:ellipsis",
+			"white-space:nowrap",
+			"opacity:.92",
+		].join(";");
+
+		const preview = document.createElement("textarea");
+		preview.readOnly = true;
+		preview.rows = 3;
+		preview.spellcheck = false;
+		preview.style.cssText = [
+			"box-sizing:border-box",
+			"width:100%",
+			"height:58px",
+			"min-height:58px",
+			"max-height:58px",
+			"resize:none",
+			"overflow-y:auto",
+			"padding:5px 7px",
+			"border:1px solid var(--border-color, #555)",
+			"border-radius:5px",
+			"background:var(--comfy-input-bg, #222)",
+			"color:var(--input-text, #ddd)",
+			"font:12px/16px monospace",
+			"white-space:pre-wrap",
+		].join(";");
+		copy.addEventListener("click", async () => {
+			if (!preview.value) return;
+			try {
+				await navigator.clipboard.writeText(preview.value);
+				copy.textContent = "已复制";
+			} catch (_) {
+				preview.focus();
+				preview.select();
+				document.execCommand?.("copy");
+				copy.textContent = "已复制";
+			}
+			setTimeout(() => { copy.textContent = "复制"; }, 1200);
+		});
+		status.append(copy, summary);
+		root.append(status, preview);
+		preview.style.display = "none";
+
+		const domWidget = node.addDOMWidget(RESULT_WIDGET, "HTML", root, {
+			serialize: false,
+			hideOnZoom: false,
+		});
+		domWidget.computeSize = (width) => [
+			Math.max(470, Number(width || node.size?.[0] || 470)),
+			preview.style.display === "none" ? 36 : 92,
+		];
+		state = node.__gjjGemmaResultPreview = { root, summary, preview, copy, domWidget };
+	}
+
+	const elapsed = payload.elapsed ? `  ⏰ ${String(payload.elapsed)}` : "";
+	state.model = incomingModel;
+	state.summary.textContent = `🧠 ${incomingModel}  💾 ${String(payload.model_size || "待执行")}${elapsed}`;
+	state.summary.title = state.summary.textContent;
+	const hasResult = incomingHasResult;
+	if (hasResult) state.preview.value = String(payload.text ?? "").replace(/\r\n/g, " ").replace(/\n/g, " ");
+	state.preview.style.display = hasResult ? "" : "none";
+	state.copy.disabled = !hasResult || !state.preview.value;
+	state.copy.style.display = hasResult ? "" : "none";
+	state.copy.style.opacity = state.copy.disabled ? ".5" : "1";
+	compactWidgetLayout(node);
+	resizeNode(node);
+	resizeNode(node, 80);
+}
+
 function buildSettings(node) {
 	const settings = document.createElement("div");
 	settings.className = "gjj-ia-settings";
+	const templateSettings = document.createElement("div");
+	templateSettings.className = "gjj-ia-template-settings";
 
-	const clipName = searchableSelectField("选择 text_encoders 目录中的 Gemma / Ideogram4 模型");
+	const clipName = searchableSelectField("选择 ComfyUI/models/text_encoders 目录中的反推模型");
 	clipName.__gjjSearchSelect.onChange = (value) => {
 		setWidgetValue(node, "clip_name", value);
 		syncPanel(node);
+	};
+	clipName.__gjjSearchSelect.onFilterChange = (value) => {
+		setWidgetValue(node, MODEL_FILTER_WIDGET, value);
 	};
 	const clipType = selectField("传给官方 CLIPLoader 的类型");
 	bindWidgetControl(node, "clip_type", clipType);
@@ -910,16 +1059,19 @@ function buildSettings(node) {
 
 	const numeric = document.createElement("div");
 	numeric.className = "gjj-ia-numeric";
-	const maxLength = numericControl(node, "max_length", "生成文本的最大 token 长度", 1, 2048, 1, true);
-	const temperature = numericControl(node, "temperature", "采样温度", 0.01, 2, 0.01);
-	const topK = numericControl(node, "top_k", "Top K", 0, 1000, 1, true);
-	const topP = numericControl(node, "top_p", "Top P", 0, 1, 0.01);
-	const minP = numericControl(node, "min_p", "Min P", 0, 1, 0.01);
-	const repetitionPenalty = numericControl(node, "repetition_penalty", "重复惩罚", 0, 5, 0.01);
-	const presencePenalty = numericControl(node, "presence_penalty", "出现惩罚", 0, 5, 0.01);
+	const samplingMode = selectField("开启：使用温度、Top K、Top P 等参数随机采样；关闭：始终选择当前概率最高的 token，输出更稳定。", ["on", "off"]);
+	samplingMode.options[0].textContent = "开启";
+	samplingMode.options[1].textContent = "关闭";
+	bindWidgetControl(node, "sampling_mode", samplingMode);
+	const maxLength = numericControl(node, "max_length", "最大输出 token 数。系统 TextGenerate 默认 512；值越大越容易得到完整长文，但生成更慢、占用更多显存。", 1, 32768, 1, true);
+	const temperature = numericControl(node, "temperature", "控制随机程度。0.2–0.7 更稳定、忠于指令；0.8–1.2 更多样但更容易跑题。仅在随机采样开启时生效。", 0.01, 2, 0.01);
+	const topK = numericControl(node, "top_k", "每一步只保留概率最高的 K 个候选。值小更稳定，值大更多样；0 表示关闭 Top K。会与 Top P、Min P 共同生效。", 0, 1000, 1, true);
+	const topP = numericControl(node, "top_p", "按概率从高到低累加候选，累计达到该比例后截断。值低更集中，接近 1.0 更多样；1.0 基本不截断。", 0, 1, 0.01);
+	const minP = numericControl(node, "min_p", "排除低于“最高概率 × Min P”的候选。值越高越保守；0 表示关闭，常用范围约 0.03–0.10。", 0, 1, 0.01);
+	const repetitionPenalty = numericControl(node, "repetition_penalty", "降低已经生成过的 token 再次出现的概率。1.0 不惩罚；1.05–1.15 可减少复读，过高会影响连贯性。", 0, 5, 0.01);
+	const presencePenalty = numericControl(node, "presence_penalty", "只要 token 已出现就施加固定惩罚，鼓励新内容。0 表示关闭；过高可能导致用词生硬或偏题。", 0, 5, 0.01);
 	const seed = numericControl(node, "seed", "随机采样种子；0 表示每次自动使用新种子，非 0 表示固定结果", 0, Number.MAX_SAFE_INTEGER, 1, true);
-	numeric.append(
-		parameterField("📐 最大长度", maxLength),
+	const samplingFields = [
 		parameterField("🌡 温度", temperature),
 		parameterField("🎯 Top K", topK),
 		parameterField("🧭 Top P", topP),
@@ -927,6 +1079,11 @@ function buildSettings(node) {
 		parameterField("🚫 重复惩罚", repetitionPenalty),
 		parameterField("✨ 出现惩罚", presencePenalty),
 		parameterField("🔢 种子", seed),
+	];
+	numeric.append(
+		labelledField("🎲 采样模式", samplingMode),
+		parameterField("📐 最大长度", maxLength),
+		...samplingFields,
 	);
 
 	const templateEditor = document.createElement("textarea");
@@ -975,17 +1132,20 @@ function buildSettings(node) {
 		syncPanel(node);
 	});
 
-	settings.append(
-		numeric,
+	settings.append(numeric);
+	templateSettings.append(
 		labelledField("🧩 系统提示词模板", templateEditor, saveTemplates),
 		labelledField("🚫 输出约束", outputRule),
 		labelledField("🧾 当前系统提示词", systemPrompt),
 	);
 	return {
 		settings,
+		templateSettings,
 		clipName,
 		clipType,
 		clipDevice,
+		samplingMode,
+		samplingFields,
 		maxLength,
 		temperature,
 		topK,
@@ -1024,7 +1184,7 @@ function buildModelPanel(node, controls) {
 	const grid = document.createElement("div");
 	grid.className = "gjj-gemma-model-grid";
 	grid.append(
-		labelledField("🤖 CLIP 模型", controls.clipName),
+		labelledField("🤖 反推模型", controls.clipName),
 		labelledField("🧩 CLIP 类型", controls.clipType),
 		labelledField("💻 加载设备", controls.clipDevice),
 	);
@@ -1043,8 +1203,10 @@ function renderTemplateButtons(node, config) {
 		const label = String(item.title || "模板").replace(/\s+/g, "");
 		const choice = button(label, `设置系统提示词模板：${label}`, () => {
 			setWidgetValue(node, "system_prompt", templatePrompt(config, item));
+			state.templatesExpanded = false;
 			syncPanel(node);
 		});
+		choice.classList.add("compact");
 		state.templateButtons.set(item.key, { button: choice, item });
 		state.templates.appendChild(choice);
 	}
@@ -1061,6 +1223,7 @@ function readTemplateConfig(node) {
 }
 
 function syncPanel(node) {
+	syncNodeTitle(node);
 	const state = node.__gjjGemmaPanel;
 	if (!state) return;
 	const thinking = asBool(widgetValue(node, "thinking", false));
@@ -1085,6 +1248,9 @@ function syncPanel(node) {
 	state.settingsButton.classList.toggle("active", state.expanded);
 	state.settingsButton.title = state.expanded ? "收起生成参数和提示词设置" : "展开生成参数和提示词设置";
 	state.settings.style.display = state.expanded ? "flex" : "none";
+	state.templateSettings.style.display = state.templatesExpanded ? "flex" : "none";
+	state.templateButton.classList.toggle("active", state.templatesExpanded);
+	state.templateButton.title = state.templatesExpanded ? "收起模板设置" : "展开模板设置";
 	state.modelPanel.style.display = state.modelExpanded ? "flex" : "none";
 	state.modelPanelButton.classList.toggle("active", state.modelExpanded);
 	state.modelPanelButton.classList.toggle("keep-model-on", keepModel);
@@ -1092,11 +1258,18 @@ function syncPanel(node) {
 	state.modelPanelButton.title = state.modelExpanded
 		? "收起模型设置"
 		: `展开模型设置。${keepModel ? "保持模型已开启。" : "保持模型未开启。"}`;
-	state.modelButton.title = `当前模型：${String(widgetValue(node, "clip_name", "") || "未选择")}。点击直接选择模型。`;
-
-	syncSearchableSelect(state.clipName, choices("clip_name", node), widgetValue(node, "clip_name", ""));
+	syncSearchableSelect(
+		state.clipName,
+		choices("clip_name", node),
+		widgetValue(node, "clip_name", ""),
+		widgetValue(node, MODEL_FILTER_WIDGET, "qwen3.5|gemma4|qwen3vl"),
+	);
 	syncSelectOptions(state.clipType, choices("clip_type", node), widgetValue(node, "clip_type", ""));
 	syncSelectOptions(state.clipDevice, choices("clip_device", node), widgetValue(node, "clip_device", ""));
+	syncSelectOptions(state.samplingMode, ["on", "off"], widgetValue(node, "sampling_mode", "on"));
+	state.samplingMode.options[0].textContent = "开启";
+	state.samplingMode.options[1].textContent = "关闭";
+	for (const field of state.samplingFields) field.style.display = sampling ? "flex" : "none";
 	for (const [control, name] of [
 		[state.maxLength, "max_length"],
 		[state.temperature, "temperature"],
@@ -1120,6 +1293,25 @@ function syncPanel(node) {
 	resizeNode(node);
 }
 
+function closeFloatingPanels(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state) return;
+	state.templatesExpanded = false;
+	state.modelExpanded = false;
+	state.expanded = false;
+	syncPanel(node);
+}
+
+function floatingWindowActions(node) {
+	const actions = document.createElement("div");
+	actions.className = "gjj-ia-window-actions";
+	const confirm = button("确定", "保存当前设置并关闭窗口", () => closeFloatingPanels(node));
+	const close = button("关闭", "关闭当前窗口；已修改的参数仍会保留", () => closeFloatingPanels(node));
+	confirm.classList.add("active");
+	actions.append(close, confirm);
+	return actions;
+}
+
 function createPanel(node) {
 	if (node.__gjjGemmaPanel || typeof node.addDOMWidget !== "function") return;
 	const root = document.createElement("div");
@@ -1135,9 +1327,12 @@ function createPanel(node) {
 			padding:0 !important;
 		}
 		.gjj-gemma-assistant-panel, .gjj-gemma-assistant-panel * { box-sizing:border-box; }
-		.gjj-gemma-assistant-panel { display:flex; flex-direction:column; gap:7px; width:100%; padding:2px 0 4px; color:#dce6e8; font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
+		.gjj-gemma-assistant-panel { position:relative; display:flex; flex-direction:column; gap:7px; width:100%; padding:2px 0 4px; overflow:visible; color:#dce6e8; font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
 		.gjj-gemma-assistant-panel .gjj-ia-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:5px; overflow:visible; padding:0 0 3px; scrollbar-width:thin; }
-		.gjj-gemma-assistant-panel .gjj-ia-templates { display:contents; }
+		.gjj-gemma-assistant-panel .gjj-ia-template-settings,.gjj-gemma-assistant-panel .gjj-ia-settings,.gjj-gemma-assistant-panel .gjj-gemma-model-panel { position:absolute; z-index:1000; top:62px; left:0; width:100%; max-height:min(520px,70vh); overflow:auto; box-shadow:0 12px 32px rgba(0,0,0,.55); }
+		.gjj-gemma-assistant-panel .gjj-ia-templates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; width:100%; min-width:0; overflow:visible; padding:1px 0 3px; }
+		.gjj-gemma-assistant-panel .gjj-ia-template-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.96); }
+		.gjj-gemma-assistant-panel .gjj-ia-window-actions { display:flex; justify-content:flex-end; align-items:center; gap:6px; padding-top:2px; border-top:1px solid rgba(73,93,101,.45); }
 		.gjj-gemma-assistant-panel .gjj-ia-button { flex:0 0 auto; height:27px; padding:0 9px; border:1px solid #3d5159; border-radius:6px; background:#172127; color:#dbe6e9; font:700 12px/25px system-ui,sans-serif; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
 		.gjj-gemma-assistant-panel .gjj-ia-button.compact { width:auto; min-width:28px; max-width:74px; height:22px; padding:0 7px; font-size:11px; line-height:20px; }
 		.gjj-gemma-assistant-panel .gjj-ia-button:disabled { opacity:.72; cursor:wait; }
@@ -1146,12 +1341,11 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-off { background:#272127; border-color:#66505f; color:#e4d9df; }
 		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-on { background:#1f5131; border-color:#72c58a; color:#f0fff4; box-shadow:0 0 0 1px rgba(114,197,138,.18) inset; }
 		.gjj-gemma-assistant-panel .gjj-ia-button.keep-model-on:hover { background:#28633d; border-color:#91d8a4; }
-		.gjj-gemma-assistant-panel .gjj-ia-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.88); }
-		.gjj-gemma-assistant-panel .gjj-gemma-model-panel { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(91,121,130,.78); border-radius:8px; background:rgba(13,22,25,.94); box-shadow:0 10px 28px rgba(0,0,0,.32); }
+		.gjj-gemma-assistant-panel .gjj-ia-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.96); }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-panel { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(91,121,130,.78); border-radius:8px; background:rgba(13,22,25,.97); }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles .gjj-ia-button { width:100%; max-width:none; text-align:center; }
-		.gjj-gemma-assistant-panel .gjj-gemma-model-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
-		.gjj-gemma-assistant-panel .gjj-gemma-model-grid .gjj-ia-field:first-child { grid-column:1 / -1; }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:7px; }
 		.gjj-gemma-assistant-panel .gjj-ia-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 		.gjj-gemma-assistant-panel .gjj-ia-label { color:#aebfc4; font-weight:700; font-size:11px; letter-spacing:.02em; }
 		.gjj-gemma-assistant-panel .gjj-ia-label-row { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
@@ -1161,8 +1355,8 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-search-trigger { display:block; text-align:left; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:24px; }
 		.gjj-gemma-assistant-panel .gjj-ia-search-trigger::after { content:"▾"; position:absolute; right:9px; color:#91a5ab; }
 		.gjj-gemma-assistant-panel .gjj-ia-input:focus,.gjj-gemma-assistant-panel .gjj-ia-textarea:focus { border-color:#6a9dae; background:#111e23; }
-		.gjj-gemma-assistant-panel .gjj-ia-numeric { display:flex; flex-wrap:wrap; align-items:flex-start; gap:7px; width:100%; }
-		.gjj-gemma-assistant-panel .gjj-ia-param { flex:1 1 128px; min-width:126px; max-width:190px; display:flex; flex-direction:row; align-items:center; gap:6px; padding:5px 6px; border:1px solid rgba(51,72,80,.72); border-radius:6px; background:rgba(16,24,28,.58); }
+		.gjj-gemma-assistant-panel .gjj-ia-numeric { display:grid; grid-template-columns:minmax(0,1fr); gap:7px; width:100%; }
+		.gjj-gemma-assistant-panel .gjj-ia-param { width:100%; min-width:0; max-width:none; display:flex; flex-direction:row; align-items:center; gap:6px; padding:5px 6px; border:1px solid rgba(51,72,80,.72); border-radius:6px; background:rgba(16,24,28,.58); }
 		.gjj-gemma-assistant-panel .gjj-ia-param .gjj-ia-label { flex:0 0 auto; max-width:72px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-gemma-assistant-panel .gjj-ia-param .gjj-ia-input { flex:1 1 54px; min-width:50px; height:27px; padding:4px 6px; }
 		.gjj-gemma-assistant-panel .gjj-ia-textarea { min-height:86px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
@@ -1181,15 +1375,24 @@ function createPanel(node) {
 	toolbar.className = "gjj-ia-toolbar";
 	const templates = document.createElement("div");
 	templates.className = "gjj-ia-templates";
-	const modelButton = button("🤖", "当前 CLIP 模型。点击直接选择模型。", () => {
-		node.__gjjGemmaPanel?.clipName?.__gjjSearchSelectOpen?.(modelButton);
+	const templateButton = button("📚", "展开模板设置", () => {
+		const state = node.__gjjGemmaPanel;
+		const open = !state.templatesExpanded;
+		state.templatesExpanded = open;
+		state.modelExpanded = false;
+		state.expanded = false;
+		syncPanel(node);
 	});
 	const thinking = button("💭", "切换思考模式", () => {
 		setWidgetValue(node, "thinking", !asBool(widgetValue(node, "thinking", false)));
 		syncPanel(node);
 	});
 	const modelPanelButton = button("🧠", "展开模型设置", () => {
-		node.__gjjGemmaPanel.modelExpanded = !node.__gjjGemmaPanel.modelExpanded;
+		const state = node.__gjjGemmaPanel;
+		const open = !state.modelExpanded;
+		state.modelExpanded = open;
+		state.templatesExpanded = false;
+		state.expanded = false;
 		syncPanel(node);
 	});
 	const randomSeed = button("🎲", "切换随机采样", () => {
@@ -1198,28 +1401,42 @@ function createPanel(node) {
 		syncPanel(node);
 	});
 	const settingsButton = button("⚙️", "展开生成参数和提示词设置", () => {
-		node.__gjjGemmaPanel.expanded = !node.__gjjGemmaPanel.expanded;
+		const state = node.__gjjGemmaPanel;
+		const open = !state.expanded;
+		state.expanded = open;
+		state.templatesExpanded = false;
+		state.modelExpanded = false;
 		syncPanel(node);
 	});
-	toolbar.append(templates, modelButton, thinking, modelPanelButton, randomSeed, settingsButton);
+	toolbar.append(templateButton, thinking, modelPanelButton, randomSeed, settingsButton);
 
 	const settingsState = buildSettings(node);
 	const modelState = buildModelPanel(node, settingsState);
-	root.append(style, toolbar, modelState.panel, settingsState.settings);
+	settingsState.templateSettings.appendChild(floatingWindowActions(node));
+	modelState.panel.appendChild(floatingWindowActions(node));
+	settingsState.settings.appendChild(floatingWindowActions(node));
+	root.append(style, toolbar, templates, settingsState.templateSettings, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
 	});
-	domWidget.computeSize = (width) => [
-		Math.max(470, Number(width || node.size?.[0] || 470)),
-		Math.max(35, Math.ceil(root.scrollHeight || 35)),
-	];
+	domWidget.computeSize = (width) => {
+		const toolbarHeight = Number(toolbar.offsetHeight || 30);
+		const templateRowHeight = Number(templates.offsetHeight || 25);
+		const mainPanelHeight = Math.ceil(toolbarHeight + templateRowHeight + 13);
+		return [
+			Math.max(470, Number(width || node.size?.[0] || 470)),
+			Math.max(35, mainPanelHeight),
+		];
+	};
 	node.__gjjGemmaPanel = {
 		root,
 		domWidget,
 		templates,
 		templateButtons: new Map(),
-		modelButton,
+		templateButton,
+		templateSettings: settingsState.templateSettings,
+		templatesExpanded: false,
 		thinking,
 		modelPanelButton,
 		modelPanel: modelState.panel,
@@ -1237,8 +1454,17 @@ function createPanel(node) {
 		node.widgets.splice(index, 1);
 		node.widgets.unshift(domWidget);
 	}
+	const handleOutsidePointerDown = (event) => {
+		const state = node.__gjjGemmaPanel;
+		if (!state || (!state.templatesExpanded && !state.modelExpanded && !state.expanded)) return;
+		if (root.contains(event.target)) return;
+		if (event.target?.closest?.(".gjj-ia-search-popup")) return;
+		closeFloatingPanels(node);
+	};
+	document.addEventListener("pointerdown", handleOutsidePointerDown, true);
 	const originalOnRemoved = node.onRemoved;
 	node.onRemoved = function (...args) {
+		document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
 		try { clipName.__gjjSearchSelectPopup?.remove(); } catch (_) {}
 		return originalOnRemoved?.apply(this, args);
 	};
@@ -1257,15 +1483,63 @@ function createPanel(node) {
 
 function stabilize(node) {
 	if (!node || String(node.comfyClass || node.type || "") !== NODE_TYPE) return;
+	const templateText = String(widgetValue(node, TEMPLATE_WIDGET, "") || "");
+	const migratedTemplateText = migrateLegacyTemplateText(templateText);
+	if (migratedTemplateText !== templateText) {
+		setWidgetValue(node, TEMPLATE_WIDGET, migratedTemplateText);
+	}
+	const systemPrompt = String(widgetValue(node, "system_prompt", "") || "");
+	const migratedSystemPrompt = migrateLegacyTemplateText(systemPrompt);
+	if (migratedSystemPrompt !== systemPrompt) {
+		setWidgetValue(node, "system_prompt", migratedSystemPrompt);
+	}
+	node.properties ||= {};
+	if (!node.properties[CLIP_TYPE_REFERENCE_MIGRATION]) {
+		const currentClipType = String(widgetValue(node, "clip_type", "") || "");
+		const currentClipName = String(widgetValue(node, "clip_name", "") || "").toLowerCase();
+		if (
+			currentClipType === "ideogram4"
+			&& (currentClipName.includes("qwen3.5") || currentClipName.includes("qwen35") || currentClipName.includes("qwen3vl"))
+		) {
+			setWidgetValue(node, "clip_type", "stable_diffusion");
+		}
+		node.properties[CLIP_TYPE_REFERENCE_MIGRATION] = true;
+	}
 	if (!String(widgetValue(node, "device_preference", "") || "").trim()) {
 		setWidgetValue(node, "device_preference", String(widgetValue(node, "clip_device", "default")) === "cpu" ? "CPU优先" : "GPU优先");
 	}
 	if (widgetValue(node, "keep_model", undefined) === undefined) {
 		setWidgetValue(node, "keep_model", true);
 	}
+	const thinkingWidget = widget(node, "thinking");
+	if (thinkingWidget) {
+		thinkingWidget.value = asBool(thinkingWidget.value);
+		thinkingWidget.serializeValue = () => asBool(thinkingWidget.value);
+	}
+	const defaultTemplateWidget = widget(node, "use_default_template");
+	if (defaultTemplateWidget) {
+		defaultTemplateWidget.value = asBool(defaultTemplateWidget.value);
+		defaultTemplateWidget.serializeValue = () => asBool(defaultTemplateWidget.value);
+	}
 	if (repairMissingClipName(node)) rememberWorkflowValues(node);
 	hideBackendWidgets(node);
 	createPanel(node);
+	showResultPreview(node, {
+		gjj_gemma_result: [{
+			model: widgetValue(node, "clip_name", "未知"),
+			model_size: "待执行",
+		}],
+	});
+	loadModelSizes().then((sizes) => {
+		const model = String(widgetValue(node, "clip_name", "未知") || "未知");
+		const bytes = Number(sizes?.[model] || 0);
+		showResultPreview(node, {
+			gjj_gemma_result: [{
+				model,
+				model_size: bytes > 0 ? `${(bytes / (1024 ** 3)).toFixed(2)} GB` : "未知",
+			}],
+		});
+	});
 	restorePromptWidget(node);
 	ensurePromptInput(node);
 	normalizeMediaInput(node);
@@ -1280,6 +1554,21 @@ function schedule(node, delay = 0) {
 
 app.registerExtension({
 	name: "GJJ.GemmaTextGenerate",
+	beforeQueuePrompt() {
+		for (const node of app.graph?._nodes || []) {
+			if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
+			const thinkingWidget = widget(node, "thinking");
+			if (thinkingWidget) thinkingWidget.value = asBool(thinkingWidget.value);
+			const defaultTemplateWidget = widget(node, "use_default_template");
+			if (defaultTemplateWidget) defaultTemplateWidget.value = asBool(defaultTemplateWidget.value);
+			rememberWorkflowValues(node);
+		}
+	},
+	beforeQueued() {
+		for (const node of app.graph?._nodes || []) {
+			if (String(node?.comfyClass || node?.type || "") === NODE_TYPE) rememberWorkflowValues(node);
+		}
+	},
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== NODE_TYPE) return;
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
@@ -1327,6 +1616,12 @@ app.registerExtension({
 				}
 			}
 			schedule(this);
+			return result;
+		};
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			showResultPreview(this, message);
 			return result;
 		};
 	},

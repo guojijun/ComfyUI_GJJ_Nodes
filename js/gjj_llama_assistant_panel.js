@@ -1,8 +1,11 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
+import { showAssistantResultPreview } from "./gjj_assistant_result_preview.js";
 
 const NODE_TYPE = "GJJ_LlamaAssistant";
+const NODE_TITLE_PREFIX = "GJJ·💙Llama🧠";
+const NODE_TITLE_SUFFIX = " 图片反推提示词推理";
 const PANEL_WIDGET = "gjj_llama_assistant_panel";
 const TEMPLATE_WIDGET = "system_prompt_templates";
 const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
@@ -56,6 +59,13 @@ function widget(node, name) {
 
 function value(node, name, fallback = "") {
 	return widget(node, name)?.value ?? fallback;
+}
+
+function syncNodeTitle(node) {
+	const model = String(value(node, "main_model", "") || "")
+		.replaceAll("\\", "/").split("/").pop()
+		.replace(/\.(?:safetensors|gguf|bin|pt|pth|ckpt)$/i, "");
+	node.title = `${NODE_TITLE_PREFIX}${model || "未选择模型"}${NODE_TITLE_SUFFIX}`;
 }
 
 function boolValue(raw) {
@@ -512,6 +522,19 @@ async function refreshModels(node, autoPair = false) {
 		setWidgetValue(node, "mmproj_model", matched);
 		state.mmprojModel.value = matched;
 	}
+	const activeModel = selectedMain || state.mainModel.value;
+	const bytes = Number(catalog.model_sizes?.[activeModel] || 0);
+	showAssistantResultPreview(node, {
+		gjj_assistant_result: [{
+			model: activeModel,
+			model_size: bytes > 0 ? `${(bytes / (1024 ** 3)).toFixed(2)} GB` : "未知",
+		}],
+	}, {
+		stateKey: "__gjjLlamaResultPreview",
+		widgetName: "gjj_llama_assistant_result",
+		layout: compactWidgetLayout,
+		resize: resizeNode,
+	});
 	resizeNode(node);
 }
 
@@ -621,6 +644,7 @@ function renderTemplates(node) {
 }
 
 function syncPanel(node) {
+	syncNodeTitle(node);
 	const state = node.__gjjLlamaPanel;
 	if (!state) return;
 	restoreUserPromptWidget(node);
@@ -968,6 +992,14 @@ function stabilize(node) {
 	if (!node || String(node.comfyClass || node.type || "") !== NODE_TYPE) return;
 	hideBackendWidgets(node);
 	createPanel(node);
+	showAssistantResultPreview(node, {
+		gjj_assistant_result: [{ model: value(node, "main_model", "未知"), model_size: "待执行" }],
+	}, {
+		stateKey: "__gjjLlamaResultPreview",
+		widgetName: "gjj_llama_assistant_result",
+		layout: compactWidgetLayout,
+		resize: resizeNode,
+	});
 	restoreUserPromptWidget(node);
 	placeUserPromptWidget(node);
 	syncPanel(node);
@@ -1011,6 +1043,20 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			schedule(this);
+			return result;
+		};
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			showAssistantResultPreview(this, message, {
+				stateKey: "__gjjLlamaResultPreview",
+				widgetName: "gjj_llama_assistant_result",
+				layout: compactWidgetLayout,
+				resize: (node) => {
+					resizeNode(node);
+					resizeNode(node, 80);
+				},
+			});
 			return result;
 		};
 		const originalOnRemoved = nodeType.prototype.onRemoved;
