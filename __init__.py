@@ -155,7 +155,12 @@ def _gjj_default_user_settings() -> dict:
 			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
 		},
 		"scene_library": {
+			"panorama_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
+			"panorama_clip": "qwen_2.5_vl_7b_int4_convrot.safetensors",
+			"panorama_vae": "qwen_image_vae.safetensors",
 			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+			"seedvr2_dit": "seedvr2_3b_int8_convrot.safetensors",
+			"seedvr2_vae": "ema_vae_fp16.safetensors",
 		},
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
@@ -1489,6 +1494,16 @@ def _register_gjj_character_library_api():
 	async def gjj_character_library_model_tree(_request):
 		settings = _gjj_section_settings("character_library")
 		choices = _gjj_library_model_choices()
+		matting_method = str(settings.get("matting_method") or "RMBG1.4")
+		matting_model_paths = {
+			"RMBG1.4": "models/RMBG/rmbg1.4.safetensors",
+			"RMBG2": "models/RMBG/rmbg2.safetensors",
+			"官方背景移除": "models/background_removal/BiRefNet.safetensors",
+			"BiRefNet 通用": "models/BiRefNet/General.safetensors",
+			"BiRefNet 精细": "models/BiRefNet/Matting.safetensors",
+			"BEN2": "models/RMBG/BEN2/BEN2_Base.pth",
+			"Inspyrenet": "models/RMBG/InSPyReNet_SwinB.pth",
+		}
 		return web.json_response({
 			"ok": True,
 			"title": "角色库模型树",
@@ -1507,7 +1522,10 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🪄 抠图",
 					"items": [
-						{"label": f"抠图模型：{settings.get('matting_method') or 'RMBG1.4'}", "path": "models/RMBG/rmbg1.4.safetensors"},
+						{
+							"label": f"抠图模型：{matting_method}",
+							"path": matting_model_paths.get(matting_method, f"models/RMBG/{matting_method}"),
+						},
 					],
 				},
 				{
@@ -2585,7 +2603,7 @@ def _register_gjj_scene_library_api():
 				break
 		return result
 
-	def parse_scene_ai_payload(text: str, asset_id: str = "") -> tuple[list[dict], list[str], str]:
+	def parse_scene_ai_payload(text: str, asset_id: str = "") -> tuple[list[dict], list[str], str, str]:
 		raw = str(text or "").strip()
 		match = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.S | re.I)
 		if match:
@@ -2597,11 +2615,11 @@ def _register_gjj_scene_library_api():
 		try:
 			parsed = json.loads(raw)
 		except Exception:
-			return parse_scene_annotations(text, asset_id), [], ""
+			return parse_scene_annotations(text, asset_id), [], "", ""
 		if isinstance(parsed, list):
-			return parse_scene_annotations(raw, asset_id), [], ""
+			return parse_scene_annotations(raw, asset_id), [], "", ""
 		if not isinstance(parsed, dict):
-			return [], [], ""
+			return [], [], "", ""
 		annotations_text = json.dumps(
 			parsed.get("annotations") or parsed.get("items") or parsed.get("objects") or [],
 			ensure_ascii=False,
@@ -2615,7 +2633,15 @@ def _register_gjj_scene_library_api():
 			or parsed.get("场景备注")
 			or ""
 		).strip()[:300]
-		return parse_scene_annotations(annotations_text, asset_id), keywords, notes
+		suggested_name = str(
+			parsed.get("name")
+			or parsed.get("title")
+			or parsed.get("scene_name")
+			or parsed.get("场景名")
+			or parsed.get("标题")
+			or ""
+		).strip()[:96]
+		return parse_scene_annotations(annotations_text, asset_id), keywords, notes, suggested_name
 
 	def fallback_scene_annotations(manifest: dict, asset_id: str = "") -> tuple[list[dict], list[str], str]:
 		name = str(manifest.get("name") or manifest.get("id") or "场景").strip()
@@ -2967,16 +2993,48 @@ def _register_gjj_scene_library_api():
 			required = GJJ_360PanoramaGenerator.INPUT_TYPES().get("required") or {}
 		except Exception:
 			required = {}
+		scene_settings = _gjj_section_settings("scene_library")
+
+		def selected_model(key: str, setting_key: str, fallback: str) -> str:
+			spec = required.get(key)
+			options = list(spec[0]) if isinstance(spec, tuple) and spec and isinstance(spec[0], list) else []
+			saved = str(scene_settings.get(setting_key) or "").replace("\\", "/").strip()
+			if saved:
+				saved_key = saved.lower()
+				for option in options:
+					option_key = str(option or "").replace("\\", "/").lower()
+					if option_key == saved_key or option_key.endswith(f"/{saved_key}"):
+						return str(option)
+				family_tokens = [
+					token for token in saved_key.rsplit("/", 1)[-1].split(".")[0].replace("-", "_").split("_")
+					if token and token not in {"safetensors", "gguf", "convrot", "int4", "fp8", "mixed", "scaled"}
+				]
+				matches = [
+					str(option) for option in options
+					if all(token in str(option or "").replace("\\", "/").lower().replace("-", "_") for token in family_tokens)
+				]
+				if matches:
+					return min(
+						matches,
+						key=lambda option: (
+							0 if "int4_convrot" in option.lower().replace("-", "_") else
+							1 if "int4" in option.lower() else 2,
+							len(option),
+							option.lower(),
+						),
+					)
+			return str(default_for(required, key, fallback) or fallback)
+
 		generator = GJJ_360PanoramaGenerator()
 		context_unique_id = unique_id or f"gjj_scene_import_{uuid.uuid4().hex[:10]}"
 		with _GJJTemporaryPromptId(server, context_unique_id):
 			result = generator.generate(
 				positive_prompt=f"Convert this scene image into a natural seamless 360-degree equirectangular panorama. Scene name: {scene_name}",
 				negative_prompt="low quality, distorted, text, watermark",
-				unet_name=default_for(required, "unet_name", ""),
+				unet_name=selected_model("unet_name", "panorama_unet", "qwen_image_edit_2511_int4_convrot.safetensors"),
 				unet_dtype=default_for(required, "unet_dtype", "default"),
-				clip_name=default_for(required, "clip_name", ""),
-				vae_name=default_for(required, "vae_name", ""),
+				clip_name=selected_model("clip_name", "panorama_clip", "qwen_2.5_vl_7b_int4_convrot.safetensors"),
+				vae_name=selected_model("vae_name", "panorama_vae", "qwen_image_vae.safetensors"),
 				lora_1_name=default_for(required, "lora_1_name", ""),
 				lora_1_strength=1.0,
 				lora_2_name=default_for(required, "lora_2_name", ""),
@@ -2989,8 +3047,8 @@ def _register_gjj_scene_library_api():
 				denoise=1.0,
 				base_width=1024,
 				base_height=512,
-				final_width=2048,
-				final_height=1024,
+				final_width=1024,
+				final_height=512,
 				upscale_enabled=False,
 				upscale_model_name=default_for(required, "upscale_model_name", ""),
 				prompt_suffix=DEFAULT_PROMPT_SUFFIX,
@@ -3012,6 +3070,66 @@ def _register_gjj_scene_library_api():
 			output = result[0]
 		if output is None:
 			raise RuntimeError("GJJ_360PanoramaGenerator 没有返回图像。")
+		try:
+			import torch
+			from .nodes.gjj_seedvr2_image_upscaler import GJJ_SeedVR2ImageUpscaler
+			seed_required = GJJ_SeedVR2ImageUpscaler.INPUT_TYPES().get("required") or {}
+
+			def seed_default(key: str, fallback):
+				spec = seed_required.get(key)
+				if isinstance(spec, tuple) and len(spec) > 1 and isinstance(spec[1], dict):
+					return spec[1].get("default", fallback)
+				if isinstance(spec, tuple) and spec and isinstance(spec[0], list) and spec[0]:
+					return spec[0][0]
+				return fallback
+
+			def seed_model(setting_key: str, input_key: str, fallback: str) -> str:
+				spec = seed_required.get(input_key)
+				options = list(spec[0]) if isinstance(spec, tuple) and spec and isinstance(spec[0], list) else []
+				requested = str(scene_settings.get(setting_key) or fallback).replace("\\", "/").lower()
+				for option in options:
+					normalized = str(option or "").replace("\\", "/").lower()
+					if normalized == requested or normalized.endswith(f"/{requested}"):
+						return str(option)
+				return str(seed_default(input_key, fallback) or fallback)
+
+			seed_input = output.detach().clone().contiguous() if torch.is_tensor(output) else output
+			with _GJJTemporaryPromptId(server, context_unique_id):
+				with torch.inference_mode():
+					output = GJJ_SeedVR2ImageUpscaler().upscale_image(
+				common_video_height="手动输入",
+				resolution=1024,
+				max_resolution=2048,
+				seed=0,
+				dit_model=seed_model("seedvr2_dit", "dit_model", "seedvr2_3b_int8_convrot.safetensors"),
+				vae_model=seed_model("seedvr2_vae", "vae_model", "ema_vae_fp16.safetensors"),
+				device=seed_default("device", "cuda:0"),
+				model_offload_device=seed_default("model_offload_device", "none"),
+				tensor_offload_device=seed_default("tensor_offload_device", "cuda:0"),
+				attention_mode=seed_default("attention_mode", "sdpa"),
+				blocks_to_swap=seed_default("blocks_to_swap", 0),
+				swap_io_components=seed_default("swap_io_components", False),
+				encode_tiled=seed_default("encode_tiled", True),
+				encode_tile_size=seed_default("encode_tile_size", 512),
+				encode_tile_overlap=seed_default("encode_tile_overlap", 128),
+				decode_tiled=seed_default("decode_tiled", True),
+				decode_tile_size=seed_default("decode_tile_size", 512),
+				decode_tile_overlap=seed_default("decode_tile_overlap", 128),
+				tile_debug=seed_default("tile_debug", "false"),
+				color_correction=seed_default("color_correction", "lab"),
+				input_noise_scale=seed_default("input_noise_scale", 0.0),
+				latent_noise_scale=seed_default("latent_noise_scale", 0.0),
+				enable_debug=False,
+				video_chunk_mode="关闭",
+				frames_per_chunk=1,
+				temporal_overlap=0,
+				vae_temporal_size=seed_default("vae_temporal_size", 32),
+				vae_temporal_overlap=seed_default("vae_temporal_overlap", 8),
+				media=seed_input,
+				unique_id=context_unique_id,
+					)[0]
+		except Exception as exc:
+			raise RuntimeError(f"SeedVR2 全景放大失败：{exc}") from exc
 		return fit_to_360_png_canvas(_tensor_to_pil(output), 2048, 1024)
 
 	def save_360_png_asset(manifest: dict, image: Image.Image, label: str, method: str = "direct") -> dict:
@@ -3165,6 +3283,12 @@ def _register_gjj_scene_library_api():
 	async def gjj_scene_library_model_tree(_request):
 		settings = _gjj_section_settings("scene_library")
 		choices = _gjj_library_model_choices()
+		try:
+			from .nodes.gjj_seedvr2_image_upscaler import _get_seedvr2_model_options
+			seedvr2_dit_choices, seedvr2_vae_choices = _get_seedvr2_model_options()
+		except Exception:
+			seedvr2_dit_choices = choices.get("seedvr2") or []
+			seedvr2_vae_choices = choices.get("seedvr2") or []
 		def model_item_path(item: dict) -> str:
 			base = str(item.get("path") or "").replace("\\", "/").rstrip("/")
 			filename = str(item.get("filename") or "").replace("\\", "/").strip("/")
@@ -3184,17 +3308,37 @@ def _register_gjj_scene_library_api():
 			"settings_section": "scene_library",
 			"settings": settings,
 			"controls": [
+				{"key": "panorama_unet", "label": "360 生成 UNET", "options": choices.get("diffusion_models") or []},
+				{"key": "panorama_clip", "label": "360 生成 CLIP / VL", "options": choices.get("text_encoders") or []},
+				{"key": "panorama_vae", "label": "360 生成 VAE", "options": choices.get("vae") or []},
 				{"key": "annotate_clip", "label": "自动打标文本编码器", "options": choices.get("text_encoders") or []},
+				{"key": "seedvr2_dit", "label": "SeedVR2 放大主模型", "options": seedvr2_dit_choices},
+				{"key": "seedvr2_vae", "label": "SeedVR2 放大 VAE", "options": seedvr2_vae_choices},
 			],
 			"groups": [
 				{
 					"name": "🌏 360 场景生成",
-					"items": panorama_items,
+					"items": [
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('panorama_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
+						{"label": "CLIP / VL", "path": f"models/text_encoders/{settings.get('panorama_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
+						{"label": "VAE", "path": f"models/vae/{settings.get('panorama_vae') or 'qwen_image_vae.safetensors'}"},
+						*[
+							item for item in panorama_items
+							if not any(part in str(item.get("path") or "").replace("\\", "/").lower() for part in ("/diffusion_models/", "/text_encoders/", "/vae/"))
+						],
+					],
 				},
 				{
 					"name": "🧠 自动打标",
 					"items": [
 						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'qwen3.5_4b_fp8_mixed.safetensors'}"},
+					],
+				},
+				{
+					"name": "🔍 SeedVR2 全景放大",
+					"items": [
+						{"label": "SeedVR2 主模型", "path": f"models/SEEDVR2/{settings.get('seedvr2_dit') or 'seedvr2_3b_int8_convrot.safetensors'}"},
+						{"label": "SeedVR2 VAE", "path": f"models/SEEDVR2/{settings.get('seedvr2_vae') or 'ema_vae_fp16.safetensors'}"},
 					],
 				},
 				{
@@ -3373,7 +3517,8 @@ def _register_gjj_scene_library_api():
 			scene_settings = _gjj_section_settings("scene_library")
 			clip_name = str(data.get("clip_name") or scene_settings.get("annotate_clip") or "qwen3.5_4b_fp8_mixed.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
-			def send_scene_progress(current: int, total: int, text: str) -> None:
+			async def send_scene_progress(current: int, total: int, text: str) -> None:
+				import asyncio
 				if not progress_id:
 					return
 				try:
@@ -3383,6 +3528,7 @@ def _register_gjj_scene_library_api():
 						"total": max(1, int(total or 1)),
 						"text": str(text or ""),
 					})
+					await asyncio.sleep(0)
 				except Exception:
 					pass
 			try:
@@ -3403,24 +3549,26 @@ def _register_gjj_scene_library_api():
 			skipped_details = []
 			scene_ids = requested_ids or [str(scene.get("id") or "") for scene in list_scenes()]
 			total_count = max(1, len(scene_ids))
-			send_scene_progress(0, total_count, "正在准备自动打标...")
+			await send_scene_progress(0, total_count, "正在准备自动打标...")
 			for scene_index, scene_id in enumerate(scene_ids, start=1):
 				if len(processed) >= limit:
 					break
 				if not scene_id:
-					send_scene_progress(scene_index, total_count, f"跳过空场景 {scene_index}/{total_count}")
+					await send_scene_progress(scene_index, total_count, f"跳过空场景 {scene_index}/{total_count}")
 					skipped_details.append({"id": "", "name": "", "reason": "场景 ID 为空"})
 					continue
 				manifest = read_manifest(scene_id)
 				scene_label = str(manifest.get("name") or scene_id)
-				send_scene_progress(scene_index - 1, total_count, f"正在分析 {scene_index}/{total_count}：{scene_label}")
+				await send_scene_progress(scene_index - 1, total_count, f"正在分析 {scene_index}/{total_count}：{scene_label}")
 				has_annotations = bool(manifest.get("annotations"))
 				has_keywords = bool(manifest.get("keywords"))
 				has_notes = bool(str(manifest.get("notes") or "").strip())
-				if has_annotations and has_keywords and has_notes:
+				needs_rename = "_unsaved" in scene_label.lower()
+				rename_only = needs_rename and has_annotations and has_keywords and has_notes
+				if has_annotations and has_keywords and has_notes and not needs_rename:
 					skipped.append(scene_id)
 					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "已有坐标、关键词和备注"})
-					send_scene_progress(scene_index, total_count, f"已跳过 {scene_index}/{total_count}：{scene_label}")
+					await send_scene_progress(scene_index, total_count, f"已跳过 {scene_index}/{total_count}：{scene_label}")
 					continue
 				asset = None
 				for item in manifest.get("assets") or []:
@@ -3431,33 +3579,34 @@ def _register_gjj_scene_library_api():
 				if not asset:
 					skipped.append(scene_id)
 					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "没有可用于识别的 PNG/JPG 预览图"})
-					send_scene_progress(scene_index, total_count, f"无可用图片，跳过 {scene_index}/{total_count}：{scene_label}")
+					await send_scene_progress(scene_index, total_count, f"无可用图片，跳过 {scene_index}/{total_count}：{scene_label}")
 					continue
 				path = scene_dir(scene_id) / str(asset.get("file") or "")
 				if not path.is_file():
 					skipped.append(scene_id)
 					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "图片文件缺失"})
-					send_scene_progress(scene_index, total_count, f"图片缺失，跳过 {scene_index}/{total_count}：{scene_label}")
+					await send_scene_progress(scene_index, total_count, f"图片缺失，跳过 {scene_index}/{total_count}：{scene_label}")
 					continue
 				try:
 					image = Image.open(path).convert("RGB")
 				except Exception:
 					skipped.append(scene_id)
 					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "图片读取失败"})
-					send_scene_progress(scene_index, total_count, f"图片读取失败，跳过 {scene_index}/{total_count}：{scene_label}")
+					await send_scene_progress(scene_index, total_count, f"图片读取失败，跳过 {scene_index}/{total_count}：{scene_label}")
 					continue
 				system_prompt = (
 					"你是360场景资产库的中文物品坐标标注助手。"
 					"根据输入的场景图片，识别清晰、可检索、适合后续关键词定位的主要物品或区域。"
 					"坐标必须是原图上的归一化中心点，x/y 都在 0 到 1 之间；x 从左到右，y 从上到下。"
 					"不要标注人物、光影、风格或抽象概念。不要输出解释。"
-					"必须只输出 JSON 对象，格式为 {\"keywords\":[\"卧室\",\"床\"],\"notes\":\"一句中文场景备注\",\"annotations\":[{\"keyword\":\"物品名\",\"x\":0.5,\"y\":0.5}]}。"
+					"必须只输出 JSON 对象，格式为 {\"name\":\"简洁中文场景名\",\"keywords\":[\"卧室\",\"床\"],\"notes\":\"一句中文场景备注\",\"annotations\":[{\"keyword\":\"物品名\",\"x\":0.5,\"y\":0.5}]}。"
 				)
 				user_prompt = (
 					f"场景名：{manifest.get('name') or scene_id}\n"
 					f"场景类型：{manifest.get('type') or '360'}\n"
 					"请标注 6 到 12 个最明显的物品或空间区域，例如：沙发、床、窗户、桌子、门、电视、地毯、柜子、阳台。"
 					"同时给出 4 到 10 个检索关键词，并写一句简短场景备注，概括空间类型、氛围和主要物件。"
+					"另给出一个 2 到 12 个汉字的简洁场景名，不要包含 Unsaved、文件扩展名、哈希或序号。"
 					"如果图片是360等距全景图，坐标仍按整张展开图的位置返回。"
 				)
 				tensor = _pil_list_to_tensor([fit_scene_inference_canvas(image)])
@@ -3492,12 +3641,16 @@ def _register_gjj_scene_library_api():
 						except Exception:
 							pass
 				asset_id = str(asset.get("id") or "")
-				annotations, keywords, notes = parse_scene_ai_payload(text, asset_id)
+				annotations, keywords, notes, suggested_name = parse_scene_ai_payload(text, asset_id)
 				fallback_annotations, fallback_keywords, fallback_notes = fallback_scene_annotations(manifest, asset_id)
-				if not annotations and has_annotations:
+				if rename_only:
+					annotations = manifest.get("annotations") or []
+					keywords = manifest.get("keywords") or []
+					notes = str(manifest.get("notes") or "")
+				elif not annotations and has_annotations:
 					annotations = manifest.get("annotations") or []
 				if not annotations:
-					send_scene_progress(scene_index, total_count, f"模型未返回坐标，已生成基础标注 {scene_index}/{total_count}：{scene_label}")
+					await send_scene_progress(scene_index, total_count, f"模型未返回坐标，已生成基础标注 {scene_index}/{total_count}：{scene_label}")
 					annotations = fallback_annotations
 				if not keywords:
 					keywords = fallback_keywords
@@ -3508,6 +3661,13 @@ def _register_gjj_scene_library_api():
 					manifest["keywords"] = keywords
 				if notes and not str(manifest.get("notes") or "").strip():
 					manifest["notes"] = notes
+				current_name = str(manifest.get("name") or scene_id).strip()
+				if "_unsaved" in current_name.lower():
+					replacement_name = re.sub(r"(?i)_?unsaved(?:[_\-\s].*)?$", "", suggested_name).strip(" _-.")
+					if not replacement_name and keywords:
+						replacement_name = str(keywords[0] or "").strip()
+					if replacement_name:
+						manifest["name"] = replacement_name[:96]
 				write_manifest(manifest)
 				processed.append({
 					"id": scene_id,
@@ -3517,8 +3677,10 @@ def _register_gjj_scene_library_api():
 					"keywords": manifest.get("keywords") or [],
 					"notes": manifest.get("notes") or "",
 				})
-				send_scene_progress(scene_index, total_count, f"已完成 {scene_index}/{total_count}：{scene_label}")
-			send_scene_progress(total_count, total_count, "自动打标完成")
+				completed_label = str(manifest.get("name") or scene_label)
+				rename_text = f"（原名：{scene_label}）" if completed_label != scene_label else ""
+				await send_scene_progress(scene_index, total_count, f"已完成 {scene_index}/{total_count}：{completed_label}{rename_text}")
+			await send_scene_progress(total_count, total_count, "自动打标完成")
 			return web.json_response({
 				"ok": True,
 				"model": model_name,

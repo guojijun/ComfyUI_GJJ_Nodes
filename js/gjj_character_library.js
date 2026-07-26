@@ -292,7 +292,9 @@ import { api } from "/scripts/api.js";
 		let choicePanel = null;
 		const renderLine = () => {
 			const current = control ? String(values[control.key] || "") : "";
-			const displayValue = control && (/[/\\]/.test(current) || /\.(safetensors|gguf|ckpt|pt|pth|bin)$/i.test(current)) ? current : item?.path || item;
+			const displayValue = control?.key === "matting_method"
+				? current
+				: (control && (/[/\\]/.test(current) || /\.(safetensors|gguf|ckpt|pt|pth|bin)$/i.test(current)) ? current : item?.path || item);
 			const name = displayModelFilename(displayValue);
 			const line = modelTreeLine(prefix, modelFileIcon(item?.path || item), name, Boolean(control));
 			line.title = String(control ? values[control.key] || item?.path || "" : item?.path || item || "");
@@ -1335,6 +1337,93 @@ import { api } from "/scripts/api.js";
 		panel.appendChild(backdrop);
 	}
 
+	function showCharacterLibraryHelp() {
+		const panel = buildPanel();
+		panel.querySelector(".gjj-cl-help-backdrop")?.remove();
+		const backdrop = document.createElement("div");
+		backdrop.className = "gjj-cl-model-backdrop gjj-cl-help-backdrop";
+		const dialog = document.createElement("div");
+		dialog.className = "gjj-cl-model-dialog";
+		const head = document.createElement("div");
+		head.className = "gjj-cl-model-head";
+		const title = document.createElement("div");
+		title.className = "gjj-cl-model-title";
+		title.textContent = "❓ 角色库详细使用方法";
+		const spacer = document.createElement("div");
+		spacer.className = "gjj-cl-spacer";
+		head.append(title, spacer, button("❌关闭", "关闭帮助", "gjj-cl-btn gjj-cl-close", () => backdrop.remove()));
+		const body = document.createElement("div");
+		body.className = "gjj-cl-model-body";
+		body.style.cssText = "display:block;overflow:auto;padding:12px 16px;color:#dce8e4;font:13px/1.65 system-ui,'Microsoft YaHei',sans-serif;";
+		body.innerHTML = `
+			<section>
+				<h3>一、角色库用途</h3>
+				<p>角色库用于保存人物身份、外貌、服装、语音路径和不同视图。分镜提示词中使用 <code>@角色名</code> 引用角色；需要指定视图时可写 <code>@角色名/视图名</code>，例如 <code>@小明/背面</code>、<code>@小明/大头照</code>。</p>
+			</section>
+			<section>
+				<h3>二、顶部按钮</h3>
+				<ul>
+					<li><b>➕ 新增角色：</b>创建空角色资料，再添加图片、备注和音色路径。</li>
+					<li><b>👥 批量多视图：</b>一次选择多张人物图片，每张图片建立一个角色并排队生成多视图。</li>
+					<li><b>🪄 智能导入：</b>从一张整图中抠出并拆分人物视图，自动建立新角色。</li>
+					<li><b>🧑‍🎨 批量打标：</b>使用推理文本编码器补充性别符号与人物备注；已有完整标注的角色会跳过。</li>
+					<li><b>🧠 模型树：</b>查看和选择抠图、多视图、LoRA、VAE、CLIP 与备注推理模型，选择后点击“保存设置”。</li>
+				</ul>
+			</section>
+			<section>
+				<h3>三、添加与整理视图</h3>
+				<ul>
+					<li><b>🚀 生成多视图：</b>上传一张参考图，自动生成角色基础角度并抠图保存。</li>
+					<li><b>🪄 智能导入整图：</b>适合包含多个站姿或角度的角色设定图。</li>
+					<li><b>➕ 添加视图：</b>上传单张图片，经当前抠图模型处理后保存为指定视图。</li>
+					<li><b>视图卡片按钮：</b>可复制引用、替换图片、查看原图或删除视图。</li>
+					<li>推荐至少保存“大头照、正面、侧面、背面”；视图名称应直观且避免重名。</li>
+				</ul>
+			</section>
+			<section>
+				<h3>四、大头照与自动补视图</h3>
+				<p>没有大头照时，可从现有视图点击“生成大头照”。大头照会强制使用近距离头肩构图，不显示腰部、腿和鞋。已有大头照后，可用“补全部缺失”或单独的左侧、右侧、45度、半身、动作按钮生成其它视图。</p>
+				<p>“自定义视图”可组合方位、俯仰、景别；支持选择一张或多张已有视图作为身份参考。多张参考只用于统一五官、服装和身份，不会把参考拼图画进结果。</p>
+			</section>
+			<section>
+				<h3>五、模型与抠图设置</h3>
+				<ul>
+					<li>默认多视图链路：Qwen Image Edit 2511 int4、Qwen 2.5 VL int4、Qwen Image VAE、Lightning LoRA 和 Multiple-Angles LoRA。</li>
+					<li>多视图 LoRA 使用 Multiple-Angles；分镜生成器的 Next-Scene LoRA 与角色库互不替换。</li>
+					<li>抠图默认 RMBG1.4，也可选择 RMBG2、官方背景移除、BiRefNet、BEN2 或 Inspyrenet；切换后必须点击“保存设置”。</li>
+					<li>模型树中点击模型行可展开关键词过滤列表；模型名称旁的复制按钮可复制相对模型名。</li>
+				</ul>
+			</section>
+			<section>
+				<h3>六、角色资料与音色</h3>
+				<p>角色名称用于 <code>@角色名</code> 引用，建议简短且唯一。备注用于描述稳定身份特征和检索。音色填写 <code>models/GJJ/wav</code> 下的相对路径；保存后可供支持角色音色引用的节点使用。</p>
+			</section>
+			<section>
+				<h3>七、常见问题</h3>
+				<ul>
+					<li><b>生成结果不像参考：</b>优先使用清晰正脸或大头照，避免多人、遮挡、水印和复杂背景。</li>
+					<li><b>大头照仍像全身：</b>重启 ComfyUI 后重新生成，确认使用的是更新后的角色库代码。</li>
+					<li><b>抠图方法没有变化：</b>在 🧠 模型树选择后点击“保存设置”，重新打开确认树中显示的新方法。</li>
+					<li><b>模型列表为空：</b>确认模型放在对应的 ComfyUI/models 子目录，并刷新或重启 ComfyUI。</li>
+					<li><b>提示词没有引用角色：</b>人物名称前必须写 @，并与角色库名称一致。</li>
+				</ul>
+			</section>
+		`;
+		for (const heading of body.querySelectorAll("h3")) {
+			heading.style.cssText = "margin:12px 0 5px;color:#effaf5;font-size:14px;";
+		}
+		for (const code of body.querySelectorAll("code")) {
+			code.style.cssText = "padding:1px 4px;border:1px solid #354950;border-radius:4px;background:#101a1f;color:#a7f3d0;";
+		}
+		dialog.append(head, body);
+		backdrop.appendChild(dialog);
+		backdrop.addEventListener("click", (event) => {
+			stopBubble(event);
+			if (event.target === backdrop) backdrop.remove();
+		});
+		panel.appendChild(backdrop);
+	}
+
 	async function deleteView(character, view) {
 		if (!character || !view) return;
 		setStatus(`正在删除视图「${view.label || view.id}」...`);
@@ -1886,9 +1975,9 @@ import { api } from "/scripts/api.js";
 		head.append(drag, title, spacer, button("➕", "新增角色", "gjj-cl-btn gjj-cl-icon", () => createCharacter().catch((error) => setStatus(error.message))));
 		head.appendChild(button("👥", "批量选择人物图片，自动队列生成四视图", "gjj-cl-btn gjj-cl-icon", () => generateMultiviewBatch().catch((error) => setStatus(error.message))));
 		head.appendChild(button("🪄", "智能导入整图为新角色", "gjj-cl-btn gjj-cl-icon", () => importSheet(null).catch((error) => setStatus(error.message))));
-		head.appendChild(button("🧠", "批量给角色补备注和性别符号", "gjj-cl-btn gjj-cl-icon", () => annotateMissingNotes().catch((error) => setStatus(error.message))));
-		head.appendChild(button("⚙️", "查看并设置角色库使用的模型", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
-		head.appendChild(button("❓", "查看抠图、生图、大模型等模型树", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("🧑‍🎨", "批量给角色补备注和性别符号", "gjj-cl-btn gjj-cl-icon", () => annotateMissingNotes().catch((error) => setStatus(error.message))));
+		head.appendChild(button("🧠", "查看并设置角色库使用的模型树", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("❓", "查看整个角色库的详细实用方法", "gjj-cl-btn gjj-cl-icon", showCharacterLibraryHelp));
 		const search = document.createElement("input");
 		search.className = "gjj-cl-search";
 		search.placeholder = "搜索角色";

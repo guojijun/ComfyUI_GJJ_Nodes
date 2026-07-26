@@ -67,6 +67,7 @@ NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 
 MODEL_FAMILY_KEYWORDS = ("qwen3.5", "qwen35", "gemma4", "qwen3vl")
 MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl"
 MISSING_CLIP_PLACEHOLDER = "未找到匹配的反推模型"
+DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 

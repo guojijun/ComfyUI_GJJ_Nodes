@@ -52,6 +52,10 @@ function refreshNode(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function setTextIfChanged(element, text) {
+	if (element && element.textContent !== text) element.textContent = text;
+}
+
 function clearCropNativePreview(node) {
 	if (!node) return;
 	node.imgs = null;
@@ -396,6 +400,18 @@ function cropImageRefUrl(item, fallbackType = "input") {
 	return `/api/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(item.type || fallbackType)}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
 }
 
+function stableCropSourceSignature(src) {
+	const text = String(src || "").trim();
+	if (!text) return "";
+	// 预览 URL 会用 rand=时间戳绕过浏览器缓存；它不是图片身份的一部分。
+	// 若把它写进 sourceSignature，350ms 轮询会永远误判为新图片并反复重载。
+	return text
+		.replace(/([?&])rand=[^&#]*/gi, "$1")
+		.replace(/&{2,}/g, "&")
+		.replace(/\?&/g, "?")
+		.replace(/[?&]+$/, "");
+}
+
 function parseCropJson(value, fallback) {
 	try { return JSON.parse(String(value ?? "")); } catch (_) { return fallback; }
 }
@@ -409,7 +425,12 @@ function getCropMultiLoaderDescriptor(sourceNode, linkId) {
 	const item = Array.isArray(selected) ? selected.find((entry) => cropImageRefUrl(entry)) : null;
 	const src = cropImageRefUrl(item);
 	if (!src) return null;
-	return { src, width: Number(item?.width || 0), height: Number(item?.height || 0), signature: `${linkId}:${sourceNode.id}:multi:${src}` };
+	return {
+		src,
+		width: Number(item?.width || 0),
+		height: Number(item?.height || 0),
+		signature: `${linkId}:${sourceNode.id}:multi:${stableCropSourceSignature(src)}`,
+	};
 }
 
 function getCropTemplateDescriptor(sourceNode, originSlot, linkId) {
@@ -424,7 +445,12 @@ function getCropTemplateDescriptor(sourceNode, originSlot, linkId) {
 	const value = field ? values?.[field.key] ?? values?.[field.label] ?? field.default : null;
 	const src = cropImageRefUrl(value);
 	if (!src) return null;
-	return { src, width: 0, height: 0, signature: `${linkId}:${sourceNode.id}:template:${originSlot}:${src}` };
+	return {
+		src,
+		width: 0,
+		height: 0,
+		signature: `${linkId}:${sourceNode.id}:template:${originSlot}:${stableCropSourceSignature(src)}`,
+	};
 }
 
 function degToRad(value) {
@@ -769,10 +795,16 @@ function renderCropPanel(node) {
 	if (!panel?.canvas || !rect) return;
 	const { canvas, sizeLine } = panel;
 	const dpr = Math.max(1, window.devicePixelRatio || 1);
-	canvas.style.width = `${rect.width}px`;
-	canvas.style.height = `${rect.height}px`;
-	canvas.width = Math.round(rect.width * dpr);
-	canvas.height = Math.round(rect.height * dpr);
+	const cssWidth = `${rect.width}px`;
+	const cssHeight = `${rect.height}px`;
+	const pixelWidth = Math.round(rect.width * dpr);
+	const pixelHeight = Math.round(rect.height * dpr);
+	if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth;
+	if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight;
+	// 修改 canvas.width / height 会清空画布并重建浏览器合成层。
+	// 节点 onResize 可能高频触发，因此仅在实际尺寸变化时更新，避免面板和尺寸文字闪烁。
+	if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+	if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
 	const ctx = canvas.getContext("2d");
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 	ctx.clearRect(0, 0, rect.width, rect.height);
@@ -787,7 +819,7 @@ function renderCropPanel(node) {
 		ctx.textAlign = "center";
 		ctx.textBaseline = "middle";
 		ctx.fillText("连接图片后显示框选预览", rect.width / 2, rect.height / 2);
-		if (sizeLine) sizeLine.textContent = "裁剪后宽高 -- x --";
+		setTextIfChanged(sizeLine, "裁剪后宽高 -- x --");
 		return;
 	}
 
@@ -854,7 +886,7 @@ function renderCropPanel(node) {
 	if (sizeLine) {
 		const out = outputCropSize(node, config.width, config.height);
 		const suffix = out.width === config.width && out.height === config.height ? "" : ` -> ${out.width} x ${out.height}`;
-		sizeLine.textContent = `裁剪后宽高 ${config.width} x ${config.height}${suffix}  旋转 ${Math.round(config.angle)}°`;
+		setTextIfChanged(sizeLine, `裁剪后宽高 ${config.width} x ${config.height}${suffix}  旋转 ${Math.round(config.angle)}°`);
 	}
 }
 
@@ -865,17 +897,22 @@ function resizeCropPanel(node) {
 	const height = Math.round(cropPanelHeight(node));
 	panel.widget.computeSize = () => [width, height];
 	panel.widget.getHeight = () => height;
-	panel.root.style.width = `${Math.max(160, width - 18)}px`;
-	panel.root.style.height = `${height}px`;
-	panel.root.style.overflow = "hidden";
+	const rootWidth = `${Math.max(160, width - 18)}px`;
+	const rootHeight = `${height}px`;
+	if (panel.root.style.width !== rootWidth) panel.root.style.width = rootWidth;
+	if (panel.root.style.height !== rootHeight) panel.root.style.height = rootHeight;
+	if (panel.root.style.overflow !== "hidden") panel.root.style.overflow = "hidden";
 	renderCropPanel(node);
-	setTimeout(() => {
+	if (panel.resizeTimer != null) return;
+	panel.resizeTimer = setTimeout(() => {
+		panel.resizeTimer = null;
+		if (!panel.root?.isConnected) return;
 		const nextH = Math.round(node.computeSize?.()[1] || height);
 		const currentH = Math.round(node.size?.[1] || 0);
 		if (Math.abs(nextH - currentH) > 1) {
 			node.setSize?.([Math.round(node.size?.[0] || width), nextH]);
+			refreshNode(node);
 		}
-		refreshNode(node);
 	}, 0);
 }
 
@@ -1564,7 +1601,7 @@ function mountCropPanel(node) {
 	sizeLine.textContent = "裁剪后宽高 -- x --";
 	root.append(toolbar, canvas, sizeLine);
 	const widget = node.addDOMWidget(CROP_PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
-	node.__gjjRegionCropPanel = { root, canvas, sizeLine, widget, image: null, src: "", sourceSignature: "", sourceWidth: 0, sourceHeight: 0, dragging: false, dragMode: "new", dragAnchor: null, start: null };
+	node.__gjjRegionCropPanel = { root, canvas, sizeLine, widget, image: null, src: "", sourceSignature: "", sourceWidth: 0, sourceHeight: 0, dragging: false, dragMode: "new", dragAnchor: null, start: null, resizeTimer: null };
 
 	canvas.addEventListener("pointerdown", (event) => {
 		const panel = node.__gjjRegionCropPanel;

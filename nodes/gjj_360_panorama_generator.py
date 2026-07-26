@@ -49,8 +49,8 @@ from .gjj_batch_outpaint import (
 NODE_NAME = "GJJ_360PanoramaGenerator"
 IMAGE_INPUT_TYPE = "GJJ_BATCH__IMAGE,GJJ_BATCH_IMAGE,IMAGE"
 
-DEFAULT_UNET = "qwen_image_edit_2511_fp8mixed.safetensors"
-DEFAULT_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+DEFAULT_UNET = "qwen_image_edit_2511_int4_convrot.safetensors"
+DEFAULT_CLIP = "qwen_2.5_vl_7b_int4_convrot.safetensors"
 DEFAULT_VAE = "qwen_image_vae.safetensors"
 DEFAULT_LIGHTNING_LORA = "QWEN\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 DEFAULT_360_LORA = "QWEN\\251018_MICKMUMPITZ_QWEN-EDIT_360_03.safetensors"

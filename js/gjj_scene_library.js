@@ -658,7 +658,7 @@ import { api } from "/scripts/api.js";
 			refreshAnnotateButtons();
 			setStatus(state.autoAnnotate ? "已开启导入后自动打标" : "已关闭导入后自动打标");
 		};
-		const btn = button("🧠", "", "gjj-sl-btn gjj-sl-icon gjj-sl-annotate-toggle", (event) => {
+		const btn = button("🧑‍🎨", "", "gjj-sl-btn gjj-sl-icon gjj-sl-annotate-toggle", (event) => {
 			if (event?.shiftKey || event?.ctrlKey || event?.altKey || event?.metaKey) {
 				clearTimeout(clickTimer);
 				clickTimer = null;
@@ -688,7 +688,7 @@ import { api } from "/scripts/api.js";
 
 	function updateAnnotateButton(btn) {
 		if (!btn) return;
-		btn.textContent = state.annotating ? "..." : "🧠";
+		btn.textContent = state.annotating ? "..." : "🧑‍🎨";
 		btn.classList.toggle("active", !!state.autoAnnotate);
 		btn.classList.toggle("is-on", !!state.autoAnnotate && !state.annotating);
 		btn.classList.toggle("is-off", !state.autoAnnotate && !state.annotating);
@@ -861,6 +861,11 @@ import { api } from "/scripts/api.js";
 
 	async function deleteScene(scene) {
 		if (!scene) return;
+		const confirmed = window.confirm(`确定删除整个场景“${scene.name || scene.id}”吗？\n\n这会删除场景资料及其全部素材；删除标签不需要执行此操作。`);
+		if (!confirmed) {
+			setStatus("已取消删除场景");
+			return;
+		}
 		await apiJson(`${ENDPOINT}/scene?id=${encodeURIComponent(scene.id)}`, { method: "DELETE" });
 		state.selectedMarkId = "";
 		state.selectedId = "";
@@ -907,6 +912,77 @@ import { api } from "/scripts/api.js";
 			groupTitle.textContent = group.name || "依赖";
 			groupEl.append(groupTitle, buildClickableModelTree(group.items || [], controls, values));
 			body.appendChild(groupEl);
+		}
+		dialog.append(head, body);
+		backdrop.appendChild(dialog);
+		backdrop.addEventListener("click", (event) => {
+			stop(event);
+			if (event.target === backdrop) backdrop.remove();
+		});
+		panel.appendChild(backdrop);
+	}
+
+	function showSceneLibraryHelp() {
+		const panel = buildPanel();
+		panel.querySelector(".gjj-sl-help-backdrop")?.remove();
+		const backdrop = document.createElement("div");
+		backdrop.className = "gjj-sl-model-backdrop gjj-sl-help-backdrop";
+		const dialog = document.createElement("div");
+		dialog.className = "gjj-sl-model-dialog";
+		const head = document.createElement("div");
+		head.className = "gjj-sl-model-head";
+		const title = document.createElement("div");
+		title.className = "gjj-sl-model-title";
+		title.textContent = "❓ 场景库详细使用方法";
+		const spacer = document.createElement("div");
+		spacer.className = "gjj-sl-spacer";
+		head.append(title, spacer, button("❌关闭", "关闭帮助", "gjj-sl-btn", () => backdrop.remove()));
+		const body = document.createElement("div");
+		body.className = "gjj-sl-model-body";
+		body.style.cssText = "display:block;overflow:auto;padding:12px 16px;color:#dce8e4;font:13px/1.65 system-ui,'Microsoft YaHei',sans-serif;";
+		body.innerHTML = `
+			<section>
+				<h3>一、场景库用途</h3>
+				<p>场景库用于保存地点、环境图、360°全景图、关键词和场景备注。分镜提示词中可使用 <code>@场景名</code> 引用已保存场景，名称应简短且唯一。</p>
+			</section>
+			<section>
+				<h3>二、顶部按钮</h3>
+				<ul>
+					<li><b>➕ 批量智能导入：</b>一次选择多张场景图，自动建立场景；需要时生成对应的 360°全景图。</li>
+					<li><b>⬆ 导入场景：</b>给当前场景上传或替换素材。</li>
+					<li><b>🧑‍🎨 批量打标：</b>单击给全库缺失内容补充关键词和备注；双击切换“导入后自动打标”。</li>
+					<li><b>🧠 模型树：</b>查看模型所在目录，设置 360°生成和自动打标模型；点击模型行可搜索选择，复制按钮可复制模型名。</li>
+					<li><b>❓ 帮助：</b>打开当前这份场景库完整说明。</li>
+				</ul>
+			</section>
+			<section>
+				<h3>三、360°场景生成</h3>
+				<p>智能导入先生成并修复 1024×512 的自然无缝等距柱状全景底图，再调用 <code>GJJ_SeedVR2ImageUpscaler</code> 官方工作流放大为 2048×1024。默认优先使用 Qwen Image Edit 2511 int4 UNET、Qwen 2.5 VL int4 CLIP 和 Qwen Image VAE。</p>
+				<p>在 🧠 模型树中可分别修改生成 UNET、CLIP、VAE，以及 SeedVR2 放大主模型和 SeedVR2 VAE。修改后必须点击“保存设置”；之后的新导入任务才会使用新模型。</p>
+			</section>
+			<section>
+				<h3>四、整理、搜索与引用</h3>
+				<ul>
+					<li>填写场景类型、关键词和备注可提升搜索与自动引用的准确性。</li>
+					<li>搜索框支持场景名、关键词和物品描述；卡片内可继续维护素材和标注。</li>
+					<li>分镜引用必须与场景库名称一致；重名场景建议先改成更明确的地点名。</li>
+				</ul>
+			</section>
+			<section>
+				<h3>五、常见问题</h3>
+				<ul>
+					<li><b>保存后仍使用旧模型：</b>重新打开 🧠，确认树中显示的新名称；模型必须位于对应的 ComfyUI/models 子目录。</li>
+					<li><b>模型列表为空：</b>刷新模型列表或重启 ComfyUI，并检查 diffusion_models、text_encoders、vae、loras 目录。</li>
+					<li><b>全景接缝明显：</b>换用清晰、透视稳定、遮挡较少的源图，并避免原图包含文字或边框。</li>
+					<li><b>没有自动打标：</b>双击 🧑‍🎨 开启导入后自动打标，或单击它手动补全已有场景。</li>
+				</ul>
+			</section>
+		`;
+		for (const heading of body.querySelectorAll("h3")) {
+			heading.style.cssText = "margin:12px 0 5px;color:#effaf5;font-size:14px;";
+		}
+		for (const code of body.querySelectorAll("code")) {
+			code.style.cssText = "padding:1px 4px;border:1px solid #354950;border-radius:4px;background:#101a1f;color:#a7f3d0;";
 		}
 		dialog.append(head, body);
 		backdrop.appendChild(dialog);
@@ -1062,10 +1138,26 @@ import { api } from "/scripts/api.js";
 		setStatus(`已复制标签引用：${text}`);
 	}
 
-	function deleteSceneMark(scene, mark) {
+	async function deleteSceneMark(scene, mark, event = null) {
+		event?.preventDefault?.();
+		event?.stopImmediatePropagation?.();
+		event?.stopPropagation?.();
+		if (!scene?.id || !mark?.id) {
+			throw new Error("标签或场景 ID 无效，已阻止删除");
+		}
 		state.selectedMarkId = "";
 		const next = (scene.annotations || []).filter((item) => item.id !== mark.id);
-		return saveAnnotations(scene, next);
+		const data = await apiJson(`${ENDPOINT}/annotations`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ id: scene.id, annotations: next }),
+		});
+		if (!data.scene || String(data.scene.id || "") !== String(scene.id)) {
+			throw new Error("标签删除返回的场景不一致，已停止刷新");
+		}
+		state.selectedId = scene.id;
+		await refreshScenes(true);
+		setStatus(`已删除标签“${mark.keyword || mark.id}”，场景已保留`);
 	}
 
 	async function annotateMissingScenes(ids = []) {
@@ -1077,7 +1169,8 @@ import { api } from "/scripts/api.js";
 		const missingCount = candidates.filter((item) => {
 			const hasAsset = (item.assets || []).some((asset) => asset.preview_url);
 			const done = (item.annotations || []).length && (item.keywords || []).length && String(item.notes || "").trim();
-			return hasAsset && !done;
+			const needsRename = String(item.name || "").toLowerCase().includes("_unsaved");
+			return hasAsset && (!done || needsRename);
 		}).length;
 		const total = Math.max(1, missingCount || candidates.length || 1);
 		setImportProgress(0, total, missingCount ? `正在用大模型给 ${missingCount} 个场景自动打标...` : "正在扫描未打标场景...");
@@ -1512,8 +1605,8 @@ import { api } from "/scripts/api.js";
 				const ref = button("@", "引用标签", "gjj-sl-mark-tool", (event) => {
 					copyOrInsertSceneMarkReference(scene, mark, event.currentTarget).catch((error) => setStatus(error.message));
 				});
-				const del = button("×", "删除坐标", "gjj-sl-mark-tool danger", () => {
-					deleteSceneMark(scene, mark).catch((error) => setStatus(error.message));
+				const del = button("×", "只删除此标签，不删除场景", "gjj-sl-mark-tool danger", (event) => {
+					deleteSceneMark(scene, mark, event).catch((error) => setStatus(error.message));
 				});
 				const editAt = (event) => {
 					event.preventDefault();
@@ -1674,8 +1767,8 @@ import { api } from "/scripts/api.js";
 			const ref = button("@", "引用标签", "gjj-sl-btn gjj-sl-icon", (event) => {
 				copyOrInsertSceneMarkReference(scene, mark, event.currentTarget).catch((error) => setStatus(error.message));
 			});
-			const del = button("×", "删除坐标", "gjj-sl-btn gjj-sl-icon", () => {
-				deleteSceneMark(scene, mark).catch((error) => setStatus(error.message));
+			const del = button("×", "只删除此标签，不删除场景", "gjj-sl-btn gjj-sl-icon", (event) => {
+				deleteSceneMark(scene, mark, event).catch((error) => setStatus(error.message));
 			});
 			tools.append(edit, ref, del);
 			row.appendChild(tools);
@@ -1830,8 +1923,8 @@ import { api } from "/scripts/api.js";
 		head.append(drag, title, spacer, importButton);
 		head.appendChild(button("⬆", "导入场景文件", "gjj-sl-btn gjj-sl-icon", () => uploadAsset(selectedScene()).catch((error) => setStatus(error.message))));
 		head.appendChild(annotateButton([], "全库场景"));
-		head.appendChild(button("⚙️", "查看并设置场景库使用的模型", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
-		head.appendChild(button("❓", "查看场景库依赖目录树", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("🧠", "查看并设置场景库使用的模型树", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("❓", "查看整个场景库的详细实用方法", "gjj-sl-btn gjj-sl-icon", showSceneLibraryHelp));
 		const search = document.createElement("input");
 		search.className = "gjj-sl-search";
 		search.placeholder = "搜索场景、关键词、物品";
