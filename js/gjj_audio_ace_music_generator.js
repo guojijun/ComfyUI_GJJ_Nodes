@@ -5,8 +5,10 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set(["GJJ_AudioAceMusicGenerator"]);
 const STATUS_WIDGET_NAME = "gjj_audio_ace_music_status";
 const AUDIO_WIDGET_NAME = "gjj_audio_ace_music_audio";
+const MODEL_SIZES_ENDPOINT = "/gjj/audio_ace_model_sizes";
 const COMPACT_PANEL_HEIGHT = 40;
 const COMPACT_NODE_HEIGHT = 390;
+let modelSizesPromise = null;
 const PARAM_ORDER = [
 	"model_name",
 	"tags",
@@ -346,6 +348,30 @@ function widgetChoices(widget) {
 
 function modelWidgetChoices(node, name) {
 	return widgetChoices(getWidget(node, name)).map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function loadAudioAceModelSizes() {
+	if (!modelSizesPromise) {
+		modelSizesPromise = api.fetchApi(MODEL_SIZES_ENDPOINT)
+			.then((response) => response.ok ? response.json() : {})
+			.then((data) => data?.sizes || {})
+			.catch(() => ({}));
+	}
+	return modelSizesPromise;
+}
+
+function formatModelSize(bytes) {
+	const value = Number(bytes);
+	if (!Number.isFinite(value) || value < 0) return "未知";
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	let size = value;
+	let unitIndex = 0;
+	while (size >= 1024 && unitIndex < units.length - 1) {
+		size /= 1024;
+		unitIndex += 1;
+	}
+	const digits = size < 10 && unitIndex > 0 ? 2 : 1;
+	return `${size.toFixed(digits)} ${units[unitIndex]}`;
 }
 
 function aceMainModelTreeEntries(node) {
@@ -688,12 +714,36 @@ function applyModelTestFilter(dialog, value) {
 	}
 }
 
-async function queueModelTestBatch(node, models, dialog) {
-	const modelWidget = getWidget(node, "model_name");
-	if (!modelWidget || !models.length) return;
-	const original = modelWidget.value;
+function sortModelTestRows(list, key, direction) {
+	const factor = direction === "desc" ? -1 : 1;
+	const rows = [...list.querySelectorAll("[data-model-row]")];
+	rows.sort((a, b) => {
+		if (key === "size") {
+			const aSize = Number(a.dataset.modelSize);
+			const bSize = Number(b.dataset.modelSize);
+			const aKnown = Number.isFinite(aSize);
+			const bKnown = Number.isFinite(bSize);
+			if (aKnown !== bKnown) return aKnown ? -1 : 1;
+			if (aKnown && aSize !== bSize) return (aSize - bSize) * factor;
+		}
+		return String(a.dataset.modelRow || "").localeCompare(
+			String(b.dataset.modelRow || ""),
+			undefined,
+			{ numeric: true, sensitivity: "base" },
+		) * factor;
+	});
+	list.append(...rows);
+}
+
+async function queueModelTestBatch(node, models, dialog, testKind = "model") {
+	const targetWidgetName = testKind === "lora" ? "lora_name" : "model_name";
+	const targetWidget = getWidget(node, targetWidgetName);
+	if (!targetWidget || !models.length) return;
+	const original = targetWidget.value;
 	const originalTestMode = getWidget(node, "model_test_mode")?.value;
+	const originalLoraEnabled = getWidget(node, "lora_enabled")?.value;
 	const runButton = dialog?.querySelector("[data-model-test-run]");
+	const testLabel = testKind === "lora" ? "LoRA 测试" : "主模型测试";
 	try {
 		if (runButton) {
 			runButton.disabled = true;
@@ -701,26 +751,30 @@ async function queueModelTestBatch(node, models, dialog) {
 		}
 		for (let index = 0; index < models.length; index += 1) {
 			const model = models[index];
-			setWidgetValue(node, "model_name", model);
+			setWidgetValue(node, targetWidgetName, model);
+			if (testKind === "lora") setWidgetValue(node, "lora_enabled", true);
 			setWidgetValue(node, "model_test_mode", true);
-			setStatus(node, `模型测试 ${index + 1}/${models.length}: ${model}`);
+			setStatus(node, `${testLabel} ${index + 1}/${models.length}: ${model}`);
 			await queueOnlyCurrentNode(node);
 		}
-		setStatus(node, `已加入模型测试队列：${models.length} 个`);
+		setStatus(node, `已加入${testLabel}队列：${models.length} 个`);
 	} catch (error) {
-		console.error("[GJJ] 模型测试排队失败:", error);
-		setStatus(node, "模型测试排队失败");
+		console.error(`[GJJ] ${testLabel}排队失败:`, error);
+		setStatus(node, `${testLabel}排队失败`);
 	} finally {
-		setWidgetValue(node, "model_name", original);
+		setWidgetValue(node, targetWidgetName, original);
+		if (testKind === "lora") setWidgetValue(node, "lora_enabled", Boolean(originalLoraEnabled));
 		setWidgetValue(node, "model_test_mode", Boolean(originalTestMode));
 		dialog?.remove?.();
 	}
 }
 
-function openModelTestDialog(node) {
+function openModelTestDialog(node, testKind = "model") {
 	document.querySelector(".gjj-audio-ace-model-test-dialog")?.remove?.();
-	const choices = modelWidgetChoices(node, "model_name");
-	const current = String(getWidget(node, "model_name")?.value || "");
+	const targetWidgetName = testKind === "lora" ? "lora_name" : "model_name";
+	const testLabel = testKind === "lora" ? "LoRA 测试" : "主模型测试";
+	const choices = modelWidgetChoices(node, targetWidgetName).filter((name) => !String(name).startsWith("[未找到"));
+	const current = String(getWidget(node, targetWidgetName)?.value || "");
 	const overlay = document.createElement("div");
 	overlay.className = "gjj-audio-ace-model-test-dialog";
 	overlay.style.cssText = [
@@ -755,13 +809,13 @@ function openModelTestDialog(node) {
 	const header = document.createElement("div");
 	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
 	const title = document.createElement("div");
-	title.textContent = "🧪 模型测试";
+	title.textContent = `🧪 ${testLabel}`;
 	title.style.cssText = "font-size:14px;font-weight:800;color:#f2fbff";
 	const close = createIconButton({ icon: "×", title: "关闭", color: "#1b252b", onClick: () => overlay.remove() });
 	header.append(title, close);
 
 	const controls = document.createElement("div");
-	controls.style.cssText = "display:flex;gap:8px;align-items:center";
+	controls.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
 	const filter = document.createElement("input");
 	filter.placeholder = "关键词过滤，支持空格 AND";
 	filter.style.cssText = [
@@ -788,7 +842,9 @@ function openModelTestDialog(node) {
 			input.checked = false;
 		}
 	});
-	controls.append(filter, selectAll, clear);
+	const nameSort = createButton("名称 ↑", "按模型名称升序排列；再次点击切换降序", null);
+	const sizeSort = createButton("大小 ↑", "按模型文件大小升序排列；再次点击切换降序", null);
+	controls.append(filter, nameSort, sizeSort, selectAll, clear);
 
 	const list = document.createElement("div");
 	list.style.cssText = [
@@ -803,6 +859,8 @@ function openModelTestDialog(node) {
 		"padding:8px",
 		"background:#0b1418",
 	].join(";");
+	const folder = testKind === "lora" ? "loras" : "diffusion_models";
+	const sizeMapPromise = loadAudioAceModelSizes().then((sizes) => sizes?.[folder] || {});
 	for (const name of choices) {
 		const row = document.createElement("label");
 		row.dataset.modelRow = name;
@@ -814,31 +872,107 @@ function openModelTestDialog(node) {
 		checkbox.checked = name === current;
 		const text = document.createElement("span");
 		text.textContent = name;
-		text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-		row.append(checkbox, text);
+		text.style.cssText = "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+		const size = document.createElement("span");
+		size.textContent = "读取中…";
+		size.style.cssText = "flex:0 0 auto;color:#91a8ad;font:11px/1.3 monospace";
+		row.append(checkbox, text, size);
 		list.appendChild(row);
+		sizeMapPromise.then((sizeMap) => {
+			const bytes = Number(sizeMap?.[name]);
+			if (Number.isFinite(bytes)) row.dataset.modelSize = String(bytes);
+			size.textContent = formatModelSize(bytes);
+		});
 	}
+	const sortState = { name: "asc", size: "asc" };
+	const activateSort = (key, button) => {
+		const direction = sortState[key];
+		sortModelTestRows(list, key, direction);
+		button.textContent = `${key === "name" ? "名称" : "大小"} ${direction === "asc" ? "↑" : "↓"}`;
+		sortState[key] = direction === "asc" ? "desc" : "asc";
+	};
+	nameSort.addEventListener("click", () => activateSort("name", nameSort));
+	sizeSort.addEventListener("click", async () => {
+		await sizeMapPromise;
+		activateSort("size", sizeSort);
+	});
 
 	const footer = document.createElement("div");
 	footer.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
 	const note = document.createElement("div");
-	note.textContent = "使用当前歌词、音乐标签和采样参数，逐个主模型加入队列。";
+	note.textContent = testKind === "lora"
+		? `固定主模型「${String(getWidget(node, "model_name")?.value || "")}」和全部参数，只更换 LoRA。`
+		: "固定当前歌词、音乐标签和采样参数，只更换主模型。";
 	note.style.cssText = "font-size:12px;color:#9eb2b4;min-width:0";
 	const run = createButton("加入队列", "按选择的模型逐个生成音乐", () => {
 		const models = selectedModelChoices(overlay);
 		if (!models.length) {
-			setStatus(node, "模型测试：未选择模型");
+			setStatus(node, `${testLabel}：未选择项目`);
 			return;
 		}
-		queueModelTestBatch(node, models, overlay);
+		queueModelTestBatch(node, models, overlay, testKind);
 	});
 	run.dataset.modelTestRun = "1";
+	run.title = testKind === "lora" ? "固定主模型和其它参数，按选择的 LoRA 逐个生成" : "按选择的主模型逐个生成音乐";
 	footer.append(note, run);
 
 	panel.append(header, controls, list, footer);
 	overlay.appendChild(panel);
 	document.body.appendChild(overlay);
 	filter.focus();
+}
+
+function openTestTypeDialog(node) {
+	document.querySelector(".gjj-audio-ace-model-test-dialog")?.remove?.();
+	const overlay = document.createElement("div");
+	overlay.className = "gjj-audio-ace-model-test-dialog";
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:1100",
+		"background:rgba(0,0,0,.35)",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"padding:18px",
+		"box-sizing:border-box",
+	].join(";");
+	protectPanelEvents(overlay);
+
+	const panel = document.createElement("div");
+	panel.style.cssText = [
+		"width:min(460px, calc(100vw - 36px))",
+		"display:flex",
+		"flex-direction:column",
+		"gap:10px",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#dce7e2",
+		"box-shadow:0 18px 48px rgba(0,0,0,.48)",
+		"padding:12px",
+		"box-sizing:border-box",
+	].join(";");
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
+	const title = document.createElement("div");
+	title.textContent = "🧪 选择测试类型";
+	title.style.cssText = "font-size:14px;font-weight:800;color:#f2fbff";
+	const close = createIconButton({ icon: "×", title: "关闭", color: "#1b252b", onClick: () => overlay.remove() });
+	header.append(title, close);
+
+	const options = document.createElement("div");
+	options.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:10px";
+	const modelTest = createButton("主模型测试", "固定其它参数，只更换主模型", () => openModelTestDialog(node, "model"));
+	const loraTest = createButton("LoRA 测试", "固定主模型和其它参数，只更换 LoRA", () => openModelTestDialog(node, "lora"));
+	for (const button of [modelTest, loraTest]) {
+		button.style.height = "42px";
+		button.style.fontSize = "13px";
+	}
+	options.append(modelTest, loraTest);
+	panel.append(header, options);
+	overlay.appendChild(panel);
+	document.body.appendChild(overlay);
 }
 
 function progressFromText(text) {
@@ -906,7 +1040,7 @@ function ensureStatusWidget(node) {
 	statusContent.append(track, label);
 
 	const generateBtn = createIconButton({ icon: "▶️", title: "只执行当前节点，生成音乐", color: "#16845a" });
-	const testBtn = createIconButton({ icon: "🧪", title: "模型测试：多选模型并用当前参数生成", color: "#355f76" });
+	const testBtn = createIconButton({ icon: "🧪", title: "测试主模型或 LoRA", color: "#355f76" });
 	const buttons = {};
 	const panelButton = (key, icon, title, color) => {
 		const button = createIconButton({
@@ -1320,7 +1454,7 @@ function patchNode(node) {
 	}
 	if (status?.testBtn) {
 		status.testBtn.addEventListener("click", () => {
-			openModelTestDialog(node);
+			openTestTypeDialog(node);
 		});
 	}
 }

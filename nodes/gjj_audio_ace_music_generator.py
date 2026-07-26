@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Any
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+except Exception:
+    web = None
+    PromptServer = None
 
 import comfy.model_management
 import comfy.model_sampling
@@ -32,6 +40,32 @@ except Exception:
 
 
 NODE_NAME = "GJJ_AudioAceMusicGenerator"
+
+
+async def _get_audio_ace_model_sizes(_request):
+    sizes: dict[str, dict[str, int]] = {}
+    for category in ("diffusion_models", "loras"):
+        category_sizes: dict[str, int] = {}
+        try:
+            names = folder_paths.get_filename_list(category) or []
+        except Exception:
+            names = []
+        for name in names:
+            try:
+                path = folder_paths.get_full_path(category, name)
+                if path:
+                    category_sizes[str(name)] = int(os.path.getsize(path))
+            except (OSError, TypeError, ValueError):
+                continue
+        sizes[category] = category_sizes
+    return web.json_response({"ok": True, "sizes": sizes})
+
+
+if PromptServer is not None and getattr(PromptServer, "instance", None) is not None and web is not None:
+    _server = PromptServer.instance
+    if not getattr(_server, "_gjj_audio_ace_model_sizes_api_registered", False):
+        _server.routes.get("/gjj/audio_ace_model_sizes")(_get_audio_ace_model_sizes)
+        _server._gjj_audio_ace_model_sizes_api_registered = True
 
 DEFAULT_MODEL_KEYWORD = "ace_step_1.5_turbo_aio"
 DEFAULT_CHECKPOINT = "ace_step_1.5_turbo_aio.safetensors"
@@ -98,6 +132,24 @@ ACE_MODEL_TREE = [
         "filename": "*ace*step*.safetensors",
         "description": "可选的主模型 LoRA；列表只显示文件名同时包含 ace 和 step 的模型，不区分大小写。",
     },
+    {
+        "label": "歌词起点检测 ASR（推荐）",
+        "folder": "ASR",
+        "filename": "Qwen3-ASR-1.7B/",
+        "description": "正常生成带歌词音乐时，用于检测首个人声起点；与 Qwen3-ASR-0.6B 二选一。模型测试模式不使用。",
+    },
+    {
+        "label": "歌词起点检测 ASR（轻量）",
+        "folder": "ASR",
+        "filename": "Qwen3-ASR-0.6B/",
+        "description": "轻量 ASR，用于检测首个人声起点；与 Qwen3-ASR-1.7B 二选一。模型测试模式不使用。",
+    },
+    {
+        "label": "歌词强制对齐模型",
+        "folder": "ASR",
+        "filename": "Qwen3-ForcedAligner-0.6B/",
+        "description": "正常生成带歌词音乐时，用于生成原歌词 SRT 时间轴。模型测试模式不使用。",
+    },
 ]
 ACE_MODEL_TREE_TEXT = f"""models/
 ├─ checkpoints/
@@ -111,8 +163,12 @@ ACE_MODEL_TREE_TEXT = f"""models/
 │  └─ {DEFAULT_CLIP_2}
 ├─ vae/
 │  └─ {DEFAULT_VAE}
-└─ loras/
-   └─ *ace*step*.safetensors  # 可选 LoRA"""
+├─ loras/
+│  └─ *ace*step*.safetensors  # 可选 LoRA
+└─ ASR/
+   ├─ Qwen3-ASR-1.7B/  # 推荐，与 0.6B 二选一；检测首个人声起点
+   ├─ Qwen3-ASR-0.6B/  # 轻量，与 1.7B 二选一
+   └─ Qwen3-ForcedAligner-0.6B/  # 原歌词 SRT 强制对齐"""
 UI_PARAMETER_ORDER = (
     "model_name",
     "tags",
@@ -1308,11 +1364,21 @@ class GJJ_AudioAceMusicGenerator:
         elapsed_seconds = max(0.0, time.perf_counter() - started_at)
         model_output_name = _safe_output_name(resolved_name)
         if bool(model_test_mode):
-            prefix = f"audio/{model_output_name}+{elapsed_seconds:.1f}s"
+            if bool(lora_enabled) and abs(float(lora_strength)) > 1e-8:
+                lora_output_name = _safe_output_name(lora_name)
+                prefix = f"audio/{model_output_name}+LoRA_{lora_output_name}+{elapsed_seconds:.1f}s"
+            else:
+                prefix = f"audio/{model_output_name}+{elapsed_seconds:.1f}s"
         else:
             prefix = f"audio/{model_output_name}"
         audio_ui = _save_audio_mp3_ui(audio, prefix, "320k")
         _send_audio_preview(unique_id, audio_ui)
+
+        if bool(model_test_mode):
+            _send_status(unique_id, f"完成：测试音乐已生成，已跳过歌词 SRT 对齐。{summary}")
+            ui = dict(audio_ui)
+            ui["srt_text"] = [""]
+            return {"ui": ui, "result": (audio, "")}
 
         srt_text = ""
         if _lyrics_to_srt_lines(source_lyrics):
