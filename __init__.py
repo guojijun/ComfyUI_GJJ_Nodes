@@ -147,7 +147,9 @@ def _gjj_default_user_settings() -> dict:
 		},
 		"character_library": {
 			"matting_method": "RMBG1.4",
-			"multiview_unet": "qwen_image_edit_2511_int8_convrot.safetensors",
+			"multiview_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
+			"multiview_clip": "qwen_2.5_vl_7b_int4_convrot.safetensors",
+			"multiview_vae": "qwen_image_vae.safetensors",
 			"multiview_lora_1": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 			"multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
 			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
@@ -254,11 +256,16 @@ def _gjj_model_filename_choices(category: str) -> list[str]:
 	return result
 
 def _gjj_library_model_choices() -> dict:
+	try:
+		from .nodes.gjj_comprehensive_matting import METHODS as matting_methods
+	except Exception:
+		matting_methods = ["RMBG1.4"]
 	return {
 		"text_encoders": _gjj_model_filename_choices("text_encoders"),
 		"diffusion_models": _gjj_model_filename_choices("diffusion_models"),
+		"vae": _gjj_model_filename_choices("vae"),
 		"loras": _gjj_model_filename_choices("loras"),
-		"matting_methods": ["RMBG1.4"],
+		"matting_methods": list(matting_methods) or ["RMBG1.4"],
 	}
 
 def _register_gjj_user_settings_api():
@@ -1234,6 +1241,7 @@ def _register_gjj_character_library_api():
 			from .nodes.gjj_comprehensive_matting import (
 				GJJ_ComprehensiveMatting,
 				METHOD_RMBG14,
+				METHODS,
 				MODEL_DOWNLOAD_URL,
 				_pil_list_to_tensor,
 				_resolve_model_path,
@@ -1243,14 +1251,12 @@ def _register_gjj_character_library_api():
 			raise RuntimeError(f"加载综合抠图运行时失败：{exc}") from exc
 		character_settings = _gjj_section_settings("character_library")
 		matting_method = str(character_settings.get("matting_method") or METHOD_RMBG14)
-		if matting_method not in {METHOD_RMBG14}:
+		if matting_method not in METHODS:
 			matting_method = METHOD_RMBG14
 		try:
 			_resolve_model_path(matting_method, notify_missing=False)
 		except Exception as exc:
-			raise RuntimeError(
-				f"未找到 RMBG1.4 抠图模型：models/RMBG/rmbg1.4.safetensors。{exc}\n{MODEL_DOWNLOAD_URL}"
-			) from exc
+			raise RuntimeError(f"未找到“{matting_method}”所需的抠图模型。{exc}\n{MODEL_DOWNLOAD_URL}") from exc
 		rgb_images = prepare_matting_rgb_batch(images)
 		context_unique_id = "gjj_character_library_import"
 		had_last_prompt_id = hasattr(server, "last_prompt_id")
@@ -1386,7 +1392,12 @@ def _register_gjj_character_library_api():
 			view_rule = "标准正面视图，主体面向镜头"
 
 		shot_rule = "远景全身照，完整全身构图，从头顶到双脚全部可见，全身无裁剪，双脚完整在画面内"
-		if "微距" in text or "macro" in lowered:
+		is_headshot = any(token in text for token in ("大头照", "大头", "头像", "头部", "脸")) or any(
+			token in lowered for token in ("headshot", "head shot", "face portrait")
+		)
+		if is_headshot:
+			shot_rule = "大头特写，近距离头肩肖像，只构图头部、颈部和双肩，画面下缘不超过胸口，禁止出现腰部、腿、脚或鞋"
+		elif "微距" in text or "macro" in lowered:
 			shot_rule = "微距细节特写，只拍摄脸部或服装局部细节，画面极近，纹理清晰"
 		elif "大特写" in text or "extreme close" in lowered:
 			shot_rule = "大特写肖像构图，只包含脸部主要区域和少量头部边缘，五官清晰"
@@ -1419,8 +1430,8 @@ def _register_gjj_character_library_api():
 		elif "倾斜镜头" in text:
 			angle_rule = "倾斜镜头构图，画面轻微 Dutch angle"
 
-		if any(token in text for token in ("大头", "头像", "头部", "脸")) or any(token in lowered for token in ("head", "face", "portrait")):
-			return f"白色背景,{view_rule},{shot_rule},{angle_rule},构图紧凑，清晰保留完整面部特征，人物资产。"
+		if is_headshot or any(token in lowered for token in ("head", "face", "portrait")):
+			return f"白色背景,大头特写,{view_rule},{shot_rule},{angle_rule},构图紧凑，清晰保留完整面部特征，人物资产。"
 		if "动作" in text or "pose" in lowered or "action" in lowered:
 			return f"白色背景,{text}人物动作视图,{view_rule},{shot_rule},{angle_rule},动作清晰自然，保持身份、服装配色和风格一致。"
 		return f"白色背景,{text or '自定义角度'}人物视图,{view_rule},{shot_rule},{angle_rule},保持身份、五官、服装配色和风格一致。"
@@ -1486,6 +1497,8 @@ def _register_gjj_character_library_api():
 			"controls": [
 				{"key": "matting_method", "label": "抠图模型", "options": choices.get("matting_methods") or ["RMBG1.4"]},
 				{"key": "multiview_unet", "label": "多视图 UNET", "options": choices.get("diffusion_models") or []},
+				{"key": "multiview_clip", "label": "多视图 CLIP / VL", "options": choices.get("text_encoders") or []},
+				{"key": "multiview_vae", "label": "多视图 VAE", "options": choices.get("vae") or []},
 				{"key": "multiview_lora_1", "label": "Lightning LoRA", "options": choices.get("loras") or []},
 				{"key": "multiview_lora_2", "label": "多角度 LoRA", "options": choices.get("loras") or []},
 				{"key": "annotate_clip", "label": "备注/性别文本编码器", "options": choices.get("text_encoders") or []},
@@ -1500,9 +1513,9 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🚀 生成多视图",
 					"items": [
-						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int8_convrot.safetensors'}"},
-						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
-						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
+						{"label": "CLIP / VL", "path": f"models/text_encoders/{settings.get('multiview_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
+						{"label": "VAE", "path": f"models/vae/{settings.get('multiview_vae') or 'qwen_image_vae.safetensors'}"},
 						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
 						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
@@ -1915,6 +1928,8 @@ def _register_gjj_character_library_api():
 						return str(match)
 				return ""
 			available_unets = _safe_filename_list("diffusion_models") or []
+			available_clips = _safe_filename_list("text_encoders") or []
+			available_vaes = _safe_filename_list("vae") or []
 			unet_seed = str(character_settings.get("multiview_unet") or default_widget_value("unet_name", DEFAULT_QWEN2511_UNET))
 			unet_name = pick_model_any_subdir("diffusion_models", unet_seed, available_unets, DEFAULT_QWEN2511_UNET, (".safetensors", ".gguf"))
 			if not unet_name:
@@ -1926,10 +1941,26 @@ def _register_gjj_character_library_api():
 				unet_name = pick_model_any_subdir("diffusion_models", multiview_unet_override, available_unets, unet_name, (".safetensors", ".gguf")) or unet_name
 			if not _is_qwen2511_unet_name(unet_name):
 				unet_name = _pick_qwen2511_unet_name(available_unets) or unet_name
+			clip_seed = str(character_settings.get("multiview_clip") or "qwen_2.5_vl_7b_int4_convrot.safetensors")
+			vae_seed = str(character_settings.get("multiview_vae") or "qwen_image_vae.safetensors")
+			multiview_clip_override = pick_model_any_subdir(
+				"text_encoders",
+				multiview_clip_override or clip_seed,
+				available_clips,
+				clip_seed,
+				(".safetensors", ".gguf"),
+			)
+			multiview_vae_override = pick_model_any_subdir(
+				"vae",
+				multiview_vae_override or vae_seed,
+				available_vaes,
+				vae_seed,
+				(".safetensors", ".pt", ".pth"),
+			)
 			preset = gjjutils_match_model_family_preset(unet_name) or {}
 			has_preset = bool(preset)
 			lora_1_seed = str(preset.get("lora_1_name") if has_preset else (character_settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA))
-			lora_2_seed = str(preset.get("lora_2_name") if has_preset else (character_settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA))
+			lora_2_seed = str(character_settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA)
 			lora_1_name = pick_lora_any_subdir(lora_1_seed) if lora_1_seed else ""
 			lora_2_name = pick_lora_any_subdir(lora_2_seed) if lora_2_seed else ""
 			if multiview_lora_1_override and multiview_lora_1_override != "不使用":

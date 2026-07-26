@@ -47,9 +47,13 @@ IMAGE_INPUT_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 MIXED_IMAGE_OUTPUT = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 PREVIEW_SUBFOLDER = "gjj_storyboard_grid_generator"
 SCENE_LINE_RE = re.compile(
-    r"^\s*(?:scene|shot|镜头|分镜)\s*(?:[#:：\-]?\s*[\d一二三四五六七八九十]+)?(?:\s*[:：]\s*|\s+)"
+    r"^\s*(?:scene|shot|镜头|分镜)\s*(?:[#:：\-]?\s*[\d一二三四五六七八九十百零〇两]+)?(?:\s*[:：]\s*|\s+)"
     r"(?:(?P<label>.*?)\s*(?:[:：]{1,2}|::)\s*)?(?P<body>.+?)\s*$",
     re.IGNORECASE,
+)
+SCENE_BRACKET_LINE_RE = re.compile(
+    r"^\s*\[\s*(?P<label>[^\[\]\r\n]+?)\s*\]"
+    r"\s*(?:[:：\-—]\s*)?(?P<body>.*?)\s*$"
 )
 CHARACTER_REF_RE = re.compile(r"@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?")
 SCENE_REF_RE = re.compile(
@@ -243,14 +247,19 @@ def _split_scene_line_segments(text: str) -> list[str]:
         line = raw_line.strip()
         if not line:
             continue
-        match = SCENE_LINE_RE.match(line)
+        bracket_match = SCENE_BRACKET_LINE_RE.match(line)
+        match = bracket_match or SCENE_LINE_RE.match(line)
         if match:
             matched = True
             flush_current()
-            label = _safe_text(match.group("label")).strip(" 　-—:：")
             body = _safe_text(match.group("body")).strip()
-            current.append(f"{label}，{body}" if label else body)
-        elif matched and current:
+            if bracket_match:
+                if body:
+                    current.append(body)
+            else:
+                label = _safe_text(match.group("label")).strip(" 　-—:：")
+                current.append(f"{label}，{body}" if label else body)
+        elif matched:
             current.append(line)
 
     flush_current()
@@ -3416,7 +3425,7 @@ def _ensure_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
 class GJJ_StoryboardGridGenerator:
     CATEGORY = "GJJ/Image"
     FUNCTION = "generate"
-    DESCRIPTION = "分镜宫格生成器：复用懒人图文集成一键生图流程，正向提示词按空行、--- 或 Scene：镜头 :: 描述 分段生成，并智能拼接为宫格图。"
+    DESCRIPTION = "分镜宫格生成器：复用懒人图文集成一键生图流程，正向提示词按场景行首标记、空行或 --- 分段生成，并智能拼接为宫格图。"
     SEARCH_ALIASES = ["分镜生成器", "智能宫格", "storyboard grid", "storyboard generator"]
     RETURN_TYPES = ("IMAGE", MIXED_IMAGE_OUTPUT)
     RETURN_NAMES = ("智能宫格图", "分镜图片")
@@ -3427,10 +3436,46 @@ class GJJ_StoryboardGridGenerator:
     INPUT_IS_LIST = True
     OUTPUT_NODE = True
     GJJ_HELP = {
+        "title": "GJJ 分镜宫格生成器",
         "description": DESCRIPTION,
         "model_tree": True,
         "dynamic_model_tree_only": True,
-        "notice": "正向提示词按空行、单独一行 --- 或 Scene：镜头 :: 描述 分段；每段会调用一次懒人图文集成一键生图流程。",
+        "notice": (
+            "【正向提示词分段方法】\n"
+            "每个分段生成一张分镜图片，完成后按“宫格布局”自动拼接。\n\n"
+            "1. 推荐格式：每段第一行以非空方括号 [...] 开头。\n"
+            "方括号内容不限，例如 [1]、[场景1]、[镜头 2]、[A]、[近景]；"
+            "标记后可直接写描述，也可加冒号、短横线或破折号。\n"
+            "示例：\n"
+            "[场景1] 清晨的车站，女孩站在月台等待\n"
+            "[2]：列车驶入车站，风吹动女孩的头发\n"
+            "[近景] - 女孩登上列车，回头看向月台\n\n"
+            "2. 标记可单独占一行；后续没有新行首方括号的非空行，会自动续接到当前分镜。\n"
+            "示例：\n"
+            "[第一格]\n"
+            "夜晚的城市街道\n"
+            "霓虹灯倒映在雨后的路面\n"
+            "人物从画面右侧走入\n\n"
+            "3. 兼容格式：无方括号时仍支持 Scene 1: 描述、Shot 2: 描述、镜头3：描述、"
+            "分镜4 标题 :: 描述。\n\n"
+            "4. 无场景行首标记时：可用空行或单独一行 --- 分隔段落。\n\n"
+            "【注意】只要一行开头出现非空 [...]，就会被识别为新分镜标记；"
+            "方括号之前只能有空白字符。标记之前的文字不会成为分镜，"
+            "方括号标记本身只用于分段，不会写入最终生图提示词。\n\n"
+            "【断点续生成】生成过程中如被取消或中断，再次执行时会保留已经完成的格子，"
+            "自动跳过已有图片并只生成缺失格；提示词或关键生成参数改变后会建立新缓存。\n\n"
+            "【参数浮窗】📐 管理尺寸、宫格与缩放参数；🧠 管理主模型、精度、CLIP、VAE 与 LoRA；"
+            "⚙️ 管理其余生成参数。浮窗默认紧贴节点下方，拖动标题栏可移动并记住位置；"
+            "三个浮窗互斥且不占节点主体空间。右上角“确定”保存修改，“取消”放弃修改，"
+            "两者都会关闭当前浮窗。🧠 中“保持模型”开启后会保留模型、CLIP 和 VAE，"
+            "加速连续生成但继续占用显存；主面板 🧠 按钮会以紫色底色和亮色边框提示开启状态。\n"
+            "切换 UNET 主模型时，CLIP、VAE 与 LoRA 会按模型族关键词筛选候选列表，"
+            "并优先选择名称含 int4_convrot 的匹配模型。主模型同时命中 qwen、image、edit、2511 "
+            "时，LoRA 会强制选择同时命中 next、scene、lora、v2、3000 的候选项。"
+            "🧠 使用与 GJJ_LazyImageStudio 相同的模型目录树，按 models/diffusion_models、"
+            "models/text_encoders、models/vae、models/loras 显示所在目录；点击模型行展开顶部带"
+            "模糊关键词框的候选列表，多个关键词用空格分隔时需全部命中，📋 可复制模型名称。"
+        ),
     }
     _shared_storyboard_cell_cache: dict[str, dict[str, Any]] = {}
 
@@ -3457,7 +3502,7 @@ class GJJ_StoryboardGridGenerator:
                         "multiline": True,
                         "dynamicPrompts": True,
                         "display_name": "✨ 正向提示词",
-                        "tooltip": "按空行、单独一行 --- 或 Scene：镜头 :: 描述 分段；每段生成一张分镜图片。",
+                        "tooltip": "行首任意非空 [...] 都会开始一个新分镜；也支持空行、单独一行 --- 或 Scene/镜头格式。每段生成一张分镜图片。",
                     },
                 ),
                 "negative_prompt": (
@@ -3579,6 +3624,14 @@ class GJJ_StoryboardGridGenerator:
                         "tooltip": "可选单行 LoRA。主模型为 qwen-image-edit / firered-image-edit 时默认选择名称匹配 next-scene 的 LoRA；flux/f2k/klein 时默认选择名称匹配 f2k_9B_lcs_consist 的 LoRA。",
                     },
                 ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "🧠 保持模型",
+                        "tooltip": "开启后执行结束不主动释放当前模型、CLIP 和 VAE，加速连续生成；会继续占用相应显存。",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_graph": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -3637,6 +3690,7 @@ class GJJ_StoryboardGridGenerator:
         force_generate_all="false",
         storyboard_preview_images="[]",
         storyboard_lora_name="",
+        keep_model_loaded=False,
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
@@ -3672,6 +3726,7 @@ class GJJ_StoryboardGridGenerator:
         force_generate_all = _parse_bool(_first_scalar(force_generate_all), False)
         storyboard_preview_images = _first_scalar(storyboard_preview_images)
         storyboard_lora_name = _first_scalar(storyboard_lora_name)
+        keep_model_loaded = _parse_bool(_first_scalar(keep_model_loaded), False)
         unique_id = _first_scalar(unique_id)
         clip_name1, vae_name = _ensure_next_scene_image_edit_clip_vae(unet_name, clip_name1, vae_name)
         if not _has_configured_lora_data(lora_data):
@@ -3753,6 +3808,7 @@ class GJJ_StoryboardGridGenerator:
         )
         cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
         stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
+        resume_missing_indices: set[int] = set()
         if not force_generate_all and not single_cell_mode and not selected_cell_mode:
             cached_count_before_preview = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
             preview_cells = _load_storyboard_preview_cells(storyboard_preview_images, cell_w, cell_h)
@@ -3776,12 +3832,16 @@ class GJJ_StoryboardGridGenerator:
                 return (grid, cells)
             cached_count = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
             if cached_count > 0:
-                missing = [str(index) for index, item in enumerate(stitched_cells, start=1) if not isinstance(item, torch.Tensor)]
-                raise RuntimeError(
-                    f"当前只找到 {cached_count}/{geometry_count} 格已生成分镜，缺少第 {'、'.join(missing)} 格；"
-                    "请不要清空预览，或先用“单格/全部”把缺失格生成出来，再运行下游拼图。"
+                resume_missing_indices = {
+                    index for index, item in enumerate(stitched_cells, start=1) if not isinstance(item, torch.Tensor)
+                }
+                missing_text = "、".join(str(index) for index in sorted(resume_missing_indices))
+                _send_status(
+                    unique_id,
+                    f"检测到断点缓存 {cached_count}/{geometry_count}，继续生成第 {missing_text} 格。",
                 )
-            _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
+            else:
+                _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
         storyboard_character_refs = _storyboard_character_context(prompts)
         is_next_scene_image_edit = _is_next_scene_image_edit_unet(unet_name)
         is_flux_storyboard = _is_flux_storyboard_unet(unet_name)
@@ -3791,6 +3851,8 @@ class GJJ_StoryboardGridGenerator:
             _send_status(unique_id, f"准备生成选中分镜 {len(prompts)} 张 / 共 {preview_total} 格...")
         elif single_cell_mode:
             _send_status(unique_id, f"准备生成单格分镜 {single_cell_index}/{preview_total}...")
+        elif resume_missing_indices:
+            _send_status(unique_id, f"断点续生成 {len(resume_missing_indices)} 张 / 共 {preview_total} 格...")
         else:
             _send_status(unique_id, f"准备生成 {len(prompts)} 张分镜图片...")
 
@@ -3799,6 +3861,8 @@ class GJJ_StoryboardGridGenerator:
                 preview_index = selected_indices[index - 1]
             else:
                 preview_index = seed_offset + index if single_cell_mode else index
+            if resume_missing_indices and preview_index not in resume_missing_indices:
+                continue
             line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(
                 line,
                 cell_w,
@@ -3920,6 +3984,7 @@ class GJJ_StoryboardGridGenerator:
                 batch_source_images="[]",
                 disable_reference_auto_mask=True,
                 force_empty_latent_reference=is_next_scene_image_edit,
+                keep_model_loaded=keep_model_loaded,
                 prompt_graph=prompt_graph,
                 unique_id=unique_id,
                 extra_pnginfo=extra_pnginfo,

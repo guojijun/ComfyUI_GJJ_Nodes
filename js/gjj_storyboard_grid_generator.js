@@ -56,8 +56,25 @@ const PANEL_SYNC_WIDGETS = [
 	"cell_fit",
 	"resize_method",
 	"size_alignment",
+	"keep_model_loaded",
 ];
 const PREVIEW_REFRESH_WIDGETS = new Set(["width", "height", "layout_mode", "gap", "size_alignment"]);
+const PARAMETER_DIALOG_GROUPS = {
+	size: {
+		title: "📐 尺寸与宫格",
+		widgets: ["width", "height", "layout_mode", "gap", "cell_fit", "resize_method", "size_alignment"],
+	},
+	model: {
+		title: "🧠 模型设置",
+		widgets: ["unet_name", "unet_dtype", "clip_name1", "vae_name", STORYBOARD_LORA_NAME, "keep_model_loaded"],
+	},
+	settings: {
+		title: "⚙️ 生成设置",
+		widgets: ["negative_prompt", "main_image_index", "batch_size", "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "grow_mask_by"],
+	},
+};
+let activeParameterDialog = null;
+let activeModelSearchPopup = null;
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
 	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
@@ -570,18 +587,25 @@ function parsePromptParts(text) {
 	const sceneLines = [];
 	let current = [];
 	let matched = false;
-	const sceneRe = /^\s*(?:scene|shot|镜头|分镜)\s*(?:[#:：\-]?\s*[\d一二三四五六七八九十]+)?(?:\s*[:：]\s*|\s+)(?:(.*?)\s*(?:[:：]{1,2}|::)\s*)?(.+?)\s*$/i;
+	const bracketRe = /^\s*\[\s*([^\[\]\r\n]+?)\s*\]\s*(?:[:：\-—]\s*)?(.*?)\s*$/;
+	const sceneRe = /^\s*(?:scene|shot|镜头|分镜)\s*(?:[#:：\-]?\s*[\d一二三四五六七八九十百零〇两]+)?(?:\s*[:：]\s*|\s+)(?:(.*?)\s*(?:[:：]{1,2}|::)\s*)?(.+?)\s*$/i;
 	for (const sourceLine of raw.split(/\r?\n/)) {
 		const line = sourceLine.trim();
 		if (!line) continue;
+		const bracketMatch = line.match(bracketRe);
 		const match = line.match(sceneRe);
-		if (match) {
+		if (bracketMatch || match) {
 			matched = true;
 			if (current.length) sceneLines.push(current.join("\n").trim());
-			const label = String(match[1] || "").trim().replace(/^[\s\-—:：]+|[\s\-—:：]+$/g, "");
-			const body = String(match[2] || "").trim();
-			current = [label ? `${label}，${body}` : body];
-		} else if (matched && current.length) {
+			if (bracketMatch) {
+				const body = String(bracketMatch[2] || "").trim();
+				current = body ? [body] : [];
+			} else {
+				const label = String(match[1] || "").trim().replace(/^[\s\-—:：]+|[\s\-—:：]+$/g, "");
+				const body = String(match[2] || "").trim();
+				current = [label ? `${label}，${body}` : body];
+			}
+		} else if (matched) {
 			current.push(line);
 		}
 	}
@@ -1006,13 +1030,25 @@ function setWidgetHidden(widget, hidden) {
 function updateSettingsButtonState(node) {
 	const button = node?.__gjjStoryboardSettingsButton;
 	if (!button) return;
-	const open = settingsOpen(node);
-	button.textContent = open ? "⚙️收起" : "⚙️设置";
-	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示反向提示词、模型、尺寸、采样和宫格参数。";
+	const open = activeParameterDialog?.node === node && activeParameterDialog?.group === "settings";
 	button.classList.toggle("on", open);
 	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
 	button.style.borderColor = open ? "#94a3b8" : "#55636f";
-	button.style.color = open ? "#ffffff" : "#e5edf2";
+}
+
+function updateModelButtonState(node) {
+	const button = node?.__gjjStoryboardModelButton;
+	if (!button) return;
+	const rawKeepModel = getWidget(node, "keep_model_loaded")?.value;
+	const keepModel = rawKeepModel === true || rawKeepModel === 1 || ["true", "1", "on", "yes"].includes(String(rawKeepModel || "").toLowerCase());
+	const open = activeParameterDialog?.node === node && activeParameterDialog?.group === "model";
+	button.classList.toggle("on", open);
+	button.style.background = keepModel
+		? (open ? "linear-gradient(135deg, #6d28d9, #8b5cf6)" : "linear-gradient(135deg, #4c1d95, #6d28d9)")
+		: (open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)");
+	button.style.borderColor = keepModel ? "#c4b5fd" : (open ? "#94a3b8" : "#55636f");
+	button.style.color = keepModel ? "#f5f3ff" : "#e5edf2";
+	button.title = keepModel ? "模型参数 · 保持模型已开启" : "模型参数 · 保持模型已关闭";
 }
 
 function orderWidgets(node) {
@@ -1035,16 +1071,16 @@ function orderWidgets(node) {
 
 function applySettingsVisibility(node) {
 	if (!node) return;
-	const open = settingsOpen(node);
 	for (const name of PANEL_SYNC_WIDGETS) {
 		const widget = getWidget(node, name);
 		if (!widget || ALWAYS_HIDDEN_WIDGETS.has(name)) continue;
-		setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+		setWidgetHidden(widget, !ALWAYS_VISIBLE_WIDGETS.has(name));
 	}
 	for (const name of ALWAYS_HIDDEN_WIDGETS) {
 		setWidgetHidden(getWidget(node, name), true);
 	}
 	updateSettingsButtonState(node);
+	updateModelButtonState(node);
 	orderWidgets(node);
 	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	GJJ_Utils.refreshNode?.(node);
@@ -1054,6 +1090,555 @@ function setSettingsOpen(node, open) {
 	node.properties ||= {};
 	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
 	applySettingsVisibility(node);
+}
+
+function closeParameterDialog() {
+	if (!activeParameterDialog) return;
+	closeModelSearchPopup();
+	const { root, node } = activeParameterDialog;
+	root?.remove();
+	activeParameterDialog = null;
+	for (const button of [
+		node?.__gjjStoryboardSizeButton,
+		node?.__gjjStoryboardModelButton,
+		node?.__gjjStoryboardSettingsButton,
+	]) {
+		if (!button) continue;
+		button.classList.remove("on");
+		button.style.background = "linear-gradient(135deg, #1f2933, #374151)";
+		button.style.borderColor = "#55636f";
+	}
+	updateModelButtonState(node);
+}
+
+function widgetDisplayLabel(widget, fallback) {
+	return String(widget?.label || widget?.options?.display_name || fallback || "").replace(/^[^\p{L}\p{N}]+/u, "").trim() || fallback;
+}
+
+function createParameterControl(widget, name) {
+	const options = allWidgetOptions(widget);
+	const value = widget?.value ?? "";
+	let control;
+	if (name === "keep_model_loaded") {
+		control = document.createElement("button");
+		control.type = "button";
+		const setState = (enabled) => {
+			control.dataset.booleanValue = enabled ? "true" : "false";
+			control.setAttribute("aria-pressed", enabled ? "true" : "false");
+			control.textContent = enabled ? "已开启" : "已关闭";
+			control.style.background = enabled ? "linear-gradient(135deg,#4c1d95,#7c3aed)" : "#111a1f";
+			control.style.borderColor = enabled ? "#c4b5fd" : "#3d5059";
+			control.style.color = enabled ? "#f5f3ff" : "#b9c9cd";
+		};
+		const enabled = value === true || value === 1 || ["true", "1", "on", "yes"].includes(String(value || "").toLowerCase());
+		control.__gjjSetBooleanState = setState;
+		setState(enabled);
+		control.addEventListener("click", () => setState(control.dataset.booleanValue !== "true"));
+	} else if (options.length) {
+		control = document.createElement("select");
+		for (const optionValue of options) {
+			const option = document.createElement("option");
+			option.value = optionValue;
+			option.textContent = optionValue || "无";
+			control.append(option);
+		}
+		control.value = String(value);
+	} else if (typeof value === "number") {
+		control = document.createElement("input");
+		control.type = "number";
+		control.value = String(value);
+		for (const key of ["min", "max", "step"]) {
+			const optionValue = widget?.options?.[key];
+			if (Number.isFinite(Number(optionValue))) control[key] = String(optionValue);
+		}
+	} else if (typeof value === "boolean") {
+		control = document.createElement("input");
+		control.type = "checkbox";
+		control.checked = value;
+	} else {
+		control = document.createElement(name === "negative_prompt" ? "textarea" : "input");
+		if (control.tagName === "INPUT") control.type = "text";
+		control.value = String(value);
+	}
+	control.dataset.widgetName = name;
+	control.style.cssText = [
+		"width:100%",
+		"min-width:0",
+		"box-sizing:border-box",
+		"border:1px solid #3d5059",
+		"border-radius:6px",
+		"background:#111a1f",
+		"color:#eef7f2",
+		"padding:6px 8px",
+		"font:12px/1.35 sans-serif",
+		"outline:none",
+		control.tagName === "TEXTAREA" ? "min-height:72px;resize:vertical" : "height:32px",
+	].join(";");
+	if (control.__gjjSetBooleanState) {
+		control.__gjjSetBooleanState(control.dataset.booleanValue === "true");
+		control.style.cursor = "pointer";
+		control.style.fontWeight = "700";
+	}
+	return control;
+}
+
+function modelFamilyFilterTokens(unetName, targetName, preset = null) {
+	const model = normalizedModelText(unetName);
+	if (/qwen.*image.*edit|firered/.test(model)) {
+		if (targetName === STORYBOARD_LORA_NAME) return ["next-scene", "next_scene"];
+		if (targetName === "clip_name1") return ["qwen_2.5_vl", "qwen25vl", "qwen2.5vl"];
+		if (targetName === "vae_name") return ["qwen_image_vae", "qwenimagevae"];
+	}
+	if (/qwen/.test(model)) {
+		if (targetName === STORYBOARD_LORA_NAME) return ["qwen", "next-scene", "next_scene"];
+		return ["qwen", "qwen25", "qwen2.5"];
+	}
+	if (targetName === "clip_name1" && preset?.clipNames?.length) {
+		const tokens = preset.clipNames
+			.flatMap((name) => normalizedModelText(name).split(/[^a-z0-9]+/))
+			.filter((token) => token.length >= 4 && !["safetensors", "scaled", "float", "default"].includes(token));
+		if (tokens.length) return [...new Set(tokens)];
+	}
+	if (targetName === "vae_name" && preset?.vaeName) {
+		const tokens = normalizedModelText(preset.vaeName)
+			.split(/[^a-z0-9]+/)
+			.filter((token) => token.length >= 4 && token !== "safetensors");
+		if (tokens.length) return [...new Set(tokens)];
+	}
+	if (/flux|f2k|klein/.test(model)) {
+		if (targetName === STORYBOARD_LORA_NAME) return ["flux", "f2k", "klein", "consist"];
+		if (targetName === "vae_name") return ["ae.", "flux", "f2k", "klein"];
+		return ["flux", "clip_l", "t5", "qwen"];
+	}
+	if (/zimage|z_image|z-image|zit/.test(model)) return ["zimage", "z_image", "z-image", "qwen"];
+	const stem = model.split(/[\\/_\-.]+/).find((token) => token.length >= 4 && !/^\d+$/.test(token));
+	return stem ? [stem] : [];
+}
+
+function optionMatchesFamily(option, tokens) {
+	if (!tokens.length) return true;
+	const normalized = normalizedModelText(option);
+	return tokens.some((token) => normalized.includes(normalizedModelText(token)));
+}
+
+function matchesAllModelKeywords(value, keywords) {
+	const normalized = normalizedModelText(value);
+	return keywords.every((keyword) => normalized.includes(normalizedModelText(keyword)));
+}
+
+function setFilteredSelectOptions(control, options, preferredValues = []) {
+	if (!control || control.tagName !== "SELECT") return;
+	const unique = [...new Set(options.map((item) => String(item ?? "")))];
+	control.replaceChildren();
+	for (const optionValue of unique) {
+		const option = document.createElement("option");
+		option.value = optionValue;
+		option.textContent = optionValue || "无";
+		control.append(option);
+	}
+	if (!unique.length) {
+		control.value = "";
+		return;
+	}
+	const int4Default = unique.find((item) => /int4[_-]?convrot/i.test(item));
+	const preferred = preferredValues
+		.map((item) => String(item || ""))
+		.map((wanted) => unique.find((item) => {
+			const optionText = normalizedModelText(item).replace(/\\/g, "/");
+			const wantedText = normalizedModelText(wanted).replace(/\\/g, "/");
+			const wantedBase = wantedText.split("/").pop();
+			return wantedText && (optionText === wantedText || optionText.endsWith(`/${wantedBase}`) || optionText.includes(wantedBase));
+		}))
+		.find(Boolean);
+	const selected = int4Default
+		|| preferred
+		|| unique[0];
+	control.value = selected;
+	control.__gjjRefreshSearchPicker?.();
+}
+
+function closeModelSearchPopup() {
+	if (!activeModelSearchPopup) return;
+	activeModelSearchPopup.cleanup?.();
+	activeModelSearchPopup.root?.remove();
+	activeModelSearchPopup = null;
+}
+
+function fuzzyModelOptionMatch(option, query) {
+	const keywords = String(query || "").trim().split(/\s+/).map(normalizedModelText).filter(Boolean);
+	if (!keywords.length) return true;
+	const normalized = normalizedModelText(option);
+	return keywords.every((keyword) => normalized.includes(keyword));
+}
+
+function createSearchableModelSelect(control) {
+	control.style.display = "none";
+	const host = document.createElement("div");
+	host.style.cssText = "position:relative;width:100%;min-width:0;";
+	const button = document.createElement("button");
+	button.type = "button";
+	button.style.cssText = "width:100%;height:32px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 9px;border:1px solid #3d5059;border-radius:6px;background:#111a1f;color:#eef7f2;font:600 12px sans-serif;cursor:pointer;text-align:left;";
+	const valueLabel = document.createElement("span");
+	valueLabel.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+	const arrow = document.createElement("span");
+	arrow.textContent = "⌄";
+	arrow.style.cssText = "flex:0 0 auto;color:#a9bbc0;font-size:15px;";
+	button.append(valueLabel, arrow);
+	host.append(control, button);
+
+	const refreshLabel = () => {
+		valueLabel.textContent = String(control.value || "无");
+		button.title = String(control.value || "点击选择模型");
+	};
+	control.__gjjRefreshSearchPicker = refreshLabel;
+	refreshLabel();
+
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (activeModelSearchPopup?.anchor === button) {
+			closeModelSearchPopup();
+			return;
+		}
+		closeModelSearchPopup();
+		const root = document.createElement("div");
+		root.style.cssText = "position:fixed;z-index:100002;display:flex;flex-direction:column;gap:6px;padding:7px;border:1px solid #46606a;border-radius:8px;background:#0c1418;box-shadow:0 12px 32px rgba(0,0,0,.55);";
+		const search = document.createElement("input");
+		search.type = "text";
+		search.placeholder = "模糊关键词过滤，空格分隔多个词";
+		search.style.cssText = "width:100%;height:30px;box-sizing:border-box;border:1px solid #5c7079;border-radius:6px;background:#0b1114;color:#f3faf7;padding:4px 8px;font:12px sans-serif;outline:none;";
+		const list = document.createElement("div");
+		list.style.cssText = "display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto;";
+		root.append(search, list);
+		document.body.append(root);
+
+		const position = () => {
+			const rect = button.getBoundingClientRect();
+			const width = Math.min(Math.max(300, rect.width), window.innerWidth - 16);
+			root.style.width = `${width}px`;
+			const measured = root.getBoundingClientRect();
+			const openAbove = window.innerHeight - rect.bottom < 220 && rect.top > window.innerHeight - rect.bottom;
+			const left = Math.max(8, Math.min(rect.left, window.innerWidth - measured.width - 8));
+			const top = openAbove ? rect.top - measured.height - 5 : rect.bottom + 5;
+			root.style.left = `${left}px`;
+			root.style.top = `${Math.max(8, Math.min(top, window.innerHeight - measured.height - 8))}px`;
+		};
+		const render = () => {
+			const options = [...control.options]
+				.map((option) => option.value)
+				.filter((option) => fuzzyModelOptionMatch(option, search.value));
+			list.replaceChildren();
+			if (!options.length) {
+				const empty = document.createElement("div");
+				empty.textContent = "没有匹配的模型";
+				empty.style.cssText = "padding:9px;color:#92a7ad;font:12px sans-serif;";
+				list.append(empty);
+			}
+			for (const optionValue of options) {
+				const row = document.createElement("button");
+				row.type = "button";
+				row.textContent = optionValue || "无";
+				const selected = optionValue === control.value;
+				row.style.cssText = `min-height:30px;width:100%;padding:5px 8px;border:1px solid ${selected ? "#4fa978" : "#2d4149"};border-radius:5px;background:${selected ? "#164f3b" : "#132027"};color:#e8f2ee;font:12px sans-serif;text-align:left;cursor:pointer;overflow-wrap:anywhere;`;
+				row.addEventListener("click", () => {
+					control.value = optionValue;
+					control.dispatchEvent(new Event("change", { bubbles: true }));
+					refreshLabel();
+					closeModelSearchPopup();
+				});
+				list.append(row);
+			}
+			position();
+		};
+		search.addEventListener("input", render);
+		search.addEventListener("keydown", (keyEvent) => {
+			if (keyEvent.key === "Escape") closeModelSearchPopup();
+		});
+		root.addEventListener("pointerdown", (pointerEvent) => pointerEvent.stopPropagation());
+		const outside = (outsideEvent) => {
+			if (!root.contains(outsideEvent.target) && !button.contains(outsideEvent.target)) closeModelSearchPopup();
+		};
+		activeModelSearchPopup = {
+			root,
+			anchor: button,
+			cleanup: () => document.removeEventListener("pointerdown", outside, true),
+		};
+		setTimeout(() => document.addEventListener("pointerdown", outside, true), 0);
+		render();
+		setTimeout(() => search.focus(), 0);
+	});
+	return host;
+}
+
+async function refreshModelFamilyDialogControls(controls) {
+	const unetControl = controls.get("unet_name")?.control;
+	if (!unetControl) return;
+	const unetName = String(unetControl.value || "");
+	let preset = null;
+	try {
+		preset = matchModelFamilyPreset(unetName, await getModelFamilyPresets()) || null;
+	} catch {
+		preset = null;
+	}
+	if (String(unetControl.value || "") !== unetName) return;
+	const preferredByName = {
+		clip_name1: preset?.clipNames || [],
+		vae_name: preset?.vaeName ? [preset.vaeName] : [],
+		[STORYBOARD_LORA_NAME]: isFluxStoryboardModel(unetName, preset) ? [FLUX_STORYBOARD_LORA] : [],
+	};
+	for (const name of ["clip_name1", "vae_name", STORYBOARD_LORA_NAME]) {
+		const entry = controls.get(name);
+		if (!entry?.control || entry.control.tagName !== "SELECT") continue;
+		const allOptions = allWidgetOptions(entry.widget);
+		const tokens = modelFamilyFilterTokens(unetName, name, preset);
+		const mandatoryNextSceneLora = name === STORYBOARD_LORA_NAME
+			&& matchesAllModelKeywords(unetName, ["qwen", "image", "edit", "2511"]);
+		const filtered = allOptions.filter((option) => {
+			if (mandatoryNextSceneLora) return matchesAllModelKeywords(option, ["next", "scene", "lora", "v2", "3000"]);
+			return (name === STORYBOARD_LORA_NAME && !String(option || "").trim()) || optionMatchesFamily(option, tokens);
+		});
+		setFilteredSelectOptions(entry.control, filtered.length ? filtered : allOptions, preferredByName[name]);
+		if (mandatoryNextSceneLora) {
+			entry.control.disabled = true;
+			entry.control.title = "Qwen Image Edit 2511 必须使用 next-scene_lora-v2-3000";
+		} else {
+			entry.control.disabled = false;
+			entry.control.title = "";
+		}
+	}
+}
+
+function renderStoryboardModelTree(node, controls, host) {
+	const definitions = [
+		{ name: "unet_name", label: "UNET 主模型", folder: "models/diffusion_models", icon: "🟣" },
+		{ name: "clip_name1", label: "CLIP 编码器", folder: "models/text_encoders", icon: "🟡" },
+		{ name: "vae_name", label: "VAE 解码器", folder: "models/vae", icon: "🔴" },
+		{ name: STORYBOARD_LORA_NAME, label: "LoRA", folder: "models/loras", icon: "🟢" },
+	];
+	const entries = definitions.map((definition) => {
+		const entry = controls.get(definition.name);
+		const values = entry?.control?.tagName === "SELECT"
+			? [...entry.control.options].map((option) => option.value)
+			: [];
+		const proxyWidget = {
+			value: entry?.control?.value ?? "",
+			options: { values },
+			callback: (value) => {
+				if (!entry?.control) return;
+				entry.control.value = value;
+				entry.control.dispatchEvent(new Event("change", { bubbles: true }));
+			},
+		};
+		return {
+			...definition,
+			models: values,
+			fallback: String(entry?.control?.value || ""),
+			getWidget: () => proxyWidget,
+		};
+	});
+	const tree = GJJ_Utils.createModelTreeView({
+		node,
+		entries,
+		refresh: () => GJJ_Utils.refreshNode?.(node),
+	});
+	tree.style.gridColumn = "1 / -1";
+	tree.style.maxHeight = "360px";
+	host.replaceChildren(tree);
+}
+
+function clampParameterDialogPosition(root, left, top) {
+	const margin = 8;
+	const rect = root.getBoundingClientRect();
+	return {
+		left: Math.max(margin, Math.min(Number(left) || margin, window.innerWidth - rect.width - margin)),
+		top: Math.max(margin, Math.min(Number(top) || margin, window.innerHeight - Math.min(rect.height, window.innerHeight - margin * 2) - margin)),
+	};
+}
+
+function nodeScreenRect(node) {
+	const canvasElement = app.canvas?.canvas;
+	const canvasRect = canvasElement?.getBoundingClientRect?.();
+	const dragScale = app.canvas?.ds;
+	if (canvasElement && canvasRect && typeof dragScale?.convertCanvasToOffset === "function" && node?.pos && node?.size) {
+		const topLeft = dragScale.convertCanvasToOffset([Number(node.pos[0]), Number(node.pos[1])]);
+		const bottomRight = dragScale.convertCanvasToOffset([
+			Number(node.pos[0]) + Number(node.size[0] || 0),
+			Number(node.pos[1]) + Number(node.size[1] || 0),
+		]);
+		return {
+			left: canvasRect.left + Number(topLeft[0] || 0),
+			top: canvasRect.top + Number(topLeft[1] || 0),
+			width: Number(bottomRight[0] || 0) - Number(topLeft[0] || 0),
+			height: Number(bottomRight[1] || 0) - Number(topLeft[1] || 0),
+		};
+	}
+	const scale = Number(app.canvas?.ds?.scale) || 1;
+	const offset = app.canvas?.ds?.offset || [0, 0];
+	if (!canvasElement || !canvasRect || !Array.isArray(node?.pos) || !Array.isArray(node?.size)) return null;
+	return {
+		left: canvasRect.left + (Number(node.pos[0]) + Number(offset[0] || 0)) * scale,
+		top: canvasRect.top + (Number(node.pos[1]) + Number(offset[1] || 0)) * scale,
+		width: Number(node.size[0] || 0) * scale,
+		height: Number(node.size[1] || 0) * scale,
+	};
+}
+
+function positionParameterDialog(node, root) {
+	const remembered = node?.__gjjStoryboardParameterDialogPosition;
+	const nodeRect = nodeScreenRect(node);
+	const initialLeft = remembered?.left ?? nodeRect?.left ?? 18;
+	const initialTop = remembered?.top ?? ((nodeRect?.top || 18) + (nodeRect?.height || 0) + 8);
+	if (!remembered && nodeRect) {
+		const availableBelow = Math.max(72, window.innerHeight - initialTop - 8);
+		root.style.maxHeight = `${Math.min(window.innerHeight - 16, availableBelow)}px`;
+	}
+	const position = clampParameterDialogPosition(root, initialLeft, initialTop);
+	root.style.left = `${position.left}px`;
+	root.style.top = `${position.top}px`;
+}
+
+function makeParameterDialogDraggable(node, root, header) {
+	header.style.cursor = "move";
+	header.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0 || event.target?.closest?.("button")) return;
+		event.preventDefault();
+		const startRect = root.getBoundingClientRect();
+		const startX = event.clientX;
+		const startY = event.clientY;
+		header.setPointerCapture?.(event.pointerId);
+
+		const move = (moveEvent) => {
+			const position = clampParameterDialogPosition(
+				root,
+				startRect.left + moveEvent.clientX - startX,
+				startRect.top + moveEvent.clientY - startY,
+			);
+			root.style.left = `${position.left}px`;
+			root.style.top = `${position.top}px`;
+		};
+		const finish = (upEvent) => {
+			header.releasePointerCapture?.(upEvent.pointerId);
+			header.removeEventListener("pointermove", move);
+			header.removeEventListener("pointerup", finish);
+			header.removeEventListener("pointercancel", finish);
+			const finalRect = root.getBoundingClientRect();
+			node.__gjjStoryboardParameterDialogPosition = { left: finalRect.left, top: finalRect.top };
+		};
+		header.addEventListener("pointermove", move);
+		header.addEventListener("pointerup", finish);
+		header.addEventListener("pointercancel", finish);
+	});
+}
+
+function openParameterDialog(node, groupName) {
+	const group = PARAMETER_DIALOG_GROUPS[groupName];
+	if (!group) return;
+	closeParameterDialog();
+
+	const root = document.createElement("div");
+	root.style.cssText = [
+		"position:fixed",
+		"left:18px",
+		"top:18px",
+		"z-index:100000",
+		"width:min(520px,calc(100vw - 36px))",
+		"max-height:calc(100vh - 36px)",
+		"display:flex",
+		"flex-direction:column",
+		"overflow:hidden",
+		"border:1px solid #415761",
+		"border-radius:10px",
+		"background:#0c1418",
+		"box-shadow:0 20px 60px rgba(0,0,0,.62)",
+	].join(";");
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #2c3d44;background:#111c21;";
+	const title = document.createElement("strong");
+	title.textContent = group.title;
+	title.style.cssText = "flex:1;color:#edf7f2;font:700 14px sans-serif;";
+	const cancel = document.createElement("button");
+	cancel.type = "button";
+	cancel.textContent = "取消";
+	const confirm = document.createElement("button");
+	confirm.type = "button";
+	confirm.textContent = "确定";
+	for (const button of [cancel, confirm]) {
+		button.style.cssText = "height:28px;padding:0 12px;border:1px solid #4b6069;border-radius:6px;background:#1a272d;color:#eef7f2;font:700 12px sans-serif;cursor:pointer;";
+	}
+	confirm.style.background = "#086c4a";
+	confirm.style.borderColor = "#10b981";
+	header.append(title, cancel, confirm);
+
+	const body = document.createElement("div");
+	body.style.cssText = "display:grid;grid-template-columns:minmax(110px,150px) minmax(0,1fr);gap:9px 12px;overflow:auto;padding:12px;";
+	const controls = new Map();
+	const modelTreeHost = document.createElement("div");
+	modelTreeHost.style.cssText = "display:block;grid-column:1/-1;min-width:0;";
+	for (const name of group.widgets) {
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		const label = document.createElement("label");
+		label.textContent = widgetDisplayLabel(widget, name);
+		label.style.cssText = "align-self:center;color:#b9c9cd;font:12px/1.3 sans-serif;";
+		const control = createParameterControl(widget, name);
+		controls.set(name, { widget, control });
+		if (groupName === "model" && ["unet_name", "clip_name1", "vae_name", STORYBOARD_LORA_NAME].includes(name)) {
+			continue;
+		}
+		body.append(label, control);
+	}
+	if (groupName === "model") {
+		body.prepend(modelTreeHost);
+		const unetControl = controls.get("unet_name")?.control;
+		unetControl?.addEventListener("change", () => {
+			void refreshModelFamilyDialogControls(controls).then(() => renderStoryboardModelTree(node, controls, modelTreeHost));
+		});
+		void refreshModelFamilyDialogControls(controls).then(() => renderStoryboardModelTree(node, controls, modelTreeHost));
+	}
+	if (!controls.size) {
+		const empty = document.createElement("div");
+		empty.textContent = "当前没有可配置参数。";
+		empty.style.cssText = "grid-column:1/-1;color:#9fb3b8;padding:14px;";
+		body.append(empty);
+	}
+
+	cancel.addEventListener("click", closeParameterDialog);
+	confirm.addEventListener("click", () => {
+		node.__gjjStoryboardApplyingParameterDialog = true;
+		try {
+			for (const { widget, control } of controls.values()) {
+				let value = control.dataset.booleanValue !== undefined
+					? control.dataset.booleanValue === "true"
+					: (control.type === "checkbox" ? control.checked : control.value);
+				if (typeof widget.value === "number") value = Number(value);
+				setWidgetValue(widget, value);
+			}
+		} finally {
+			delete node.__gjjStoryboardApplyingParameterDialog;
+		}
+		saveParamValues(node);
+		drawPromptGridPreview(node);
+		closeParameterDialog();
+		GJJ_Utils.refreshNode?.(node);
+	});
+	root.append(header, body);
+	document.body.append(root);
+	positionParameterDialog(node, root);
+	makeParameterDialogDraggable(node, root, header);
+	activeParameterDialog = { root, node, group: groupName };
+
+	const activeButton = groupName === "size"
+		? node.__gjjStoryboardSizeButton
+		: groupName === "model"
+			? node.__gjjStoryboardModelButton
+			: node.__gjjStoryboardSettingsButton;
+	if (activeButton) {
+		activeButton.classList.add("on");
+		activeButton.style.background = "linear-gradient(135deg, #4b5563, #64748b)";
+		activeButton.style.borderColor = "#94a3b8";
+	}
+	updateModelButtonState(node);
 }
 
 function updateReconnectButton(node) {
@@ -1285,16 +1870,45 @@ function createButtons(node) {
 
 	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
 
+	const sizeButton = document.createElement("button");
+	sizeButton.type = "button";
+	sizeButton.textContent = "📐";
+	sizeButton.title = "尺寸与宫格参数";
+	sizeButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #55636f",
+		"background:linear-gradient(135deg, #1f2933, #374151)",
+		"color:#e5edf2",
+		"flex:0 0 30px",
+		"padding:0",
+	].join(";");
+	node.__gjjStoryboardSizeButton = sizeButton;
+
+	const modelButton = document.createElement("button");
+	modelButton.type = "button";
+	modelButton.textContent = "🧠";
+	modelButton.title = "模型参数";
+	modelButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #55636f",
+		"background:linear-gradient(135deg, #1f2933, #374151)",
+		"color:#e5edf2",
+		"flex:0 0 30px",
+		"padding:0",
+	].join(";");
+	node.__gjjStoryboardModelButton = modelButton;
+
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
-	settingsButton.textContent = "⚙️设置";
-	settingsButton.title = "展开更多设置";
+	settingsButton.textContent = "⚙️";
+	settingsButton.title = "其他生成参数";
 	settingsButton.style.cssText = [
 		...sharedButtonStyle,
 		"border:1px solid #55636f",
 		"background:linear-gradient(135deg, #1f2933, #374151)",
 		"color:#e5edf2",
-		"flex:0 0 auto",
+		"flex:0 0 30px",
+		"padding:0",
 	].join(";");
 	node.__gjjStoryboardSettingsButton = settingsButton;
 
@@ -1308,7 +1922,7 @@ function createButtons(node) {
 			if (button === diceButton && node.__gjjStoryboardRandomSeedOnce) return;
 			if (button === completeRefButton && button.__gjjStoryboardCompleteRefFlashTimer) return;
 			if (button === reconnectButton && button.__gjjStoryboardReconnectFlashTimer) return;
-			if (button === settingsButton && settingsOpen(node)) return;
+			if (button.classList.contains("on")) return;
 			button.style.background = hoverBg;
 			button.style.transform = "translateY(-1px)";
 		});
@@ -1326,9 +1940,8 @@ function createButtons(node) {
 				button.style.transform = "translateY(0)";
 				return;
 			}
-			if (button === settingsButton && settingsOpen(node)) {
+			if (button.classList.contains("on")) {
 				button.style.transform = "translateY(0)";
-				updateSettingsButtonState(node);
 				return;
 			}
 			button.style.background = defaultBg;
@@ -1435,7 +2048,17 @@ function createButtons(node) {
 
 	function handleSettings(event) {
 		protectEvent(event);
-		setSettingsOpen(node, !settingsOpen(node));
+		openParameterDialog(node, "settings");
+	}
+
+	function handleModels(event) {
+		protectEvent(event);
+		openParameterDialog(node, "model");
+	}
+
+	function handleSize(event) {
+		protectEvent(event);
+		openParameterDialog(node, "size");
 	}
 
 	function handleDice(event) {
@@ -1475,14 +2098,19 @@ function createButtons(node) {
 	setupButtonHover(diceButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
 	setupButtonHover(completeRefButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
 	setupButtonHover(reconnectButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
+	setupButtonHover(sizeButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
+	setupButtonHover(modelButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(singleButton, handleSingleGenerate);
 	setupButtonEvents(diceButton, handleDice);
 	setupButtonEvents(completeRefButton, handleCompleteReferences);
 	setupButtonEvents(reconnectButton, handleReconnect);
+	setupButtonEvents(sizeButton, handleSize);
+	setupButtonEvents(modelButton, handleModels);
 	setupButtonEvents(settingsButton, handleSettings);
 	updateSettingsButtonState(node);
+	updateModelButtonState(node);
 	updateDiceButtonState();
 	updateReconnectButton(node);
 
@@ -1492,6 +2120,8 @@ function createButtons(node) {
 	container.appendChild(completeRefButton);
 	container.appendChild(reconnectButton);
 	container.appendChild(templateButton);
+	container.appendChild(sizeButton);
+	container.appendChild(modelButton);
 	container.appendChild(settingsButton);
 	return container;
 }
@@ -2584,7 +3214,9 @@ function hookUnetWidget(node) {
 	widget.callback = function (value, ...args) {
 		const result = original?.apply(this, [value, ...args]);
 		refreshUnetPickerControl(node);
-		setTimeout(() => applyModelFamilyPreset(node, true), 0);
+		if (!node.__gjjStoryboardApplyingParameterDialog) {
+			setTimeout(() => applyModelFamilyPreset(node, true), 0);
+		}
 		return result;
 	};
 }
