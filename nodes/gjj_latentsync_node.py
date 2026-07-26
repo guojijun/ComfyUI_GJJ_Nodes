@@ -15,7 +15,7 @@ from .common_utils.dependency_checker import (
     send_dependency_model_notice,
 )
 
-NODE_DISPLAY_NAME = "GJJ · LatentSync 视频音频同步"
+NODE_DISPLAY_NAME = "GJJ · 👄 视频口型同步（LatentSync）"
 CV2_DEPENDENCY = {
     "module_name": "cv2",
     "package_name": "opencv-python",
@@ -30,13 +30,13 @@ SCIPY_DEPENDENCY = {
 }
 LATENTSYNC_MODEL_SPECS = [
     {
-        "label": "LatentSync 主模型",
+        "label": "🧠 口型同步主模型",
         "subdir": "models/latentsync",
         "filename": "latentsync_unet.pt",
         "description": "LatentSync 口型同步 UNet 主模型。",
     },
     {
-        "label": "LatentSync Whisper",
+        "label": "🎧 音频特征提取模型",
         "subdir": "models/latentsync/whisper",
         "filename": "tiny.pt",
         "description": "LatentSync 音频特征提取 Whisper tiny 模型。",
@@ -103,18 +103,38 @@ class LatentSyncNode:
     DESCRIPTION = DESCRIPTION
     REQUIRED_MODELS = LATENTSYNC_MODEL_SPECS
     GJJ_HELP = {
+        "title": NODE_DISPLAY_NAME,
         "description": DESCRIPTION,
-        "notice": _ENV_REPORT["help_message"] if not _ENV_REPORT["available"] else "",
+        "notice": (
+            _ENV_REPORT["help_message"]
+            if not _ENV_REPORT["available"]
+            else "输入视频与音频后生成口型同步视频；优先使用连接的 VIDEO/AUDIO，未连接时读取文件路径。"
+        ),
         "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT["available"] else "",
         "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT["available"] else "",
         "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT["available"] else "",
         "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT["available"] else "",
         "models": REQUIRED_MODELS,
+        "model_tree_text": (
+            "ComfyUI/\n"
+            "└─ models/\n"
+            "   └─ latentsync/\n"
+            "      ├─ latentsync_unet.pt  # 口型同步主模型\n"
+            "      └─ whisper/\n"
+            "         └─ tiny.pt  # 音频特征提取模型"
+        ),
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
         "dependencies": [
             "opencv-python（cv2；视频帧读取、写入和处理）",
             "scipy（音频重采样；仅输入采样率不是 16000Hz 时需要）",
             "soundfile / librosa / pydub（音频文件读取；按本机可用项回退）",
             "ffmpeg 或 moviepy（音视频封装合并）",
+        ],
+        "tips": [
+            "VIDEO 与 AUDIO 连接输入的优先级高于视频路径和音频路径。",
+            "音频会自动重采样为 16000 Hz。",
+            "输出为已写入 ComfyUI 输出目录的 MP4 视频文件路径。",
         ],
     }
 
@@ -122,21 +142,59 @@ class LatentSyncNode:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "seed": ("INT", {"default": 1247, "min": 0, "max": 999999999, "step": 1, "display": "number"}),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 1247,
+                        "min": 0,
+                        "max": 999999999,
+                        "step": 1,
+                        "display": "number",
+                        "display_name": "🎲 随机种子",
+                        "tooltip": "控制口型同步处理的随机种子；相同输入和参数可使用相同种子复现结果。",
+                    },
+                ),
             },
             "optional": {
-                "video": ("VIDEO", {"tooltip": "要同步的视频文件"}),
-                "audio": ("AUDIO", {"tooltip": "用于同步的音频数据"}),
-                "video_path": ("STRING", {"default": "", "tooltip": "视频文件路径，如果未使用VIDEO输入则使用此项"}),
-                "audio_path": ("STRING", {"default": "", "tooltip": "音频文件路径，如果未使用AUDIO输入则使用此项"}),
+                "video": (
+                    "VIDEO",
+                    {
+                        "display_name": "🎬 输入视频",
+                        "tooltip": "需要进行口型同步的视频；连接后优先于“视频文件路径”。",
+                    },
+                ),
+                "audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "🔊 输入音频",
+                        "tooltip": "用于驱动人物口型的音频；连接后优先于“音频文件路径”。",
+                    },
+                ),
+                "video_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "display_name": "📁 视频文件路径",
+                        "tooltip": "未连接“输入视频”时，从此本地文件路径读取视频。",
+                    },
+                ),
+                "audio_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "display_name": "📁 音频文件路径",
+                        "tooltip": "未连接“输入音频”时，从此本地文件路径读取音频。",
+                    },
+                ),
             }
             ,
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    CATEGORY = "GJJ/音视频处理"
+    CATEGORY = "GJJ/🎬 音视频处理/👄 口型同步"
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("输出视频路径",)
+    RETURN_NAMES = ("📤 输出视频路径",)
+    OUTPUT_TOOLTIPS = ("口型同步完成后保存的 MP4 视频绝对路径。",)
     FUNCTION = "inference"
 
     def _resolve_video_path(self, video):

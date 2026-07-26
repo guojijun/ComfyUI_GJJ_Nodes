@@ -256,6 +256,7 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
 
 
 LORA_FILENAME = "krea2_identity_edit_v1_2.safetensors"
+LORA_SEARCH_KEYWORDS = ("krea", "edit")
 IMAGE_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE"
 
 
@@ -340,15 +341,31 @@ def _first_input_value(value, default=None):
     return default if current is None else current
 
 
+def _matching_loras():
+    matches = [
+        str(name)
+        for name in (folder_paths.get_filename_list("loras") or [])
+        if all(keyword in str(name).lower() for keyword in LORA_SEARCH_KEYWORDS)
+    ]
+    return sorted(
+        matches,
+        key=lambda name: (
+            os.path.basename(name).lower() != LORA_FILENAME.lower(),
+            name.count("/") + name.count("\\"),
+            name.lower(),
+        ),
+    )
+
+
 def _resolve_required_lora():
-    candidates = list(folder_paths.get_filename_list("loras") or [])
-    exact = [name for name in candidates if os.path.basename(str(name)).lower() == LORA_FILENAME.lower()]
-    if not exact:
+    matches = _matching_loras()
+    if not matches:
+        keywords = ",".join(LORA_SEARCH_KEYWORDS)
         raise FileNotFoundError(
-            f"未找到节点必需的 LoRA：{LORA_FILENAME}。请放入 ComfyUI/models/loras（可位于任意子目录）后刷新模型列表。"
+            f"未找到名称同时包含关键词 {keywords} 的 Krea2 编辑 LoRA。"
+            "请放入 ComfyUI/models/loras（可位于任意子目录）后刷新模型列表。"
         )
-    exact.sort(key=lambda name: (str(name).count("/") + str(name).count("\\"), str(name).lower()))
-    selected = exact[0]
+    selected = matches[0]
     path = folder_paths.get_full_path("loras", selected)
     if not path:
         raise FileNotFoundError(f"已发现 LoRA 名称但无法解析文件路径：{selected}")
@@ -357,7 +374,7 @@ def _resolve_required_lora():
 
 class GJJ_Krea2EditModelPatch:
     DESCRIPTION = "零外部节点依赖的 Krea2 图像编辑模型补丁：递归拆分输入图片、内部加载固定身份编辑 LoRA，并注入多参考图编辑路径。"
-    CATEGORY = "GJJ/model_patches/krea"
+    CATEGORY = "GJJ/模型补丁"
     FUNCTION = "patch"
     INPUT_IS_LIST = True
     RETURN_TYPES = ("MODEL", "VAE")
@@ -372,18 +389,14 @@ class GJJ_Krea2EditModelPatch:
         "模型": "连接外部 Krea2 MODEL，节点内部仅应用身份编辑 LoRA 和扩散 forward 补丁。",
         "VAE": "连接外部配套 VAE；节点内部用它逐张编码参考图，并原样输出供最终解码。",
         "图片": "输入类型为 IMAGE,GJJ_BATCH_IMAGE。普通 IMAGE batch、嵌套列表、字典和 GJJ 批图容器都会递归解包；每一张图片作为独立参考图。",
-        "LoRA": f"节点内部固定加载 {LORA_FILENAME}，会递归搜索 ComfyUI/models/loras 的子目录。",
+        "LoRA": "LoRA 列表会递归搜索 models/loras，并显示名称中同时包含 krea、edit 的模型。",
         "零依赖": "不导入 comfyui-krea2edit，也不需要安装其他自定义节点；仅使用 ComfyUI 自带运行库。",
         "建议": "参考图与目标图宽高比接近时优先使用“适配”；旧版权重或需要中心裁切构图时使用“裁切（旧版）”。",
     }
 
     @classmethod
     def INPUT_TYPES(cls):
-        lora_names = [
-            name
-            for name in (folder_paths.get_filename_list("loras") or [])
-            if os.path.basename(str(name)).lower() == LORA_FILENAME.lower()
-        ]
+        lora_names = _matching_loras()
         if not lora_names:
             lora_names = [LORA_FILENAME]
         return {
@@ -402,7 +415,7 @@ class GJJ_Krea2EditModelPatch:
                 }),
                 "lora_name": (lora_names, {
                     "display_name": "身份编辑 LoRA",
-                    "tooltip": f"节点内部加载的 LoRA 模型列表。默认需要 {LORA_FILENAME}，支持位于 LoRA 子目录中。",
+                    "tooltip": "模糊搜索名称中同时包含 krea、edit 的 LoRA，支持任意 LoRA 子目录。",
                 }),
                 "lora_strength": ("FLOAT", {
                     "default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01,

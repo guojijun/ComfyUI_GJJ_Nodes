@@ -39,7 +39,7 @@ def _split_content(content: str, mode: str, skip_empty: bool) -> list[str]:
 
 
 class GJJ_TextFileReader:
-    CATEGORY = "GJJ/Text"
+    CATEGORY = "GJJ/文本"
     FUNCTION = "read"
     DESCRIPTION = "从 input/output/temp 或自定义路径读取文本，支持整文件、按行和按逗号输出。"
     SEARCH_ALIASES = ["read text", "load text", "文本读取", "提示词文件"]
@@ -87,7 +87,7 @@ class GJJ_TextFileReader:
 
 
 class GJJ_TextFileWriter:
-    CATEGORY = "GJJ/Text"
+    CATEGORY = "GJJ/文本"
     FUNCTION = "write"
     DESCRIPTION = "把文本写入 input/output/temp 或自定义路径，支持覆盖、追加、前插和逗号拼接。"
     SEARCH_ALIASES = ["write text", "save text", "文本保存", "提示词保存"]

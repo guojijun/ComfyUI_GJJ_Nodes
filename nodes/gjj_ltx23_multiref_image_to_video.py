@@ -1652,7 +1652,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
 
 原始错误：{_IMPORT_ERROR}
 """
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"

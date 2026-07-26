@@ -90,7 +90,7 @@ def _source_signature(panel_json: Any, json_file_path: str, encoding: str) -> st
 
 
 class GJJ_JsonDynamicParser:
-    CATEGORY = "GJJ/Text"
+    CATEGORY = "GJJ/文本"
     FUNCTION = "parse"
     DESCRIPTION = "从外部输入、面板粘贴文本、浏览器打开文件文本或本地文件路径读取 JSON，并按顶层键/项目动态显示输出口。"
     SEARCH_ALIASES = ["json", "动态JSON", "JSON解析", "JSON输出", "键值解析", "json parser"]
