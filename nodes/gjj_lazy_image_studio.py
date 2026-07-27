@@ -740,7 +740,15 @@ def _resolve_lazy_test_model_pair(unet_name: str) -> tuple[dict[str, Any], str, 
         vae_models,
         DEFAULT_VAE_NAME,
     )
-    return preset, str(clip_names[0] if clip_names else ""), str(vae_name or "")
+    selected_clip_name = str(clip_names[0] if clip_names else "")
+    if (
+        _normalize_text(preset.get("clip_type", "")) == "flux"
+        and len(clip_names) > 1
+    ):
+        # The exposed Flux slot represents T5XXL; CLIP-L is fixed and is added
+        # again by the normal single-run resolver for every batch item.
+        selected_clip_name = str(clip_names[1])
+    return preset, selected_clip_name, str(vae_name or "")
 
 
 def _supports_multi_reference_edit(
@@ -1965,6 +1973,33 @@ def _patch_model_sampling(model, sampling_mode: str, shift: float):
 
     model_sampling = ModelSamplingAdvanced(patched.model.model_config)
     model_sampling.set_parameters(shift=float(shift), multiplier=multiplier)
+    patched.add_object_patch("model_sampling", model_sampling)
+    return patched
+
+
+def _patch_flux_model_sampling(
+    model,
+    width: int,
+    height: int,
+    max_shift: float = 1.15,
+    base_shift: float = 0.5,
+):
+    """Match ComfyUI's ModelSamplingFlux node for Flux 1 workflows."""
+    patched = model.clone()
+    x1 = 256
+    x2 = 4096
+    slope = (float(max_shift) - float(base_shift)) / (x2 - x1)
+    intercept = float(base_shift) - slope * x1
+    shift = (int(width) * int(height) / (8 * 8 * 2 * 2)) * slope + intercept
+
+    class ModelSamplingAdvanced(
+        comfy.model_sampling.ModelSamplingFlux,
+        comfy.model_sampling.CONST,
+    ):
+        pass
+
+    model_sampling = ModelSamplingAdvanced(patched.model.model_config)
+    model_sampling.set_parameters(shift=shift)
     patched.add_object_patch("model_sampling", model_sampling)
     return patched
 
@@ -3596,7 +3631,27 @@ class GJJ_LazyImageStudio:
                     if preset_driven_model
                     else _pick_available_name(exposed_clip_name, clip_models, "")
                 )
-                if selected_clip_name:
+                preset_clip_names = preset.get("clip_names", [])
+                is_flux_dual_clip = (
+                    _normalize_text(preset.get("clip_type", "")) == "flux"
+                    and bool(preset_clip_names)
+                    and _canonical_model_text(preset_clip_names[0]) == "cliplsafetensors"
+                )
+                if is_flux_dual_clip:
+                    # Flux 1 always needs CLIP-L + T5XXL. The exposed widget is the
+                    # selectable T5 slot; old workflows may still contain clip_l.
+                    selected_t5_name = (
+                        ""
+                        if _canonical_model_text(selected_clip_name) == "cliplsafetensors"
+                        else selected_clip_name
+                    )
+                    resolved_clip_names = resolve_clip_names_for_preset(
+                        preset,
+                        clip_models,
+                        exposed_clip_name=selected_t5_name,
+                        legacy_clip_names=legacy_clip_names,
+                    )
+                elif selected_clip_name:
                     resolved_clip_names = [selected_clip_name]
                 else:
                     resolved_clip_names = resolve_clip_names_for_preset(
@@ -3649,6 +3704,10 @@ class GJJ_LazyImageStudio:
             if is_flux2_runtime:
                 resolved_clip_type = "flux2"
             is_ltx_runtime = _is_ltx_family(unet_name, resolved_clip_type, preset)
+            is_flux1_krea_runtime = (
+                str(preset.get("id", "")) == "flux1_krea_dev"
+                and _normalize_text(resolved_clip_type) == "flux"
+            )
             is_mage_flow_runtime = (
                 not use_checkpoint_model
                 and (
@@ -4026,6 +4085,11 @@ class GJJ_LazyImageStudio:
                     )
 
                 _send_status(unique_id, f"5/6 采样生成图像{status_suffix}...")
+                if is_flux1_krea_runtime:
+                    positive = node_helpers.conditioning_set_values(
+                        positive,
+                        {"guidance": 3.5},
+                    )
                 positive = _limit_conditioning_batch(positive, int(batch_size))
                 negative = _limit_conditioning_batch(negative, int(batch_size))
                 sample_model = (
@@ -4033,6 +4097,14 @@ class GJJ_LazyImageStudio:
                     if krea2_patched_model is not None
                     else model
                 )
+                if is_flux1_krea_runtime:
+                    sample_model = _patch_flux_model_sampling(
+                        sample_model,
+                        local_width,
+                        local_height,
+                        max_shift=1.15,
+                        base_shift=0.5,
+                    )
                 if is_ltx_runtime:
                     _send_status(unique_id, f"5/6 应用 LTX NAG 引导{status_suffix}...")
                     nag_conditioning = self._encode_text_conditioning(

@@ -175,6 +175,24 @@ def _model_default(widget_name: str, choices: list[str]) -> str:
     return pick_available_model_name(seed, choices, "", allow_first=True) or (choices[0] if choices else seed)
 
 
+def _resolve_model_selection(widget_name: str, selected: Any) -> str:
+    slot = MODEL_SLOTS[widget_name]
+    names = _filename_list(slot["category"])
+    preferred = str(selected or "").strip()
+    resolved = pick_available_model_name(
+        preferred,
+        names,
+        slot["seed"],
+        allow_first=False,
+    )
+    if resolved:
+        return resolved
+    raise RuntimeError(
+        f"未找到{slot['label']}：{preferred or slot['seed']}\n"
+        f"请将模型放到 ComfyUI/{slot['models_path']}，或在节点设置中重新选择。"
+    )
+
+
 def _ideogram4_sigmas(steps: int, width: int, height: int, mu: float, std: float) -> torch.Tensor:
     logs_nr_min = -15.0
     logs_nr_max = 18.0
@@ -263,6 +281,13 @@ class GJJ_Ideogram4DirectGenerator:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, **_kwargs):
+        # Model combo values are intentionally resolved at execution time. This
+        # keeps workflows valid when a model is moved into a subdirectory or its
+        # quantization/precision suffix changes.
+        return True
+
     def generate(
         self,
         mode: str,
@@ -295,6 +320,10 @@ class GJJ_Ideogram4DirectGenerator:
 
         try:
             _send_status(unique_id, "加载 Ideogram 4 模型...")
+            unet_name = _resolve_model_selection("unet_name", unet_name)
+            uncond_unet_name = _resolve_model_selection("uncond_unet_name", uncond_unet_name)
+            clip_name = _resolve_model_selection("clip_name", clip_name)
+            vae_name = _resolve_model_selection("vae_name", vae_name)
             unet_loader = UNETLoader()
             main_model = _unwrap(unet_loader.load_unet(unet_name, weight_dtype))
             uncond_model = _unwrap(unet_loader.load_unet(uncond_unet_name, weight_dtype))

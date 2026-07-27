@@ -1125,6 +1125,36 @@ function expectedMainModelName(preset) {
 	return String(preset?.modelName || "").trim() || expectedUnetName(preset);
 }
 
+const MAIN_MODEL_FILTER_STOP_WORDS = new Set([
+	"base",
+	"dev",
+	"distilled",
+	"fp8",
+	"int4",
+	"int8",
+	"convrot",
+	"scaled",
+	"mixed",
+	"transformer",
+	"only",
+	"safetensors",
+	"gguf",
+]);
+
+function presetMainModelFilter(preset, selectedModel = "") {
+	const source = expectedMainModelName(preset) || selectedModel;
+	const tokens = stemOf(source)
+		.split(/[^a-z0-9]+/i)
+		.map((token) => token.trim().toLowerCase())
+		.filter((token) => token && !MAIN_MODEL_FILTER_STOP_WORDS.has(token));
+	return [...new Set(tokens)].slice(0, 4).join(" ");
+}
+
+function syncPresetMainModelFilter(node, preset, selectedModel = "") {
+	if (!preset || isCheckpointCommonPreset(preset)) return;
+	setFilter(node, UNET_WIDGET, presetMainModelFilter(preset, selectedModel));
+}
+
 function isFlux1Preset(preset) {
 	const clipType = lower(preset?.clipType);
 	const clipNames = (preset?.clipNames || []).map(lower).join("|");
@@ -1517,6 +1547,7 @@ function applyPreset(node, force = false) {
 	if (preset.denoise != null) setWidgetValue(getWidget(node, DENOISE_WIDGET), preset.denoise);
 	setPresetLoraWidgets(node, preset, loraList);
 	setTemplateId(node, preset.id);
+	syncPresetMainModelFilter(node, preset, unetName);
 	node.properties[PRESET_INIT_PROPERTY] = true;
 	node.properties[PRESET_UNET_PROPERTY] = unetName;
 	node.properties[PRESET_TEMPLATE_PROPERTY] = preset.id;

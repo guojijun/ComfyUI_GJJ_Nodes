@@ -1323,6 +1323,7 @@ export class GJJ_Utils {
 
     static _modelTreeFileNode(node, entry, callbacks = {}) {
         const widget = GJJ_Utils._modelTreeWidget(node, entry);
+        const readOnly = entry?.readOnly === true;
         const strengthWidget = entry?.strengthWidget || entry?.strengthWidgetName
             ? GJJ_Utils.getWidget(node, entry.strengthWidget || entry.strengthWidgetName)
             : null;
@@ -1339,7 +1340,7 @@ export class GJJ_Utils {
             const icon = entry?.icon || "🟣";
             const prefix = entry?.prefix || "│　└─";
             const { row, button } = GJJ_Utils._modelTreeLine(prefix, icon, filename, {
-                clickable: true,
+                clickable: !readOnly,
                 selected: Boolean(choicePanel),
                 missing,
                 copyValue: value,
@@ -1359,7 +1360,7 @@ export class GJJ_Utils {
                     entry?.description || entry?.tooltip || "",
                 ].filter(Boolean).join("\n");
             }
-            button.addEventListener("click", () => {
+            if (!readOnly) button.addEventListener("click", () => {
                 if (choicePanel) {
                     choicePanel.remove();
                     choicePanel = null;

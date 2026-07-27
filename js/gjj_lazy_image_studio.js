@@ -2864,6 +2864,40 @@ function lazyModelTreeEntries(node) {
 			description: "VAE 解码器；把采样 latent 解码成最终图片。",
 		},
 	];
+	if (!useCheckpoint && normalizeText(preset?.clipType) === "flux") {
+		const clipIndex = entries.findIndex((entry) => entry?.widget === "clip_name1");
+		if (clipIndex >= 0) {
+			const t5Entry = entries[clipIndex];
+			const currentClip = widgetValue(node, "clip_name1");
+			const currentT5 = canonicalizeText(currentClip) === "cliplsafetensors"
+				? ""
+				: currentClip;
+			const preferredT5 = currentT5
+				|| (preset?.clipNames || [])[1]
+				|| "t5xxl_int8_convrot.safetensors";
+			entries.splice(
+				clipIndex,
+				1,
+				{
+					label: "Flux CLIP-L 编码器",
+					folder: "models/text_encoders",
+					icon: "🟡",
+					models: ["clip_l.safetensors"],
+					fallback: "clip_l.safetensors",
+					autoSelect: false,
+					readOnly: true,
+					description: "Flux 固定加载的 CLIP-L 编码器。",
+				},
+				{
+					...t5Entry,
+					label: "Flux T5XXL 编码器",
+					searchValue: modelFamilyStem(preferredT5),
+					fallback: currentT5 || "t5xxl_int8_convrot.safetensors",
+					description: "Flux 必需的第二个文本编码器；与上方 CLIP-L 同时加载。",
+				},
+			);
+		}
+	}
 	entries.push({
 		label: "Opus-MT 中英翻译模型",
 		folder: "models/translation",
@@ -5643,11 +5677,27 @@ function applyPreset(node, force = false) {
 	const clipValues = Array.isArray(clipWidget?.options?.values) ? clipWidget.options.values : [];
 	const vaeValues = Array.isArray(vaeWidget?.options?.values) ? vaeWidget.options.values : [];
 	const currentClipName = String(clipWidget?.value || "");
-	const prioritizedClipValues = currentClipName
-		? [currentClipName, ...clipValues.filter((value) => String(value) !== currentClipName)]
-		: clipValues;
-
-	setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, (preset.clipNames || [])[0] || ""));
+	const isFluxDualClip = (
+		normalizeText(preset.clipType) === "flux"
+		&& canonicalizeText((preset.clipNames || [])[0]) === "cliplsafetensors"
+	);
+	if (isFluxDualClip) {
+		const preferredT5Names = [
+			(preset.clipNames || [])[1],
+			"t5xxl_int8_convrot.safetensors",
+			"t5xxl_int4_convrot.safetensors",
+			"t5xxl_fp16.safetensors",
+		].filter(Boolean);
+		const selectedT5 = preferredT5Names.find((name) => clipValues.includes(name))
+			|| clipValues.find((name) => canonicalizeText(name).includes("t5xxl"))
+			|| preferredValue(clipValues, preferredT5Names[0] || "");
+		setWidgetValue(clipWidget, selectedT5);
+	} else {
+		const prioritizedClipValues = currentClipName
+			? [currentClipName, ...clipValues.filter((value) => String(value) !== currentClipName)]
+			: clipValues;
+		setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, (preset.clipNames || [])[0] || ""));
+	}
 	setWidgetValue(vaeWidget, preferredValue(vaeValues, preset.vaeName || ""));
 	if (Number.isFinite(preset.steps)) {
 		setWidgetValue(getWidget(node, "steps"), Number(preset.steps));

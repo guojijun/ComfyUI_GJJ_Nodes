@@ -14,9 +14,6 @@ const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "workflow_title";
 const MIN_WIDTH = 120;
 const SETTINGS_WIDTH = 360;
-const SETTINGS_PREVIEW_HEIGHT = 104;
-const SETTINGS_PREVIEW_PADDING = 8;
-const SETTINGS_TOP_GAP = 30;
 const DEFAULT_FONT_SIZE = 72;
 const DEFAULT_TITLE_WIDTH = 512;
 const USER_STYLE_SAVE_DELAY = 420;
@@ -97,13 +94,13 @@ function ensureStyle() {
 	style.textContent = `
 .gjj-title-root{position:relative;box-sizing:border-box;width:100%;min-width:0;padding:0;background:transparent;color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;pointer-events:none;user-select:none;}
 .gjj-title-preview{display:block;box-sizing:border-box;width:fit-content;max-width:100%;background:transparent;pointer-events:none;}
-.gjj-title-canvas{display:block;background:transparent;pointer-events:none;}
-.gjj-title-gear{position:absolute;left:0;top:0;z-index:4;width:24px;height:24px;padding:0;border:0;border-radius:5px;background:rgba(11,16,20,.34);color:#effff8;font-size:14px;line-height:24px;cursor:pointer;opacity:.62;pointer-events:auto;}
-.gjj-title-root:hover .gjj-title-gear,.gjj-title-root.open .gjj-title-gear{opacity:1;background:rgba(20,31,37,.82);box-shadow:0 0 0 1px rgba(85,198,133,.28);}
-.gjj-title-panel{display:none;box-sizing:border-box;width:${SETTINGS_WIDTH}px;margin-top:6px;padding:8px;border:1px solid rgba(85,198,133,.28);border-radius:7px;background:rgba(13,20,24,.96);box-shadow:0 8px 28px rgba(0,0,0,.28);pointer-events:auto;}
+.gjj-title-canvas{display:block;background:transparent;pointer-events:auto;cursor:text;}
+.gjj-title-panel{position:fixed;z-index:10020;display:none;box-sizing:border-box;width:${SETTINGS_WIDTH}px;max-height:calc(100vh - 24px);padding:8px;border:1px solid rgba(85,198,133,.28);border-radius:7px;background:rgba(13,20,24,.96);box-shadow:0 8px 28px rgba(0,0,0,.38);color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:auto;pointer-events:auto;}
 .gjj-title-panel *{pointer-events:auto;}
-.gjj-title-root.open .gjj-title-panel{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:${SETTINGS_TOP_GAP}px;}
-.gjj-title-root.open .gjj-title-preview{display:flex;align-items:center;justify-content:center;width:${SETTINGS_WIDTH}px;height:${SETTINGS_PREVIEW_HEIGHT}px;margin-top:7px;padding:${SETTINGS_PREVIEW_PADDING}px;border:1px solid rgba(85,198,133,.2);border-radius:7px;background:rgba(7,12,15,.62);overflow:hidden;}
+.gjj-title-panel.open{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+.gjj-title-panel-header{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;height:30px;margin:-8px -8px 1px;padding:0 7px 0 10px;border-bottom:1px solid rgba(85,198,133,.22);border-radius:7px 7px 0 0;background:#172329;color:#dce7e2;font-size:12px;font-weight:800;cursor:move;user-select:none;touch-action:none;}
+.gjj-title-panel-close{width:24px;height:24px;padding:0;border:0;border-radius:5px;background:transparent;color:#b9c9cd;font-size:18px;line-height:22px;cursor:pointer;}
+.gjj-title-panel-close:hover{background:#293940;color:#fff;}
 .gjj-title-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .gjj-title-field.wide{grid-column:1 / -1;}
 .gjj-title-field label{font-size:11px;color:#9fb5bd;font-weight:700;}
@@ -809,10 +806,18 @@ function createPanel(node) {
 	const preview = document.createElement("div");
 	preview.className = "gjj-title-preview";
 	preview.appendChild(canvas);
-	const gear = makeButton("⚙️", "设置工作流标题样式");
-	gear.className = "gjj-title-gear";
 	const settings = document.createElement("div");
 	settings.className = "gjj-title-panel";
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+		settings.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	const panelHeader = document.createElement("div");
+	panelHeader.className = "gjj-title-panel-header";
+	const panelTitle = document.createElement("span");
+	panelTitle.textContent = "编辑工作流标题";
+	const panelClose = makeButton("×", "关闭编辑窗口");
+	panelClose.className = "gjj-title-panel-close";
+	panelHeader.append(panelTitle, panelClose);
 
 	const textInput = document.createElement("textarea");
 	textInput.value = state.text;
@@ -894,6 +899,7 @@ function createPanel(node) {
 	actions.append(reset, ok);
 
 	settings.append(
+		panelHeader,
 		actions,
 		makeField("标题", textInput, true),
 		makeField("字体", fontSelect, true),
@@ -922,7 +928,9 @@ function createPanel(node) {
 		controls[11].field,
 		controls[12].field,
 	);
-	root.append(gear, settings, preview);
+	root.append(preview);
+	document.body.appendChild(settings);
+	node.__gjjWorkflowTitleFloatingPanel = settings;
 
 	function syncWidthFromNode(persist = true) {
 		const width = currentNodeWidth(node, state.width, true);
@@ -979,18 +987,57 @@ function createPanel(node) {
 		}
 	}
 
-	gear.addEventListener("click", (event) => {
+	function closePanel(event) {
+		if (event) stop(event);
+		panelOpen = false;
+		settings.classList.remove("open");
+	}
+
+	function openPanel(event) {
 		stop(event);
-		panelOpen = !panelOpen;
-		root.classList.toggle("open", panelOpen);
-		renderPreview();
-		resizeNode();
+		panelOpen = true;
+		settings.classList.add("open");
+		if (!settings.dataset.positioned) {
+			const left = Math.max(12, Math.round((window.innerWidth - SETTINGS_WIDTH) / 2));
+			const top = Math.max(12, Math.round((window.innerHeight - Math.min(720, settings.scrollHeight || 720)) / 2));
+			settings.style.left = `${left}px`;
+			settings.style.top = `${top}px`;
+			settings.dataset.positioned = "true";
+		}
+		textInput.focus();
+	}
+
+	canvas.addEventListener("dblclick", openPanel);
+	panelClose.addEventListener("click", closePanel);
+	panelHeader.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0 || event.target === panelClose) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const rect = settings.getBoundingClientRect();
+		const startX = event.clientX;
+		const startY = event.clientY;
+		const startLeft = rect.left;
+		const startTop = rect.top;
+		panelHeader.setPointerCapture?.(event.pointerId);
+		const move = (moveEvent) => {
+			const maxLeft = Math.max(0, window.innerWidth - settings.offsetWidth);
+			const maxTop = Math.max(0, window.innerHeight - 36);
+			settings.style.left = `${Math.min(maxLeft, Math.max(0, startLeft + moveEvent.clientX - startX))}px`;
+			settings.style.top = `${Math.min(maxTop, Math.max(0, startTop + moveEvent.clientY - startY))}px`;
+		};
+		const end = (endEvent) => {
+			panelHeader.releasePointerCapture?.(endEvent.pointerId);
+			panelHeader.removeEventListener("pointermove", move);
+			panelHeader.removeEventListener("pointerup", end);
+			panelHeader.removeEventListener("pointercancel", end);
+		};
+		panelHeader.addEventListener("pointermove", move);
+		panelHeader.addEventListener("pointerup", end);
+		panelHeader.addEventListener("pointercancel", end);
 	});
 	ok.addEventListener("click", (event) => {
-		stop(event);
-		panelOpen = false;
-		root.classList.remove("open");
 		syncFromControls();
+		closePanel(event);
 	});
 	reset.addEventListener("click", (event) => {
 		stop(event);
@@ -1050,17 +1097,6 @@ function createPanel(node) {
 		const display = titleDisplaySize(state, layout);
 		let displayW = display.width;
 		let displayH = display.height;
-		if (panelOpen) {
-			const maxW = SETTINGS_WIDTH - SETTINGS_PREVIEW_PADDING * 2;
-			const maxH = SETTINGS_PREVIEW_HEIGHT - SETTINGS_PREVIEW_PADDING * 2;
-			const scale = Math.min(
-				maxW / Math.max(1, displayW),
-				maxH / Math.max(1, displayH),
-				1
-			);
-			displayW = Math.max(1, Math.round(displayW * scale));
-			displayH = Math.max(1, Math.round(displayH * scale));
-		}
 		const dpr = Math.max(1, window.devicePixelRatio || 1);
 		canvas.style.width = `${displayW}px`;
 		canvas.style.height = `${displayH}px`;
@@ -1075,19 +1111,15 @@ function createPanel(node) {
 		requestAnimationFrame(() => {
 			syncWidthFromNode(false);
 			applyTransparentChrome(node);
-			const frameWidth = Math.max(MIN_WIDTH, currentNodeWidth(node, state.width, true), panelOpen ? SETTINGS_WIDTH : 0);
+			const frameWidth = Math.max(MIN_WIDTH, currentNodeWidth(node, state.width, true));
 			if (Math.abs(frameWidth - finite(state.width, DEFAULT_TITLE_WIDTH)) >= 0.5) {
 				state = normalizeState({ ...state, width: frameWidth });
 				persistTitleState(node, state);
 			}
 			layout = measureLayout(state);
 			const display = titleDisplaySize(state, layout);
-			const panelHeight = panelOpen
-				? Math.ceil(settings.scrollHeight || settings.offsetHeight || 0) + SETTINGS_TOP_GAP + SETTINGS_PREVIEW_HEIGHT + 13
-				: 0;
 			const width = Math.max(MIN_WIDTH, display.width, frameWidth);
-			const previewHeight = panelOpen ? 0 : display.height;
-			const height = Math.max(24, previewHeight + panelHeight);
+			const height = Math.max(24, display.height);
 			node.__gjjWorkflowTitleSize = [width, height];
 			node.minWidth = MIN_WIDTH;
 			node.min_width = MIN_WIDTH;
@@ -1200,6 +1232,13 @@ app.registerExtension({
 			writeSerializedConfig(this, serializedNode);
 			applyTransparentChrome(this);
 			return result;
+		};
+
+		const originalOnRemoved = nodeType.prototype.onRemoved;
+		nodeType.prototype.onRemoved = function (...args) {
+			this.__gjjWorkflowTitleFloatingPanel?.remove();
+			delete this.__gjjWorkflowTitleFloatingPanel;
+			return originalOnRemoved?.apply(this, args);
 		};
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;

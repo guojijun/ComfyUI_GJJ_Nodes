@@ -239,6 +239,8 @@ def gjjutils_model_family_get_flux_clip_candidates(
     if priority_list is None:
         priority_list = [
             default_name,
+            "t5xxl_int8_convrot.safetensors",
+            "t5xxl_int4_convrot.safetensors",
             "t5xxl_fp16.safetensors",
             "t5xxl_fp8_e4m3fn_scaled.safetensors",
             "t5xxl_fp8_e4m3fn.safetensors",
@@ -311,7 +313,7 @@ def gjjutils_model_family_resolve_clip_names(
     # Flux 特殊处理：clip_l + 可选 T5
     if (
         _normalize_text(preset.get("clip_type", "")) == "flux"
-        and _normalize_text(recommended_clip_names[0]) == "clipl.safetensors"
+        and _canonical_model_text(recommended_clip_names[0]) == "cliplsafetensors"
     ):
         clip_l_name = matcher(
             "clip_l.safetensors", clip_models, recommended_clip_names[0]
@@ -320,10 +322,15 @@ def gjjutils_model_family_resolve_clip_names(
             clip_models,
             recommended_clip_names[1] if len(recommended_clip_names) > 1 else "",
         )
-        optional_name = matcher(
-            exposed_clip_name,
-            optional_candidates,
-            recommended_clip_names[1] if len(recommended_clip_names) > 1 else "",
+        exposed_t5_name = (
+            ""
+            if _canonical_model_text(exposed_clip_name) == "cliplsafetensors"
+            else str(exposed_clip_name or "").strip()
+        )
+        optional_name = (
+            matcher(exposed_t5_name, optional_candidates, "")
+            if exposed_t5_name
+            else (optional_candidates[0] if optional_candidates else "")
         )
         resolved = [
             name for name in [clip_l_name, optional_name] if str(name or "").strip()
