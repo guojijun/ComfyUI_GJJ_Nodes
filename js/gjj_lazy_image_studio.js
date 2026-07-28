@@ -4065,13 +4065,15 @@ function lazyTestFilters(node) {
 			lora: String(filters.lora || ""),
 			lora_strength: String(filters.lora_strength || filters.lora || ""),
 			checkpoint: String(filters.checkpoint || ""),
+			sampler: String(filters.sampler || ""),
+			scheduler: String(filters.scheduler || ""),
 		};
 	}
-	return { unet: "", lora: "", lora_strength: "", checkpoint: "" };
+	return { unet: "", lora: "", lora_strength: "", checkpoint: "", sampler: "", scheduler: "" };
 }
 
 function saveLazyTestFilter(node, kind, value) {
-	if (!node || !["unet", "lora", "lora_strength", "checkpoint"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength", "checkpoint", "sampler", "scheduler"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
@@ -4091,13 +4093,15 @@ function lazyTestSorts(node) {
 			lora: String(sorts.lora || "name_asc"),
 			lora_strength: String(sorts.lora_strength || sorts.lora || "name_asc"),
 			checkpoint: String(sorts.checkpoint || "name_asc"),
+			sampler: String(sorts.sampler || "name_asc"),
+			scheduler: String(sorts.scheduler || "name_asc"),
 		};
 	}
-	return { unet: "name_asc", lora: "name_asc", lora_strength: "name_asc", checkpoint: "name_asc" };
+	return { unet: "name_asc", lora: "name_asc", lora_strength: "name_asc", checkpoint: "name_asc", sampler: "name_asc", scheduler: "name_asc" };
 }
 
 function saveLazyTestSort(node, kind, value) {
-	if (!node || !["unet", "lora", "lora_strength", "checkpoint"].includes(kind)) {
+	if (!node || !["unet", "lora", "lora_strength", "checkpoint", "sampler", "scheduler"].includes(kind)) {
 		return;
 	}
 	node.properties = node.properties || {};
@@ -4224,9 +4228,9 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	const savedStrength = lazyTestStrengthSettings(node);
 	const state = {
 		kind: "unet",
-		models: { unet: [], lora: [], checkpoint: [] },
-		filters: { unet: savedFilters.unet, lora: savedFilters.lora, lora_strength: savedFilters.lora_strength, checkpoint: savedFilters.checkpoint },
-		sorts: { unet: savedSorts.unet, lora: savedSorts.lora, lora_strength: savedSorts.lora_strength, checkpoint: savedSorts.checkpoint },
+		models: { unet: [], lora: [], checkpoint: [], sampler: [], scheduler: [] },
+		filters: { unet: savedFilters.unet, lora: savedFilters.lora, lora_strength: savedFilters.lora_strength, checkpoint: savedFilters.checkpoint, sampler: savedFilters.sampler, scheduler: savedFilters.scheduler },
+		sorts: { unet: savedSorts.unet, lora: savedSorts.lora, lora_strength: savedSorts.lora_strength, checkpoint: savedSorts.checkpoint, sampler: savedSorts.sampler, scheduler: savedSorts.scheduler },
 	};
 	const list = panel.querySelector("[data-list]");
 	const status = panel.querySelector("[data-status]");
@@ -4250,6 +4254,8 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			{ kind: "lora", label: "Lora模型测试" },
 			{ kind: "lora_strength", label: "Lora强度测试" },
 			{ kind: "checkpoint", label: "Checkpoint测试" },
+			{ kind: "sampler", label: "采样器测试" },
+			{ kind: "scheduler", label: "调度器测试" },
 		]) {
 			const button = document.createElement("button");
 			button.type = "button";
@@ -4311,6 +4317,13 @@ function openLazyTestDialog(node, testButton, generateButton) {
 		if (state.models[modelKind]?.length) {
 			return;
 		}
+		if (modelKind === "sampler" || modelKind === "scheduler") {
+			const widgetName = modelKind === "sampler" ? "sampler_name" : "scheduler";
+			const widget = getWidget(node, widgetName);
+			const values = Array.isArray(widget?.options?.values) ? widget.options.values : [];
+			state.models[modelKind] = values.map((value) => ({ name: String(value), size: "", bytes: 0 }));
+			return;
+		}
 		status.textContent = "正在读取模型列表...";
 		state.models[modelKind] = await fetchLazyTestModels(modelKind, node);
 	}
@@ -4334,7 +4347,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			list.appendChild(row);
 		}
 		const selectedCount = selectedLazyTestModels(panel).length;
-		const label = state.kind === "unet" ? "UNET" : (state.kind === "lora_strength" ? "LoRA强度" : (state.kind === "checkpoint" ? "Checkpoint" : "LoRA模型"));
+		const label = state.kind === "unet" ? "UNET" : (state.kind === "lora_strength" ? "LoRA强度" : (state.kind === "checkpoint" ? "Checkpoint" : (state.kind === "sampler" ? "采样器" : (state.kind === "scheduler" ? "调度器" : "LoRA模型"))));
 		status.textContent = `${label}：${filtered.length} / ${state.models[modelKind].length}，已选 ${selectedCount}`;
 	}
 

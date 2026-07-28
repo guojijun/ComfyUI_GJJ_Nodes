@@ -8,50 +8,28 @@ from __future__ import annotations
 import json
 import base64
 import io
-import time
 from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils.temp_files import (
+    gjjutils_read_temp_pil_image,
+    gjjutils_write_temp_pil_image,
+    gjjutils_write_temp_tensor_images,
+)
+from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate, _text_encoder_options
 try:
     from .gjj_ollama_common import (
         DEFAULT_OLLAMA_HOST,
-        extract_final_answer,
-        model_options_with_fallback,
-        normalize_ollama_host,
-        request_chat,
-        resolve_model,
         tensor_to_png_base64,
-        unload_model,
     )
 except Exception:
     DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 
-    def model_options_with_fallback(*_args, **_kwargs):
-        return [""]
-
-    def normalize_ollama_host(raw_host: str | None) -> str:
-        return raw_host or DEFAULT_OLLAMA_HOST
-
-    def resolve_model(model: str, host: str | None = None) -> str:
-        if str(model or "").strip():
-            return str(model).strip()
-        raise RuntimeError("未选择 Ollama 反推模型。")
-
-    def request_chat(*_args, **_kwargs):
-        raise RuntimeError("当前环境无法导入 GJJ Ollama 公共工具。")
-
-    def extract_final_answer(_response):
-        return ""
-
     def tensor_to_png_base64(_image):
-        raise RuntimeError("当前环境无法转换图片给 Ollama。")
-
-    def unload_model(_model: str, host: str | None = None):
-        return {}
+        raise RuntimeError("当前环境无法生成图片预览。")
 
 
 NODE_NAME = "GJJ_Ideogram4PromptBuilder"
@@ -61,12 +39,15 @@ STYLE_ART = "艺术风格"
 STYLE_OPTIONS = [STYLE_NONE, STYLE_PHOTO, STYLE_ART]
 MIXED_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 CAPTION_BACKEND_OFF = "关闭"
-CAPTION_BACKEND_OLLAMA = "Ollama"
-CAPTION_BACKENDS = [CAPTION_BACKEND_OFF, CAPTION_BACKEND_OLLAMA]
+CAPTION_BACKEND_GEMMA = "GJJ_GemmaTextGenerate"
+CAPTION_BACKENDS = [CAPTION_BACKEND_OFF, CAPTION_BACKEND_GEMMA]
+DEFAULT_IMAGE_CAPTION_MODEL = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
 DEFAULT_IMAGE_CAPTION_PROMPT = (
     "请识别这张参考图的主体、背景、构图、光线、色调、材质、文字内容和关键细节，"
     "输出一段适合写入 Ideogram 4 JSON caption 的中文画面描述。只输出描述正文。"
 )
+RMBG14_RECAPTION_API = "/gjj/ideogram4_prompt_builder/rmbg14_recaption"
+TEMP_IMAGE_API = "/gjj/ideogram4_prompt_builder/temp_image"
 
 
 def _hex_rgb(value: Any) -> tuple[int, int, int]:
@@ -167,6 +148,11 @@ def _image_to_pil_list(image: Any) -> list[Image.Image]:
 
 
 def _data_url_to_pil(data_url: Any) -> Image.Image | None:
+    if isinstance(data_url, dict) and data_url.get("filename"):
+        try:
+            return gjjutils_read_temp_pil_image(data_url).convert("RGB")
+        except Exception:
+            return None
     text = str(data_url or "").strip()
     if not text:
         return None
@@ -179,16 +165,56 @@ def _data_url_to_pil(data_url: Any) -> Image.Image | None:
         return None
 
 
+def _rmbg14_cutout(image: Image.Image) -> Image.Image:
+    from .gjj_comprehensive_matting import (
+        GJJ_ComprehensiveMatting,
+        METHOD_RMBG14,
+    )
+
+    rgba = image.convert("RGBA")
+    rgb = np.asarray(rgba.convert("RGB"), dtype=np.float32) / 255.0
+    media = torch.from_numpy(rgb).unsqueeze(0)
+    output = GJJ_ComprehensiveMatting().remove_background(
+        matting_method=METHOD_RMBG14,
+        background="透明",
+        device="自动",
+        process_res=1024,
+        threshold=0.0,
+        mask_blur=0.0,
+        invert_output=False,
+        inspyrenet_jit=False,
+        media=media,
+    )
+    result = output.get("result") if isinstance(output, dict) else output
+    if not isinstance(result, (tuple, list)) or len(result) < 2:
+        raise RuntimeError("GJJ_ComprehensiveMatting 没有返回有效遮罩")
+    mask_tensor = result[1]
+    if not isinstance(mask_tensor, torch.Tensor) or mask_tensor.numel() == 0:
+        raise RuntimeError("GJJ_ComprehensiveMatting 返回的遮罩为空")
+    mask_array = mask_tensor.detach().float().cpu()
+    while mask_array.ndim > 2:
+        mask_array = mask_array[0]
+    mask = Image.fromarray(
+        np.clip(mask_array.numpy() * 255.0, 0, 255).astype(np.uint8),
+        mode="L",
+    )
+    if mask.size != rgba.size:
+        resampling = getattr(Image, "Resampling", Image)
+        mask = mask.resize(rgba.size, resampling.LANCZOS)
+    rgba.putalpha(ImageChops.multiply(rgba.getchannel("A"), mask))
+    return rgba
+
+
 def _pil_to_png_base64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.convert("RGB").save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _box_image_data(box: Any) -> str:
+def _box_image_data(box: Any) -> Any:
     if not isinstance(box, dict):
         return ""
-    return str(box.get("imageData") or box.get("image_data") or box.get("image") or "").strip()
+    return box.get("imageRef") or box.get("image_ref") or box.get("imageData") or box.get("image_data") or box.get("image") or ""
 
 
 def _render_preview(boxes: list[Any], width: int, height: int, image: Any = None, image_element_data: str = "") -> torch.Tensor:
@@ -517,35 +543,9 @@ def _normalize_imported_caption(caption: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _caption_image_with_ollama(
-    image: Any,
-    model: str,
-    host: str,
-    prompt: str,
-    thinking_mode: str,
-    max_tokens: int,
-    keep_alive: str,
-) -> str:
-    if image is None:
-        return ""
-    chosen_model = resolve_model(model, host=host)
-    pil = _image_to_pil(image)
-    image_base64 = _pil_to_png_base64(pil) if pil is not None else tensor_to_png_base64(image)
-    return _caption_base64_with_ollama(
-        image_base64,
-        chosen_model,
-        host,
-        prompt,
-        thinking_mode,
-        max_tokens,
-        keep_alive,
-    )
-
-
-def _caption_pil_with_ollama(
+def _caption_pil_with_gemma(
     image: Image.Image,
     model: str,
-    host: str,
     prompt: str,
     thinking_mode: str,
     max_tokens: int,
@@ -553,50 +553,32 @@ def _caption_pil_with_ollama(
 ) -> str:
     if image is None:
         return ""
-    chosen_model = resolve_model(model, host=host)
-    return _caption_base64_with_ollama(
-        _pil_to_png_base64(image),
-        chosen_model,
-        host,
-        prompt,
-        thinking_mode,
-        max_tokens,
-        keep_alive,
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    media = torch.from_numpy(rgb).unsqueeze(0)
+    generated = GJJ_GemmaTextGenerate().generate(
+        clip_name=str(model or DEFAULT_IMAGE_CAPTION_MODEL),
+        clip_type="stable_diffusion",
+        clip_device="default",
+        prompt=str(prompt or DEFAULT_IMAGE_CAPTION_PROMPT),
+        max_length=max(32, min(8192, int(max_tokens or 512))),
+        sampling_mode="off",
+        temperature=0.35,
+        top_k=64,
+        top_p=0.95,
+        min_p=0.05,
+        repetition_penalty=1.05,
+        seed=0,
+        presence_penalty="0.0",
+        thinking=str(thinking_mode) == "开启思考",
+        use_default_template=True,
+        media=media,
+        keep_model=str(keep_alive) == "保持模型",
+        device_preference="GPU优先",
     )
-
-
-def _caption_base64_with_ollama(
-    image_base64: str,
-    chosen_model: str,
-    host: str,
-    prompt: str,
-    thinking_mode: str,
-    max_tokens: int,
-    keep_alive: str,
-) -> str:
-    options: dict[str, Any] = {
-        "temperature": 0.35,
-        "num_predict": max(32, min(8192, int(max_tokens or 512))),
-        "seed": int(time.time_ns() & 0xFFFFFFFF),
-    }
-    payload = {
-        "model": chosen_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": str(prompt or DEFAULT_IMAGE_CAPTION_PROMPT),
-                "images": [image_base64],
-            }
-        ],
-        "stream": False,
-        "think": str(thinking_mode) == "开启思考",
-        "options": options,
-    }
-    response = request_chat(payload, error_label="Ollama 图片反推请求", host=host, timeout=120)
-    text = extract_final_answer(response).strip()
-    if str(keep_alive) == "卸载模型":
-        unload_model(chosen_model, host=host)
-    return text
+    result = generated.get("result") if isinstance(generated, dict) else generated
+    if isinstance(result, (tuple, list)):
+        return str(result[0] if result else "").strip()
+    return str(result or "").strip()
 
 
 def _merge_image_caption(caption: dict[str, Any], image_text: str) -> None:
@@ -683,6 +665,74 @@ def _ensure_image_element(boxes: list[Any], image: Any) -> list[Any]:
     ]
 
 
+def _register_rmbg14_recaption_api() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+
+    @PromptServer.instance.routes.post(TEMP_IMAGE_API)
+    async def store_temp_image(request):
+        try:
+            image = None
+            if request.content_type.startswith("multipart/"):
+                reader = await request.multipart()
+                while True:
+                    field = await reader.next()
+                    if field is None:
+                        break
+                    if field.name != "image":
+                        continue
+                    raw = await field.read(decode=False)
+                    try:
+                        image = Image.open(io.BytesIO(raw))
+                        image.load()
+                    except Exception:
+                        image = None
+                    break
+            else:
+                data = await request.json()
+                image = _data_url_to_pil(data.get("image"))
+            if image is None:
+                return web.json_response({"ok": False, "error": "图片数据无效"}, status=400)
+            info = gjjutils_write_temp_pil_image(image, format="PNG", suffix=".png")
+            return web.json_response({"ok": True, "image": info})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post(RMBG14_RECAPTION_API)
+    async def rmbg14_recaption(request):
+        try:
+            data = await request.json()
+            image = _data_url_to_pil(data.get("image"))
+            if image is None:
+                return web.json_response({"ok": False, "error": "图片数据无效"}, status=400)
+            model = str(data.get("model") or "").strip()
+            if not model:
+                return web.json_response({"ok": False, "error": "请先在反推设置中选择模型"}, status=400)
+
+            cutout = _rmbg14_cutout(image)
+            caption_image = Image.new("RGB", cutout.size, (255, 255, 255))
+            caption_image.paste(cutout.convert("RGB"), mask=cutout.getchannel("A"))
+            caption = _caption_pil_with_gemma(
+                caption_image,
+                model,
+                str(data.get("prompt") or DEFAULT_IMAGE_CAPTION_PROMPT),
+                str(data.get("thinking") or "关闭思考"),
+                int(data.get("max_tokens") or 512),
+                str(data.get("keep_alive") or "保持模型"),
+            )
+            image_info = gjjutils_write_temp_pil_image(cutout, format="PNG", suffix=".png")
+            return web.json_response({
+                "ok": True,
+                "image": image_info,
+                "caption": caption,
+            })
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
 class GJJ_Ideogram4PromptBuilder:
     DESCRIPTION = (
         "可视化构建 Ideogram 4 结构化 JSON 提示词。"
@@ -699,8 +749,10 @@ class GJJ_Ideogram4PromptBuilder:
 
     @classmethod
     def INPUT_TYPES(cls):
-        model_options = model_options_with_fallback()
-        default_model = model_options[0] if model_options else ""
+        available_models = list(_text_encoder_options() or [])
+        model_options = [DEFAULT_IMAGE_CAPTION_MODEL]
+        model_options.extend(name for name in available_models if name not in model_options)
+        default_model = DEFAULT_IMAGE_CAPTION_MODEL
         return {
             "required": {
                 "width": ("INT", {
@@ -782,18 +834,18 @@ class GJJ_Ideogram4PromptBuilder:
                     "tooltip": "作品媒介，例如数字摄影、混合媒介拼贴、3D 渲染、油画等。",
                 }),
                 "image_caption_backend": (CAPTION_BACKENDS, {
-                    "default": CAPTION_BACKEND_OLLAMA if default_model else CAPTION_BACKEND_OFF,
+                    "default": CAPTION_BACKEND_GEMMA,
                     "hidden": True,
                     "display": "hidden",
                     "display_name": "图片反推方式",
-                    "tooltip": "连接图片后可选择是否调用本机 Ollama 多模态模型反推图片描述，并写入对应图片元素的描述。",
+                    "tooltip": "连接图片后可选择是否调用 GJJ_GemmaTextGenerate 反推图片描述，并写入对应图片元素的描述。",
                 }),
                 "image_caption_model": (model_options, {
                     "default": default_model,
                     "hidden": True,
                     "display": "hidden",
                     "display_name": "反推模型",
-                    "tooltip": "选择本机 Ollama 已安装的多模态模型；留空或关闭反推时不会调用。",
+                    "tooltip": "选择 ComfyUI/models/text_encoders 中供 GJJ_GemmaTextGenerate 使用的多模态反推模型。",
                 }),
                 "image_caption_prompt": ("STRING", {
                     "default": DEFAULT_IMAGE_CAPTION_PROMPT,
@@ -831,8 +883,8 @@ class GJJ_Ideogram4PromptBuilder:
                     "default": DEFAULT_OLLAMA_HOST,
                     "hidden": True,
                     "display": "hidden",
-                    "display_name": "Ollama 地址",
-                    "tooltip": "本机 Ollama 完整地址，例如 http://127.0.0.1:11434 。",
+                    "display_name": "旧版 Ollama 地址",
+                    "tooltip": "仅为兼容旧工作流保留；GJJ_GemmaTextGenerate 反推方式不会使用此字段。",
                 }),
             },
             "optional": {
@@ -922,10 +974,10 @@ class GJJ_Ideogram4PromptBuilder:
         image_caption = ""
         image_sources = _image_sources_for_boxes(boxes, image=image, image_element_data=image_element_data)
         has_caption_model = bool(str(image_caption_model or "").strip())
-        # 旧工作流里反推方式可能仍保存为“关闭”。只要已选择模型且存在图片元素，
-        # 就按 Ollama 执行，避免图片元素 desc 一直为空。
+        # 旧工作流里反推方式可能仍保存为“关闭”或“Ollama”。只要已选择模型且存在图片元素，
+        # 就按 GJJ_GemmaTextGenerate 执行，避免旧工作流升级后图片元素 desc 一直为空。
         should_caption_images = has_caption_model and bool(image_sources) and (
-            str(image_caption_backend or "") in {CAPTION_BACKEND_OLLAMA, CAPTION_BACKEND_OFF}
+            str(image_caption_backend or "") in {CAPTION_BACKEND_GEMMA, CAPTION_BACKEND_OFF, "Ollama"}
         )
         if should_caption_images:
             image_captions: list[tuple[int, str]] = []
@@ -933,10 +985,9 @@ class GJJ_Ideogram4PromptBuilder:
                 box = boxes[box_index] if 0 <= box_index < len(boxes) else {}
                 if isinstance(box, dict) and not _is_placeholder_image_desc(box.get("desc")):
                     continue
-                text = _caption_pil_with_ollama(
+                text = _caption_pil_with_gemma(
                     pil,
                     str(image_caption_model or ""),
-                    normalize_ollama_host(ollama_host or DEFAULT_OLLAMA_HOST),
                     image_caption_prompt,
                     image_caption_thinking,
                     int(image_caption_max_tokens or 512),
@@ -1009,3 +1060,5 @@ class GJJ_Ideogram4PromptBuilder:
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Ideogram4PromptBuilder}
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧭 Ideogram4提示词画框"}
+
+_register_rmbg14_recaption_api()

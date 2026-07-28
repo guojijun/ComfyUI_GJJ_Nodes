@@ -90,7 +90,7 @@ function ensureStyles() {
 		.gjj-pen-mask { width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:7px; color:#dbe7e8; font:12px/1.35 Arial, sans-serif; }
 		.gjj-pen-mask * { box-sizing:border-box; }
 		.gjj-pen-mask-toolbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
-		.gjj-pen-mask button { flex:0 0 30px; min-width:30px; height:26px; padding:0 6px; border:1px solid #3a4d55; border-radius:6px; background:#202b31; color:#e7f3f3; font-size:12px; font-weight:700; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-pen-mask button { flex:0 0 34px; min-width:34px; height:26px; padding:0 4px; border:1px solid #3a4d55; border-radius:6px; background:#202b31; color:#e7f3f3; font-size:14px; line-height:24px; font-weight:700; cursor:pointer; overflow:visible; text-overflow:clip; white-space:nowrap; }
 		.gjj-pen-mask button:hover { background:#2d3a42; border-color:#6aa6b8; }
 		.gjj-pen-mask button.on { border-color:#4f8f7a; background:#20382f; color:#dff8ea; }
 		.gjj-pen-mask-canvas-wrap { width:100%; position:relative; overflow:hidden; border:1px solid #33464e; border-radius:8px; background:#081014; display:flex; align-items:center; justify-content:center; }
@@ -110,6 +110,51 @@ function findNodeById(nodeId) {
 	return app.graph?.getNodeById?.(Number(nodeId))
 		|| app.graph?._nodes?.find((node) => String(node?.id || "") === String(nodeId))
 		|| null;
+}
+
+function graphLink(linkId) {
+	if (linkId == null || !app.graph?.links) return null;
+	return typeof app.graph.links.get === "function" ? app.graph.links.get(linkId) : app.graph.links[linkId];
+}
+
+function upstreamImageSource(node) {
+	const inputIndex = (node?.inputs || []).findIndex((input) => {
+		const name = String(input?.name || "").toLowerCase();
+		const type = String(input?.type || "").toUpperCase();
+		return name === "image" || type.includes("IMAGE");
+	});
+	const input = inputIndex >= 0 ? node.inputs[inputIndex] : null;
+	const link = graphLink(input?.link);
+	if (!link) return null;
+	const originId = Array.isArray(link) ? link[1] : link.origin_id ?? link.source_id ?? link.from_id;
+	const originSlot = Number(Array.isArray(link) ? link[2] : link.origin_slot ?? link.source_slot ?? 0);
+	const sourceNode = findNodeById(originId);
+	if (!sourceNode) return null;
+
+	// 模板参数节点的媒体预览就是参数当前值的即时可视结果，无需等待执行。
+	// 按输出字段 key 选择对应卡片，避免模板中有多张图片时取错。
+	if (sourceNode.comfyClass === "GJJ_TemplateParams" || sourceNode.type === "GJJ_TemplateParams") {
+		const output = sourceNode.outputs?.[originSlot];
+		const fieldKey = String(output?.gjj_template_param_key || "");
+		const fieldKeys = sourceNode.__gjjTemplateParamsMediaFieldKeys || [];
+		const mediaIndex = Math.max(0, fieldKey ? fieldKeys.indexOf(fieldKey) : originSlot);
+		const root = sourceNode.__gjjTemplateParamsMediaGroup;
+		const cards = root?.querySelectorAll?.(".gjj-common-media-card") || [];
+		const image = cards[mediaIndex]?.querySelector?.("img") || root?.querySelector?.("img");
+		if (image?.src) {
+			return {
+				src: image.src,
+				signature: `template:${originId}:${fieldKey || originSlot}:${image.src}`,
+			};
+		}
+	}
+
+	const image = sourceNode.imgs?.find?.((item) => item?.src)
+		|| sourceNode.image
+		|| sourceNode.preview;
+	return image?.src
+		? { src: image.src, signature: `preview:${originId}:${originSlot}:${image.src}` }
+		: null;
 }
 
 function prunePreviewOutput(node) {
@@ -176,7 +221,7 @@ class PenMaskEditor {
 			modeReplace: this.makeButton("🔁", "新选区模式：替换", () => this.setMode("替换")),
 			modeAdd: this.makeButton("➕", "新选区模式：添加", () => this.setMode("添加")),
 			modeSubtract: this.makeButton("➖", "新选区模式：减去", () => this.setMode("减去")),
-			invert: this.makeButton("🔄", "反相遮罩", () => this.toggleInvert()),
+			invert: this.makeButton("🌔", "遮罩方向：正向；点击切换为反向遮罩", () => this.toggleInvert()),
 			clear: this.makeButton("🗑", "清空全部钢笔路径、魔棒点和笔刷痕迹", () => this.clear()),
 		};
 		this.toolbar.append(
@@ -291,6 +336,15 @@ class PenMaskEditor {
 			const isMode = modeMap[name] && modeMap[name] === this.currentMode();
 			const isInvert = name === "invert" && this.currentInvert();
 			button.classList.toggle("on", Boolean(isTool || isMode || isInvert));
+		}
+		const invert = this.buttons?.invert;
+		if (invert) {
+			const reversed = this.currentInvert();
+			invert.textContent = reversed ? "🌘" : "🌔";
+			invert.title = reversed
+				? "遮罩方向：反向（黑白反相）；点击切换为正向遮罩"
+				: "遮罩方向：正向；点击切换为反向遮罩";
+			invert.setAttribute("aria-pressed", String(reversed));
 		}
 	}
 
@@ -847,6 +901,15 @@ class PenMaskEditor {
 		this.setImageSource(`data:image/jpeg;base64,${String(base64).trim()}`);
 	}
 
+	syncUpstreamImage(force = false) {
+		const source = upstreamImageSource(this.node);
+		if (!source?.src) return false;
+		if (!force && source.signature === this.node.__gjjPenMaskUpstreamSignature) return true;
+		this.node.__gjjPenMaskUpstreamSignature = source.signature;
+		this.setImageSource(source.src);
+		return true;
+	}
+
 	updateStatus() {
 		const active = this.activePath?.points?.length ? ` · 当前路径 ${this.activePath.points.length} 点` : "";
 		const file = getWidgetValue(this.node, FILE_WIDGET, "");
@@ -1194,7 +1257,10 @@ function ensureEditor(node) {
 	if (Number.isFinite(width) && width > 0) {
 		node.setSize?.([Math.round(width), Math.max(Number(node.size?.[1] || 0), 430)]);
 	}
-	requestAnimationFrame(() => node.__gjjPenMaskEditor?.layout());
+	requestAnimationFrame(() => {
+		node.__gjjPenMaskEditor?.layout();
+		node.__gjjPenMaskEditor?.syncUpstreamImage(true);
+	});
 }
 
 function scheduleEnsure(node, delay = 0) {
@@ -1256,6 +1322,24 @@ app.registerExtension({
 			this.__gjjPenMaskEditor?.layout(false);
 			return result;
 		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			delete this.__gjjPenMaskUpstreamSignature;
+			setTimeout(() => this.__gjjPenMaskEditor?.syncUpstreamImage(true), 0);
+			return result;
+		};
+
+		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			const now = Date.now();
+			if (!this.__gjjPenMaskLastUpstreamCheck || now - this.__gjjPenMaskLastUpstreamCheck > 300) {
+				this.__gjjPenMaskLastUpstreamCheck = now;
+				setTimeout(() => this.__gjjPenMaskEditor?.syncUpstreamImage(false), 0);
+			}
+			return originalOnDrawBackground?.apply(this, args);
+		};
 	},
 	nodeCreated(node) {
 		if (node?.comfyClass === TARGET) scheduleEnsure(node, 0);
@@ -1264,6 +1348,16 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === TARGET) scheduleEnsure(node, 0);
 		}
+		window.addEventListener("gjj-template-params-updated", (event) => {
+			const sourceId = String(event?.detail?.nodeId ?? "");
+			for (const node of app.graph?._nodes || []) {
+				if (node?.comfyClass !== TARGET) continue;
+				const source = upstreamImageSource(node);
+				if (!source || !source.signature.startsWith(`template:${sourceId}:`)) continue;
+				delete node.__gjjPenMaskUpstreamSignature;
+				setTimeout(() => node.__gjjPenMaskEditor?.syncUpstreamImage(true), 0);
+			}
+		});
 	},
 });
 

@@ -1155,6 +1155,63 @@ function syncPresetMainModelFilter(node, preset, selectedModel = "") {
 	setFilter(node, UNET_WIDGET, presetMainModelFilter(preset, selectedModel));
 }
 
+const RELATED_MODEL_FILTER_STOP_WORDS = new Set([
+	...MAIN_MODEL_FILTER_STOP_WORDS,
+	"model",
+	"checkpoint",
+	"unet",
+	"clip",
+	"encoder",
+	"text",
+	"vae",
+	"ae",
+	"lora",
+	"control",
+	"controlnet",
+	"patch",
+	"vision",
+]);
+
+function relatedModelFilter(value) {
+	const source = Array.isArray(value)
+		? value.find((item) => String(item || "").trim()) || ""
+		: String(value || "").split("|").find((item) => String(item || "").trim()) || "";
+	const tokens = stemOf(source)
+		.split(/[^a-z0-9]+/i)
+		.map((token) => token.trim().toLowerCase())
+		.filter((token) => token && !RELATED_MODEL_FILTER_STOP_WORDS.has(token));
+	return [...new Set(tokens)].slice(0, 3).join(" ");
+}
+
+function syncPresetModelFilters(node, preset, selectedModel = "") {
+	const filterWidgets = [
+		UNET_WIDGET,
+		CLIP_NAME_WIDGET,
+		FLUX_CLIP_L_WIDGET,
+		VAE_NAME_WIDGET,
+		MODEL_PATCH_WIDGET,
+		CLIP_VISION_WIDGET,
+		...CONTROL_NET_WIDGETS,
+		...PRESET_LORA_SLOTS.map((slot) => slot.name),
+	];
+	for (const name of filterWidgets) setFilter(node, name, "");
+	if (!preset || isCheckpointCommonPreset(preset)) return;
+
+	syncPresetMainModelFilter(node, preset, selectedModel);
+	const clipNames = Array.isArray(preset?.clipNames) ? preset.clipNames : [];
+	const fluxPreset = isFlux1Preset(preset);
+	const fixedFluxClip = fluxPreset ? clipNames.find((name) => lower(name).includes("clip_l")) : "";
+	const primaryClip = fluxPreset ? clipNames.find(isT5ClipName) : clipNames;
+	setFilter(node, CLIP_NAME_WIDGET, relatedModelFilter(primaryClip));
+	setFilter(node, FLUX_CLIP_L_WIDGET, relatedModelFilter(fixedFluxClip));
+	setFilter(node, VAE_NAME_WIDGET, relatedModelFilter(preset?.vaeName));
+	setFilter(node, MODEL_PATCH_WIDGET, relatedModelFilter(preset?.modelPatchName));
+	setFilter(node, CLIP_VISION_WIDGET, relatedModelFilter(preset?.clipVisionName));
+	setFilter(node, CONTROL_NET_WIDGET, relatedModelFilter(preset?.controlNetName));
+	setFilter(node, PRESET_LORA_1_NAME_WIDGET, relatedModelFilter(preset?.lora1));
+	setFilter(node, PRESET_LORA_2_NAME_WIDGET, relatedModelFilter(preset?.lora2));
+}
+
 function isFlux1Preset(preset) {
 	const clipType = lower(preset?.clipType);
 	const clipNames = (preset?.clipNames || []).map(lower).join("|");
@@ -1547,7 +1604,7 @@ function applyPreset(node, force = false) {
 	if (preset.denoise != null) setWidgetValue(getWidget(node, DENOISE_WIDGET), preset.denoise);
 	setPresetLoraWidgets(node, preset, loraList);
 	setTemplateId(node, preset.id);
-	syncPresetMainModelFilter(node, preset, unetName);
+	syncPresetModelFilters(node, preset, unetName);
 	node.properties[PRESET_INIT_PROPERTY] = true;
 	node.properties[PRESET_UNET_PROPERTY] = unetName;
 	node.properties[PRESET_TEMPLATE_PROPERTY] = preset.id;

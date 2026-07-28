@@ -9,12 +9,14 @@ from typing import Any
 
 import comfy.model_management
 import comfy.model_sampling
+import comfy.sd
 import comfy.utils
+import comfy.clip_vision
 import folder_paths
 import torch
 import torch.nn.functional as F
 from comfy_api.latest import InputImpl, Types
-from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecode, common_ksampler
+from nodes import CheckpointLoaderSimple, CLIPTextEncode, CLIPVisionEncode, VAEDecode, common_ksampler
 
 try:
     from aiohttp import web
@@ -33,6 +35,7 @@ from .common_utils.dependency_checker import (
 )
 from .gjj_multi_image_loader import load_image_tensor, parse_selected_images, resolve_selected_image_path
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+from .gjj_wan_unified_video_conditioning import GJJ_WanUnifiedVideoConditioning
 from .gjj_mmaudio_nsfw_single import (
     _mmaudio_clip_models,
     _mmaudio_main_models,
@@ -70,7 +73,14 @@ DEFAULT_VIDEO_PREFIX = "GJJ/Wan22RapidAIOMega"
 DEFAULT_AUDIO_PROMPT = "强烈、有节奏的动作音效，贴近画面的 Foley 声音"
 DEFAULT_AUDIO_NEGATIVE = "音乐，唱歌，说话，对话，男声，背景噪声，干燥声音，安静，平静"
 GGUF_DEFAULT_CLIP = "umt5-xxl-encoder-Q4_K_M.gguf"
+DEFAULT_WAN_CLIP = "umt5_xxl_int4_convrot.safetensors"
 GGUF_DEFAULT_VAE = "wan_2.1_vae.safetensors"
+DEFAULT_HIGH_LORA = "wan/Wan2.2_I2V_LightX2V_2step_high_noise.safetensors"
+DEFAULT_LOW_LORA = "wan/Wan2.2_I2V_LightX2V_2step_low_noise.safetensors"
+DEFAULT_CLIP_VISION = "clip_vision_h.safetensors"
+DEFAULT_TRANSITION_LORA = "wan/Wan2.2-ST_I2V2.2_high_34-无缝转场，丝滑转场.safetensors"
+DEFAULT_WORKFLOW_HIGH_MODEL = "diffusion_models/DasiwaWAN22I2V14BTruevision_boundbiteHighV10_int4_convrot.safetensors"
+DEFAULT_WORKFLOW_LOW_MODEL = "diffusion_models/DasiwaWAN22I2V14BTruevision_boundbiteLowV10_int4_convrot.safetensors"
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 RAPID_AIO_SEARCH_SEED = "wan2.2-rapid-mega-aio"
 # 这些是“视频通用模型加载器”里已经提供给用户的 Wan2.2 预设族。
@@ -122,8 +132,8 @@ WAN22_RAPID_AIO_MODEL_TREE = [
     {
         "label": "Wan GGUF CLIP / T5 文本编码器",
         "folder": "clip_gguf",
-        "filename": GGUF_DEFAULT_CLIP,
-        "value": GGUF_DEFAULT_CLIP,
+        "filename": DEFAULT_WAN_CLIP,
+        "value": DEFAULT_WAN_CLIP,
         "kind": "clip",
         "icon": "🧠",
         "description": "分体主模型使用的 Wan 文本编码器，工作流中等价于 CLIPLoaderGGUF(type=wan)。负责把正向/反向提示词编码为 Wan 条件。",
@@ -422,6 +432,22 @@ def _is_compatible_wan22_main_model(name: str) -> bool:
     return any(all(_normalize_text(token) in compact for token in keywords) for keywords in WAN22_COMPATIBLE_MODEL_KEYWORDS)
 
 
+def _is_int4_convrot(name: Any) -> bool:
+    normalized = _normalize_text(str(name or ""))
+    return "int4" in normalized and "convrot" in normalized
+
+
+def _quantization_priority(name: Any) -> int:
+    normalized = _normalize_text(str(name or ""))
+    if "int4" in normalized and "convrot" in normalized:
+        return 0
+    if "int4" in normalized:
+        return 1
+    if "int8" in normalized:
+        return 2
+    return 3
+
+
 def _list_rapid_checkpoints() -> list[str]:
     _ensure_checkpoint_gguf_extension()
     _ensure_unet_gguf_folder()
@@ -444,12 +470,11 @@ def _list_rapid_checkpoints() -> list[str]:
             suffix = Path(item).suffix.lower()
             if suffix not in {".safetensors", ".gguf"}:
                 continue
-            if not _is_compatible_wan22_main_model(item):
-                continue
             seen.add(key)
             filtered.append(choice)
     filtered.sort(
         key=lambda name: (
+            _quantization_priority(name),
             0 if not str(name).lower().startswith("diffusion_models/") and str(name).lower().endswith(".safetensors") else 1,
             0 if str(name).lower().startswith("diffusion_models/") and str(name).lower().endswith(".safetensors") else 1,
             0 if str(name).lower().endswith(".gguf") else 1,
@@ -457,6 +482,34 @@ def _list_rapid_checkpoints() -> list[str]:
         )
     )
     return filtered or [DEFAULT_CHECKPOINT]
+
+
+def _list_lora_models() -> list[str]:
+    names = _safe_filename_list("loras") + _scan_model_folder_files("loras", {".safetensors", ".pt", ".ckpt"})
+    return [""] + sorted({str(name or "").replace("\\", "/") for name in names if str(name or "").strip()}, key=str.lower)
+
+
+def _pick_noise_model(models: list[str], noise: str, fallback: str) -> str:
+    tokens = ("high", "高") if noise == "high" else ("low", "低")
+    matching = [
+        name
+        for name in models
+        if str(name).startswith("diffusion_models/")
+        and any(token in str(name).lower() for token in tokens)
+    ]
+    if matching:
+        return sorted(matching, key=lambda name: (_quantization_priority(name), str(name).lower()))[0]
+    return fallback
+
+
+def _load_model_lora(model: Any, lora_name: str):
+    name = str(lora_name or "").strip()
+    if not name:
+        return model
+    path = folder_paths.get_full_path_or_raise("loras", name)
+    lora = comfy.utils.load_torch_file(path, safe_load=True)
+    patched, _ = comfy.sd.load_lora_for_models(model, None, lora, 1.0, 0.0)
+    return patched
 
 
 def _list_wan_gguf_clip_models() -> list[str]:
@@ -484,7 +537,13 @@ def _list_wan_gguf_clip_models() -> list[str]:
             continue
         seen.add(key)
         filtered.append(item)
-    filtered.sort(key=lambda name: (0 if str(name).lower().endswith(".gguf") else 1, str(name).lower()))
+    filtered.sort(
+        key=lambda name: (
+            _quantization_priority(name),
+            0 if str(name).lower().endswith(".gguf") else 1,
+            str(name).lower(),
+        )
+    )
     return [""] + (filtered or [GGUF_DEFAULT_CLIP])
 
 
@@ -503,6 +562,23 @@ def _list_wan_vae_models() -> list[str]:
         filtered.append(item)
     filtered.sort(key=lambda name: (0 if "wan" in str(name).lower() and "vae" in str(name).lower() else 1, str(name).lower()))
     return [""] + (filtered or [GGUF_DEFAULT_VAE])
+
+
+def _list_clip_vision_models() -> list[str]:
+    names = _safe_filename_list("clip_vision") + _scan_model_folder_files(
+        "clip_vision",
+        {".safetensors", ".pt", ".pth", ".ckpt"},
+    )
+    filtered = sorted(
+        {str(name or "").replace("\\", "/") for name in names if str(name or "").strip()},
+        key=lambda name: (
+            0 if Path(name).name.lower() == DEFAULT_CLIP_VISION.lower() else 1,
+            str(name).lower(),
+        ),
+    )
+    # 保留空值用于兼容在新增此隐藏字段前保存的工作流。执行时空值会自动
+    # 回退到 DEFAULT_CLIP_VISION，避免 ComfyUI 在进入节点前判定为无效输入。
+    return [""] + (filtered or [DEFAULT_CLIP_VISION])
 
 
 def _is_gguf_model(value: Any) -> bool:
@@ -704,7 +780,7 @@ def _load_wan_clip_model(clip_name: str, unique_id: Any = None):
 
 def _load_wan_split_workflow_models(
     unet_name: str,
-    clip_name: str = GGUF_DEFAULT_CLIP,
+    clip_name: str = DEFAULT_WAN_CLIP,
     vae_name: str = GGUF_DEFAULT_VAE,
     unique_id: Any = None,
 ):
@@ -725,12 +801,12 @@ def _load_wan_split_workflow_models(
             f"主模型：{resolved_unet}\n"
             "请改用 Q4_K / Q4_K_M / 更高量化 GGUF，或使用同仓库 .safetensors AIO。"
         )
-    requested_clip = clip_name or GGUF_DEFAULT_CLIP
+    requested_clip = clip_name or DEFAULT_WAN_CLIP
     clip_is_gguf = _is_gguf_model(requested_clip)
     resolved_clip = gjjutils_resolve_model_name(
         requested_clip,
         "clip_gguf" if clip_is_gguf else "text_encoders",
-        candidates=[clip_name, GGUF_DEFAULT_CLIP, "umt5 xxl encoder"],
+        candidates=[clip_name, DEFAULT_WAN_CLIP, GGUF_DEFAULT_CLIP, "umt5 xxl encoder"],
         extensions={".gguf"} if clip_is_gguf else {".safetensors"},
         label="Wan CLIP / T5",
     )
@@ -756,7 +832,7 @@ def _load_wan_split_workflow_models(
 
 def _load_aio_checkpoint_gguf(
     checkpoint_name: str,
-    clip_name: str = GGUF_DEFAULT_CLIP,
+    clip_name: str = DEFAULT_WAN_CLIP,
     vae_name: str = GGUF_DEFAULT_VAE,
     unique_id: Any = None,
 ):
@@ -823,7 +899,7 @@ def _is_split_model_selection(model_name: str) -> bool:
 
 def _load_rapid_pipeline(
     checkpoint_name: str,
-    wan_clip_model: str = GGUF_DEFAULT_CLIP,
+    wan_clip_model: str = DEFAULT_WAN_CLIP,
     wan_vae_model: str = GGUF_DEFAULT_VAE,
     unique_id: Any = None,
 ):
@@ -990,7 +1066,7 @@ def _parse_segment_timeline_config(value: Any) -> list[dict[str, Any]]:
             continue
         duration = item.get("duration", item.get("seconds", None))
         try:
-            duration_value = max(3.0, min(10.0, float(duration)))
+            duration_value = max(3.0, min(15.0, float(duration)))
         except Exception:
             duration_value = 0.0
         transition = str(item.get("transition") or "首尾帧").strip()
@@ -1023,22 +1099,23 @@ def _split_positive_prompt_segments(text: Any) -> list[str]:
     return cleaned
 
 
-def _timeline_segment_frames(config: dict[str, Any] | None, fallback_frames: Any, fps: Any) -> int:
+def _prepend_global_prompt(global_prompt: Any, prompt: Any) -> str:
+    prefix = str(global_prompt or "").strip()
+    body = str(prompt or "").strip()
+    if prefix and body:
+        return f"{prefix}, {body}"
+    return prefix or body
+
+
+def _timeline_segment_frames(config: dict[str, Any] | None, fallback_duration: Any, fps: Any) -> int:
     try:
-        fallback = max(1, int(fallback_frames))
+        duration = max(3.0, min(15.0, float(fallback_duration)))
     except Exception:
-        fallback = int(DEFAULT_SEGMENT_FRAMES)
-    if not config or float(config.get("duration") or 0.0) <= 0:
-        return fallback
-    try:
-        duration = max(3.0, min(10.0, float(config.get("duration"))))
-        frame_count = max(5, int(round(duration * max(1.0, float(fps or DEFAULT_FRAME_RATE)))))
-    except Exception:
-        return fallback
-    remainder = (frame_count - 1) % 4
-    if remainder:
-        frame_count += 4 - remainder
-    return frame_count
+        duration = 4.0
+    if config and float(config.get("duration") or 0.0) > 0:
+        duration = max(3.0, min(15.0, float(config.get("duration"))))
+    frame_rate = max(1.0, float(fps or DEFAULT_FRAME_RATE))
+    return max(1, int((duration * frame_rate // 4) * 4 + 1))
 
 
 def _input_sequence_source(images: Any, pack_to_sequence: bool) -> Any:
@@ -1905,6 +1982,8 @@ class GJJ_Wan22RapidAIOMega:
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
+        self.loaded_clip_vision_name: str | None = None
+        self.loaded_clip_vision: Any = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1917,6 +1996,18 @@ class GJJ_Wan22RapidAIOMega:
         audio_clip_models = _mmaudio_clip_models(audio_models)
         wan_clip_models = _list_wan_gguf_clip_models()
         wan_vae_models = _list_wan_vae_models()
+        clip_vision_models = _list_clip_vision_models()
+        lora_models = _list_lora_models()
+        default_high_model = _pick_available_name(
+            DEFAULT_WORKFLOW_HIGH_MODEL,
+            checkpoints,
+            _pick_noise_model(checkpoints, "high", default_checkpoint),
+        )
+        default_low_model = _pick_available_name(
+            DEFAULT_WORKFLOW_LOW_MODEL,
+            checkpoints,
+            _pick_noise_model(checkpoints, "low", default_high_model),
+        )
         return {
             "required": {
                 "positive_prompt": (
@@ -1942,9 +2033,9 @@ class GJJ_Wan22RapidAIOMega:
                 "checkpoint_name": (
                     checkpoints,
                     {
-                        "default": default_checkpoint,
+                        "default": default_high_model,
                         "display_name": "Wan 基础模型",
-                        "tooltip": "显示本机已有的 Wan2.2 Rapid、I2V/IS2V、REMIX、SmoothMix、Dasiwa 等兼容主模型；支持 INT4/INT8 的 GGUF 与 safetensors。",
+                        "tooltip": "显示本机全部 checkpoint 与 diffusion_models；自动选择和列表排序优先 int4_convrot，再回退其他 safetensors / GGUF 精度。",
                     },
                 ),
                 "width": (
@@ -2122,7 +2213,11 @@ class GJJ_Wan22RapidAIOMega:
                 "wan_clip_model": (
                     wan_clip_models,
                     {
-                        "default": _prefer_model(wan_clip_models, ("umt5", "gguf")),
+                        "default": _pick_available_name(
+                            DEFAULT_WAN_CLIP,
+                            wan_clip_models,
+                            _prefer_model(wan_clip_models, ("umt5",)),
+                        ),
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "Wan CLIP / T5",
@@ -2180,6 +2275,89 @@ class GJJ_Wan22RapidAIOMega:
                         "tooltip": "由前端素材时间线写入：每两张图片之间的时长、提示词和转场方式。",
                     },
                 ),
+                "low_model_name": (
+                    checkpoints,
+                    {
+                        "default": default_low_model,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "低噪模型",
+                        "tooltip": "多合一 NSFW Wan 工作流的低噪阶段模型；与原 Wan 基础模型组成高噪/低噪两阶段采样。",
+                    },
+                ),
+                "high_lora_name": (
+                    lora_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_HIGH_LORA, lora_models, ""),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "高噪 2step LoRA",
+                    },
+                ),
+                "low_lora_name": (
+                    lora_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_LOW_LORA, lora_models, ""),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "低噪 2step LoRA",
+                    },
+                ),
+                "clip_vision_model": (
+                    clip_vision_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_CLIP_VISION, clip_vision_models, DEFAULT_CLIP_VISION),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "首尾帧 CLIP Vision",
+                        "tooltip": "按目标工作流使用 clip_vision_h 编码队列中的每一对参考图，作为 Wan 首尾帧视觉条件。",
+                    },
+                ),
+                "transition_lora_name": (
+                    lora_models,
+                    {
+                        "default": _pick_available_name(DEFAULT_TRANSITION_LORA, lora_models, ""),
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "首尾帧转场 LoRA",
+                        "tooltip": "首尾帧分段自动叠加的高噪转场 LoRA；文生、单图和硬切分段不会使用。",
+                    },
+                ),
+                "global_prompt": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "dynamicPrompts": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "全局提示词",
+                        "tooltip": "可留空；设置后会自动添加到每一段正向提示词的前面。",
+                    },
+                ),
+                "segment_duration": (
+                    "FLOAT",
+                    {
+                        "default": 4.0,
+                        "min": 3.0,
+                        "max": 15.0,
+                        "step": 0.1,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "每段时长",
+                        "tooltip": "每段 3–15 秒；后台按 int((时长 * 帧率 // 4) * 4 + 1) 计算帧数。",
+                    },
+                ),
+                "auto_transition_prompt": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "自动首尾帧过渡词",
+                        "tooltip": "由前端 🎬 开关控制；多图输入时直接根据每一对相邻首尾帧自动反推转场提示词。",
+                    },
+                ),
             },
             "optional": {
                 "images": (
@@ -2224,12 +2402,20 @@ class GJJ_Wan22RapidAIOMega:
         audio_vae_model="",
         audio_synchformer_model="",
         audio_clip_model="",
-        wan_clip_model=GGUF_DEFAULT_CLIP,
+        wan_clip_model=DEFAULT_WAN_CLIP,
         wan_vae_model=GGUF_DEFAULT_VAE,
         image_fit_mode="裁剪",
         crop_position="中",
         pack_input_images_to_sequence=True,
         segment_timeline_config="[]",
+        low_model_name="",
+        high_lora_name=DEFAULT_HIGH_LORA,
+        low_lora_name=DEFAULT_LOW_LORA,
+        clip_vision_model=DEFAULT_CLIP_VISION,
+        transition_lora_name=DEFAULT_TRANSITION_LORA,
+        global_prompt="",
+        segment_duration=4.0,
+        auto_transition_prompt=False,
         images=None,
         lora_chain_config="",
         unique_id=None,
@@ -2260,6 +2446,14 @@ class GJJ_Wan22RapidAIOMega:
             image_fit_mode = _unwrap_list_param(image_fit_mode)
             crop_position = _unwrap_list_param(crop_position)
             pack_input_images_to_sequence = _bool_param(pack_input_images_to_sequence, True)
+            low_model_name = _unwrap_list_param(low_model_name)
+            high_lora_name = _unwrap_list_param(high_lora_name)
+            low_lora_name = _unwrap_list_param(low_lora_name)
+            clip_vision_model = _unwrap_list_param(clip_vision_model)
+            transition_lora_name = _unwrap_list_param(transition_lora_name)
+            global_prompt = _unwrap_list_param(global_prompt)
+            segment_duration = _unwrap_list_param(segment_duration)
+            auto_transition_prompt = _bool_param(auto_transition_prompt, False)
             timeline_config = _parse_segment_timeline_config(segment_timeline_config)
             lora_chain_config = _unwrap_list_param(lora_chain_config)
             unique_id = _unwrap_list_param(unique_id)
@@ -2281,6 +2475,15 @@ class GJJ_Wan22RapidAIOMega:
             ]
             image_count = len(image_frames)
 
+            clip_vision = None
+            if image_count > 0:
+                selected_clip_vision = str(clip_vision_model or DEFAULT_CLIP_VISION).strip()
+                if self.loaded_clip_vision_name != selected_clip_vision or self.loaded_clip_vision is None:
+                    clip_vision_path = folder_paths.get_full_path_or_raise("clip_vision", selected_clip_vision)
+                    self.loaded_clip_vision = comfy.clip_vision.load(clip_vision_path)
+                    self.loaded_clip_vision_name = selected_clip_vision
+                clip_vision = self.loaded_clip_vision
+
             _send_status(unique_id, "1/7 加载 Wan Rapid-AIO Checkpoint...", 0.06)
             resolved_checkpoint, model, clip, vae = _load_rapid_pipeline(
                 checkpoint_name,
@@ -2288,7 +2491,19 @@ class GJJ_Wan22RapidAIOMega:
                 wan_vae_model,
                 unique_id=unique_id,
             )
-            model = _apply_sd3_shift(model, DEFAULT_SHIFT)
+            low_selection = str(low_model_name or "").strip()
+            dual_model_mode = bool(low_selection and low_selection != str(resolved_checkpoint))
+            if dual_model_mode:
+                _, low_model, _, _ = _load_rapid_pipeline(
+                    low_selection,
+                    wan_clip_model,
+                    wan_vae_model,
+                    unique_id=unique_id,
+                )
+            else:
+                low_model = model
+            model = _load_model_lora(_apply_sd3_shift(model, DEFAULT_SHIFT), high_lora_name)
+            low_model = _load_model_lora(_apply_sd3_shift(low_model, DEFAULT_SHIFT), low_lora_name)
 
             _send_status(unique_id, "2/7 应用 LoRA串联配置...", 0.14)
             model, clip, self.loaded_lora = _apply_chain_loras(
@@ -2297,16 +2512,30 @@ class GJJ_Wan22RapidAIOMega:
                 lora_chain_config=lora_chain_config,
                 loaded_lora_cache=self.loaded_lora,
             )
+            transition_model = _load_model_lora(model, transition_lora_name)
 
             _send_status(unique_id, "3/7 编码提示词...", 0.2)
-            positive = CLIPTextEncode().encode(clip, str(positive_prompt or "").strip() or DEFAULT_POSITIVE)[0]
+            base_positive_text = _prepend_global_prompt(
+                global_prompt,
+                str(positive_prompt or "").strip() or DEFAULT_POSITIVE,
+            )
+            positive = CLIPTextEncode().encode(clip, base_positive_text)[0]
             negative = CLIPTextEncode().encode(clip, str(negative_prompt or "").strip() or DEFAULT_NEGATIVE)[0]
             positive_prompt_segments = _split_positive_prompt_segments(positive_prompt)
 
-            segment_count = 1 if image_count <= 1 else image_count - 1
+            base_segment_count = 1 if image_count <= 1 else image_count - 1
+            close_loop = image_count > 1 and len(positive_prompt_segments) >= image_count
+            segment_count = image_count if close_loop else base_segment_count
+            ignored_prompt_count = max(0, len(positive_prompt_segments) - segment_count)
             _send_status(
                 unique_id,
-                f"4/7 当前模式：{route_name}，共 {segment_count} 段，输出尺寸 {resolved_width}x{resolved_height}...",
+                (
+                    f"4/7 当前模式：{route_name}，共 {segment_count} 段，"
+                    f"{'已按 --- 顺序匹配队列提示词，' if positive_prompt_segments else ''}"
+                    f"{'最后一段使用末图→首图闭环，' if close_loop else ''}"
+                    f"{f'忽略多余 {ignored_prompt_count} 段提示词，' if ignored_prompt_count else ''}"
+                    f"输出尺寸 {resolved_width}x{resolved_height}..."
+                ),
                 0.28,
             )
 
@@ -2314,53 +2543,98 @@ class GJJ_Wan22RapidAIOMega:
             decoded_segment_frames: list[int] = []
             for segment_index in range(segment_count):
                 segment_config = timeline_config[segment_index] if segment_index < len(timeline_config) else None
-                segment_frame_count = _timeline_segment_frames(segment_config, segment_frames, output_fps)
-                segment_prompt = str((segment_config or {}).get("prompt") or "").strip()
-                if not segment_prompt and segment_index < len(positive_prompt_segments):
+                segment_frame_count = _timeline_segment_frames(segment_config, segment_duration, output_fps)
+                if segment_index < len(positive_prompt_segments):
                     segment_prompt = positive_prompt_segments[segment_index]
+                else:
+                    segment_prompt = str((segment_config or {}).get("prompt") or "").strip()
                 segment_transition = str((segment_config or {}).get("transition") or "首尾帧").strip()
+                if (
+                    auto_transition_prompt
+                    and image_count > 1
+                    and segment_transition != "硬切"
+                    and not segment_prompt
+                ):
+                    infer_options = _prompt_infer_options()
+                    infer_method = next(
+                        (name for name in ("GJJ_OllamaAssistant", "GJJ_GemmaTextGenerate", "GJJ_LlamaAssistant") if infer_options.get(name)),
+                        "",
+                    )
+                    infer_models = infer_options.get(infer_method, [])
+                    if infer_method and infer_models:
+                        next_image_index = 0 if close_loop and segment_index == image_count - 1 else segment_index + 1
+                        _send_status(
+                            unique_id,
+                            f"🎬 第 {segment_index + 1}/{segment_count} 段：根据首尾帧自动生成过渡词...",
+                            0.28 + (0.48 * (segment_index / max(1, segment_count))),
+                        )
+                        segment_prompt = _infer_transition_prompt(
+                            infer_method,
+                            infer_models[0],
+                            _make_transition_pair_image(image_frames[segment_index], image_frames[next_image_index]),
+                            unique_id=unique_id,
+                            keep_model=True,
+                        )
                 if segment_prompt:
-                    active_positive = CLIPTextEncode().encode(clip, segment_prompt)[0]
+                    active_positive = CLIPTextEncode().encode(
+                        clip,
+                        _prepend_global_prompt(global_prompt, segment_prompt),
+                    )[0]
                 else:
                     active_positive = positive
 
                 if image_count <= 0:
                     segment_start = None
                     segment_end = None
-                    strength = 0.0
                 elif image_count == 1:
                     segment_start = image_frames[0]
                     segment_end = None
-                    strength = 1.0
                 else:
                     segment_start = image_frames[segment_index]
-                    segment_end = None if segment_transition == "硬切" else image_frames[segment_index + 1]
-                    strength = 1.0
+                    next_image_index = 0 if close_loop and segment_index == image_count - 1 else segment_index + 1
+                    segment_end = None if segment_transition == "硬切" else image_frames[next_image_index]
+
+                if segment_start is None:
+                    conditioning_mode = "文生"
+                elif segment_end is None:
+                    conditioning_mode = "图生"
+                else:
+                    conditioning_mode = "首尾帧"
 
                 progress_base = 0.28 + (0.48 * (segment_index / max(1, segment_count)))
+                next_image_number = 1 if close_loop and segment_index == image_count - 1 else segment_index + 2
                 _send_status(
                     unique_id,
-                    f"5/7 第 {segment_index + 1}/{segment_count} 段：构建 VACE 条件（{segment_transition}，{segment_frame_count} 帧）...",
+                    (
+                        f"5/7 第 {segment_index + 1}/{segment_count} 段"
+                        f"{f'（图{segment_index + 1}→图{next_image_number}）' if image_count > 1 else ''}："
+                        f"构建 Wan {conditioning_mode}条件（{segment_transition}，{segment_frame_count} 帧）..."
+                    ),
                     progress_base + 0.05,
                 )
-                control_images, control_masks = _build_vace_control_frames(
-                    num_frames=segment_frame_count,
-                    empty_frame_level=DEFAULT_EMPTY_FRAME_LEVEL,
-                    start_image=segment_start,
-                    end_image=segment_end,
+                start_clip_condition = (
+                    CLIPVisionEncode().encode(clip_vision, segment_start[:1], "none")[0]
+                    if clip_vision is not None and segment_start is not None
+                    else None
                 )
-                segment_positive, segment_negative, segment_latent, _ = _build_vace_latent(
-                    active_positive,
-                    negative,
-                    vae,
+                end_clip_condition = (
+                    CLIPVisionEncode().encode(clip_vision, segment_end[:1], "none")[0]
+                    if clip_vision is not None and segment_end is not None
+                    else None
+                )
+                segment_positive, segment_negative, segment_latent = GJJ_WanUnifiedVideoConditioning().generate(
                     resolved_width,
                     resolved_height,
                     segment_frame_count,
                     1,
-                    strength,
-                    control_video=control_images,
-                    control_masks=control_masks,
-                    reference_image=None,
+                    gjj_mode=conditioning_mode,
+                    positive=active_positive,
+                    negative=negative,
+                    vae=vae,
+                    clip_vision_start_image=start_clip_condition,
+                    clip_vision_end_image=end_clip_condition,
+                    start_image=segment_start,
+                    end_image=segment_end,
                 )
 
                 _send_status(
@@ -2368,17 +2642,36 @@ class GJJ_Wan22RapidAIOMega:
                     f"5/7 第 {segment_index + 1}/{segment_count} 段：采样中...",
                     progress_base + 0.18,
                 )
-                sampled = common_ksampler(
-                    model,
+                high_sampled = common_ksampler(
+                    transition_model if conditioning_mode == "首尾帧" else model,
                     int(seed),
-                    DEFAULT_STEPS,
-                    DEFAULT_CFG,
-                    DEFAULT_SAMPLER,
-                    DEFAULT_SCHEDULER,
+                    2,
+                    1.0,
+                    "euler_ancestral",
+                    "simple",
                     segment_positive,
                     segment_negative,
                     segment_latent,
                     denoise=DEFAULT_DENOISE,
+                    start_step=0,
+                    last_step=1,
+                    force_full_denoise=False,
+                )[0]
+                sampled = common_ksampler(
+                    low_model,
+                    int(seed),
+                    2,
+                    1.0,
+                    "euler_ancestral",
+                    "simple",
+                    segment_positive,
+                    segment_negative,
+                    high_sampled,
+                    denoise=DEFAULT_DENOISE,
+                    disable_noise=True,
+                    start_step=1,
+                    last_step=2,
+                    force_full_denoise=True,
                 )[0]
 
                 _send_status(

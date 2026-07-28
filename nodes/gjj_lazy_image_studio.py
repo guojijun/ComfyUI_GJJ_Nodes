@@ -347,6 +347,8 @@ def _compact_model_size_text(kind: str, name: str) -> str:
 
 def _test_caption_label(kind: str, model_name: str, elapsed: float | None = None, failed: bool = False) -> str:
     time_text = "失败" if failed else f"{max(0, int(round(float(elapsed or 0))))}秒"
+    if kind in {"sampler", "scheduler"}:
+        return f"{_compact_model_name(model_name)} [{time_text}]"
     return f"{_compact_model_name(model_name)} ({_compact_model_size_text(kind, model_name)})[{time_text}]"
 
 
@@ -1071,6 +1073,26 @@ def _pairs_signature(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for index, pair in enumerate(pairs)
     ]
+
+
+def _clone_image_pairs_for_task(
+    pairs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Give every prompt task independent image tensors.
+
+    Flux samplers and reference-conditioning helpers may retain or mutate tensor
+    state during a sampling pass. Reusing the same pair dictionaries across a
+    ``---`` prompt batch can therefore make later prompts lose their effective
+    image condition. Keep the metadata stable while isolating tensor storage.
+    """
+    cloned: list[dict[str, Any]] = []
+    for pair in pairs:
+        item = dict(pair)
+        image = pair.get("image")
+        if isinstance(image, torch.Tensor):
+            item["image"] = image.detach().clone().contiguous()
+        cloned.append(item)
+    return cloned
 
 
 def _cache_digest(payload: Any) -> str:
@@ -3365,7 +3387,7 @@ class GJJ_LazyImageStudio:
         # 记录开始时间
         start_time = time.time()
 
-        if test_config_data.get("mode") in {"unet", "lora", "lora_strength", "checkpoint"}:
+        if test_config_data.get("mode") in {"unet", "lora", "lora_strength", "checkpoint", "sampler", "scheduler"}:
             mode = str(test_config_data.get("mode") or "")
             selected_models = [
                 str(item or "").strip()
@@ -3435,6 +3457,10 @@ class GJJ_LazyImageStudio:
                                 [{"enabled": True, "name": model_name, "strength": strength}],
                                 ensure_ascii=False,
                             )
+                        elif mode == "sampler":
+                            item_sampler_name = model_name
+                        elif mode == "scheduler":
+                            item_scheduler = model_name
                         else:
                             item_lora_data = json.dumps(
                                 [{"enabled": True, "name": model_name, "strength": 1.0}],
@@ -3484,7 +3510,7 @@ class GJJ_LazyImageStudio:
                         )
                         item_image = item_result["result"][0]
                         item_elapsed = time.time() - item_started
-                        model_size = _model_size_text("lora" if mode == "lora_strength" else mode, model_name)
+                        model_size = "" if mode in {"sampler", "scheduler"} else _model_size_text("lora" if mode == "lora_strength" else mode, model_name)
                         if (
                             isinstance(item_image, torch.Tensor)
                             and item_image.ndim == 4
@@ -3517,7 +3543,7 @@ class GJJ_LazyImageStudio:
                         _send_test_preview(unique_id, preview_batch)
                     except Exception as exc:
                         _send_status(unique_id, f"测试失败 {index}/{len(test_entries)}：{str(exc).splitlines()[0]}")
-                        if mode in {"unet", "lora", "lora_strength", "checkpoint"}:
+                        if mode in {"unet", "lora", "lora_strength", "checkpoint", "sampler", "scheduler"}:
                             error_image = _caption_test_image(
                                 _make_soft_error_image(test_width, test_height),
                                 (
@@ -3892,6 +3918,12 @@ class GJJ_LazyImageStudio:
                 status_suffix = f"（{prompt_index + 1}/{prompt_count}）" if prompt_count > 1 else ""
                 local_width = int(width)
                 local_height = int(height)
+                task_pairs = _clone_image_pairs_for_task(pairs)
+                task_mask = (
+                    mask.detach().clone().contiguous()
+                    if isinstance(mask, torch.Tensor)
+                    else mask
+                )
                 flux2_sample_size = None
                 krea2_reference_sample = False
                 krea2_patched_model = None
@@ -3907,14 +3939,14 @@ class GJJ_LazyImageStudio:
                     local_width = max(16, (local_width // 16) * 16)
                     local_height = max(16, (local_height // 16) * 16)
                     ordered_pairs = _reorder_pairs_by_main_index(
-                        pairs, int(main_image_index)
+                        task_pairs, int(main_image_index)
                     )
                     reference_images = [
                         pair["image"]
                         for pair in ordered_pairs[:3]
                         if isinstance(pair.get("image"), torch.Tensor)
                     ]
-                    if mask is not None:
+                    if task_mask is not None:
                         print("[GJJ_LazyImageStudio] Mage-Flow 分支暂不使用遮罩输入。")
                     _send_status(
                         unique_id,
@@ -3947,7 +3979,7 @@ class GJJ_LazyImageStudio:
                         int(batch_size),
                     )
                 elif is_boogu_image_edit_turbo:
-                    if not pairs:
+                    if not task_pairs:
                         raise RuntimeError("Boogu Image Edit Turbo 工作流需要至少连接一张参考图。")
                     _send_status(
                         unique_id,
@@ -3959,7 +3991,7 @@ class GJJ_LazyImageStudio:
                             vae=vae,
                             prompt=prompt_text,
                             negative_prompt=effective_negative_prompt,
-                            pairs=pairs,
+                            pairs=task_pairs,
                             batch_size=int(batch_size),
                             target_width=local_width,
                             target_height=local_height,
@@ -3968,9 +4000,9 @@ class GJJ_LazyImageStudio:
                     local_width = int(boogu_width)
                     local_height = int(boogu_height)
                     boogu_turbo_sample = True
-                elif pairs and _is_krea2_family(unet_name, resolved_clip_type, preset):
+                elif task_pairs and _is_krea2_family(unet_name, resolved_clip_type, preset):
                     ordered_krea2_pairs = _reorder_pairs_by_main_index(
-                        pairs, int(main_image_index)
+                        task_pairs, int(main_image_index)
                     )
                     configured_lora_text = (
                         f"{str(lora_data or '')}\n{str(lora_chain_config or '')}"
@@ -4003,10 +4035,10 @@ class GJJ_LazyImageStudio:
                         identity_lora_strength=identity_lora_strength,
                     )
                     krea2_reference_sample = True
-                elif pairs and resolved_clip_type == "flux2":
+                elif task_pairs and resolved_clip_type == "flux2":
                     _send_status(
                         unique_id,
-                        f"4/6 编码 Flux2 图片编辑条件{status_suffix}（{len(pairs)} 张）...",
+                        f"4/6 编码 Flux2 图片编辑条件{status_suffix}（{len(task_pairs)} 张）...",
                     )
                     positive, negative, latent_out, flux2_width, flux2_height = (
                         self._encode_flux2_multi_reference(
@@ -4015,7 +4047,7 @@ class GJJ_LazyImageStudio:
                             prompt=prompt_text,
                             negative_prompt=effective_negative_prompt,
                             main_image_index=main_image_index,
-                            pairs=pairs,
+                            pairs=task_pairs,
                             width=local_width,
                             height=local_height,
                             batch_size=int(batch_size),
@@ -4024,18 +4056,18 @@ class GJJ_LazyImageStudio:
                     )
                     flux2_sample_size = (int(flux2_width), int(flux2_height))
                 elif (
-                    pairs
-                    and mask is None
+                    task_pairs
+                    and task_mask is None
                     and supports_reference_edit
                     and (
                         _uses_equal_reference_canvas(preset, unet_name)
                         or _as_bool(force_empty_latent_reference)
-                        or (len(pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
+                        or (len(task_pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
                     )
                 ):
                     _send_status(
                         unique_id,
-                        f"4/6 编码平等参考条件{status_suffix}（{len(pairs)} 张，按设置尺寸创建空 latent）...",
+                        f"4/6 编码平等参考条件{status_suffix}（{len(task_pairs)} 张，按设置尺寸创建空 latent）...",
                     )
                     positive, negative, latent_out, equal_width, equal_height = (
                         self._encode_equal_reference_image_edit(
@@ -4043,7 +4075,7 @@ class GJJ_LazyImageStudio:
                             vae=vae,
                             prompt=prompt_text,
                             negative_prompt=effective_negative_prompt,
-                            pairs=pairs,
+                            pairs=task_pairs,
                             vl_long_edge=int(preset.get("vl_long_edge", 512)),
                             target_width=local_width,
                             target_height=local_height,
@@ -4052,15 +4084,15 @@ class GJJ_LazyImageStudio:
                     )
                     local_width = int(equal_width)
                     local_height = int(equal_height)
-                elif pairs and supports_reference_edit:
+                elif task_pairs and supports_reference_edit:
                     positive, negative, latent_out = self._encode_multi_image_edit(
                         clip=clip,
                         vae=vae,
                         prompt=prompt_text,
                         negative_prompt=effective_negative_prompt,
                         main_image_index=main_image_index,
-                        pairs=pairs,
-                        main_mask=mask,
+                        pairs=task_pairs,
+                        main_mask=task_mask,
                         main_long_edge=int(preset.get("main_long_edge", 1024)),
                         vl_long_edge=int(preset.get("vl_long_edge", 512)),
                         target_width=local_width,
@@ -4077,8 +4109,8 @@ class GJJ_LazyImageStudio:
                         width=local_width,
                         height=local_height,
                         batch_size=batch_size,
-                        image_pairs=pairs,
-                        mask=mask,
+                        image_pairs=task_pairs,
+                        mask=task_mask,
                         grow_mask_by=grow_mask_by,
                         preset=preset,
                         disable_auto_mask=bool(disable_reference_auto_mask),

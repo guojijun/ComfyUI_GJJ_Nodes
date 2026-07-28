@@ -914,6 +914,30 @@ function setOutputLinkSlot(link, nodeId, slot, type) {
 	if (type) link.type = type;
 }
 
+function setInputLinkSlot(link, nodeId, slot, type) {
+	if (!link) return;
+	if (Array.isArray(link)) {
+		link[3] = nodeId;
+		link[4] = slot;
+		if (type) link[5] = type;
+		return;
+	}
+	link.target_id = nodeId;
+	link.target_slot = slot;
+	if (type) link.type = type;
+}
+
+function repairInputLinkSlots(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	for (let index = 0; index < node.inputs.length; index += 1) {
+		const input = node.inputs[index];
+		const linkIds = Array.isArray(input?.link) ? input.link : [input?.link];
+		for (const linkId of linkIds) {
+			if (linkId != null) setInputLinkSlot(getGraphLink(node, linkId), node.id, index, input.type);
+		}
+	}
+}
+
 function repairOutputLinkSlots(node) {
 	if (!Array.isArray(node?.outputs)) return;
 	for (let index = 0; index < node.outputs.length; index += 1) {
@@ -1035,11 +1059,25 @@ function inputHasLink(input) {
 
 function pruneLegacyWidgetInputs(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
-	node.inputs = node.inputs.filter((input) => {
+	// 必须倒序调用 removeInput。直接用 filter 替换 inputs 数组不会同步
+	// graph.links[*].target_slot，位于隐藏口之后的动态输入连线会在保存后失效。
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
 		const name = String(input?.name || input?.widget?.name || "");
-		const isHiddenWidgetInput = [TEMPLATE_WIDGET, VALUES_WIDGET, SCHEMA_WIDGET].includes(name) || Boolean(input?.widget);
-		return !isHiddenWidgetInput || inputHasLink(input);
-	});
+		// param_* 是模板生成的正式输入口。工作流恢复时 ComfyUI 会先配置节点，
+		// 再恢复 graph.links；若在这个间隙按 input.link 为空将其删除，序列化连接
+		// 随后便找不到原 target_slot。缩放/DOM 重排触发 stabilize 时也可能遇到
+		// 相同的短暂状态。因此这里只清理三个真正的后端隐藏 widget 输入。
+		const isHiddenWidgetInput = [TEMPLATE_WIDGET, VALUES_WIDGET, SCHEMA_WIDGET].includes(name);
+		if (isHiddenWidgetInput && !inputHasLink(input)) {
+			try {
+				node.removeInput?.(index);
+			} catch (_) {
+				node.inputs.splice(index, 1);
+			}
+		}
+	}
+	repairInputLinkSlots(node);
 }
 
 function dynamicInputName(field) {
@@ -1306,9 +1344,13 @@ function ensureDynamicInputs(node, fields, values) {
 		input.gjj_template_param_key = field.key;
 		input.hidden = false;
 		input.visible = true;
-		input.widget = { name };
+		// 保持同一个 widget 描述对象，避免布局刷新时替换插槽元数据。
+		// ComfyUI 会把该对象和序列化 input slot 关联，原地更新可保住连接。
+		if (!input.widget || typeof input.widget !== "object") input.widget = {};
+		input.widget.name = name;
 		delete input.widget_name;
 	}
+	repairInputLinkSlots(node);
 }
 
 function safeJsonParse(text, fallback) {
@@ -2540,6 +2582,8 @@ function forceRefreshTemplate(node, templateText = null) {
 	resetTemplateMediaState(node);
 	saveState(node, template, fields, values);
 	renderRows(node);
+	// 🔄 是显式刷新动作；即使模板文本未变化，也通知下游即时预览重新读取媒体。
+	notifyTemplateParamsUpdated(node);
 	node.__gjjTemplateParamsUpdateCount?.();
 	if (node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
 		requestAnimationFrame(() => {
@@ -3614,6 +3658,7 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
+			repairInputLinkSlots(this);
 			syncValuesFromDom(this);
 			syncTextareaHeightsFromDom(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode]);

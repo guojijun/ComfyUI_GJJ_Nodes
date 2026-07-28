@@ -36,17 +36,31 @@ const AUDIO_SYNCHFORMER_MODEL_WIDGET = "audio_synchformer_model";
 const AUDIO_CLIP_MODEL_WIDGET = "audio_clip_model";
 const WAN_CLIP_MODEL_WIDGET = "wan_clip_model";
 const WAN_VAE_MODEL_WIDGET = "wan_vae_model";
+const LOW_MODEL_WIDGET = "low_model_name";
+const HIGH_LORA_WIDGET = "high_lora_name";
+const LOW_LORA_WIDGET = "low_lora_name";
+const CLIP_VISION_MODEL_WIDGET = "clip_vision_model";
+const TRANSITION_LORA_WIDGET = "transition_lora_name";
+const DEFAULT_TRANSITION_LORA = "wan/Wan2.2-ST_I2V2.2_high_34-无缝转场，丝滑转场.safetensors";
+const TRANSITION_LORA_MIGRATION_PROPERTY = "gjj_wan22_transition_lora_migrated_v1";
+const DEFAULT_WAN_CLIP = "umt5_xxl_int4_convrot.safetensors";
+const WAN_CLIP_INT4_MIGRATION_PROPERTY = "gjj_wan22_clip_int4_migrated_v1";
 const CHECKPOINT_WIDGET = "checkpoint_name";
 const SEGMENT_FRAMES_WIDGET = "segment_frames";
 const SEGMENT_TIMELINE_WIDGET = "segment_timeline_config";
 const POSITIVE_WIDGET = "positive_prompt";
 const NEGATIVE_WIDGET = "negative_prompt";
+const GLOBAL_PROMPT_WIDGET = "global_prompt";
+const SEGMENT_DURATION_WIDGET = "segment_duration";
+const AUTO_TRANSITION_PROMPT_WIDGET = "auto_transition_prompt";
 const IMAGE_INPUT_NAME = "images";
 const MULTI_IMAGE_LOADER_CLASS = "GJJ_MultiImageLoader";
 const IMAGE_OPTIONS_API = "/gjj/input_images";
 const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
 const PROMPT_INFER_OPTIONS_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/options";
 const PROMPT_INFER_RUN_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/run";
+const AUTO_PROMPT_INFER_PROPERTY = "gjj_wan22_auto_prompt_infer";
+const AUTO_PROMPT_SIGNATURE_PROPERTY = "gjj_wan22_auto_prompt_signature";
 const LINK_MEMORY_PROPERTY = "gjj_wan22_rapid_aio_mega_image_link";
 const TEMPLATE_PARAM_NODE_TYPE = "GJJ_TemplateParams";
 const TEMPLATE_BINDABLE_FIELDS = [
@@ -55,6 +69,7 @@ const TEMPLATE_BINDABLE_FIELDS = [
 	{ name: CHECKPOINT_WIDGET, widget: CHECKPOINT_WIDGET, label: "主模型", type: "STRING", aliases: ["checkpoint", "model", "模型"] },
 	{ name: WAN_CLIP_MODEL_WIDGET, widget: WAN_CLIP_MODEL_WIDGET, label: "Wan CLIP", type: "STRING", aliases: ["clip", "wan clip"] },
 	{ name: WAN_VAE_MODEL_WIDGET, widget: WAN_VAE_MODEL_WIDGET, label: "Wan VAE", type: "STRING", aliases: ["vae", "wan vae"] },
+	{ name: CLIP_VISION_MODEL_WIDGET, widget: CLIP_VISION_MODEL_WIDGET, label: "CLIP Vision", type: "STRING", aliases: ["clip vision", "视觉模型"] },
 	{ name: WIDTH_WIDGET, widget: WIDTH_WIDGET, label: "宽度", type: "INT", aliases: ["width", "宽"] },
 	{ name: HEIGHT_WIDGET, widget: HEIGHT_WIDGET, label: "高度", type: "INT", aliases: ["height", "高"] },
 	{ name: SEGMENT_FRAMES_WIDGET, widget: SEGMENT_FRAMES_WIDGET, label: "默认每段帧数", type: "INT", aliases: ["frames", "length", "num_frames", "帧数", "长度"] },
@@ -74,6 +89,9 @@ const TEMPLATE_BINDABLE_FIELDS = [
 	{ name: AUDIO_VAE_MODEL_WIDGET, widget: AUDIO_VAE_MODEL_WIDGET, label: "配音VAE", type: "STRING", aliases: ["audio_vae"] },
 	{ name: AUDIO_SYNCHFORMER_MODEL_WIDGET, widget: AUDIO_SYNCHFORMER_MODEL_WIDGET, label: "Synchformer", type: "STRING", aliases: ["synchformer"] },
 	{ name: AUDIO_CLIP_MODEL_WIDGET, widget: AUDIO_CLIP_MODEL_WIDGET, label: "配音CLIP", type: "STRING", aliases: ["audio_clip"] },
+	{ name: TRANSITION_LORA_WIDGET, widget: TRANSITION_LORA_WIDGET, label: "转场 LoRA", type: "STRING", aliases: ["transition lora", "转场"] },
+	{ name: GLOBAL_PROMPT_WIDGET, widget: GLOBAL_PROMPT_WIDGET, label: "全局提示词", type: "STRING", aliases: ["global prompt", "全局提示词", "全局"] },
+	{ name: SEGMENT_DURATION_WIDGET, widget: SEGMENT_DURATION_WIDGET, label: "每段时长", type: "FLOAT", aliases: ["duration", "时长", "每段时长"] },
 ];
 const HIDDEN_WIDGETS = new Set([
 	NEGATIVE_WIDGET,
@@ -100,7 +118,12 @@ const HIDDEN_WIDGETS = new Set([
 	AUDIO_CLIP_MODEL_WIDGET,
 	WAN_CLIP_MODEL_WIDGET,
 	WAN_VAE_MODEL_WIDGET,
+	CLIP_VISION_MODEL_WIDGET,
 	SEGMENT_TIMELINE_WIDGET,
+	TRANSITION_LORA_WIDGET,
+	GLOBAL_PROMPT_WIDGET,
+	SEGMENT_DURATION_WIDGET,
+	AUTO_TRANSITION_PROMPT_WIDGET,
 ]);
 
 let loaderOptionsPromise = null;
@@ -151,6 +174,103 @@ function repairMissingModelDefaults(node) {
 	repairMissingModelWidget(node, CHECKPOINT_WIDGET);
 	repairMissingModelWidget(node, WAN_CLIP_MODEL_WIDGET, ["umt5"]);
 	repairMissingModelWidget(node, WAN_VAE_MODEL_WIDGET, ["wan", "vae"]);
+	repairMissingModelWidget(node, CLIP_VISION_MODEL_WIDGET, ["clip_vision_h"]);
+	repairWanClipInt4Default(node);
+	repairTransitionLoraDefault(node);
+	repairSegmentDurationDefault(node);
+	repairAutoTransitionPromptDefault(node);
+}
+
+function repairSegmentDurationDefault(node) {
+	const widget = getWidget(node, SEGMENT_DURATION_WIDGET);
+	if (!widget) return;
+	const value = Number(widget.value);
+	// 兼容新增该字段前保存的工作流：旧 widgets_values 没有对应项时，
+	// ComfyUI 会留下 null/undefined，执行前便会报 FLOAT 输入类型错误。
+	if (!Number.isFinite(value) || value < 3 || value > 15) {
+		setWidgetValue(widget, 4.0);
+	}
+}
+
+function repairAutoTransitionPromptDefault(node) {
+	const widget = getWidget(node, AUTO_TRANSITION_PROMPT_WIDGET);
+	if (!widget) return;
+	node.properties ||= {};
+	const saved = node.properties[AUTO_PROMPT_INFER_PROPERTY];
+	const enabled = typeof saved === "boolean" ? saved : widget.value === true;
+	setWidgetValue(widget, enabled);
+	node.properties[AUTO_PROMPT_INFER_PROPERTY] = enabled;
+}
+
+function repairWanClipInt4Default(node) {
+	if (!node) return;
+	node.properties ||= {};
+	if (node.properties[WAN_CLIP_INT4_MIGRATION_PROPERTY]) return;
+
+	const widget = getWidget(node, WAN_CLIP_MODEL_WIDGET);
+	const choices = Array.isArray(widget?.options?.values) ? widget.options.values.map(String) : [];
+	const preferredKey = normalizedModelName(DEFAULT_WAN_CLIP);
+	const preferred = choices.find((choice) => normalizedModelName(choice) === preferredKey)
+		|| choices.find((choice) => /umt5.*int4.*convrot/i.test(choice));
+	if (widget && preferred && !/int4.*convrot/i.test(String(widget.value || ""))) {
+		setWidgetValue(widget, preferred);
+	}
+	node.properties[WAN_CLIP_INT4_MIGRATION_PROPERTY] = true;
+}
+
+function repairTransitionLoraDefault(node) {
+	if (!node) return;
+	node.properties ||= {};
+	if (node.properties[TRANSITION_LORA_MIGRATION_PROPERTY]) return;
+
+	const widget = getWidget(node, TRANSITION_LORA_WIDGET);
+	const choices = Array.isArray(widget?.options?.values) ? widget.options.values.map(String) : [];
+	const current = String(widget?.value || "");
+	const currentLooksLikeTransition = /st[_-]?i2v|无缝转场|丝滑转场/i.test(current);
+	const preferredKey = normalizedModelName(DEFAULT_TRANSITION_LORA);
+	const preferred = choices.find((choice) => normalizedModelName(choice) === preferredKey)
+		|| choices.find((choice) => /st[_-]?i2v.*high.*34|无缝转场|丝滑转场/i.test(choice));
+	if (widget && preferred && !currentLooksLikeTransition) {
+		setWidgetValue(widget, preferred);
+	}
+	node.properties[TRANSITION_LORA_MIGRATION_PROPERTY] = true;
+}
+
+function pairedNoiseModelName(value, fromNoise, toNoise) {
+	const text = String(value || "");
+	if (!text) return "";
+	const token = new RegExp(fromNoise, "ig");
+	if (!token.test(text)) return "";
+	return text.replace(token, (matched) => {
+		if (matched === matched.toUpperCase()) return toNoise.toUpperCase();
+		if (matched[0] === matched[0].toUpperCase()) {
+			return toNoise[0].toUpperCase() + toNoise.slice(1);
+		}
+		return toNoise;
+	});
+}
+
+function syncNoiseModelPair(node, sourceWidgetName, selectedValue) {
+	const pairMap = {
+		[CHECKPOINT_WIDGET]: [LOW_MODEL_WIDGET, "high", "low"],
+		[LOW_MODEL_WIDGET]: [CHECKPOINT_WIDGET, "low", "high"],
+		[HIGH_LORA_WIDGET]: [LOW_LORA_WIDGET, "high", "low"],
+		[LOW_LORA_WIDGET]: [HIGH_LORA_WIDGET, "low", "high"],
+	};
+	const pair = pairMap[sourceWidgetName];
+	if (!pair) return;
+	const [targetWidgetName, fromNoise, toNoise] = pair;
+	const expected = pairedNoiseModelName(selectedValue, fromNoise, toNoise);
+	if (!expected) return;
+
+	const targetWidget = getWidget(node, targetWidgetName);
+	const choices = Array.isArray(targetWidget?.options?.values)
+		? targetWidget.options.values.map(String)
+		: [];
+	const expectedKey = normalizedModelName(expected);
+	const match = choices.find((choice) => choice === expected)
+		|| choices.find((choice) => normalizedModelName(choice) === expectedKey);
+	if (match) setWidgetValue(targetWidget, match);
 }
 
 function safeJsonParse(value, fallback) {
@@ -715,7 +835,7 @@ function normalizeSegmentTimelineConfig(value) {
 	const parsed = safeJsonParse(value, []);
 	if (!Array.isArray(parsed)) return [];
 	return parsed.map((item) => ({
-		duration: Math.max(3, Math.min(10, Number(item?.duration ?? item?.seconds ?? 3) || 3)),
+		duration: Math.max(3, Math.min(15, Number(item?.duration ?? item?.seconds ?? 3) || 3)),
 		prompt: String(item?.prompt ?? ""),
 		autoPrompt: Boolean(item?.autoPrompt),
 		transition: ["首尾帧", "硬切"].includes(String(item?.transition || "")) ? String(item.transition) : "首尾帧",
@@ -815,13 +935,11 @@ function splitPositivePromptSegments(text) {
 }
 
 function clampSegmentDuration(value) {
-	return Math.max(3, Math.min(10, Number(value) || 3));
+	return Math.max(3, Math.min(15, Number(value) || 3));
 }
 
 function defaultSegmentDurationFromWidgets(node) {
-	const frames = Math.max(1, Number(getWidget(node, SEGMENT_FRAMES_WIDGET)?.value || 0) || 0);
-	const fps = Math.max(1, Number(getWidget(node, FPS_WIDGET)?.value || 24) || 24);
-	return clampSegmentDuration(frames / fps);
+	return clampSegmentDuration(getWidget(node, SEGMENT_DURATION_WIDGET)?.value || 4);
 }
 
 function applyDefaultSegmentFramesToTimeline(node) {
@@ -970,6 +1088,7 @@ function refreshMaterialTimeline(node, force = false) {
 		positiveSegments,
 	});
 	if (!force && state.signature === signature) return;
+	const materialChanged = state.signature !== signature;
 	state.signature = signature;
 	const segmentCount = Math.max(0, items.length - 1);
 	const defaults = segmentTimelineConfig(node);
@@ -998,6 +1117,7 @@ function refreshMaterialTimeline(node, force = false) {
 		node.properties ||= {};
 		node.properties[SEGMENT_TIMELINE_WIDGET] = text;
 	}
+	if (materialChanged) scheduleAutoPromptInfer(node);
 
 	state.hint.textContent = items.length ? `${items.length} 张素材 / ${segmentCount || 1} 段` : "连接或导入图片后显示";
 	state.strip.replaceChildren();
@@ -1258,13 +1378,101 @@ function refreshMaterialTimeline(node, force = false) {
 		};
 		line.addEventListener("pointerdown", startDurationDrag);
 		timeLabel.addEventListener("pointerdown", startDurationDrag);
-		timeLabel.title = "拖动分割线或秒数调整时长（3-10 秒）";
-		line.title = "拖动调整这一段时长（3-10 秒）";
+		timeLabel.title = "拖动分割线或秒数调整时长（3-15 秒）";
+		line.title = "拖动调整这一段时长（3-15 秒）";
 
 		splitter.append(line, transitionButton, timeLabel);
 		const leftFrame = row.children[index];
 		if (leftFrame) leftFrame.appendChild(splitter);
 	});
+}
+
+function autoPromptInferEnabled(node) {
+	const widget = getWidget(node, AUTO_TRANSITION_PROMPT_WIDGET);
+	return widget ? widget.value === true : node?.properties?.[AUTO_PROMPT_INFER_PROPERTY] === true;
+}
+
+function materialPromptSignature(node) {
+	return JSON.stringify(materialTimelineItems(node).map((item) => [
+		item?.filename || "",
+		item?.subfolder || "",
+		item?.type || "input",
+	]));
+}
+
+function scheduleAutoPromptInfer(node, delay = 350) {
+	if (!node || !autoPromptInferEnabled(node)) return;
+	window.clearTimeout(node.__gjjWan22AutoPromptTimer);
+	node.__gjjWan22AutoPromptTimer = window.setTimeout(() => runAutoPromptInfer(node), delay);
+}
+
+async function runAutoPromptInfer(node) {
+	if (!node || !autoPromptInferEnabled(node) || node.__gjjWan22AutoPromptRunning) return;
+	const items = materialTimelineItems(node);
+	const segmentCount = Math.max(0, items.length - 1);
+	if (segmentCount <= 0) return;
+	const signature = materialPromptSignature(node);
+	if (node.properties?.[AUTO_PROMPT_SIGNATURE_PROPERTY] === signature) return;
+	node.__gjjWan22AutoPromptRunning = true;
+	refreshToolbarState(node);
+	try {
+		const optionsByMethod = await fetchPromptInferOptions();
+		const preferredMethod = String(node.properties?.gjj_wan22_prompt_infer_method || "GJJ_OllamaAssistant");
+		const methods = Object.keys(optionsByMethod || {});
+		const method = methods.includes(preferredMethod) ? preferredMethod : methods[0];
+		const models = Array.isArray(optionsByMethod?.[method]) ? optionsByMethod[method] : [];
+		const savedModel = String(node.properties?.gjj_wan22_prompt_infer_model || "");
+		const model = models.includes(savedModel) ? savedModel : models[0];
+		if (!method || !model) throw new Error("🎬 自动过渡词：没有可用的反推模型。");
+		node.properties ||= {};
+		node.properties.gjj_wan22_prompt_infer_method = method;
+		node.properties.gjj_wan22_prompt_infer_model = model;
+		const next = segmentTimelineConfig(node);
+		for (let index = 0; index < segmentCount; index += 1) {
+			if (!autoPromptInferEnabled(node) || materialPromptSignature(node) !== signature) return;
+			setStatus(node, { text: `🎬 正在根据第 ${index + 1}、${index + 2} 张图片生成过渡词...`, progress: (index + 0.2) / segmentCount });
+			const prompt = await runPromptInferRequest({
+				node_id: node.id,
+				method,
+				model,
+				keep_model: node.properties?.gjj_wan22_prompt_infer_keep_model !== false,
+				segment_index: index,
+				items,
+			});
+			next[index] = { ...(next[index] || {}), prompt: String(prompt || "").trim(), autoPrompt: true };
+			setSegmentTimelineConfig(node, next);
+			refreshMaterialTimeline(node, true);
+		}
+		node.properties[AUTO_PROMPT_SIGNATURE_PROPERTY] = signature;
+		setStatus(node, { text: `🎬 已根据 ${items.length} 张图片生成 ${segmentCount} 段过渡词`, progress: 0 });
+	} catch (error) {
+		setStatus(node, { text: String(error?.message || error || "自动生成过渡词失败"), progress: 0 });
+	} finally {
+		node.__gjjWan22AutoPromptRunning = false;
+		refreshToolbarState(node);
+		if (autoPromptInferEnabled(node) && node.properties?.[AUTO_PROMPT_SIGNATURE_PROPERTY] !== materialPromptSignature(node)) {
+			scheduleAutoPromptInfer(node, 500);
+		}
+	}
+}
+
+function toggleAutoPromptInfer(node) {
+	node.properties ||= {};
+	const enabled = !autoPromptInferEnabled(node);
+	node.properties[AUTO_PROMPT_INFER_PROPERTY] = enabled;
+	setWidgetValue(getWidget(node, AUTO_TRANSITION_PROMPT_WIDGET), enabled);
+	if (enabled) {
+		delete node.properties[AUTO_PROMPT_SIGNATURE_PROPERTY];
+		scheduleAutoPromptInfer(node, 50);
+		setStatus(node, { text: "🎬 自动过渡词已开启；多图输入后将按相邻首尾帧自动生成。", progress: 0 });
+	} else {
+		window.clearTimeout(node.__gjjWan22AutoPromptTimer);
+		setStatus(node, { text: "🎬 自动过渡词已关闭。", progress: 0 });
+	}
+	refreshToolbarState(node);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+	return enabled;
 }
 
 function getGraphLink(graph, linkId) {
@@ -1578,6 +1786,34 @@ function bindInput(widgetName, type = "text") {
 	if (type === "textarea") input.rows = 3;
 	input.oninput = () => setWidgetValue(widget, type === "number" ? Number(input.value) : input.value);
 	return input;
+}
+
+function bindRange(node, widgetName, min, max, step, suffix = "", onChange = null) {
+	const widget = getWidget(node, widgetName);
+	const wrap = document.createElement("div");
+	wrap.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 58px;gap:8px;align-items:center";
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = String(min);
+	slider.max = String(max);
+	slider.step = String(step);
+	slider.value = String(widget?.value ?? min);
+	slider.style.cssText = "width:100%;accent-color:#28a88b;cursor:pointer";
+	const value = document.createElement("span");
+	value.style.cssText = "text-align:right;color:#dce7e2;font-variant-numeric:tabular-nums";
+	const refresh = () => {
+		const numeric = Number(slider.value);
+		value.textContent = `${Number.isInteger(numeric) ? numeric : numeric.toFixed(1)}${suffix}`;
+	};
+	slider.oninput = () => {
+		const numeric = Number(slider.value);
+		setWidgetValue(widget, numeric);
+		refresh();
+		onChange?.(numeric);
+	};
+	refresh();
+	wrap.append(slider, value);
+	return wrap;
 }
 
 function bindDefaultSegmentFramesInput(node) {
@@ -2302,8 +2538,16 @@ function refreshToolbarState(node) {
 		applyToolButtonState(node.__gjjWan22TemplateButton, { active, palette: active ? "green" : "default" });
 	}
 	if (node.__gjjWan22PromptInferButton) {
-		const active = Math.max(0, materialTimelineItems(node).length - 1) > 0;
-		applyToolButtonState(node.__gjjWan22PromptInferButton, { active, palette: active ? "purple" : "dim" });
+		const enabled = autoPromptInferEnabled(node);
+		const running = Boolean(node.__gjjWan22AutoPromptRunning);
+		node.__gjjWan22PromptInferButton.title = enabled
+			? (running ? "🎬 自动过渡词正在生成；点击关闭并打开反推设置" : "🎬 自动过渡词已开启；点击关闭并打开反推设置")
+			: "🎬 自动过渡词已关闭；点击开启并打开反推设置";
+		node.__gjjWan22PromptInferButton.setAttribute("aria-pressed", enabled ? "true" : "false");
+		applyToolButtonState(node.__gjjWan22PromptInferButton, {
+			active: enabled || running,
+			palette: running ? "amber" : (enabled ? "purple" : "dim"),
+		});
 	}
 	if (node.__gjjWan22LinkButton) {
 		node.__gjjWan22LinkButton.style.display = (linked || node.properties?.[LINK_MEMORY_PROPERTY]) ? "" : "none";
@@ -2338,32 +2582,37 @@ function ensureToolbarWidget(node) {
 	const templateBtn = makeToolButton("⚡", "绑定 GJJ_TemplateParams 参数", (button) => showTemplateBindingPanel(node, button));
 	const modelBtn = makeToolButton("🧠", "模型与模型列表", (button) => showFloatingPanel(node, button, "模型", (body) => {
 		body.style.gap = "8px";
-		const mainSelect = bindSelect(node, CHECKPOINT_WIDGET);
-		const wanClipRow = modelRow("Wan CLIP", bindSelect(node, WAN_CLIP_MODEL_WIDGET));
-		const wanVaeRow = modelRow("Wan VAE", bindSelect(node, WAN_VAE_MODEL_WIDGET));
-		const updateWanRows = () => {
-			const value = String(getWidget(node, CHECKPOINT_WIDGET)?.value || "").replaceAll("\\", "/").toLowerCase();
-			const usesExternalParts = value.startsWith("diffusion_models/") || value.endsWith(".gguf");
-			wanClipRow.style.display = usesExternalParts ? "" : "none";
-			wanVaeRow.style.display = usesExternalParts ? "" : "none";
-		};
-		mainSelect.addEventListener("change", () => {
-			setTimeout(updateWanRows, 0);
+		const tree = GJJ_Utils.createModelTreeView({
+			node,
+			entries: [
+				{ widget: CHECKPOINT_WIDGET, label: "高噪模型", folder: "models/diffusion_models", icon: "🟣", searchValue: "wan", fallback: String(getWidget(node, CHECKPOINT_WIDGET)?.value || "") },
+				{ widget: LOW_MODEL_WIDGET, label: "低噪模型", folder: "models/diffusion_models", icon: "🟣", searchValue: "wan", fallback: String(getWidget(node, LOW_MODEL_WIDGET)?.value || "") },
+				{ widget: WAN_CLIP_MODEL_WIDGET, label: "Wan CLIP / T5", folder: "models/text_encoders", icon: "🟡", fallback: String(getWidget(node, WAN_CLIP_MODEL_WIDGET)?.value || "") },
+				{ widget: WAN_VAE_MODEL_WIDGET, label: "Wan VAE", folder: "models/vae", icon: "🔴", fallback: String(getWidget(node, WAN_VAE_MODEL_WIDGET)?.value || "") },
+				{ widget: HIGH_LORA_WIDGET, label: "高噪 2step LoRA", folder: "models/loras", icon: "🟢", fallback: String(getWidget(node, HIGH_LORA_WIDGET)?.value || "") },
+				{ widget: LOW_LORA_WIDGET, label: "低噪 2step LoRA", folder: "models/loras", icon: "🟢", fallback: String(getWidget(node, LOW_LORA_WIDGET)?.value || "") },
+				{ widget: CLIP_VISION_MODEL_WIDGET, label: "首尾帧 CLIP Vision", folder: "models/clip_vision", icon: "🔵", fallback: String(getWidget(node, CLIP_VISION_MODEL_WIDGET)?.value || "") },
+				{ widget: AUDIO_MMAUDIO_MODEL_WIDGET, label: "MMAudio", folder: "models/mmaudio", icon: "🟠", fallback: String(getWidget(node, AUDIO_MMAUDIO_MODEL_WIDGET)?.value || "") },
+				{ widget: AUDIO_VAE_MODEL_WIDGET, label: "配音 VAE", folder: "models/mmaudio", icon: "🟠", fallback: String(getWidget(node, AUDIO_VAE_MODEL_WIDGET)?.value || "") },
+				{ widget: AUDIO_SYNCHFORMER_MODEL_WIDGET, label: "Synchformer", folder: "models/mmaudio", icon: "🟠", fallback: String(getWidget(node, AUDIO_SYNCHFORMER_MODEL_WIDGET)?.value || "") },
+				{ widget: AUDIO_CLIP_MODEL_WIDGET, label: "配音 CLIP", folder: "models/mmaudio", icon: "🟠", fallback: String(getWidget(node, AUDIO_CLIP_MODEL_WIDGET)?.value || "") },
+				{ widget: TRANSITION_LORA_WIDGET, label: "首尾帧转场 LoRA", folder: "models/loras", icon: "🟢", fallback: String(getWidget(node, TRANSITION_LORA_WIDGET)?.value || "") },
+			],
+			onApply: (entry, nextValue) => {
+				syncNoiseModelPair(node, entry?.widget, nextValue);
+				closeFloatingPanel(node);
+			},
+			refresh: () => {
+				refreshToolbarState(node);
+				GJJ_Utils.refreshNode(node);
+			},
 		});
-		body.append(
-			modelRow("主模型", mainSelect),
-			wanClipRow,
-			wanVaeRow,
-			modelRow("MMAudio", bindSelect(node, AUDIO_MMAUDIO_MODEL_WIDGET)),
-			modelRow("配音VAE", bindSelect(node, AUDIO_VAE_MODEL_WIDGET)),
-			modelRow("Synchformer", bindSelect(node, AUDIO_SYNCHFORMER_MODEL_WIDGET)),
-			modelRow("配音CLIP", bindSelect(node, AUDIO_CLIP_MODEL_WIDGET)),
-		);
+		tree.style.maxHeight = "420px";
+		body.append(tree);
 		const note = document.createElement("div");
-		note.textContent = `checkpoints 自带 CLIP/VAE；diffusion_models 使用 Wan CLIP/Wan VAE：${getWidget(node, CHECKPOINT_WIDGET)?.value || ""}`;
+		note.textContent = "完整显示本节点会加载的模型；包含高/低噪模型、2step LoRA、转场 LoRA、CLIP Vision、VAE 与配音模型。";
 		note.style.cssText = "color:#91a8ae;white-space:nowrap;overflow:hidden;text-overflow:clip";
 		body.appendChild(note);
-		updateWanRows();
 	}));
 	const audioBtn = makeToolButton("📢", "配音设置", (button) => showFloatingPanel(node, button, "配音", (body) => {
 		body.append(
@@ -2389,15 +2638,15 @@ function ensureToolbarWidget(node) {
 			row("输入打包", bindCheckbox(node, PACK_INPUT_SEQUENCE_WIDGET)),
 		);
 	}));
-	const promptInferBtn = makeToolButton("🎬", "反推转场提示词", (button) => showPromptInferPanel(node, button));
+	const promptInferBtn = makeToolButton("🎬", "自动生成转场提示词开关", (button) => {
+		toggleAutoPromptInfer(node);
+		showPromptInferPanel(node, button);
+	});
 	const linkBtn = makeToolButton("🔗", "吸收或恢复外部批量图片链接", () => detachOrRestoreImageLink(node));
 	const gearBtn = makeToolButton("⚙️", "其它参数", (button) => showFloatingPanel(node, button, "参数", (body) => {
 		body.append(
-			row("默认每段帧数", bindDefaultSegmentFramesInput(node)),
-			row("视频帧率", bindInput.call(node, FPS_WIDGET, "number")),
-			row("视频格式", bindSelect(node, VIDEO_FORMAT_WIDGET)),
-			row("文件前缀", bindInput.call(node, PREFIX_WIDGET)),
-			row("反向提示", bindInput.call(node, NEGATIVE_WIDGET, "textarea")),
+			row("帧率", bindRange(node, FPS_WIDGET, 1, 120, 1, " fps")),
+			row("每段时长", bindRange(node, SEGMENT_DURATION_WIDGET, 3, 15, 0.1, " 秒", () => applyDefaultSegmentFramesToTimeline(node))),
 		);
 	}));
 	tools.append(fileBtn, resetBtn, seedBtn, templateBtn, modelBtn, audioBtn, sizeBtn, promptInferBtn, linkBtn, gearBtn, runBtn);
@@ -2669,6 +2918,7 @@ function patchNode(node) {
 	const originalOnRemoved = node.onRemoved;
 	node.onRemoved = function (...args) {
 		closeFloatingPanel(this);
+		window.clearTimeout(this.__gjjWan22AutoPromptTimer);
 		if (this.__gjjWan22MaterialTimelineRefreshTimer) {
 			window.clearInterval(this.__gjjWan22MaterialTimelineRefreshTimer);
 			this.__gjjWan22MaterialTimelineRefreshTimer = null;

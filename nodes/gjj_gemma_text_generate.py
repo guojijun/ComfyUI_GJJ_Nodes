@@ -6,6 +6,7 @@ import inspect
 import gc
 import os
 import secrets
+import threading
 from typing import Any
 
 try:
@@ -69,6 +70,7 @@ MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl"
 MISSING_CLIP_PLACEHOLDER = "未找到匹配的反推模型"
 DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
+_OFFICIAL_TEXT_GENERATE_LOCK = threading.RLock()
 
 
 class AnyMediaType(str):
@@ -431,9 +433,22 @@ def _generate_text(
     try:
         signature = inspect.signature(TextGenerate.execute)
         official_kwargs = {key: value for key, value in official_kwargs.items() if key in signature.parameters}
-        official_started = time.perf_counter()
-        official_output = TextGenerate.execute(**official_kwargs)
-        official_seconds = time.perf_counter() - official_started
+        with _OFFICIAL_TEXT_GENERATE_LOCK:
+            server = getattr(PromptServer, "instance", None) if PromptServer is not None else None
+            had_prompt_id = bool(server is not None and hasattr(server, "last_prompt_id"))
+            previous_prompt_id = getattr(server, "last_prompt_id", None) if had_prompt_id else None
+            if server is not None and not previous_prompt_id:
+                setattr(server, "last_prompt_id", f"gjj_gemma_{time.time_ns()}")
+            try:
+                official_started = time.perf_counter()
+                official_output = TextGenerate.execute(**official_kwargs)
+                official_seconds = time.perf_counter() - official_started
+            finally:
+                if server is not None:
+                    if had_prompt_id:
+                        setattr(server, "last_prompt_id", previous_prompt_id)
+                    elif hasattr(server, "last_prompt_id"):
+                        delattr(server, "last_prompt_id")
     except Exception as exc:
         raise RuntimeError(f"调用 ComfyUI 官方 TextGenerate 失败：{exc}") from exc
 

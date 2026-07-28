@@ -1,6 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const NODE_TYPE = "GJJ_GemmaTextGenerate";
 const NODE_TITLE_PREFIX = "GJJ·💛Gemma🧠";
@@ -1379,7 +1379,22 @@ function createPanel(node) {
 		state.modelExpanded = false;
 		syncPanel(node);
 	});
-	toolbar.append(templateButton, thinking, modelPanelButton, randomSeed, settingsButton);
+	const runButton = button("▶️", "只执行当前 Gemma 文本生成节点", async () => {
+		if (runButton.disabled) return;
+		runButton.disabled = true;
+		runButton.textContent = "⏳";
+		try {
+			const queued = await queueOnlyCurrentNode(node);
+			if (!queued) throw new Error("当前节点未能加入执行队列");
+		} catch (error) {
+			console.error("[GJJ GemmaTextGenerate] 执行当前节点失败：", error);
+			alert(`执行当前节点失败：${error?.message || error}`);
+		} finally {
+			runButton.textContent = "▶️";
+			runButton.disabled = false;
+		}
+	});
+	toolbar.append(templateButton, thinking, modelPanelButton, randomSeed, settingsButton, runButton);
 
 	const settingsState = buildSettings(node);
 	const modelState = buildModelPanel(node, settingsState);

@@ -8,14 +8,19 @@ const DOM_WIDGET_NAME = "gjj_text_input_markdown";
 const SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MODE_PROPERTY = "gjj_text_input_mode";
 const WIDTH_PROPERTY = "gjj_text_input_width";
+const HEIGHT_PROPERTY = "gjj_text_input_height";
 const LAST_LINK_PROPERTY = "gjj_text_input_last_upstream_link";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DEFAULT_NODE_WIDTH = 160;
 const MIN_NODE_WIDTH = 160;
 const WIDTH_GRID = 5;
-const MIN_WIDGET_HEIGHT = 24;
+const MIN_WIDGET_HEIGHT = 0;
 const MIN_EDITOR_HEIGHT = 32;
+// 不对用户高度设置 GJJ 下限；仅保留 ComfyUI 画布自身的结构限制。
+const MIN_NODE_HEIGHT = 0;
+const NODE_CHROME_HEIGHT = 52;
+const HEIGHT_RESIZE_HANDLE_SIZE = 12;
 const EMPTY_TEXT = "空文本";
 const WAITING_UPSTREAM_TEXT = "等待执行后预览上游文本";
 const DOUBLE_CLICK_MS = 420;
@@ -170,7 +175,8 @@ function getPreviewText(node) {
 		return String(liveText);
 	}
 	if (hasLinkedTextInput(node)) {
-		return WAITING_UPSTREAM_TEXT;
+		const savedText = preserveSavedTextValue(node);
+		return savedText || WAITING_UPSTREAM_TEXT;
 	}
 	return getTextValue(node);
 }
@@ -244,23 +250,118 @@ function syncEditorHeight(editor) {
 	if (!editor) {
 		return MIN_EDITOR_HEIGHT;
 	}
-	editor.style.height = "auto";
-	const height = Math.max(MIN_EDITOR_HEIGHT, Math.ceil(editor.scrollHeight || MIN_EDITOR_HEIGHT));
-	editor.style.height = `${height}px`;
+	editor.style.height = "100%";
+	return Math.max(MIN_EDITOR_HEIGHT, Math.ceil(editor.clientHeight || MIN_EDITOR_HEIGHT));
+}
+
+function normalizeHeight(value, fallback = MIN_NODE_HEIGHT) {
+	const height = Number(value);
+	return Number.isFinite(height) ? Math.max(MIN_NODE_HEIGHT, height) : fallback;
+}
+
+function getUserHeight(node, fallback = MIN_NODE_HEIGHT) {
+	const currentHeight = normalizeHeight(node?.size?.[1], NaN);
+	if (Number.isFinite(currentHeight)) return currentHeight;
+	return normalizeHeight(node?.properties?.[HEIGHT_PROPERTY], fallback);
+}
+
+function applyUserSize(node, width, height, rememberHeight = true) {
+	if (!node) return;
+	const nextWidth = Math.max(MIN_NODE_WIDTH, normalizeWidth(width) || getCurrentWidth(node));
+	const nextHeight = normalizeHeight(height, getUserHeight(node));
+	if (!Array.isArray(node.size)) node.size = [nextWidth, nextHeight];
+	node.size[0] = nextWidth;
+	node.size[1] = nextHeight;
+	if (rememberHeight) {
+		node.properties = node.properties || {};
+		node.properties[HEIGHT_PROPERTY] = nextHeight;
+	}
+	applyViewportHeight(node, [nextWidth, nextHeight]);
+}
+
+function applyViewportHeight(node, size = null) {
+	const nodeHeight = normalizeHeight(size?.[1], getUserHeight(node));
+	const height = Math.max(MIN_WIDGET_HEIGHT, nodeHeight - NODE_CHROME_HEIGHT);
+	const element = node?.__gjjTextInputWidget?.element || node?.__gjjTextInputContainer;
+	if (element?.style) element.style.height = `${height}px`;
+	if (node?.__gjjTextInputContainer?.style) node.__gjjTextInputContainer.style.height = `${height}px`;
 	return height;
 }
 
-function measureDomHeight(node) {
-	if (getMode(node) === MODE_EDIT && node.__gjjTextInputEditor) {
-		syncEditorHeight(node.__gjjTextInputEditor);
+function installHeightResizeHandle(node, container) {
+	if (!node || !container || node.__gjjTextInputHeightResizeHandle) return;
+	const handle = document.createElement("div");
+	handle.className = "gjj-text-input-height-resize-handle";
+	handle.title = "拖动调整节点高度";
+	handle.style.cssText = [
+		"position:absolute",
+		"left:0",
+		"right:0",
+		"bottom:0",
+		`height:${HEIGHT_RESIZE_HANDLE_SIZE}px`,
+		"z-index:20",
+		"cursor:ns-resize",
+		"pointer-events:auto",
+		"touch-action:none",
+		"background:linear-gradient(to bottom,transparent 4px,rgba(111,151,160,.55) 5px,transparent 6px)",
+	].join(";");
+	handle.addEventListener("pointerdown", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const startY = Number(event.clientY || 0);
+		const startHeight = Math.max(MIN_NODE_HEIGHT, Number(node.size?.[1] || MIN_NODE_HEIGHT));
+		const pointerId = event.pointerId;
+		handle.setPointerCapture?.(pointerId);
+		const move = (moveEvent) => {
+			moveEvent.preventDefault();
+			moveEvent.stopPropagation();
+			const scale = Math.max(0.05, Number(app.canvas?.ds?.scale || 1));
+			const nextHeight = Math.max(
+				MIN_NODE_HEIGHT,
+				Math.round(startHeight + (Number(moveEvent.clientY || startY) - startY) / scale),
+			);
+			// 不调用 LiteGraph.setSize：它会按 DOM 内容高度重新夹紧，导致只能拉长不能缩短。
+			applyUserSize(node, getCurrentWidth(node), nextHeight);
+			node.setDirtyCanvas?.(true, true);
+			app.graph?.setDirtyCanvas?.(true, true);
+		};
+		const finish = () => {
+			handle.releasePointerCapture?.(pointerId);
+			handle.removeEventListener("pointermove", move);
+			handle.removeEventListener("pointerup", finish);
+			handle.removeEventListener("pointercancel", finish);
+		};
+		handle.addEventListener("pointermove", move);
+		handle.addEventListener("pointerup", finish);
+		handle.addEventListener("pointercancel", finish);
+	});
+	container.appendChild(handle);
+	node.__gjjTextInputHeightResizeHandle = handle;
+}
+
+function enableManualHeightResize(node) {
+	if (!node) return;
+	node.resizable = true;
+	node.min_size = [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
+	node.min_width = MIN_NODE_WIDTH;
+	node.min_height = MIN_NODE_HEIGHT;
+	if (!node.__gjjTextInputComputeSizePatched) {
+		node.__gjjTextInputComputeSizePatched = true;
+		node.__gjjTextInputOriginalComputeSize = node.computeSize;
+		node.computeSize = function () {
+			return [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
+		};
 	}
-	const candidates = [
-		node.__gjjTextInputContainer?.scrollHeight,
-		node.__gjjTextInputContainer?.offsetHeight,
-		node.__gjjTextInputPreviewBody?.scrollHeight,
-		node.__gjjTextInputEditor?.scrollHeight,
-	];
-	return Math.max(MIN_WIDGET_HEIGHT, Math.ceil(candidates.find((value) => Number(value || 0) > 0) || MIN_WIDGET_HEIGHT));
+	const widget = node.__gjjTextInputWidget;
+	if (widget) {
+		widget.computedHeight = MIN_WIDGET_HEIGHT;
+		widget.getMinHeight = () => 1;
+		widget.computeSize = (width) => [effectiveWidgetWidth(node, width), MIN_WIDGET_HEIGHT];
+		widget.getHeight = () => MIN_WIDGET_HEIGHT;
+		if (widget.options && typeof widget.options === "object") {
+			widget.options.getMinHeight = () => 1;
+		}
+	}
 }
 
 function refreshNode(node) {
@@ -268,19 +369,10 @@ function refreshNode(node) {
 		return;
 	}
 	const width = rememberWidth(node);
-	const computed = node.computeSize?.([width, node.size?.[1] || 0]) || node.size || [width, MIN_WIDGET_HEIGHT];
 	const nextWidth = Math.max(MIN_NODE_WIDTH, width);
-	const nextHeight = Math.max(MIN_WIDGET_HEIGHT, Number(computed?.[1] || measureDomHeight(node)));
-	const currentWidth = Number(node.size?.[0] || 0);
-	const currentHeight = Number(node.size?.[1] || 0);
-	if (Math.abs(currentWidth - nextWidth) >= 0.5 || Math.abs(currentHeight - nextHeight) >= 0.5) {
-		node.__gjjTextInputInternalResize = true;
-		try {
-			node.setSize?.([nextWidth, nextHeight]);
-		} finally {
-			node.__gjjTextInputInternalResize = false;
-		}
-	}
+	const nextHeight = getUserHeight(node);
+	// 绝不调用 setSize/computeSize；二者都会让 DOM 内容重新参与最小高度计算。
+	applyUserSize(node, nextWidth, nextHeight, false);
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -1040,9 +1132,12 @@ function applyMode(node) {
 	if (node.__gjjTextInputWidget) {
 		node.__gjjTextInputWidget.computeSize = (width) => [
 			effectiveWidgetWidth(node, width),
-			measureDomHeight(node),
+			MIN_WIDGET_HEIGHT,
 		];
+		node.__gjjTextInputWidget.getHeight = () => MIN_WIDGET_HEIGHT;
 	}
+	enableManualHeightResize(node);
+	applyViewportHeight(node);
 	refreshNode(node);
 }
 
@@ -1196,10 +1291,14 @@ function buildDom(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
+		"position:relative",
 		"gap:0",
 		"width:100%",
+		"height:100%",
+		"min-height:0",
+		"overflow:hidden",
 		"box-sizing:border-box",
-		"padding:0",
+		`padding:0 0 ${HEIGHT_RESIZE_HANDLE_SIZE}px`,
 	].join(";");
 
 	const previewBody = document.createElement("div");
@@ -1207,9 +1306,10 @@ function buildDom(node) {
 	previewBody.title = "双击编辑";
 	previewBody.style.cssText = [
 		"display:block",
+		"flex:1 1 auto",
 		"min-height:0",
-		"max-height:none",
-		"overflow:visible",
+		"max-height:100%",
+		"overflow:auto",
 		"padding:0",
 		"border:0",
 		"border-radius:0",
@@ -1230,10 +1330,11 @@ function buildDom(node) {
 	editor.spellcheck = false;
 	editor.style.cssText = [
 		"display:none",
+		"flex:1 1 auto",
 		"width:100%",
 		"min-height:0",
-		"height:auto",
-		"resize:vertical",
+		"height:100%",
+		"resize:none",
 		"box-sizing:border-box",
 		"padding:8px 10px",
 		"border:1px solid #44565f",
@@ -1505,6 +1606,7 @@ function buildDom(node) {
 	});
 
 	container.append(style, actionBar, previewBody, editor);
+	installHeightResizeHandle(node, container);
 
 	node.__gjjTextInputContainer = container;
 	node.__gjjTextInputActionBar = actionBar;
@@ -1529,8 +1631,11 @@ function ensureDom(node) {
 	});
 	if (widget) {
 		widget.value = getTextValue(node);
-		widget.computeSize = (width) => [effectiveWidgetWidth(node, width), measureDomHeight(node)];
+		widget.computeSize = (width) => [effectiveWidgetWidth(node, width), MIN_WIDGET_HEIGHT];
+		widget.getHeight = () => MIN_WIDGET_HEIGHT;
 		node.__gjjTextInputWidget = widget;
+		enableManualHeightResize(node);
+		applyViewportHeight(node);
 	}
 	if (Array.isArray(node.widgets)) {
 		const domIndex = node.widgets.indexOf(widget);
@@ -1546,8 +1651,10 @@ function stabilizeNode(node) {
 	if (!node) {
 		return;
 	}
+	enableManualHeightResize(node);
 	ensureStableWidth(node);
 	ensureDom(node);
+	enableManualHeightResize(node);
 	recordCurrentTextInputLink(node);
 	bindTextWidget(node);
 	disableStandardStatus(node);
@@ -1587,12 +1694,32 @@ app.registerExtension({
 			return result;
 		};
 
+		const originalSetSize = nodeType.prototype.setSize;
+		nodeType.prototype.setSize = function (size, ...args) {
+			if (!Array.isArray(size)) {
+				return originalSetSize?.apply(this, [size, ...args]);
+			}
+			const requestedWidth = Number(size[0]);
+			const requestedHeight = normalizeHeight(size[1], getUserHeight(this));
+			const result = originalSetSize?.apply(this, [size, ...args]);
+			// LiteGraph/DOM widget 可以修改传入数组或按内容夹紧；最后无条件恢复用户请求高度。
+			applyUserSize(this, requestedWidth, requestedHeight, !this.__gjjTextInputInternalResize);
+			return result;
+		};
+
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			const serializedHeight = Math.max(
+				MIN_NODE_HEIGHT,
+				Number(serializedNode?.properties?.[HEIGHT_PROPERTY] ?? serializedNode?.size?.[1] ?? MIN_NODE_HEIGHT),
+			);
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
 			const serializedWidth = normalizeWidth(serializedNode?.size?.[0]);
 			const savedWidth = normalizeWidth(serializedNode?.properties?.[WIDTH_PROPERTY] || this.properties?.[WIDTH_PROPERTY]);
 			ensureStableWidth(this, serializedWidth || savedWidth || DEFAULT_NODE_WIDTH);
+			this.properties = this.properties || {};
+			this.properties[HEIGHT_PROPERTY] = serializedHeight;
+			applyUserSize(this, serializedWidth || savedWidth || DEFAULT_NODE_WIDTH, serializedHeight);
 			restoreSavedValue(this, serializedNode);
 			scheduleStabilize(this, 0);
 			return result;
@@ -1600,10 +1727,13 @@ app.registerExtension({
 
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
+			const requestedSize = Array.isArray(args[0]) ? [...args[0]] : [...(this.size || [DEFAULT_NODE_WIDTH, MIN_NODE_HEIGHT])];
+			const requestedHeight = normalizeHeight(requestedSize[1], getUserHeight(this));
 			const result = originalOnResize?.apply(this, args);
 			if (this.__gjjTextInputInternalResize) {
 				return result;
 			}
+			applyUserSize(this, requestedSize[0], requestedHeight);
 			rememberWidth(this, true);
 			scheduleStabilize(this, 0);
 			return result;
@@ -1655,12 +1785,17 @@ app.registerExtension({
 				if (propertyWidth > 0) {
 					serializedNode.properties[WIDTH_PROPERTY] = propertyWidth;
 				}
+				const propertyHeight = Math.max(
+					MIN_NODE_HEIGHT,
+					Number(this.properties?.[HEIGHT_PROPERTY] ?? this.size?.[1] ?? MIN_NODE_HEIGHT),
+				);
+				serializedNode.properties[HEIGHT_PROPERTY] = propertyHeight;
 				if (Array.isArray(serializedNode.size)) {
 					const savedWidth = propertyWidth || normalizeWidth(serializedNode.size[0]);
 					if (savedWidth > 0) {
 						serializedNode.size[0] = savedWidth;
 					}
-					serializedNode.size[1] = Math.max(MIN_WIDGET_HEIGHT, Number(this.size?.[1] || serializedNode.size[1] || measureDomHeight(this)));
+					serializedNode.size[1] = propertyHeight;
 				}
 				if (Array.isArray(serializedNode.widgets_values) && Array.isArray(this.widgets)) {
 					const domIndex = this.widgets.findIndex((widget) => widget?.name === DOM_WIDGET_NAME);

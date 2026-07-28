@@ -1,5 +1,5 @@
 const { app } = window.comfyAPI.app;
-const api = window.comfyAPI?.api;
+const api = window.comfyAPI?.api?.api || window.api;
 
 function chainCallback(object, property, callback) {
   if (!object) return;
@@ -68,6 +68,8 @@ const SETTINGS_PROPERTY = "gjj_ideogram4_prompt_builder_settings_open";
 const IMAGE_SETTINGS_PROPERTY = "gjj_ideogram4_prompt_builder_image_settings_open";
 const PARAM_SOURCE_PROPERTY = "gjj_ideogram4_prompt_builder_template_source";
 const PARAM_MODE_PROPERTY = "gjj_ideogram4_prompt_builder_template_mode";
+const RMBG14_RECAPTION_API = "/gjj/ideogram4_prompt_builder/rmbg14_recaption";
+const TEMP_IMAGE_API = "/gjj/ideogram4_prompt_builder/temp_image";
 const PARAM_WIDGETS = [
   "width", "height", "high_level_description", "background", "style", "photo", "art_style",
   "aesthetics", "lighting", "medium",
@@ -75,7 +77,7 @@ const PARAM_WIDGETS = [
   "image_caption_thinking", "image_caption_keep_alive", "image_caption_max_tokens", "ollama_host",
 ];
 const SYSTEM_PARAM_WIDGETS = ["width", "height", "high_level_description", "background", "style", "photo", "art_style", "aesthetics", "lighting", "medium"];
-const IMAGE_PARAM_WIDGETS = ["image_caption_backend", "image_caption_model", "image_caption_prompt", "image_caption_thinking", "image_caption_keep_alive", "image_caption_max_tokens", "ollama_host"];
+const IMAGE_PARAM_WIDGETS = ["image_caption_backend", "image_caption_model", "image_caption_prompt", "image_caption_thinking", "image_caption_keep_alive", "image_caption_max_tokens"];
 const SOCKET_WIDGETS = {
   width: { type: "INT", label: "画布宽度" },
   height: { type: "INT", label: "画布高度" },
@@ -122,6 +124,16 @@ const KJIDEO_STYLE = `
     .kjideo-settings { display:none; flex-direction:column; gap:6px; padding:7px; background:#20282c; border:1px solid #3b454a; border-radius:6px; color:#cfd8dc; font:11px sans-serif; }
     .kjideo-settings.open { display:flex; }
     .kjideo-field { display:grid; grid-template-columns:70px minmax(0,1fr); align-items:center; gap:6px; min-width:0; }
+    .kjideo-floating { position:fixed; z-index:100000; display:none; width:min(520px,calc(100vw - 28px)); max-height:min(680px,calc(100vh - 32px)); overflow:hidden; flex-direction:column; padding:10px; box-sizing:border-box; border:1px solid #4d6069; border-radius:9px; background:#11191d; color:#dce7e2; box-shadow:0 16px 42px rgba(0,0,0,.48); pointer-events:auto; }
+    .kjideo-floating.open { display:flex; }
+    .kjideo-floating-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-bottom:8px; cursor:move; user-select:none; touch-action:none; }
+    .kjideo-floating-title { font-size:13px; font-weight:800; color:#f2faf7; }
+    .kjideo-floating-close { width:26px; height:24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; }
+    .kjideo-floating-body { display:flex; flex-direction:column; gap:8px; min-height:0; overflow:auto; overscroll-behavior:contain; }
+    .kjideo-floating-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
+    .kjideo-floating textarea { width:100%; min-height:240px; resize:vertical; box-sizing:border-box; background:#151b1e; border:1px solid #445157; border-radius:6px; color:#e0e7ea; padding:7px; font:12px/1.45 monospace; }
+    .kjideo-floating-note { color:#9babb1; font:11px/1.45 sans-serif; }
+    .kjideo-template-choice { width:100%; text-align:left; }
     .kjideo-field label { color:#aebbc0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .kjideo-field input, .kjideo-field select, .kjideo-field textarea { width:100%; min-width:0; box-sizing:border-box; background:#151b1e; border:1px solid #445157; border-radius:4px; color:#e0e7ea; font:12px sans-serif; padding:4px 6px; }
     .kjideo-field textarea { min-height:48px; resize:vertical; line-height:1.35; }
@@ -285,6 +297,8 @@ app.registerExtension({
       node._hoverTitle = null; // index of the title chip under the cursor
       node._hoverBox = null;   // index of the box under the cursor
       node._hoverFolder = null; // index of the image element folder button
+      node._hoverRmbg = null;   // index of the image element RMBG1.4 button
+      node._rmbgBusy = new Set();
       node._focused = false;   // editor (DOM) focused — gates the active-box highlight
       node._selected = false;  // node selected in the graph
       node._lastImported = ""; // last import_json applied to the editor (avoid re-apply)
@@ -349,6 +363,107 @@ app.registerExtension({
       const imageSettingsPanel = document.createElement("div");
       imageSettingsPanel.className = "kjideo-settings";
 
+      const floating = document.createElement("div");
+      floating.className = "kjideo-floating";
+      const floatingHead = document.createElement("div");
+      floatingHead.className = "kjideo-floating-head";
+      const floatingTitle = document.createElement("div");
+      floatingTitle.className = "kjideo-floating-title";
+      const floatingClose = document.createElement("button");
+      floatingClose.type = "button";
+      floatingClose.className = "kjideo-floating-close";
+      floatingClose.textContent = "×";
+      floatingClose.title = "关闭";
+      const floatingBody = document.createElement("div");
+      floatingBody.className = "kjideo-floating-body";
+      floatingHead.append(floatingTitle, floatingClose);
+      floating.append(floatingHead, floatingBody);
+      document.body.appendChild(floating);
+      for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+        floating.addEventListener(eventName, (event) => event.stopPropagation());
+      }
+      floating.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+
+      const floatingState = { kind: "", anchor: null, offsetX: 0, offsetY: 0, frame: 0 };
+      function closeFloating() {
+        node.properties ||= {};
+        node.properties[SETTINGS_PROPERTY] = false;
+        node.properties[IMAGE_SETTINGS_PROPERTY] = false;
+        floatingState.kind = "";
+        floatingState.anchor = null;
+        floatingState.offsetX = 0;
+        floatingState.offsetY = 0;
+        floating.classList.remove("open");
+        floatingBody.innerHTML = "";
+        settingsBtn.classList.remove("active");
+        imageSettingsBtn.classList.remove("active");
+        paramsBtn.classList.remove("active");
+        colorBtn.classList.remove("active");
+        socketBtn.classList.remove("active");
+        copyBtn.classList.remove("active");
+        importBtn.classList.remove("active");
+        clearBtn.classList.remove("active");
+        paramsBtn.classList.toggle("active", paramModeEnabled());
+        socketBtn.classList.toggle("active", socketsEnabled());
+        cancelAnimationFrame(floatingState.frame);
+        floatingState.frame = 0;
+      }
+      function positionFloating() {
+        if (!floatingState.kind || !floatingState.anchor?.isConnected) return;
+        const anchor = floatingState.anchor.getBoundingClientRect();
+        const rect = floating.getBoundingClientRect();
+        const pad = 12;
+        const baseLeft = anchor.left;
+        const baseTop = anchor.bottom + 6;
+        const left = Math.max(pad, Math.min(baseLeft + floatingState.offsetX, window.innerWidth - rect.width - pad));
+        const top = Math.max(pad, Math.min(baseTop + floatingState.offsetY, window.innerHeight - rect.height - pad));
+        floating.style.left = `${Math.round(left)}px`;
+        floating.style.top = `${Math.round(top)}px`;
+        floatingState.frame = requestAnimationFrame(positionFloating);
+      }
+      function openFloating(kind, anchor, title, build) {
+        if (floatingState.kind === kind) {
+          closeFloating();
+          refreshSettingsPanel();
+          return;
+        }
+        closeFloating();
+        floatingState.kind = kind;
+        floatingState.anchor = anchor;
+        floatingTitle.textContent = title;
+        floatingBody.innerHTML = "";
+        floating.classList.add("open");
+        anchor?.classList?.add("active");
+        build?.(floatingBody);
+        floatingState.frame = requestAnimationFrame(positionFloating);
+      }
+      floatingClose.addEventListener("click", closeFloating);
+      floating.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") closeFloating();
+      });
+      floatingHead.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || event.target?.closest?.("button,input,select,textarea")) return;
+        event.preventDefault();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const initialX = floatingState.offsetX;
+        const initialY = floatingState.offsetY;
+        floatingHead.setPointerCapture?.(event.pointerId);
+        const move = (moveEvent) => {
+          floatingState.offsetX = initialX + moveEvent.clientX - startX;
+          floatingState.offsetY = initialY + moveEvent.clientY - startY;
+        };
+        const stop = (stopEvent) => {
+          floatingHead.releasePointerCapture?.(stopEvent.pointerId);
+          floatingHead.removeEventListener("pointermove", move);
+          floatingHead.removeEventListener("pointerup", stop);
+          floatingHead.removeEventListener("pointercancel", stop);
+        };
+        floatingHead.addEventListener("pointermove", move);
+        floatingHead.addEventListener("pointerup", stop);
+        floatingHead.addEventListener("pointercancel", stop);
+      });
+
       const canvasEl = document.createElement("canvas");
       canvasEl.className = "kjideo-canvas";
       canvasEl.tabIndex = 0;                                  // focusable, so it can receive key events
@@ -368,17 +483,46 @@ app.registerExtension({
         return box.gjjImageId;
       }
 
-      function setImageElementThumb(box, src) {
-        const next = String(src || "").trim();
+      function tempImageUrl(ref) {
+        if (!ref || typeof ref !== "object" || !ref.filename) return "";
+        const query = new URLSearchParams({
+          filename: String(ref.filename),
+          subfolder: String(ref.subfolder || "GJJ"),
+          type: String(ref.type || "temp"),
+        });
+        if (ref.hash) query.set("v", String(ref.hash).slice(0, 16));
+        return `/api/view?${query.toString()}`;
+      }
+
+      function imageSource(box) {
+        const ref = box?.imageRef || box?.image_ref;
+        return tempImageUrl(ref) || String(box?.imageData || box?.image_data || "").trim();
+      }
+
+      function setImageElementThumb(box, source) {
+        const ref = source && typeof source === "object" ? source : null;
+        const next = ref ? tempImageUrl(ref) : String(source || "").trim();
         const key = ensureBoxId(box);
         if (!key) return;
         if (!next) {
           node._imageElementThumbs.delete(key);
-          if (box) delete box.imageData;
+          if (box) {
+            delete box.imageRef;
+            delete box.image_ref;
+            delete box.imageData;
+            delete box.image_data;
+          }
           drawCanvas();
           return;
         }
-        if (box) box.imageData = next;
+        if (box && ref) {
+          box.imageRef = ref;
+          delete box.image_ref;
+          delete box.imageData;
+          delete box.image_data;
+        } else if (box) {
+          box.imageData = next;
+        }
         const cached = node._imageElementThumbs.get(key);
         if (cached?.src === next && cached?.image) return;
         const img = new Image();
@@ -389,19 +533,50 @@ app.registerExtension({
         drawCanvas();
       }
 
+      async function persistImageElementThumb(box, dataUrl) {
+        const value = String(dataUrl || "").trim();
+        if (!box || !value) return false;
+        const fetcher = api?.fetchApi ? api.fetchApi.bind(api) : window.fetch.bind(window);
+        const blob = await (await window.fetch(value)).blob();
+        const form = new FormData();
+        form.append("image", blob, `ideogram4_element_${ensureBoxId(box)}.${blob.type === "image/webp" ? "webp" : "png"}`);
+        const response = await fetcher(TEMP_IMAGE_API, {
+          method: "POST",
+          body: form,
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.ok || !data?.image?.filename) {
+          throw new Error(data?.error || "临时图片写入失败");
+        }
+        setImageElementThumb(box, data.image);
+        serialize();
+        return true;
+      }
+
       function restoreImageElementThumbs() {
         node._imageElementThumbs = new Map();
         const legacy = imageElementWidget?.value || "";
         for (const box of node._boxes) {
           if (box?.type !== "image") continue;
-          const src = String(box.imageData || box.image_data || "").trim() || (legacy && !node._boxes.some((b) => b?.imageData) ? legacy : "");
-          if (src) setImageElementThumb(box, src);
+          const ref = box.imageRef || box.image_ref;
+          const src = imageSource(box) || (legacy && !node._boxes.some((b) => imageSource(b)) ? legacy : "");
+          if (ref) {
+            setImageElementThumb(box, ref);
+          } else if (src) {
+            setImageElementThumb(box, src);
+            if (src.startsWith("data:image/")) {
+              persistImageElementThumb(box, src).catch((error) => {
+                console.warn("[GJJ Ideogram4] 旧图片迁移失败：", error);
+                alert(`Ideogram4 区域图片迁移失败，工作流仍会偏大：${error?.message || error}`);
+              });
+            }
+          }
         }
       }
 
       function imageForBox(box) {
         const key = ensureBoxId(box);
-        const localSrc = String(box?.imageData || box?.image_data || "").trim();
+        const localSrc = imageSource(box);
         if (localSrc) {
           const cached = node._imageElementThumbs.get(key);
           if (!cached || cached.src !== localSrc) setImageElementThumb(box, localSrc);
@@ -637,6 +812,22 @@ app.registerExtension({
         }
         return null;
       }
+      function rmbgRects() {
+        const rects = [];
+        for (const [index, rect] of folderRects().entries()) {
+          if (rect) rects[index] = { x: rect.x, y: rect.y + 23, w: rect.w, h: rect.h };
+        }
+        return rects;
+      }
+      function rmbgAt(mN) {
+        const px = mN.x * logW(), py = mN.y * logH();
+        const rects = rmbgRects();
+        for (let i = node._boxes.length - 1; i >= 0; i--) {
+          const r = rects[i];
+          if (r && px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
+        }
+        return null;
+      }
       // Click selection: active box's resize handle wins (corner resize); then a
       // title-chip click selects that box (drawn to front); Alt-click cycles the
       // overlap stack; else the topmost box.
@@ -763,6 +954,19 @@ app.registerExtension({
               ctx.fillText("📁", fr.x + 4, fr.y + 14);
               ctx.restore();
             }
+            const rr = rmbgRects()[i];
+            if (rr) {
+              ctx.save();
+              ctx.fillStyle = i === node._hoverRmbg ? "rgba(230,116,70,0.95)" : "rgba(18,18,18,0.82)";
+              ctx.strokeStyle = "#f09a6b";
+              ctx.lineWidth = 1;
+              ctx.fillRect(rr.x, rr.y, rr.w, rr.h);
+              ctx.strokeRect(rr.x, rr.y, rr.w, rr.h);
+              ctx.font = "13px sans-serif";
+              ctx.fillStyle = "#fff";
+              ctx.fillText(node._rmbgBusy.has(i) ? "⏳" : "🐦‍🔥", rr.x + 3, rr.y + 14);
+              ctx.restore();
+            }
           }
           // in-box content (clipped to the box): prompt text, tag chip on top
           ctx.save();
@@ -832,7 +1036,15 @@ app.registerExtension({
 
       // ── pointer interaction ──
       canvasEl.addEventListener("mousedown", (e) => {
-        const folderIndex = folderAt(mouseN(e));
+        const pointer = mouseN(e);
+        const rmbgIndex = rmbgAt(pointer);
+        if (e.button === 0 && rmbgIndex !== null) {
+          e.preventDefault();
+          e.stopPropagation();
+          runRmbgAndRecaption(rmbgIndex);
+          return;
+        }
+        const folderIndex = folderAt(pointer);
         if (e.button === 0 && folderIndex !== null) {
           e.preventDefault();
           e.stopPropagation();
@@ -878,32 +1090,79 @@ app.registerExtension({
         if (node._drawing) return;
         const mN = mouseN(e);
         const fi = folderAt(mN);
+        const ri = rmbgAt(mN);
         const ti = titleAt(mN);
         const hit = hitTest(mN);
         const hb = ti != null ? ti : (hit ? hit.index : null);
-        if (ti !== node._hoverTitle || hb !== node._hoverBox || fi !== node._hoverFolder) {
-          node._hoverTitle = ti; node._hoverBox = hb; node._hoverFolder = fi; drawCanvas();
+        if (ti !== node._hoverTitle || hb !== node._hoverBox || fi !== node._hoverFolder || ri !== node._hoverRmbg) {
+          node._hoverTitle = ti; node._hoverBox = hb; node._hoverFolder = fi; node._hoverRmbg = ri; drawCanvas();
         }
-        canvasEl.style.cursor = fi != null || ti != null ? "pointer" : (hit ? (cursorForBboxMode(hit.mode) || "crosshair") : "crosshair");
+        canvasEl.style.cursor = fi != null || ri != null || ti != null ? "pointer" : (hit ? (cursorForBboxMode(hit.mode) || "crosshair") : "crosshair");
       });
       canvasEl.addEventListener("mouseleave", () => {
-        if (node._hoverTitle !== null || node._hoverBox !== null || node._hoverFolder !== null) {
-          node._hoverTitle = null; node._hoverBox = null; node._hoverFolder = null; drawCanvas();
+        if (node._hoverTitle !== null || node._hoverBox !== null || node._hoverFolder !== null || node._hoverRmbg !== null) {
+          node._hoverTitle = null; node._hoverBox = null; node._hoverFolder = null; node._hoverRmbg = null; drawCanvas();
         }
       });
+
+      async function runRmbgAndRecaption(index) {
+        if (node._rmbgBusy.has(index)) return;
+        const box = node._boxes[index];
+        const image = box?.imageRef || box?.image_ref || imageSource(box) || String(node._upstreamImageThumbSrc || "").trim();
+        if (!box || box.type !== "image" || !image) {
+          alert("请先用上方 📁 给这个图片元素载入图片。");
+          return;
+        }
+        ensureCaptionBackendForModel();
+        node._rmbgBusy.add(index);
+        drawCanvas();
+        try {
+          const fetcher = api?.fetchApi ? api.fetchApi.bind(api) : window.fetch.bind(window);
+          const response = await fetcher(RMBG14_RECAPTION_API, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              image,
+              model: getW("image_caption_model"),
+              prompt: getW("image_caption_prompt"),
+              thinking: getW("image_caption_thinking"),
+              keep_alive: getW("image_caption_keep_alive"),
+              max_tokens: getW("image_caption_max_tokens"),
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data?.ok) throw new Error(data?.error || "RMBG1.4 抠图识别失败");
+          setImageElementThumb(box, data.image);
+          box.desc = String(data.caption || "").trim();
+          node._activeIdx = index;
+          commit();
+          fitNode();
+        } catch (error) {
+          alert(`RMBG1.4 抠图识别失败：${error?.message || error}`);
+        } finally {
+          node._rmbgBusy.delete(index);
+          drawCanvas();
+        }
+      }
 
       imageFileInput.addEventListener("change", () => {
         const file = imageFileInput.files?.[0];
         imageFileInput.value = "";
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => {
+        reader.onload = async () => {
           const dataUrl = String(reader.result || "");
           const b = node._boxes[node._activeIdx];
           if (b) {
             b.type = "image";
             b.desc = "";
             setImageElementThumb(b, dataUrl);
+            try {
+              await persistImageElementThumb(b, dataUrl);
+            } catch (error) {
+              alert(`临时图片写入失败：${error?.message || error}`);
+              return;
+            }
           }
           commit();
           fitNode();
@@ -1018,36 +1277,139 @@ app.registerExtension({
       canvasEl.addEventListener("contextmenu", (e) => e.preventDefault());
       clearBtn.addEventListener("mousedown", (e) => e.stopPropagation());
       clearBtn.addEventListener("click", () => {
-        closeInlineEditor();
-        node._boxes = []; node._activeIdx = -1; node._stylePalette = [];
-        if (imageElementWidget) imageElementWidget.value = "";
-        node._imageElementThumbs = new Map();
-        node._upstreamImageThumbSrc = "";
-        commit(); rebuildStylePalette(); fitNode();
+        openFloating("clear", clearBtn, "清空画框内容", (body) => {
+          const note = document.createElement("div");
+          note.className = "kjideo-floating-note";
+          note.textContent = "将清除全部区域、图片元素和样式颜色。此操作不能在节点内撤销。";
+          const actions = document.createElement("div");
+          actions.className = "kjideo-floating-actions";
+          const cancel = document.createElement("button");
+          cancel.className = "kjideo-btn";
+          cancel.textContent = "取消";
+          cancel.addEventListener("click", closeFloating);
+          const confirm = document.createElement("button");
+          confirm.className = "kjideo-btn active";
+          confirm.textContent = "确认清空";
+          confirm.addEventListener("click", () => {
+            closeInlineEditor();
+            node._boxes = []; node._activeIdx = -1; node._stylePalette = [];
+            if (imageElementWidget) imageElementWidget.value = "";
+            node._imageElementThumbs = new Map();
+            node._upstreamImageThumbSrc = "";
+            commit(); rebuildStylePalette(); fitNode(); closeFloating();
+          });
+          actions.append(cancel, confirm);
+          body.append(note, actions);
+        });
       });
       settingsBtn.addEventListener("mousedown", (e) => e.stopPropagation());
       settingsBtn.addEventListener("click", () => {
         node.properties ||= {};
-        node.properties[SETTINGS_PROPERTY] = !node.properties[SETTINGS_PROPERTY];
-        refreshSettingsPanel();
+        openFloating("settings", settingsBtn, "⚙️ 图片反推设置", (body) => {
+          node.properties[SETTINGS_PROPERTY] = true;
+          refreshSettingsPanel();
+          body.appendChild(settingsPanel);
+        });
       });
       imageSettingsBtn.addEventListener("mousedown", (e) => e.stopPropagation());
       imageSettingsBtn.addEventListener("click", () => {
         node.properties ||= {};
-        node.properties[IMAGE_SETTINGS_PROPERTY] = !node.properties[IMAGE_SETTINGS_PROPERTY];
-        refreshSettingsPanel();
+        openFloating("description", imageSettingsBtn, "📝 画面与样式描述", (body) => {
+          node.properties[IMAGE_SETTINGS_PROPERTY] = true;
+          refreshSettingsPanel();
+          body.appendChild(imageSettingsPanel);
+        });
       });
       paramsBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-      paramsBtn.addEventListener("click", toggleTemplateParamsMode);
+      paramsBtn.addEventListener("click", () => {
+        openFloating("params", paramsBtn, "⚡ 模板参数", (body) => {
+          const note = document.createElement("div");
+          note.className = "kjideo-floating-note";
+          note.textContent = "选择 GJJ_TemplateParams 后动态读取宽度和高度；关闭浮窗后仍保持所选联动。";
+          body.appendChild(note);
+          if (paramModeEnabled()) {
+            const disable = document.createElement("button");
+            disable.className = "kjideo-btn kjideo-template-choice";
+            disable.textContent = "关闭参数联动";
+            disable.addEventListener("click", () => {
+              node.properties[PARAM_MODE_PROPERTY] = false;
+              applySocketVisibility();
+              refreshSettingsPanel();
+              fitNode();
+              closeFloating();
+            });
+            body.appendChild(disable);
+          }
+          const candidates = templateNodes();
+          if (!candidates.length) {
+            const empty = document.createElement("div");
+            empty.className = "kjideo-floating-note";
+            empty.textContent = "当前工作流里没有 GJJ_TemplateParams 节点。";
+            body.appendChild(empty);
+          }
+          for (const candidate of candidates) {
+            const choice = document.createElement("button");
+            choice.className = "kjideo-btn kjideo-template-choice";
+            const active = String(candidate.id ?? "") === String(node.properties?.[PARAM_SOURCE_PROPERTY] || "");
+            choice.classList.toggle("active", active && paramModeEnabled());
+            choice.textContent = `使用 ${String(candidate.title || "").trim() || `模板参数 #${candidate.id ?? "?"}`}`;
+            choice.addEventListener("click", () => {
+              node.properties[PARAM_MODE_PROPERTY] = true;
+              if (applyTemplateParams(candidate)) {
+                applySocketVisibility();
+                refreshSettingsPanel();
+                fitNode();
+                closeFloating();
+              }
+            });
+            body.appendChild(choice);
+          }
+        });
+      });
       colorBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-      colorBtn.addEventListener("click", applyColorScheme);
+      colorBtn.addEventListener("click", () => {
+        openFloating("colors", colorBtn, "🎨 色系与样式颜色", (body) => {
+          const note = document.createElement("div");
+          note.className = "kjideo-floating-note";
+          note.textContent = "选择色系会立即应用到样式颜色和所有区域；关闭后不保留浮窗拖动位置。";
+          body.appendChild(note);
+          for (const scheme of COLOR_SCHEMES) {
+            const choice = document.createElement("button");
+            choice.className = "kjideo-btn kjideo-template-choice";
+            choice.textContent = `🎨 ${scheme.name}　${scheme.colors.join(" ")}`;
+            choice.addEventListener("click", () => {
+              node._stylePalette = scheme.colors.slice(0, MAX_STYLE_COLORS);
+              for (const box of node._boxes) box.palette = scheme.colors.slice(0, Math.min(3, MAX_ELEM_COLORS));
+              serialize(); rebuildStylePalette(); renderPanel(); drawCanvas(); updateTokens();
+              closeFloating();
+            });
+            body.appendChild(choice);
+          }
+          const random = document.createElement("button");
+          random.className = "kjideo-btn";
+          random.textContent = "随机色系";
+          random.addEventListener("click", () => { applyColorScheme(); closeFloating(); });
+          body.appendChild(random);
+        });
+      });
       socketBtn.addEventListener("mousedown", (e) => e.stopPropagation());
       socketBtn.addEventListener("click", () => {
-        node.properties ||= {};
-        node.properties[SOCKETS_PROPERTY] = !node.properties[SOCKETS_PROPERTY];
-        applySocketVisibility();
-        refreshSettingsPanel();
-        fitNode();
+        openFloating("sockets", socketBtn, "🔌 外部接口", (body) => {
+          const note = document.createElement("div");
+          note.className = "kjideo-floating-note";
+          note.textContent = socketsEnabled()
+            ? "宽度、高度和外部框选接口当前已显示。"
+            : "宽度、高度和外部框选接口当前已隐藏。";
+          const toggle = document.createElement("button");
+          toggle.className = "kjideo-btn";
+          toggle.textContent = socketsEnabled() ? "隐藏接口" : "显示接口";
+          toggle.addEventListener("click", () => {
+            node.properties ||= {};
+            node.properties[SOCKETS_PROPERTY] = !node.properties[SOCKETS_PROPERTY];
+            applySocketVisibility(); refreshSettingsPanel(); fitNode(); closeFloating();
+          });
+          body.append(note, toggle);
+        });
       });
 
       // ── build caption JSON (mirrors Python key order) ──
@@ -1080,7 +1442,9 @@ app.registerExtension({
       function ensureCaptionBackendForModel() {
         const model = String(getW("image_caption_model") || "").trim();
         const backend = String(getW("image_caption_backend") || "");
-        if (model && (backend === "关闭" || backend === "off")) setW("image_caption_backend", "Ollama");
+        if (model && (backend === "关闭" || backend === "off" || backend === "Ollama")) {
+          setW("image_caption_backend", "GJJ_GemmaTextGenerate");
+        }
       }
       function cleanPalette(arr) { return (arr || []).filter((c) => c).map((c) => c.toUpperCase()); }
       function align16Min256(value) {
@@ -1246,7 +1610,31 @@ app.registerExtension({
         catch (e) { window.prompt("复制结构化 JSON：", txt); }
       }
       copyBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-      copyBtn.addEventListener("click", doCopy);
+      copyBtn.addEventListener("click", () => {
+        openFloating("copy", copyBtn, "复制 Ideogram 4 JSON", (body) => {
+          const text = document.createElement("textarea");
+          text.value = buildCaption();
+          text.readOnly = true;
+          const actions = document.createElement("div");
+          actions.className = "kjideo-floating-actions";
+          const copy = document.createElement("button");
+          copy.className = "kjideo-btn active";
+          copy.textContent = "复制到剪贴板";
+          copy.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(text.value);
+              copy.textContent = "已复制";
+              setTimeout(closeFloating, 500);
+            } catch (_) {
+              text.readOnly = false;
+              text.focus();
+              text.select();
+            }
+          });
+          actions.appendChild(copy);
+          body.append(text, actions);
+        });
+      });
 
       // ── import a caption JSON and populate the node ──
       function setWidgetVal(name, val) {
@@ -1311,7 +1699,39 @@ app.registerExtension({
         syncCanvasToDims(); commit(); rebuildStylePalette(); fitNode();
       }
       importBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-      importBtn.addEventListener("click", doImport);
+      importBtn.addEventListener("click", () => {
+        openFloating("import", importBtn, "导入 Ideogram 4 JSON", (body) => {
+          const text = document.createElement("textarea");
+          text.placeholder = "在这里粘贴包含 compositional_deconstruction 的 Ideogram 4 JSON";
+          const status = document.createElement("div");
+          status.className = "kjideo-floating-note";
+          const actions = document.createElement("div");
+          actions.className = "kjideo-floating-actions";
+          const paste = document.createElement("button");
+          paste.className = "kjideo-btn";
+          paste.textContent = "读取剪贴板";
+          paste.addEventListener("click", async () => {
+            try { text.value = await navigator.clipboard.readText(); status.textContent = ""; }
+            catch (_) { status.textContent = "浏览器未授权读取剪贴板，请手动粘贴。"; }
+          });
+          const apply = document.createElement("button");
+          apply.className = "kjideo-btn active";
+          apply.textContent = "导入";
+          apply.addEventListener("click", () => {
+            const cap = tryParseCaption(text.value.trim());
+            if (!cap) {
+              status.textContent = "不是有效的 Ideogram 4 JSON，需要包含 compositional_deconstruction。";
+              return;
+            }
+            closeInlineEditor();
+            applyCaption(cap);
+            syncCanvasToDims(); commit(); rebuildStylePalette(); fitNode(); closeFloating();
+          });
+          actions.append(paste, apply);
+          body.append(text, status, actions);
+          setTimeout(() => text.focus(), 0);
+        });
+      });
 
       // Populate the editor from a caption pushed back by execute() when import_json
       // is connected (a connected socket can't be read in the frontend directly).
@@ -1386,7 +1806,7 @@ app.registerExtension({
           image_caption_thinking: "思考",
           image_caption_keep_alive: "模型处理",
           image_caption_max_tokens: "反推长度",
-          ollama_host: "Ollama",
+          ollama_host: "旧版 Ollama 地址",
         };
         return labels[name] || name;
       }
@@ -1668,14 +2088,14 @@ app.registerExtension({
             function () { b.text = this.value; serialize(); drawCanvas(); updateTokens(); }));
         }
 
-        // desc — 图片元素只由 Ollama 反推写入描述，避免和对象/文字的手写描述混淆。
+        // desc — 图片元素只由 GJJ_GemmaTextGenerate 反推写入描述，避免和对象/文字的手写描述混淆。
         if (b.type !== "image") {
           panel.appendChild(makeArea("desc", b.desc, "描述这个区域的内容、材质、动作和视觉特征",
             function () { b.desc = this.value; serialize(); drawCanvas(); updateTokens(); }, 110));
         } else {
           const note = document.createElement("div");
           note.style.cssText = "color:#8ea0a7;font-size:11px;line-height:1.35;padding:4px 2px;";
-          note.textContent = "图片元素不手写描述；在 ⚙️设置 中开启 Ollama 反推后，会自动写入 JSON。";
+          note.textContent = "图片元素不手写描述；在 ⚙️设置 中开启 GJJ_GemmaTextGenerate 反推后，会自动写入 JSON。";
           panel.appendChild(note);
         }
 
@@ -1733,12 +2153,15 @@ app.registerExtension({
 
       chainCallback(node, "onRemoved", function () {
         closeInlineEditor();
+        closeFloating();
+        floating.remove();
         for (const ro of node._areaObservers) ro.disconnect();
         node._areaObservers = [];
       });
 
       // ── restore on load ──
       chainCallback(node, "onConfigure", function () {
+        closeFloating();
         if (elementsWidget?.value) {
           try {
             const parsed = JSON.parse(elementsWidget.value);
