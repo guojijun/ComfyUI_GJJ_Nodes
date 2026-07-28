@@ -1154,13 +1154,45 @@ function buildModelPanel(node, controls) {
 
 	const grid = document.createElement("div");
 	grid.className = "gjj-gemma-model-grid";
+	const modelPath = document.createElement("div");
+	modelPath.className = "gjj-gemma-model-path";
+	const updateModelPath = () => {
+		const selected = String(widgetValue(node, "clip_name", "") || "").replaceAll("\\", "/");
+		modelPath.textContent = `当前路径：models/text_encoders/${selected || "未选择模型"}`;
+		modelPath.title = modelPath.textContent;
+	};
+	const modelTree = GJJ_Utils.createModelTreeView({
+		node,
+		entries: [{
+			widget: "clip_name",
+			label: "Gemma / Qwen 反推模型",
+			folder: "models/text_encoders",
+			icon: "🧠",
+			models: choices("clip_name", node),
+			anyKeywords: ["qwen3.5", "qwen35", "gemma4", "qwen3vl"],
+			fallback: String(widgetValue(node, "clip_name", "") || "未找到匹配的反推模型"),
+			description: "用于图片、视频或音频理解与文本生成；模型相对路径完整保存在工作流中。",
+		}],
+		refresh: () => {
+			updateModelPath();
+			syncPanel(node);
+		},
+		onApply: () => {
+			updateModelPath();
+			const state = node.__gjjGemmaPanel;
+			if (state) state.modelExpanded = false;
+		},
+	});
+	modelTree.style.maxHeight = "330px";
+	updateModelPath();
 	grid.append(
-		labelledField("🤖 反推模型", controls.clipName),
+		modelTree,
+		modelPath,
 		labelledField("🧩 CLIP 类型", controls.clipType),
 		labelledField("💻 加载设备", controls.clipDevice),
 	);
 	panel.append(toggleRow, grid);
-	return { panel, gpuPriority, keepModel, defaultTemplate };
+	return { panel, gpuPriority, keepModel, defaultTemplate, modelPath, updateModelPath };
 }
 
 function renderTemplateButtons(node, config) {
@@ -1229,6 +1261,7 @@ function syncPanel(node) {
 	state.modelPanelButton.title = state.modelExpanded
 		? "收起模型设置"
 		: `展开模型设置。${keepModel ? "保持模型已开启。" : "保持模型未开启。"}`;
+	state.updateModelPath?.();
 	syncSearchableSelect(
 		state.clipName,
 		choices("clip_name", node),
@@ -1317,6 +1350,7 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-toggles .gjj-ia-button { width:100%; max-width:none; text-align:center; }
 		.gjj-gemma-assistant-panel .gjj-gemma-model-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:7px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-model-path { padding:5px 7px; border:1px solid #33454c; border-radius:6px; background:#0d1519; color:#9fc8bd; font:11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
 		.gjj-gemma-assistant-panel .gjj-ia-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 		.gjj-gemma-assistant-panel .gjj-ia-label { color:#aebfc4; font-weight:700; font-size:11px; letter-spacing:.02em; }
 		.gjj-gemma-assistant-panel .gjj-ia-label-row { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
@@ -1429,6 +1463,8 @@ function createPanel(node) {
 		gpuPriority: modelState.gpuPriority,
 		keepModel: modelState.keepModel,
 		defaultTemplate: modelState.defaultTemplate,
+		modelPath: modelState.modelPath,
+		updateModelPath: modelState.updateModelPath,
 		randomSeed,
 		settingsButton,
 		expanded: false,

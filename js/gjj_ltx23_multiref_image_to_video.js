@@ -48,12 +48,23 @@ const DEFAULT_CONFIG = {
   transition_lora_name: "",
   transition_lora_enabled: true,
   transition_lora_strength: 1.0,
-  test_lora_name: "",
-  test_lora_enabled: false,
+  test_lora_name: "LTX-2.3-Licon-MSR-V2.safetensors",
+  test_lora_enabled: true,
   test_lora_strength: 1.0,
+  auto_transition_prompt: false,
+  transition_prompt_model: "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
   size_source: "面板尺寸",
+  seed_mode: "固定",
+  global_prompt: "",
 };
 
+const SEED_MODES = ["固定", "随机", "递增", "递减"];
+const SEED_MODE_STYLES = {
+  "固定": { background: "linear-gradient(135deg,#26323a,#3b4650)", border: "#667681", color: "#edf3f5" },
+  "随机": { background: "linear-gradient(135deg,#854d0e,#ca8a04)", border: "#facc15", color: "#fffbeb" },
+  "递增": { background: "linear-gradient(135deg,#065f46,#059669)", border: "#34d399", color: "#ecfdf5" },
+  "递减": { background: "linear-gradient(135deg,#4338ca,#6366f1)", border: "#a5b4fc", color: "#eef2ff" },
+};
 
 const MAIN_WIDGET_KEYS = [
   "ltx_model_name",
@@ -1338,11 +1349,36 @@ function makeToolButton(text, title, onClick) {
 
 function refreshToolbarState(node) {
   const cfg = getConfig(node);
+  if (node.__gjjLtxSeedButton) {
+    const mode = SEED_MODES.includes(cfg.seed_mode) ? cfg.seed_mode : "固定";
+    const style = SEED_MODE_STYLES[mode];
+    node.__gjjLtxSeedButton.style.background = style.background;
+    node.__gjjLtxSeedButton.style.borderColor = style.border;
+    node.__gjjLtxSeedButton.style.color = style.color;
+    node.__gjjLtxSeedButton.title = `种子模式：${mode}；当前种子 ${Math.round(Number(cfg.seed) || 0)}`;
+    node.__gjjLtxSeedButton.dataset.seedMode = mode;
+  }
+  if (node.__gjjLtxSizeButton) {
+    const useOriginalSize = cfg.size_source === "原视频尺寸";
+    node.__gjjLtxSizeButton.classList.toggle("active", useOriginalSize);
+    node.__gjjLtxSizeButton.setAttribute("aria-pressed", useOriginalSize ? "true" : "false");
+    node.__gjjLtxSizeButton.title = useOriginalSize
+      ? "📐 原版尺寸：已开启；宽度和高度设置不可用"
+      : "📐 面板尺寸：点击设置尺寸来源、宽度和高度";
+  }
   if (node.__gjjLtxSegmentButton) {
     node.__gjjLtxSegmentButton.classList.toggle("active", Boolean(cfg.segmented_execution));
   }
   if (node.__gjjLtxTransitionButton) {
     node.__gjjLtxTransitionButton.classList.toggle("active", Boolean(cfg.transition_enabled));
+  }
+  if (node.__gjjLtxAutoPromptButton) {
+    const enabled = Boolean(cfg.auto_transition_prompt);
+    node.__gjjLtxAutoPromptButton.classList.toggle("active", enabled);
+    node.__gjjLtxAutoPromptButton.title = enabled
+      ? "🎬 Gemma 首尾帧过渡词：已开启"
+      : "🎬 Gemma 首尾帧过渡词：已关闭";
+    node.__gjjLtxAutoPromptButton.setAttribute("aria-pressed", enabled ? "true" : "false");
   }
   if (node.__gjjLtxRunButton) {
     const running = Boolean(node.__gjjLtxRunInFlight);
@@ -1356,6 +1392,29 @@ function refreshToolbarState(node) {
 function randomizeSeed(node) {
   const max = Number.MAX_SAFE_INTEGER;
   setConfig(node, { seed: Math.floor(Math.random() * max) });
+}
+
+function setSeedMode(node, mode) {
+  const nextMode = SEED_MODES.includes(mode) ? mode : "固定";
+  if (nextMode === "随机") {
+    randomizeSeed(node);
+  }
+  setConfig(node, { seed_mode: nextMode });
+  refreshToolbarState(node);
+}
+
+function advanceSeedAfterExecution(node) {
+  const cfg = getConfig(node);
+  const mode = SEED_MODES.includes(cfg.seed_mode) ? cfg.seed_mode : "固定";
+  const current = Math.max(0, Math.round(Number(cfg.seed) || 0));
+  if (mode === "随机") {
+    randomizeSeed(node);
+  } else if (mode === "递增") {
+    setConfig(node, { seed: Math.min(Number.MAX_SAFE_INTEGER, current + 1) });
+  } else if (mode === "递减") {
+    setConfig(node, { seed: Math.max(0, current - 1) });
+  }
+  refreshToolbarState(node);
 }
 
 function panelRow(label, element) {
@@ -1393,7 +1452,7 @@ function configInput(node, key, type = "text", options = {}) {
   return input;
 }
 
-function configSegmented(node, key, options) {
+function configSegmented(node, key, options, onChange = null) {
   const wrap = document.createElement("div");
   wrap.className = "gjj-ltx-segmented";
   const refresh = () => {
@@ -1415,6 +1474,7 @@ function configSegmented(node, key, options) {
       setConfig(node, { [key]: value });
       refresh();
       refreshToolbarState(node);
+      onChange?.(value);
     };
     wrap.appendChild(button);
   }
@@ -1781,15 +1841,38 @@ function buildPanel(node) {
 
   const fileBtn = makeToolButton("📁", "打开参考图片并自动连接到本节点", () => chooseReferenceImages(node));
   const modelBtn = makeToolButton("🧠", "模型树：主模型、VAE、文本编码器、Latent 放大和转场 LoRA", (button) => showModelTreePanel(node, button));
-  const negativeBtn = makeToolButton("🚫", "反向提示词", (button) => showFloatingPanel(node, button, "反向提示词", (body) => {
-    body.append(panelRow("反向", configInput(node, "negative_prompt", "textarea", { rows: 7 })));
+  const negativeBtn = makeToolButton("📒", "全局提示词与反向提示词", (button) => showFloatingPanel(node, button, "提示词设置", (body) => {
+    body.append(
+      panelRow("全局提示词", configInput(node, "global_prompt", "textarea", { rows: 5, placeholder: "自动添加到每一段提示词最前面" })),
+      panelRow("反向提示词", configInput(node, "negative_prompt", "textarea", { rows: 7 })),
+    );
   }, { width: 460 }));
   const sizeBtn = makeToolButton("📐", "尺寸设置", (button) => showFloatingPanel(node, button, "尺寸", (body) => {
-    body.append(
-      panelRow("视频尺寸来源", configSegmented(node, "size_source", ["面板尺寸", "原视频尺寸"])),
-      panelRow("宽度", configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 })),
-      panelRow("高度", configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 })),
+    const widthControl = configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 });
+    const heightControl = configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 });
+    const widthRow = panelRow("宽度", widthControl);
+    const heightRow = panelRow("高度", heightControl);
+    const syncDimensionAvailability = () => {
+      const disabled = getConfig(node).size_source === "原视频尺寸";
+      for (const [row, control] of [[widthRow, widthControl], [heightRow, heightControl]]) {
+        row.style.opacity = disabled ? "0.38" : "1";
+        row.style.filter = disabled ? "grayscale(1)" : "";
+        row.title = disabled ? "当前使用原版尺寸，宽度和高度由输入素材决定。" : "";
+        for (const input of control.querySelectorAll("input,select,button")) {
+          input.disabled = disabled;
+        }
+      }
+    };
+    const sourceControl = configSegmented(
+      node,
+      "size_source",
+      ["面板尺寸", "原视频尺寸"],
+      syncDimensionAvailability,
     );
+    const originalButton = sourceControl.querySelector('button[data-value="原视频尺寸"]');
+    if (originalButton) originalButton.textContent = "原版尺寸";
+    body.append(panelRow("视频尺寸来源", sourceControl), widthRow, heightRow);
+    syncDimensionAvailability();
   }, { width: 460 }));
   const timingBtn = makeToolButton("🎞️", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "时长", (body) => {
     body.append(
@@ -1798,12 +1881,12 @@ function buildPanel(node) {
       panelRow("降噪", configInput(node, "denoise_strength", "number", { min: 0, max: 1, step: 0.01 })),
     );
   }));
-  const seedBtn = makeToolButton("🎲", "随机种子", (button) => {
-    randomizeSeed(node);
-    showFloatingPanel(node, button, "种子", (body) => {
-      body.append(panelRow("种子", configInput(node, "seed", "number", { min: 0, step: 1 })));
-    });
-  });
+  const seedBtn = makeToolButton("🎲", "种子模式", (button) => showFloatingPanel(node, button, "种子", (body) => {
+    body.append(
+      panelRow("种子", configInput(node, "seed", "number", { min: 0, step: 1 })),
+      panelRow("生成后", configSegmented(node, "seed_mode", SEED_MODES, (mode) => setSeedMode(node, mode))),
+    );
+  }, { width: 450 }));
   const transitionBtn = makeToolButton("🔁", "转场设置", (button) => showFloatingPanel(node, button, "转场", (body) => {
     body.append(
       panelRow("启用", configCheckbox(node, "transition_enabled")),
@@ -1816,6 +1899,15 @@ function buildPanel(node) {
       panelRow("LoRA序列", configInput(node, "transition_lora_switches", "text", { placeholder: "例如：1,0,1" })),
     );
   }, { width: 420 }));
+  const autoPromptBtn = makeToolButton("🎬", "Gemma 首尾帧过渡词开关", () => {
+    const enabled = !Boolean(getConfig(node).auto_transition_prompt);
+    setConfig(node, {
+      auto_transition_prompt: enabled,
+      transition_enabled: enabled ? true : getConfig(node).transition_enabled,
+      transition_lora_enabled: enabled ? true : getConfig(node).transition_lora_enabled,
+    });
+    refreshToolbarState(node);
+  });
   const segmentBtn = makeToolButton("🧩", "多图分段与保存", (button) => showFloatingPanel(node, button, "分段", (body) => {
     const openDirBtn = document.createElement("button");
     openDirBtn.type = "button";
@@ -1836,11 +1928,14 @@ function buildPanel(node) {
   const testBtn = makeToolButton("🧪", "选择多个主模型加入队列测试；视频文件名包含模型名和耗时", (button) => showModelTestPanel(node, button));
   const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, segmentBtn, testBtn, runBtn);
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, runBtn);
   root.appendChild(tools);
   node.__gjjLtxTransitionButton = transitionBtn;
+  node.__gjjLtxAutoPromptButton = autoPromptBtn;
   node.__gjjLtxSegmentButton = segmentBtn;
   node.__gjjLtxFileButton = fileBtn;
+  node.__gjjLtxSizeButton = sizeBtn;
+  node.__gjjLtxSeedButton = seedBtn;
   node.__gjjLtxRunButton = runBtn;
   refreshToolbarState(node);
   requestAnimationFrame(() => resizeNodeToFit(node));
@@ -1923,6 +2018,7 @@ function installExecutionPreviewHooks(node) {
     this.__gjjLtxRunInFlight = false;
     setStatus(this, { text: "执行完成", progress: 1 });
     setVideoPreview(this, message || {});
+    advanceSeedAfterExecution(this);
     refreshToolbarState(this);
   };
   const originalOnExecutionError = node.onExecutionError;

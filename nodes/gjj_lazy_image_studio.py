@@ -139,6 +139,10 @@ MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]
 DEFAULT_CHECKPOINT_NAME = ""
 DEFAULT_DEVICE_PREFERENCE = "智能调度"
 DEVICE_PREFERENCE_OPTIONS = ["GPU优先", "CPU优先", DEFAULT_DEVICE_PREFERENCE]
+DEFAULT_GLOBAL_QUALITY_PROMPT = (
+    "high quality, highly detailed, sharp focus, clean composition, "
+    "professional lighting, natural colors"
+)
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
@@ -2548,6 +2552,18 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "global_prompt": (
+                        "STRING",
+                        {
+                            "default": DEFAULT_GLOBAL_QUALITY_PROMPT,
+                            "multiline": True,
+                            "display_name": "全局提示词",
+                            "tooltip": "填写后会自动添加到每一条正向提示词的最前面。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -3264,7 +3280,17 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
+        global_prompt = str(_unwrap_list_input(kwargs.pop("global_prompt", "")) or "").strip()
         prompt_items = _prompt_batch_items(prompt)
+        if global_prompt:
+            prompt_items = [
+                f"{global_prompt}, {item}" if str(item or "").strip() else global_prompt
+                for item in (prompt_items or [""])
+            ]
+            print(
+                f"[GJJ] LazyImageStudio 全局提示词已前置到 {len(prompt_items)} 条提示词："
+                f"{global_prompt}"
+            )
         prompt = prompt_items[0] if prompt_items else ""
         negative_prompt = _unwrap_list_input(negative_prompt)
         main_image_index = _unwrap_list_input(main_image_index)
@@ -3592,6 +3618,7 @@ class GJJ_LazyImageStudio:
             preview_images = gjjutils_write_temp_tensor_images(image)
             effective_params = {
                 "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),
+                "global_prompt": global_prompt,
                 "negative_prompt": str(negative_prompt or ""),
                 "main_image_index": int(main_image_index),
                 "width": int(width),
@@ -4277,6 +4304,7 @@ class GJJ_LazyImageStudio:
             effective_params = {
                 "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),
                 "prompt_batch_count": len(prompt_items),
+                "global_prompt": global_prompt,
                 "negative_prompt": str(negative_prompt or ""),
                 "main_image_index": int(main_image_index),
                 "width": int(width),

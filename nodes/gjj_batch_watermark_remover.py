@@ -96,8 +96,12 @@ def _ensure_image_batch(image: torch.Tensor) -> torch.Tensor:
 
 
 def _split_images(image: torch.Tensor) -> list[torch.Tensor]:
-    batch = _ensure_image_batch(image)
-    return [batch[index : index + 1].contiguous() for index in range(int(batch.shape[0]))]
+    values = list(image) if isinstance(image, (list, tuple)) else [image]
+    images: list[torch.Tensor] = []
+    for value in values:
+        batch = _ensure_image_batch(value)
+        images.extend(batch[index : index + 1].contiguous() for index in range(int(batch.shape[0])))
+    return images
 
 
 def _resize_image_exact(image: torch.Tensor, width: int, height: int, method: str = "lanczos") -> torch.Tensor:
@@ -106,6 +110,28 @@ def _resize_image_exact(image: torch.Tensor, width: int, height: int, method: st
     samples = image.movedim(-1, 1)
     scaled = comfy.utils.common_upscale(samples, width, height, str(method or "lanczos"), "disabled")
     return scaled.movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+
+def _align_input_images(images: list[torch.Tensor], method: str = "lanczos") -> list[torch.Tensor]:
+    """把所有输入图自动缩放到同一 W/H/C，避免批量路径因维度不同而中断。"""
+    normalized = [_ensure_image_batch(image) for image in images]
+    if not normalized:
+        raise RuntimeError("批量去水印至少需要一张图片。")
+    target_width = max(int(image.shape[2]) for image in normalized)
+    target_height = max(int(image.shape[1]) for image in normalized)
+    aligned: list[torch.Tensor] = []
+    for image in normalized:
+        if int(image.shape[2]) != target_width or int(image.shape[1]) != target_height:
+            image = _resize_image_exact(image, target_width, target_height, method)
+        aligned.append(image.contiguous())
+    return aligned
+
+
+def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
+    result = dict(options)
+    result["hidden"] = True
+    result["display"] = "hidden"
+    return result
 
 
 def _scale_to_total_pixels(image: torch.Tensor, megapixels: float, method: str) -> torch.Tensor:
@@ -725,133 +751,133 @@ class GJJ_BatchWatermarkRemover:
                 ),
                 "prompt": (
                     "STRING",
-                    {
+                    _hidden_widget({
                         "default": DEFAULT_PROMPT,
                         "multiline": False,
                         "display_name": "去水印提示词",
                         "tooltip": "描述要清理的覆盖物。默认按参考工作流清理 watermark、text、logo、signature、caption、overlay。",
-                    },
+                    }),
                 ),
                 "negative_prompt": (
                     "STRING",
-                    {
+                    _hidden_widget({
                         "default": DEFAULT_NEGATIVE,
                         "multiline": False,
                         "display_name": "反向提示词",
                         "tooltip": "可选。留空时使用参考工作流的 ConditioningZeroOut 方式。",
-                    },
+                    }),
                 ),
                 "unet_name": (
                     unet_models,
-                    {
+                    _hidden_widget({
                         "default": _default_required_choice(unet_models, complete_config["unet"]),
                         "display_name": "🟣 UNET 主模型",
                         "tooltip": "只允许文件名包含 flux-2-klein-4b 的 4B 模型，或固定的 flux-2-klein-9b.safetensors。显示“缺失：名称”表示未在 models/diffusion_models 找到，节点不会用其它文件替代。",
-                    },
+                    }),
                 ),
                 "clip_name": (
                     clip_models,
-                    {
+                    _hidden_widget({
                         "default": _default_required_choice(clip_models, complete_config["clip"]),
                         "display_name": "🔤 CLIP 文本编码器",
                         "tooltip": "4B 必须搭配 qwen_3_4b.safetensors，9B 必须搭配 qwen_3_8b.safetensors。显示“缺失：文件名”表示未在 models/text_encoders 找到。",
-                    },
+                    }),
                 ),
                 "vae_name": (
                     vae_models,
-                    {
+                    _hidden_widget({
                         "default": _default_required_choice(vae_models, complete_config["vae"]),
                         "display_name": "🧩 VAE",
                         "tooltip": "两套配置都固定使用 flux2-vae.safetensors。显示“缺失：文件名”表示未在 models/vae 找到。",
-                    },
+                    }),
                 ),
                 "working_megapixels": (
                     "FLOAT",
-                    {
+                    _hidden_widget({
                         "default": 1.0,
                         "min": 0.05,
                         "max": 16.0,
                         "step": 0.05,
                         "display_name": "工作像素量 MP",
                         "tooltip": "送入 Klein 重绘前的工作分辨率，参考工作流为 1 MP。数值越大越慢、显存占用越高。",
-                    },
+                    }),
                 ),
                 "output_size_mode": (
                     SIZE_MODES,
-                    {
+                    _hidden_widget({
                         "default": "保持输入尺寸",
                         "display_name": "输出尺寸",
                         "tooltip": "保持输入尺寸会在重绘后缩放回原图尺寸；使用工作尺寸则输出实际采样尺寸。",
-                    },
+                    }),
                 ),
                 "scale_method": (
                     UPSCALE_METHODS,
-                    {
+                    _hidden_widget({
                         "default": "nearest-exact",
                         "display_name": "缩放算法",
                         "tooltip": "用于工作分辨率缩放和可选的回原尺寸缩放；默认对齐参考 workflow。",
-                    },
+                    }),
                 ),
                 "steps": (
                     "INT",
-                    {
+                    _hidden_widget({
                         "default": 4,
                         "min": 1,
                         "max": 100,
                         "step": 1,
                         "display_name": "采样步数",
                         "tooltip": "参考 workflow 使用 4 步。",
-                    },
+                    }),
                 ),
                 "cfg": (
                     "FLOAT",
-                    {
+                    _hidden_widget({
                         "default": 1.0,
                         "min": 0.0,
                         "max": 20.0,
                         "step": 0.1,
                         "display_name": "CFG",
                         "tooltip": "参考 workflow 使用 1.0。",
-                    },
+                    }),
                 ),
                 "seed": (
                     "INT",
-                    {
+                    _hidden_widget({
                         "default": 352628917855609,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "control_after_generate": True,
                         "display_name": "种子",
                         "tooltip": "批量处理时会按图片序号自动递增，避免每张图完全同噪声。",
-                    },
+                    }),
                 ),
                 "auto_save": (
                     "BOOLEAN",
-                    {
+                    _hidden_widget({
                         "default": False,
                         "display_name": "自动保存",
                         "label_on": "保存",
                         "label_off": "不保存",
                         "tooltip": "开启后会把每张去水印结果保存到 ComfyUI output 目录，并在节点面板显示保存预览。",
-                    },
+                    }),
                 ),
                 "filename_prefix": (
                     "STRING",
-                    {
+                    _hidden_widget({
                         "default": DEFAULT_FILENAME_PREFIX,
                         "multiline": False,
                         "display_name": "文件名前缀",
                         "tooltip": "保存到 output 下的相对前缀，支持子目录，例如 GJJ/批量去水印。",
-                    },
+                    }),
                 ),
                 "filename_regex": (
                     "STRING",
-                    {
+                    _hidden_widget({
                         "default": "",
                         "multiline": False,
                         "display_name": "来源名正则",
                         "tooltip": "可选。上游来自批量多图片加载预览器时，对原文件名应用此正则；有捕获组则用第一个非空捕获组作为保存名后缀。",
-                    },
+                    }),
                 ),
             },
             "hidden": {
@@ -883,7 +909,7 @@ class GJJ_BatchWatermarkRemover:
         unique_id=None,
     ):
         try:
-            input_images = _split_images(image)
+            input_images = _align_input_images(_split_images(image), scale_method)
 
             _send_status(unique_id, "1/4 解析并加载 Klein / CLIP / VAE...")
             _validate_model_config(unet_name, clip_name, vae_name)

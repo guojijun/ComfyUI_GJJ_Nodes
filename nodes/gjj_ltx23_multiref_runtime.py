@@ -2386,7 +2386,10 @@ def _format_segment_save_prefix(
 	return f"{base}{separator}段{int(segment_index):02d}_场景{int(start_index):02d}-{int(end_index):02d}"
 
 
-def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[str, Any] | None:
+def _concat_audio_segments(
+	audio_segments: list[dict[str, Any] | None],
+	trim_trailing_seconds_before_last: float = 0.0,
+) -> dict[str, Any] | None:
 	valid = [item for item in audio_segments if isinstance(item, dict) and item.get("waveform") is not None]
 	if not valid:
 		return None
@@ -2394,7 +2397,7 @@ def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[
 	if sample_rate <= 0:
 		return None
 	waveforms: list[torch.Tensor] = []
-	for item in valid:
+	for index, item in enumerate(valid):
 		if int(item.get("sample_rate", 0) or 0) != sample_rate:
 			return None
 		waveform = item.get("waveform")
@@ -2406,6 +2409,10 @@ def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[
 			waveform = waveform.unsqueeze(0)
 		elif waveform.ndim != 3:
 			return None
+		if index < len(valid) - 1 and float(trim_trailing_seconds_before_last or 0.0) > 0:
+			trim_samples = max(0, int(round(float(trim_trailing_seconds_before_last) * sample_rate)))
+			if trim_samples > 0:
+				waveform = waveform[..., : max(0, int(waveform.shape[-1]) - trim_samples)]
 		waveforms.append(waveform.detach().cpu())
 	if not waveforms:
 		return None
@@ -2413,6 +2420,28 @@ def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[
 	result["sample_rate"] = sample_rate
 	result["waveform"] = torch.cat(waveforms, dim=-1).contiguous()
 	return result
+
+
+def _concat_visual_segments_without_duplicate_boundaries(
+	segments: list[torch.Tensor],
+) -> tuple[torch.Tensor, list[dict[str, int]]]:
+	"""删除前段尾帧，保留后段首帧作为唯一共享场景帧。"""
+	if not segments:
+		raise RuntimeError("没有可合并的视频分段。")
+	merged: list[torch.Tensor] = []
+	stats: list[dict[str, int]] = []
+	for index, frames in enumerate(segments, start=1):
+		if not isinstance(frames, torch.Tensor) or frames.ndim < 1:
+			raise RuntimeError(f"第 {index} 段没有有效视频帧。")
+		before = int(frames.shape[0])
+		trimmed = frames if index == len(segments) else frames[:-1]
+		after = int(trimmed.shape[0])
+		stats.append({"segment": index, "before": before, "removed_tail": before - after, "after": after})
+		if after > 0:
+			merged.append(trimmed)
+	if not merged:
+		raise RuntimeError("删除重复边界帧后没有可输出的视频帧。")
+	return torch.cat(merged, dim=0).contiguous(), stats
 
 
 def _save_segment_video_preview(
@@ -2857,6 +2886,8 @@ def run_ltx23_multiref_video(
 	transition_lora_name: Any = "",
 	transition_lora_enabled: Any = True,
 	transition_lora_strength: Any = 1.0,
+	auto_transition_prompt: Any = False,
+	transition_prompt_model: Any = "",
 	test_lora_name: Any = "",
 	branch_debug: Any = None,
 	unique_id: Any = None,
@@ -2865,6 +2896,8 @@ def run_ltx23_multiref_video(
 	_ensure_runtime_dependencies()
 	run_started_at = time.perf_counter()
 	prompt_text = str(positive_prompt or "").strip() or "电影感视频，主体自然运动，镜头稳定，细节清晰。"
+	auto_transition_prompt = bool(auto_transition_prompt)
+	transition_prompt_model = str(transition_prompt_model or "").strip()
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
 	try:
@@ -3077,12 +3110,85 @@ def run_ltx23_multiref_video(
 			render_segment_label = "启用" if render_segment_lora_enabled else "关闭"
 			render_prompt_text = prompt_text
 			render_trigger_added = False
+			gemma_transition_prompt = ""
+			selected_transition_prompt_model = ""
+			if auto_transition_prompt and render_main_image is not None:
+				end_images = [item for item in list(render_guide_images or []) if item is not None]
+				if end_images:
+					try:
+						from .gjj_wan22_rapid_aio_mega import (
+							_infer_transition_prompt,
+							_make_transition_pair_image,
+							_prompt_infer_options,
+						)
+						gemma_models = _prompt_infer_options().get("GJJ_GemmaTextGenerate", [])
+						if not gemma_models:
+							raise RuntimeError("未找到可用 Gemma 模型")
+						selected_gemma_model = (
+							transition_prompt_model
+							if transition_prompt_model in gemma_models
+							else gemma_models[0]
+						)
+						selected_transition_prompt_model = selected_gemma_model
+						gemma_transition_prompt = _infer_transition_prompt(
+							"GJJ_GemmaTextGenerate",
+							selected_gemma_model,
+							_make_transition_pair_image(render_main_image, end_images[-1]),
+							unique_id=unique_id,
+							keep_model=True,
+						)
+						if gemma_transition_prompt:
+							# Gemma 只负责补充当前首尾帧的转场描述；用户正向提示词始终是
+							# 全段主体约束，不能被自动过渡词覆盖。
+							render_prompt_text = ", ".join(
+								part for part in (prompt_text, gemma_transition_prompt) if str(part or "").strip()
+							)
+					except Exception as exc:
+						print(
+							f"[GJJ LTX2.3][GEMMA_TRANSITION_PROMPT_ERROR] segment={render_segment_index or 1}: {exc}",
+							flush=True,
+						)
 			if transition_lora_enabled and render_segment_lora_enabled:
-				render_prompt_text, render_trigger_added = _append_ltx_transition_trigger(prompt_text, True)
+				render_prompt_text, render_trigger_added = _append_ltx_transition_trigger(render_prompt_text, True)
 			_send_status(unique_id, f"{prefix}Clean v40 当前分支：{_branch_kind_label(str(render_branch_kind or 'default'))} / route={render_route_label}")
 			_send_status(unique_id, f"{prefix}Clean v40 转场LoRA段控制：序列={segment_switch_text or '默认全启用'}；当前段={render_segment_index or 1}；本段={render_segment_label}")
 			try:
 				print(f"[GJJ LTX2.3 Clean v40] render_once branch={render_branch_kind} route={render_route_label}", flush=True)
+				print(
+					"[GJJ LTX2.3][SEGMENT_CONFIG] "
+					+ json.dumps(
+						{
+							"segment": render_segment_index or 1,
+							"route": render_route_label,
+							"branch": render_branch_kind,
+							"auto_transition_prompt": auto_transition_prompt,
+							"user_positive_prompt": prompt_text,
+							"gemma_transition_prompt": gemma_transition_prompt,
+							"transition_prompt_model_requested": transition_prompt_model,
+							"transition_prompt_model_effective": selected_transition_prompt_model,
+							"effective_prompt": render_prompt_text,
+							"transition_trigger": LTX_TRANSITION_LORA_TRIGGER,
+							"transition_trigger_added": render_trigger_added,
+							"transition_lora_global_enabled": transition_lora_enabled,
+							"transition_lora_segment_enabled": render_segment_lora_enabled,
+							"transition_lora_name": auto_transition_lora_name,
+							"transition_lora_path": auto_transition_lora_path,
+							"transition_lora_strength": _transition_lora_strength_value(transition_lora_strength),
+							"prepared_lora_chain_config": prepared_lora_chain_config,
+							"transition_lora_switches": segment_switch_text,
+							"seed": render_seed,
+							"duration_seconds": render_duration_seconds,
+							"fps": fps,
+							"target_size": [target_width, target_height],
+							"main_image_shape": list(render_main_image.shape) if hasattr(render_main_image, "shape") else None,
+							"guide_image_shapes": [list(item.shape) for item in list(render_guide_images or []) if hasattr(item, "shape")],
+							"guide_times": list(render_guide_times or []),
+						},
+						ensure_ascii=False,
+						default=str,
+					),
+					flush=True,
+				)
 			except Exception:
 				pass
 			original_guide_images = list(render_guide_images or [])
@@ -3493,6 +3599,38 @@ def run_ltx23_multiref_video(
 				pass
 			_send_status(unique_id, f"{prefix}8/8 创建视频...")
 			video = _create_video(frames, float(fps), output_audio)
+			print(
+				"[GJJ LTX2.3][SEGMENT_RESULT] "
+				+ json.dumps(
+					{
+						"segment": render_segment_index or 1,
+						"route": render_route_label,
+						"frames_shape": list(frames.shape),
+						"output_size": [int(output_width), int(output_height)],
+						"output_frame_count": int(output_frame_count),
+						"effective_prompt": render_prompt_text,
+						"user_positive_prompt": prompt_text,
+						"gemma_transition_prompt": gemma_transition_prompt,
+						"transition_prompt_model_effective": selected_transition_prompt_model,
+						"transition_trigger_added": render_trigger_added,
+						"transition_lora_enabled": bool(transition_lora_enabled and render_segment_lora_enabled),
+						"transition_lora_name": auto_transition_lora_name,
+						"transition_lora_path": auto_transition_lora_path,
+						"transition_lora_strength": _transition_lora_strength_value(transition_lora_strength),
+						"stage1_sampler": DEFAULT_STAGE1_SAMPLER,
+						"stage1_sigmas": WORKFLOW_FIRST_LAST_STAGE1_SIGMAS if workflow_first_last else DEFAULT_STAGE1_SIGMAS,
+						"stage2_sampler": DEFAULT_STAGE2_SAMPLER,
+						"stage2_sigmas": WORKFLOW_FIRST_LAST_STAGE2_SIGMAS if workflow_first_last else DEFAULT_STAGE2_SIGMAS,
+						"cfg": DEFAULT_CFG,
+						"denoise_strength": resolved_denoise_strength,
+						"seed_stage1": int(render_seed),
+						"seed_stage2": int(render_seed) + 1,
+					},
+					ensure_ascii=False,
+					default=str,
+				),
+				flush=True,
+			)
 			return {
 				"video": video,
 				"frames": frames.detach().float().cpu().clamp(0.0, 1.0).contiguous(),
@@ -3696,8 +3834,25 @@ def run_ltx23_multiref_video(
 				_send_status(unique_id, f"已保存第 {segment_index} 段（共 {segment_count} 段）：{preview.get('path') or '输出文件'}")
 				_maybe_purge_vram()
 
-			combined_frames = torch.cat(segment_frames, dim=0).contiguous()
-			combined_audio = _concat_audio_segments(segment_audios)
+			combined_frames, boundary_trim_stats = _concat_visual_segments_without_duplicate_boundaries(segment_frames)
+			combined_audio = _concat_audio_segments(
+				segment_audios,
+				trim_trailing_seconds_before_last=1.0 / float(max(1, fps)),
+			)
+			print(
+				"[GJJ LTX2.3][SEGMENT_MERGE] "
+				+ json.dumps(
+					{
+						"policy": "drop_previous_tail_keep_next_head",
+						"segments": boundary_trim_stats,
+						"input_frames": sum(item["before"] for item in boundary_trim_stats),
+						"removed_duplicate_frames": sum(item["removed_tail"] for item in boundary_trim_stats),
+						"output_frames": int(combined_frames.shape[0]),
+					},
+					ensure_ascii=False,
+				),
+				flush=True,
+			)
 			final_video = _create_video(combined_frames, float(fps), combined_audio)
 			audio_label = "模型生成音轨" if combined_audio is not None else "静音输出"
 			output_width = int(combined_frames.shape[2])

@@ -67,6 +67,7 @@ def _torch_module():
 NODE_NAME = "GJJ_LTX23ImageToVideoMultiRef"
 SCENE_PREFIX = "scene_"
 DEFAULT_PROMPT = "多张参考图连续过渡，主体动作自然，镜头语言稳定，电影感光影，细节真实。"
+DEFAULT_TEST_LORA = "LTX-2.3-Licon-MSR-V2.safetensors"
 DEFAULT_SEGMENT_SECONDS = 5.0
 DEFAULT_FPS = 24
 DEFAULT_SEED = 483811081311996
@@ -367,6 +368,18 @@ def _split_image_tensor_like(value: Any) -> list[Any]:
         return [value.unsqueeze(0).contiguous()]
     if value.ndim == 4 and int(value.shape[-1]) in (1, 3, 4):
         batch = value.contiguous()
+        boundary_indices = getattr(value, "gjj_scene_frame_indices", None)
+        if isinstance(boundary_indices, (list, tuple)) and boundary_indices:
+            valid_indices = sorted({
+                max(0, min(int(batch.shape[0]) - 1, int(index)))
+                for index in boundary_indices
+            })
+            print(
+                f"[GJJ LTX2.3] 检测到上游场景边界：总帧数={int(batch.shape[0])}，"
+                f"边界={valid_indices}，按 {len(valid_indices)} 张场景图处理。",
+                flush=True,
+            )
+            return [batch[index:index + 1].contiguous() for index in valid_indices]
         return [batch[index:index + 1].contiguous() for index in range(int(batch.shape[0]))]
     return []
 
@@ -1072,6 +1085,19 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
         "OR",
     )
     test_loras = _model_options("loras")
+    test_lora_value = next(
+        (name for name in test_loras if name.lower() == DEFAULT_TEST_LORA.lower()),
+        next((name for name in test_loras if name.lower().endswith(("\\" + DEFAULT_TEST_LORA).lower())), DEFAULT_TEST_LORA),
+    )
+    transition_prompt_models = _model_options(
+        "text_encoders",
+        any_keywords=("qwen3.5", "qwen35", "qwen3vl", "gemma4"),
+    )
+    transition_prompt_default = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
+    transition_prompt_value = next(
+        (name for name in transition_prompt_models if name.lower() == transition_prompt_default.lower()),
+        transition_prompt_models[0] if transition_prompt_models else transition_prompt_default,
+    )
     return [
         {
             "name": "ltx_model_name",
@@ -1184,13 +1210,30 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
             "models": test_loras,
             "modelInfo": _category_model_info("loras", test_loras),
             "anyKeywords": ["ltx", "ltx2.3", "ltx23"],
-            "fallback": "",
-            "filename": "",
+            "fallback": test_lora_value,
+            "filename": DEFAULT_TEST_LORA,
             "enableKey": "test_lora_enabled",
             "strengthKey": "test_lora_strength",
             "strengthDefault": 1.0,
             "required": False,
             "description": "🧪 批量 LoRA 测试专用；不会覆盖转场 LoRA 设置。",
+            "defaultModel": DEFAULT_TEST_LORA,
+            "missingDefault": not any(name.lower().endswith(DEFAULT_TEST_LORA.lower()) for name in test_loras),
+        },
+        {
+            "name": "transition_prompt_model",
+            "label": "Gemma/Qwen 过渡词模型",
+            "folder": "text_encoders",
+            "path": "models/text_encoders",
+            "models": transition_prompt_models,
+            "modelInfo": _category_model_info("text_encoders", transition_prompt_models),
+            "anyKeywords": ["qwen3.5", "qwen35", "qwen3vl", "gemma4"],
+            "fallback": transition_prompt_value,
+            "filename": transition_prompt_default,
+            "required": True,
+            "description": "🎬 自动分析每段首尾图并生成过渡词；与 LTX 自身的 Gemma 3 12B 文本编码器相互独立。",
+            "defaultModel": transition_prompt_default,
+            "missingDefault": transition_prompt_default not in transition_prompt_models,
         },
     ]
 
@@ -1462,10 +1505,14 @@ def _clean_config_defaults() -> dict[str, Any]:
         "transition_lora_name": "",
         "transition_lora_enabled": True,
         "transition_lora_strength": 1.0,
-        "test_lora_name": "",
-        "test_lora_enabled": False,
+        "test_lora_name": DEFAULT_TEST_LORA,
+        "test_lora_enabled": True,
         "test_lora_strength": 1.0,
+        "auto_transition_prompt": False,
+        "transition_prompt_model": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
         "size_source": "面板尺寸",
+        "seed_mode": "固定",
+        "global_prompt": "",
     }
 
 
@@ -1588,12 +1635,21 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
     config["transition_lora_name"] = str(config.get("transition_lora_name") or "").strip()
     config["transition_lora_enabled"] = _safe_bool(config.get("transition_lora_enabled"), True)
     config["transition_lora_strength"] = _safe_float(config.get("transition_lora_strength"), 1.0, -10.0, 10.0)
-    config["test_lora_name"] = str(config.get("test_lora_name") or "").strip()
-    config["test_lora_enabled"] = _safe_bool(config.get("test_lora_enabled"), False)
+    config["test_lora_name"] = str(config.get("test_lora_name") or DEFAULT_TEST_LORA).strip()
+    config["test_lora_enabled"] = _safe_bool(config.get("test_lora_enabled"), True)
     config["test_lora_strength"] = _safe_float(config.get("test_lora_strength"), 1.0, -10.0, 10.0)
+    config["auto_transition_prompt"] = _safe_bool(config.get("auto_transition_prompt"), False)
+    config["transition_prompt_model"] = str(
+        config.get("transition_prompt_model")
+        or "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
+    ).strip()
     config["size_source"] = str(config.get("size_source") or "面板尺寸").strip()
     if config["size_source"] not in ("面板尺寸", "原视频尺寸"):
         config["size_source"] = "面板尺寸"
+    config["seed_mode"] = str(config.get("seed_mode") or "固定").strip()
+    if config["seed_mode"] not in ("固定", "随机", "递增", "递减"):
+        config["seed_mode"] = "固定"
+    config["global_prompt"] = str(config.get("global_prompt") or "").strip()
     return config
 
 
@@ -1943,6 +1999,18 @@ class GJJ_LTX23ImageToVideoMultiRef:
             scene_count=len(scene_images),
             has_input_audio=has_input_audio,
         )
+        global_prompt = str(config.get("global_prompt") or "").strip()
+        if global_prompt:
+            segment_prompt = str(resolved_payload.get("positive_prompt") or "").strip()
+            resolved_payload["positive_prompt"] = ", ".join(
+                part for part in (global_prompt, segment_prompt) if part
+            )
+            print(
+                "[GJJ LTX2.3 Clean v40][GLOBAL_PROMPT] "
+                f"seed_mode={config['seed_mode']} global_prompt={global_prompt!r} "
+                f"effective_base_prompt={resolved_payload['positive_prompt']!r}",
+                flush=True,
+            )
         guide_images, guide_times, duration_seconds = _build_scene_schedule(
             scene_images,
             float(resolved_payload["segment_seconds"]),
@@ -2020,6 +2088,8 @@ class GJJ_LTX23ImageToVideoMultiRef:
             transition_lora_name=transition_lora_name_for_run,
             transition_lora_enabled=config.get("transition_lora_enabled", True),
             transition_lora_strength=transition_lora_strength,
+            auto_transition_prompt=config.get("auto_transition_prompt", False),
+            transition_prompt_model=config.get("transition_prompt_model", ""),
             test_lora_name=config["test_lora_name"],
             branch_debug={
                 "route_key": route_key,

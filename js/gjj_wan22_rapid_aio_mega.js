@@ -221,7 +221,6 @@ function repairWanClipInt4Default(node) {
 function repairTransitionLoraDefault(node) {
 	if (!node) return;
 	node.properties ||= {};
-	if (node.properties[TRANSITION_LORA_MIGRATION_PROPERTY]) return;
 
 	const widget = getWidget(node, TRANSITION_LORA_WIDGET);
 	const choices = Array.isArray(widget?.options?.values) ? widget.options.values.map(String) : [];
@@ -230,7 +229,11 @@ function repairTransitionLoraDefault(node) {
 	const preferredKey = normalizedModelName(DEFAULT_TRANSITION_LORA);
 	const preferred = choices.find((choice) => normalizedModelName(choice) === preferredKey)
 		|| choices.find((choice) => /st[_-]?i2v.*high.*34|无缝转场|丝滑转场/i.test(choice));
-	if (widget && preferred && !currentLooksLikeTransition) {
+	if (widget && !currentLooksLikeTransition) {
+		if (!preferred) {
+			console.error("[GJJ_Wan22RapidAIOMega] 未找到 ST-I2V/无缝转场 LoRA，已拒绝使用无关 LoRA：", current);
+			return;
+		}
 		setWidgetValue(widget, preferred);
 	}
 	node.properties[TRANSITION_LORA_MIGRATION_PROPERTY] = true;
@@ -1463,11 +1466,20 @@ function toggleAutoPromptInfer(node) {
 	setWidgetValue(getWidget(node, AUTO_TRANSITION_PROMPT_WIDGET), enabled);
 	if (enabled) {
 		delete node.properties[AUTO_PROMPT_SIGNATURE_PROPERTY];
+		const segmentCount = Math.max(0, materialTimelineItems(node).length - 1);
+		const timeline = segmentTimelineConfig(node);
+		for (let index = 0; index < segmentCount; index += 1) {
+			timeline[index] = { ...(timeline[index] || {}), transition: "首尾帧" };
+		}
+		if (segmentCount > 0) {
+			setSegmentTimelineConfig(node, timeline);
+			refreshMaterialTimeline(node, true);
+		}
 		scheduleAutoPromptInfer(node, 50);
-		setStatus(node, { text: "🎬 自动过渡词已开启；多图输入后将按相邻首尾帧自动生成。", progress: 0 });
+		setStatus(node, { text: "🎬 自动丝滑转场已开启；所有相邻图片段将强制使用首尾帧条件。", progress: 0 });
 	} else {
 		window.clearTimeout(node.__gjjWan22AutoPromptTimer);
-		setStatus(node, { text: "🎬 自动过渡词已关闭。", progress: 0 });
+		setStatus(node, { text: "🎬 自动丝滑转场已关闭。", progress: 0 });
 	}
 	refreshToolbarState(node);
 	node.setDirtyCanvas?.(true, true);
@@ -1553,16 +1565,20 @@ function detachOrRestoreImageLink(node) {
 	const current = getLinkedImageRecord(node);
 	if (current) {
 		const selected = sourceSelectedImages(node);
-		if (!selected.length) {
-			setStatus(node, { text: "当前外链来源没有可复制的图片列表。", progress: 0 });
-			return;
-		}
 		node.properties[LINK_MEMORY_PROPERTY] = current;
-		setWidgetValue(getWidget(node, LOCAL_IMAGES_WIDGET), JSON.stringify(selected));
-		node.properties.local_image_files = JSON.stringify(selected);
+		if (selected.length) {
+			setWidgetValue(getWidget(node, LOCAL_IMAGES_WIDGET), JSON.stringify(selected));
+			node.properties.local_image_files = JSON.stringify(selected);
+		}
 		try { node.disconnectInput?.(current.target_slot); } catch (_) {}
-		setStatus(node, { text: `已吸收外链 ${selected.length} 张图片，并断开输入。再次点 🔗 可恢复。`, progress: 0 });
+		setStatus(node, {
+			text: selected.length
+				? `已吸收外链 ${selected.length} 张图片并断开输入；再次点 🔗 可恢复。`
+				: "上游不提供文件列表；已记住并断开外链，但无法复制图片到本地时间线。再次点 🔗 可恢复。",
+			progress: 0,
+		});
 		refreshMaterialTimeline(node);
+		refreshToolbarState(node);
 		refreshNode(node);
 		return;
 	}
@@ -1584,6 +1600,7 @@ function detachOrRestoreImageLink(node) {
 		delete node.properties[LINK_MEMORY_PROPERTY];
 		setStatus(node, { text: "已恢复批量图片外链。", progress: 0 });
 		refreshMaterialTimeline(node);
+		refreshToolbarState(node);
 		refreshNode(node);
 	} catch (error) {
 		setStatus(node, { text: String(error?.message || error || "恢复外链失败"), progress: 0 });
@@ -2910,6 +2927,16 @@ function patchNode(node) {
 			refreshNode(this);
 		}
 		setVideoPreview(this, message || {});
+		const imageCount = Number(message?.source_image_count?.[0] || 0);
+		const smoothSegments = Number(message?.smooth_transition_segments?.[0] || 0);
+		if (autoPromptInferEnabled(this)) {
+			setStatus(this, {
+				text: smoothSegments > 0
+					? `🎬 已强制启用 ${smoothSegments} 段首尾帧丝滑转场（输入 ${imageCount} 张图片）`
+					: `🎬 开关已开启，但本次后台只识别到 ${imageCount} 张图片，未形成转场段`,
+				progress: 0,
+			});
+		}
 		refreshToolbarState(this);
 		refreshMaterialTimeline(this);
 		return undefined;

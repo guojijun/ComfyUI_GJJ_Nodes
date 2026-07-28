@@ -223,7 +223,7 @@ def _normalize_total_wan_pixels(value: Any) -> int:
     except Exception:
         raw = REGION_CROP_SETTINGS_DEFAULTS["total_pixels"]
     raw = max(10, min(6400, raw))
-    return int(round(raw / 5.0) * 5)
+    return int(round(raw / 10.0) * 10)
 
 
 def _read_user_settings() -> dict[str, Any]:
@@ -305,10 +305,10 @@ def _region_from_crop_config(config: Any, width: int, height: int) -> dict[str, 
     else:
         data = {}
 
-    default_w = max(1, width // 2)
-    default_h = max(1, height // 2)
-    x = int(data.get("x", max(0, (width - default_w) // 2)))
-    y = int(data.get("y", max(0, (height - default_h) // 2)))
+    default_w = max(1, width)
+    default_h = max(1, height)
+    x = int(data.get("x", 0))
+    y = int(data.get("y", 0))
     w = int(data.get("width", default_w))
     h = int(data.get("height", default_h))
     return {
@@ -467,7 +467,7 @@ class GJJ_RegionCrop:
             "required": {
                 "crop_config": ("STRING", {"default": "", "multiline": False, "hidden": True, "display": "hidden", "display_name": "面板框选数据", "tooltip": "内部保存面板框选区域，通常无需手动编辑。"}),
                 "image_file": (_input_image_files(), {"image_upload": True, "display_name": "图片文件", "tooltip": "输入图像未连接时使用。点击节点内 📁 可从磁盘/网盘选择并上传到 ComfyUI/input。"}),
-                "total_pixels": ("INT", {"default": settings["total_pixels"], "min": 10, "max": 6400, "step": 5, "display": "slider", "display_name": "总像素(万)", "tooltip": "裁切后严格缩放到接近此总像素，单位为万像素。30 表示约 30 万像素；最低 10 万，步长 5 万。"}),
+                "total_pixels": ("INT", {"default": settings["total_pixels"], "min": 10, "max": 6400, "step": 10, "display": "slider", "display_name": "总像素(万)", "tooltip": "裁切后严格缩放到接近此总像素，单位为万像素。面板滑条每格 10 万、最高 400 万；更高数值请在数字输入框填写。"}),
                 "scale_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 16.0, "step": 0.01, "display": "slider", "display_name": "缩放比例(兼容保留)", "tooltip": "兼容旧工作流保留；当前节点不再使用此参数。"}),
                 "align_multiple": ("INT", {"default": settings["align_multiple"], "min": 1, "max": 256, "step": 1, "display_name": "对齐倍数", "tooltip": "输出宽高按此倍数对齐，只使用 2 的 n 次方：1/2/4/8/16/32/64/128/256。默认 8。"}),
             },

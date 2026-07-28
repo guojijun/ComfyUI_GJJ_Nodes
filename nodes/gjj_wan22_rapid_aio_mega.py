@@ -489,6 +489,34 @@ def _list_lora_models() -> list[str]:
     return [""] + sorted({str(name or "").replace("\\", "/") for name in names if str(name or "").strip()}, key=str.lower)
 
 
+def _is_transition_lora_name(name: Any) -> bool:
+    return bool(re.search(r"st[_-]?i2v|无缝转场|丝滑转场", str(name or ""), re.IGNORECASE))
+
+
+def _resolve_transition_lora_name(requested: Any) -> str:
+    requested_name = str(requested or "").strip().replace("\\", "/")
+    choices = [name for name in _list_lora_models() if name]
+    if _is_transition_lora_name(requested_name) and requested_name in choices:
+        return requested_name
+    default_key = re.sub(r"[^a-z0-9]+", "", DEFAULT_TRANSITION_LORA.lower())
+    preferred = next(
+        (name for name in choices if re.sub(r"[^a-z0-9]+", "", name.lower()) == default_key),
+        None,
+    )
+    preferred = preferred or next(
+        (name for name in choices if re.search(r"st[_-]?i2v.*high.*34|无缝转场|丝滑转场", name, re.IGNORECASE)),
+        None,
+    )
+    if preferred:
+        if requested_name and requested_name != preferred:
+            print(
+                f"[GJJ_Wan22RapidAIOMega] 已阻止无关转场 LoRA：{requested_name} -> {preferred}",
+                flush=True,
+            )
+        return preferred
+    return ""
+
+
 def _pick_noise_model(models: list[str], noise: str, fallback: str) -> str:
     tokens = ("high", "高") if noise == "high" else ("low", "低")
     matching = [
@@ -1703,19 +1731,35 @@ def _combined_video_from_frames(
 PROMPT_INFER_OPTIONS_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/options"
 PROMPT_INFER_RUN_API = "/gjj/wan22_rapid_aio_mega/prompt_infer/run"
 PROMPT_INFER_SYSTEM = (
-    "你是视频生成提示词专家。根据参考图中左侧起始画面和右侧目标画面，"
-    "反推出适合 Wan 图生视频首尾帧转场的中文提示词。只描述主体动作、镜头运动、场景变化、光线氛围和自然过渡，"
+    "你是视频生成提示词专家。输入媒体虽然为了识别而把两帧临时并排展示，但它不是一个左右并排的画面："
+    "第一张图代表视频时间轴的起始帧，第二张图代表同一视频时间轴的结束帧。"
+    "请反推出从第一张图随时间连续变化到第二张图的首尾帧转场提示词。"
+    "必须使用“起始帧、随后、逐渐、最终、结束帧”等时间顺序来理解和描述两张图；"
+    "禁止把它们称为左图、右图、左侧画面、右侧画面、两侧、并排画面或拼接画面。"
+    "只描述主体动作、形态变化、镜头运动、场景变化、光线氛围和自然过渡，"
     "不要解释，不要编号，不要 Markdown，不要输出标题。"
 )
 PROMPT_INFER_USER = (
-    "左边是起始帧，右边是结束帧。请生成一条 1 句到 2 句的转场视频提示词，"
-    "让画面从左图自然运动到右图。只输出提示词正文。"
+    "按时间顺序分析这两个连续关键帧：第一张是起始帧，第二张是结束帧。"
+    "请生成一条 1 句到 2 句的视频转场提示词，让起始帧中的内容自然、连续地运动并变化为结束帧中的内容。"
+    "不要描述图片在输入媒体里的左右位置，不要出现“左图、右图、左侧画面、右侧画面、两侧、并排、拼接”等词。"
+    "只输出提示词正文。"
 )
 
 
 def _clean_inferred_prompt(text: Any) -> str:
     cleaned = str(text or "").strip()
     cleaned = re.sub(r"^\s*(?:转场提示词|视频提示词|提示词|结果)\s*[:：]\s*", "", cleaned)
+    temporal_replacements = (
+        (r"(?:左侧|左边)(?:的)?(?:画面|图片|图像|图)中?", "起始帧中"),
+        (r"(?:右侧|右边)(?:的)?(?:画面|图片|图像|图)中?", "结束帧中"),
+        (r"从左图", "从起始帧"),
+        (r"到右图", "到结束帧"),
+        (r"由左图", "由起始帧"),
+        (r"至右图", "至结束帧"),
+    )
+    for pattern, replacement in temporal_replacements:
+        cleaned = re.sub(pattern, replacement, cleaned)
     cleaned = cleaned.strip().strip("`").strip()
     return cleaned
 
@@ -2512,6 +2556,12 @@ class GJJ_Wan22RapidAIOMega:
                 lora_chain_config=lora_chain_config,
                 loaded_lora_cache=self.loaded_lora,
             )
+            transition_lora_name = _resolve_transition_lora_name(transition_lora_name)
+            if auto_transition_prompt and image_count > 1 and not transition_lora_name:
+                raise RuntimeError(
+                    "🎬 已开启，但未找到 ST-I2V/无缝转场 LoRA。"
+                    f"请安装：{DEFAULT_TRANSITION_LORA}"
+                )
             transition_model = _load_model_lora(model, transition_lora_name)
 
             _send_status(unique_id, "3/7 编码提示词...", 0.2)
@@ -2549,6 +2599,8 @@ class GJJ_Wan22RapidAIOMega:
                 else:
                     segment_prompt = str((segment_config or {}).get("prompt") or "").strip()
                 segment_transition = str((segment_config or {}).get("transition") or "首尾帧").strip()
+                if auto_transition_prompt and image_count > 1:
+                    segment_transition = "首尾帧"
                 if (
                     auto_transition_prompt
                     and image_count > 1
@@ -2600,6 +2652,49 @@ class GJJ_Wan22RapidAIOMega:
                     conditioning_mode = "图生"
                 else:
                     conditioning_mode = "首尾帧"
+
+                debug_payload = {
+                    "segment": f"{segment_index + 1}/{segment_count}",
+                    "image_pair": (
+                        None
+                        if image_count <= 1
+                        else [
+                            segment_index + 1,
+                            (1 if close_loop and segment_index == image_count - 1 else segment_index + 2),
+                        ]
+                    ),
+                    "source_image_count": image_count,
+                    "auto_transition_prompt": bool(auto_transition_prompt),
+                    "timeline_transition_raw": str((segment_config or {}).get("transition") or "首尾帧"),
+                    "effective_transition": segment_transition,
+                    "conditioning_mode": conditioning_mode,
+                    "prompt": _prepend_global_prompt(global_prompt, segment_prompt) if segment_prompt else base_positive_text,
+                    "segment_prompt": segment_prompt,
+                    "global_prompt": str(global_prompt or ""),
+                    "frame_count": segment_frame_count,
+                    "fps": float(output_fps or DEFAULT_FRAME_RATE),
+                    "size": [resolved_width, resolved_height],
+                    "seed": int(seed),
+                    "sampler": "euler_ancestral",
+                    "scheduler": "simple",
+                    "steps": 2,
+                    "cfg": 1.0,
+                    "denoise": float(DEFAULT_DENOISE),
+                    "checkpoint_high": str(resolved_checkpoint),
+                    "checkpoint_low": str(low_selection or resolved_checkpoint),
+                    "high_lora": str(high_lora_name or ""),
+                    "low_lora": str(low_lora_name or ""),
+                    "transition_lora": str(transition_lora_name or ""),
+                    "transition_lora_applied": bool(conditioning_mode == "首尾帧" and str(transition_lora_name or "").strip()),
+                    "clip_vision_model": str(clip_vision_model or ""),
+                    "start_image_shape": list(segment_start.shape) if isinstance(segment_start, torch.Tensor) else None,
+                    "end_image_shape": list(segment_end.shape) if isinstance(segment_end, torch.Tensor) else None,
+                }
+                print(
+                    "[GJJ_Wan22RapidAIOMega][SEGMENT_CONFIG] "
+                    + json.dumps(debug_payload, ensure_ascii=False, default=str),
+                    flush=True,
+                )
 
                 progress_base = 0.28 + (0.48 * (segment_index / max(1, segment_count)))
                 next_image_number = 1 if close_loop and segment_index == image_count - 1 else segment_index + 2
@@ -2684,6 +2779,20 @@ class GJJ_Wan22RapidAIOMega:
                     decoded = decoded[1:].contiguous()
                 decoded_segment_frames.append(int(decoded.shape[0]))
                 collected_segments.append(decoded)
+                print(
+                    "[GJJ_Wan22RapidAIOMega][SEGMENT_RESULT] "
+                    + json.dumps(
+                        {
+                            "segment": f"{segment_index + 1}/{segment_count}",
+                            "decoded_frames": int(decoded.shape[0]),
+                            "decoded_shape": list(decoded.shape),
+                            "conditioning_mode": conditioning_mode,
+                            "effective_transition": segment_transition,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
                 segment_preview = _segment_preview_extra(
                     decoded,
                     float(output_fps or DEFAULT_FRAME_RATE),
@@ -2700,6 +2809,35 @@ class GJJ_Wan22RapidAIOMega:
 
             _send_status(unique_id, "7/7 合并全部帧序列...", 0.88)
             frames = _concat_segments(collected_segments)
+            # 给下游多图/视频节点保留原始素材边界。多段合并时后续段已经去掉
+            # 重复首帧，因此每个场景边界等于累计帧数 - 1。
+            if image_count > 1 and decoded_segment_frames:
+                scene_frame_indices = [0]
+                cumulative_frames = 0
+                for decoded_count in decoded_segment_frames:
+                    cumulative_frames += max(0, int(decoded_count))
+                    scene_frame_indices.append(max(0, cumulative_frames - 1))
+                scene_frame_indices = sorted({
+                    min(max(0, int(index)), max(0, int(frames.shape[0]) - 1))
+                    for index in scene_frame_indices
+                })
+                try:
+                    frames.gjj_scene_frame_indices = scene_frame_indices
+                    frames.gjj_source_image_count = int(image_count)
+                except Exception:
+                    pass
+                print(
+                    "[GJJ_Wan22RapidAIOMega][SCENE_BOUNDARIES] "
+                    + json.dumps(
+                        {
+                            "source_image_count": int(image_count),
+                            "total_frames": int(frames.shape[0]),
+                            "scene_frame_indices": scene_frame_indices,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
             output_audio = None
             if bool(audio_enabled):
                 _send_status(unique_id, "7/7 使用 MMAudio 生成配音...", 0.94)
@@ -2765,6 +2903,10 @@ class GJJ_Wan22RapidAIOMega:
                     "resolved_width": [resolved_width],
                     "resolved_height": [resolved_height],
                     "source_image_count": [image_count],
+                    "auto_transition_prompt": [bool(auto_transition_prompt)],
+                    "smooth_transition_segments": [
+                        int(segment_count if auto_transition_prompt and image_count > 1 else 0)
+                    ],
                     "video_component_frames": [video_component_frames],
                     "decoded_segment_frames": [",".join(str(value) for value in decoded_segment_frames)],
                     "encoded_video_path": [encoded_video_path],

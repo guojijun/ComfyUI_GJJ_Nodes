@@ -42,6 +42,8 @@ const ALLOW_SAGE_COMPILE_WIDGET_NAME = "allow_sage_compile";
 const ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME = "enable_fp16_accumulation_setting";
 const FP16_ACCUMULATION_WIDGET_NAME = "fp16_accumulation";
 const MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME = "missing_sage_attention_policy";
+const GLOBAL_PROMPT_WIDGET_NAME = "global_prompt";
+const DEFAULT_GLOBAL_QUALITY_PROMPT = "high quality, highly detailed, sharp focus, clean composition, professional lighting, natural colors";
 const MODEL_OPTIMIZATION_WIDGETS = [
 	ENABLE_SAGE_ATTENTION_WIDGET_NAME,
 	SAGE_ATTENTION_MODE_WIDGET_NAME,
@@ -68,6 +70,7 @@ const MODEL_OPTIMIZATION_BUTTON_LABELS = {
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const MODEL_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_model_settings_open";
 const SIZE_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_size_settings_open";
+const PROMPT_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_prompt_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
@@ -200,7 +203,6 @@ const MODEL_PANEL_WIDGETS = new Set([
 	...MODEL_OPTIMIZATION_WIDGETS,
 ]);
 const OTHER_PANEL_WIDGETS = new Set([
-	"negative_prompt",
 	"main_image_index",
 	"seed",
 	"steps",
@@ -209,6 +211,10 @@ const OTHER_PANEL_WIDGETS = new Set([
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+]);
+const PROMPT_PANEL_WIDGETS = new Set([
+	"negative_prompt",
+	GLOBAL_PROMPT_WIDGET_NAME,
 ]);
 const SIZE_PANEL_WIDGETS = new Set([
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
@@ -247,6 +253,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
+	GLOBAL_PROMPT_WIDGET_NAME,
 ]);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
@@ -484,6 +491,7 @@ const PANEL_SYNC_WIDGETS = [
 	CHECKPOINT_WIDGET_NAME,
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
+	GLOBAL_PROMPT_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -515,6 +523,7 @@ const RESTORE_WIDGET_TYPES = {
 	[ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME]: "toggle",
 	[FP16_ACCUMULATION_WIDGET_NAME]: "toggle",
 	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "combo",
+	[GLOBAL_PROMPT_WIDGET_NAME]: "text",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -563,6 +572,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	CHECKPOINT_WIDGET_NAME,
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
+	GLOBAL_PROMPT_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -596,6 +606,7 @@ const DEFAULT_PARAM_VALUES = {
 	[ENABLE_FP16_ACCUMULATION_SETTING_WIDGET_NAME]: false,
 	[FP16_ACCUMULATION_WIDGET_NAME]: true,
 	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "自动跳过SageAttention继续运行",
+	[GLOBAL_PROMPT_WIDGET_NAME]: DEFAULT_GLOBAL_QUALITY_PROMPT,
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -1337,6 +1348,10 @@ function sizeSettingsOpen(node) {
 	return Boolean(node?.properties?.[SIZE_SETTINGS_OPEN_PROPERTY]);
 }
 
+function promptSettingsOpen(node) {
+	return Boolean(node?.properties?.[PROMPT_SETTINGS_OPEN_PROPERTY]);
+}
+
 function translationEnabled(node) {
 	return Boolean(node?.properties?.[TRANSLATE_ENABLED_PROPERTY]);
 }
@@ -1698,6 +1713,22 @@ function updateSettingsButtonState(node) {
 	button.__gjjLazyHoverBg = open ? button.style.background : "linear-gradient(135deg, #374151, #4b5563)";
 }
 
+function updatePromptSettingsButtonState(node) {
+	const button = node?.__gjjPromptSettingsButton;
+	if (!button) {
+		return;
+	}
+	const open = promptSettingsOpen(node);
+	button.textContent = "📒";
+	button.title = open ? "关闭提示词浮动窗口。" : "打开全局提示词与反向提示词浮动窗口。";
+	button.classList.toggle("on", open);
+	button.style.background = open ? "linear-gradient(135deg,#7c2d12,#c2410c)" : "linear-gradient(135deg,#3f2418,#7c2d12)";
+	button.style.borderColor = open ? "#fb923c" : "#9a5433";
+	button.style.color = "#fff7ed";
+	button.__gjjLazyDefaultBg = button.style.background;
+	button.__gjjLazyHoverBg = open ? button.style.background : "linear-gradient(135deg,#7c2d12,#c2410c)";
+}
+
 function updateSizeSettingsButtonState(node) {
 	applyInputSizeButtonState(node);
 }
@@ -1739,6 +1770,7 @@ function applySettingsVisibility(node) {
 	updateModelSettingsButtonState(node);
 	updateSizeSettingsButtonState(node);
 	updateSettingsButtonState(node);
+	updatePromptSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 	applyReferenceBrowserButtonState(node);
 	orderLazyWidgets(node);
@@ -1759,6 +1791,7 @@ function setSettingsOpen(node, open) {
 	if (nextOpen) {
 		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
 		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[PROMPT_SETTINGS_OPEN_PROPERTY] = false;
 	}
 	applySettingsVisibility(node);
 }
@@ -1776,6 +1809,7 @@ function setModelSettingsOpen(node, open) {
 	if (nextOpen) {
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
 		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[PROMPT_SETTINGS_OPEN_PROPERTY] = false;
 	}
 	applySettingsVisibility(node);
 }
@@ -1793,6 +1827,25 @@ function setSizeSettingsOpen(node, open) {
 	if (nextOpen) {
 		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[PROMPT_SETTINGS_OPEN_PROPERTY] = false;
+	}
+	applySettingsVisibility(node);
+}
+
+function setPromptSettingsOpen(node, open) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const nextOpen = Boolean(open);
+	if (nextOpen) {
+		closeLazyFloatingSurfaces(node, "prompt");
+	}
+	node.properties[PROMPT_SETTINGS_OPEN_PROPERTY] = nextOpen;
+	if (nextOpen) {
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
 	}
 	applySettingsVisibility(node);
 }
@@ -1819,6 +1872,12 @@ function closeLazyFloatingSurfaces(node, except = "") {
 		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
 		if (node.__gjjLazySizeFloatingPanel?.panel) {
 			node.__gjjLazySizeFloatingPanel.panel.style.display = "none";
+		}
+	}
+	if (except !== "prompt") {
+		node.properties[PROMPT_SETTINGS_OPEN_PROPERTY] = false;
+		if (node.__gjjLazyPromptFloatingPanel?.panel) {
+			node.__gjjLazyPromptFloatingPanel.panel.style.display = "none";
 		}
 	}
 	if (except !== "lora" && globalThis.__gjjLoraPopup?.state?.node === node) {
@@ -1929,6 +1988,7 @@ function createFloatingPanel(node, kind, titleText) {
 		event.stopPropagation();
 		if (kind === "model") setModelSettingsOpen(node, false);
 		else if (kind === "size") setSizeSettingsOpen(node, false);
+		else if (kind === "prompt") setPromptSettingsOpen(node, false);
 		else setSettingsOpen(node, false);
 	});
 	panel.addEventListener("keydown", (event) => {
@@ -1939,6 +1999,7 @@ function createFloatingPanel(node, kind, titleText) {
 		event.stopPropagation();
 		if (kind === "model") setModelSettingsOpen(node, false);
 		else if (kind === "size") setSizeSettingsOpen(node, false);
+		else if (kind === "prompt") setPromptSettingsOpen(node, false);
 		else setSettingsOpen(node, false);
 	});
 	header.append(title, close);
@@ -2176,6 +2237,13 @@ function createFloatingControl(node, name) {
 			option.textContent = String(value ?? "");
 			input.appendChild(option);
 		}
+	} else if (name === GLOBAL_PROMPT_WIDGET_NAME || name === "negative_prompt") {
+		input = document.createElement("textarea");
+		input.rows = name === GLOBAL_PROMPT_WIDGET_NAME ? 4 : 7;
+		input.placeholder = name === GLOBAL_PROMPT_WIDGET_NAME
+			? "每一条正向提示词都会自动加上这段前缀"
+			: "输入需要排除的内容";
+		input.style.resize = "vertical";
 	} else if (String(widget.type || "").toLowerCase().includes("toggle") || typeof widget.value === "boolean") {
 		input = document.createElement("input");
 		input.type = "checkbox";
@@ -2193,6 +2261,12 @@ function createFloatingControl(node, name) {
 	valueElement.dataset.widgetName = name;
 	if (name !== MODEL_SOURCE_WIDGET_NAME) {
 		valueElement.style.cssText = "min-width:0;width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 7px;font-size:12px";
+	}
+	if (name === GLOBAL_PROMPT_WIDGET_NAME || name === "negative_prompt") {
+		row.style.alignItems = "start";
+		valueElement.style.minHeight = name === GLOBAL_PROMPT_WIDGET_NAME ? "86px" : "126px";
+		valueElement.style.resize = "vertical";
+		valueElement.style.lineHeight = "1.45";
 	}
 	if (valueElement.type === "checkbox") {
 		valueElement.style.cssText = "appearance:none;-webkit-appearance:none;justify-self:end;min-width:42px;width:42px;height:22px;box-sizing:border-box;border:1px solid #52636b;border-radius:999px;background:#4b5563;cursor:pointer;transition:background-color .15s,border-color .15s;outline:none";
@@ -2571,10 +2645,14 @@ function ensureFloatingPanels(node) {
 	if (!node.__gjjLazyOtherFloatingPanel) {
 		node.__gjjLazyOtherFloatingPanel = createFloatingPanel(node, "settings", "⚙️ 其它参数");
 	}
+	if (!node.__gjjLazyPromptFloatingPanel) {
+		node.__gjjLazyPromptFloatingPanel = createFloatingPanel(node, "prompt", "📒 提示词");
+	}
 	return {
 		model: node.__gjjLazyModelFloatingPanel,
 		size: node.__gjjLazySizeFloatingPanel,
 		other: node.__gjjLazyOtherFloatingPanel,
+		prompt: node.__gjjLazyPromptFloatingPanel,
 	};
 }
 
@@ -2946,7 +3024,7 @@ function syncFloatingPanels(node) {
 	if (!node || typeof document === "undefined") {
 		return;
 	}
-	const { model, size, other } = ensureFloatingPanels(node);
+	const { model, size, other, prompt } = ensureFloatingPanels(node);
 	if (modelSettingsOpen(node) && settingsOpen(node)) {
 		node.properties = node.properties || {};
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
@@ -2956,9 +3034,16 @@ function syncFloatingPanels(node) {
 		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
 		node.properties[SETTINGS_OPEN_PROPERTY] = false;
 	}
+	if (promptSettingsOpen(node) && (modelSettingsOpen(node) || sizeSettingsOpen(node) || settingsOpen(node))) {
+		node.properties = node.properties || {};
+		node.properties[MODEL_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SIZE_SETTINGS_OPEN_PROPERTY] = false;
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+	}
 	const modelOpen = modelSettingsOpen(node);
 	const sizeOpen = sizeSettingsOpen(node);
 	const otherOpen = settingsOpen(node);
+	const promptOpen = promptSettingsOpen(node);
 
 	renderModelPanelControls(node, model.body);
 	if (node.__gjjLoraContainer) {
@@ -2981,10 +3066,12 @@ function syncFloatingPanels(node) {
 	}
 	renderSizePanelControls(node, size.body);
 	renderFloatingPanelControls(node, other.body, Array.from(OTHER_PANEL_WIDGETS));
+	renderFloatingPanelControls(node, prompt.body, Array.from(PROMPT_PANEL_WIDGETS));
 
 	model.panel.style.display = modelOpen ? "flex" : "none";
 	size.panel.style.display = sizeOpen ? "flex" : "none";
 	other.panel.style.display = otherOpen ? "flex" : "none";
+	prompt.panel.style.display = promptOpen ? "flex" : "none";
 	if (modelOpen) {
 		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
 	}
@@ -2993,6 +3080,9 @@ function syncFloatingPanels(node) {
 	}
 	if (otherOpen) {
 		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
+	}
+	if (promptOpen) {
+		positionFloatingPanel(node, prompt.panel, node.__gjjPromptSettingsButton);
 	}
 }
 
@@ -3004,11 +3094,13 @@ function positionOpenFloatingPanels(node) {
 		if (node.__gjjLazyModelFloatingPanel?.panel) node.__gjjLazyModelFloatingPanel.panel.style.display = "none";
 		if (node.__gjjLazySizeFloatingPanel?.panel) node.__gjjLazySizeFloatingPanel.panel.style.display = "none";
 		if (node.__gjjLazyOtherFloatingPanel?.panel) node.__gjjLazyOtherFloatingPanel.panel.style.display = "none";
+		if (node.__gjjLazyPromptFloatingPanel?.panel) node.__gjjLazyPromptFloatingPanel.panel.style.display = "none";
 		return;
 	}
 	const model = node.__gjjLazyModelFloatingPanel;
 	const size = node.__gjjLazySizeFloatingPanel;
 	const other = node.__gjjLazyOtherFloatingPanel;
+	const prompt = node.__gjjLazyPromptFloatingPanel;
 	if (modelSettingsOpen(node) && model?.panel?.style.display !== "none") {
 		positionFloatingPanel(node, model.panel, node.__gjjModelSettingsButton);
 	}
@@ -3017,6 +3109,9 @@ function positionOpenFloatingPanels(node) {
 	}
 	if (settingsOpen(node) && other?.panel?.style.display !== "none") {
 		positionFloatingPanel(node, other.panel, node.__gjjSettingsButton);
+	}
+	if (promptSettingsOpen(node) && prompt?.panel?.style.display !== "none") {
+		positionFloatingPanel(node, prompt.panel, node.__gjjPromptSettingsButton);
 	}
 	if (node.__gjjUnetModelPicker?.__gjjAnchor) {
 		positionUnetModelPicker(node, node.__gjjUnetModelPicker, node.__gjjUnetModelPicker.__gjjAnchor);
@@ -3038,9 +3133,13 @@ function lazyFloatingContains(node, target) {
 	const contains = (element) => Boolean(element && (element === target || element.contains?.(target)));
 	return (
 		contains(node.__gjjLazyModelFloatingPanel?.panel)
+		|| contains(node.__gjjLazySizeFloatingPanel?.panel)
 		|| contains(node.__gjjLazyOtherFloatingPanel?.panel)
+		|| contains(node.__gjjLazyPromptFloatingPanel?.panel)
 		|| contains(node.__gjjModelSettingsButton)
+		|| contains(node.__gjjInputSizeButton)
 		|| contains(node.__gjjSettingsButton)
+		|| contains(node.__gjjPromptSettingsButton)
 		|| contains(node.__gjjLazyTestOverlay)
 		|| contains(node.__gjjUnetModelPicker)
 		|| (
@@ -3059,7 +3158,7 @@ function closeLazyFloatingPanelsFromOutside(event) {
 		if (!TARGET_NODES.has(node?.comfyClass || node?.type)) {
 			continue;
 		}
-		const hasOpenPanel = modelSettingsOpen(node) || settingsOpen(node) || Boolean(node.__gjjLazyTestOverlay) || globalThis.__gjjLoraPopup?.state?.node === node;
+		const hasOpenPanel = modelSettingsOpen(node) || sizeSettingsOpen(node) || settingsOpen(node) || promptSettingsOpen(node) || Boolean(node.__gjjLazyTestOverlay) || globalThis.__gjjLoraPopup?.state?.node === node;
 		if (!hasOpenPanel || lazyFloatingContains(node, target)) {
 			continue;
 		}
@@ -4461,8 +4560,8 @@ function createButtons(node) {
 	].join(";");
 
 	const sharedButtonStyle = [
-		"height:32px",
-		"padding:0 10px",
+		"height:36px",
+		"padding:0",
 		"border-radius:6px",
 		"color:#e5edf2",
 		"font-size:12px",
@@ -4486,9 +4585,10 @@ function createButtons(node) {
 	];
 	const emojiButtonStyle = [
 		...sharedButtonStyle,
-		"padding:0 7px",
+		"padding:0",
 		"gap:0",
-		"font-size:15px",
+		"font-size:20px",
+		"min-width:36px",
 	];
 	const referenceBrowserButton = document.createElement("button");
 	referenceBrowserButton.type = "button";
@@ -4671,6 +4771,18 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjModelSettingsButton = modelSettingsButton;
 
+	const promptSettingsButton = document.createElement("button");
+	promptSettingsButton.type = "button";
+	promptSettingsButton.textContent = "📒";
+	promptSettingsButton.title = "打开全局提示词与反向提示词浮动窗口";
+	promptSettingsButton.style.cssText = [
+		...emojiButtonStyle,
+		"border:1px solid #9a5433",
+		"background:linear-gradient(135deg,#3f2418,#7c2d12)",
+		"color:#fff7ed",
+	].join(";");
+	node.__gjjPromptSettingsButton = promptSettingsButton;
+
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
 	settingsButton.textContent = "⚙️";
@@ -4683,10 +4795,11 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjSettingsButton = settingsButton;
 	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, emojiButtonStyle);
-	templateButton.style.width = "";
+	templateButton.style.width = "36px";
 	templateButton.style.flex = "0 0 auto";
-	templateButton.style.padding = "0 7px";
+	templateButton.style.padding = "0";
 	templateButton.style.gap = "0";
+	templateButton.style.fontSize = "20px";
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
@@ -4703,6 +4816,9 @@ function createButtons(node) {
 				return;
 			}
 			if (btn === settingsButton && settingsOpen(node)) {
+				return;
+			}
+			if (btn === promptSettingsButton && promptSettingsOpen(node)) {
 				return;
 			}
 			btn.style.background = btn.__gjjLazyHoverBg || hoverBg;
@@ -4727,6 +4843,11 @@ function createButtons(node) {
 			if (btn === settingsButton && settingsOpen(node)) {
 				btn.style.transform = "translateY(0)";
 				updateSettingsButtonState(node);
+				return;
+			}
+			if (btn === promptSettingsButton && promptSettingsOpen(node)) {
+				btn.style.transform = "translateY(0)";
+				updatePromptSettingsButtonState(node);
 				return;
 			}
 			btn.style.background = btn.__gjjLazyDefaultBg || defaultBg;
@@ -4903,6 +5024,11 @@ function createButtons(node) {
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
+	function handlePromptSettings(event) {
+		protectEvent(event);
+		setPromptSettingsOpen(node, !promptSettingsOpen(node));
+	}
+
 	async function chooseLocalReferenceImages() {
 		if (!node.__gjjLazyReferenceFileInput) {
 			const fileInput = document.createElement("input");
@@ -5011,6 +5137,7 @@ function createButtons(node) {
 	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(modelSettingsButton, MODEL_SETTINGS_BUTTON_STYLES.off.bg, MODEL_SETTINGS_BUTTON_STYLES.off.hover);
+	setupButtonHover(promptSettingsButton, "linear-gradient(135deg,#3f2418,#7c2d12)", "linear-gradient(135deg,#7c2d12,#c2410c)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(referenceBrowserButton, handleReferenceBrowser);
 	setupButtonEvents(refreshButton, handleRefresh);
@@ -5022,6 +5149,7 @@ function createButtons(node) {
 	setupButtonEvents(testButton, handleTest);
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(modelSettingsButton, handleModelSettings);
+	setupButtonEvents(promptSettingsButton, handlePromptSettings);
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
 	applySeedRandomButtonState(node);
@@ -5029,6 +5157,7 @@ function createButtons(node) {
 	applyInputSizeButtonState(node);
 	applyReferenceBrowserButtonState(node);
 	updateModelSettingsButtonState(node);
+	updatePromptSettingsButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 
@@ -5040,6 +5169,7 @@ function createButtons(node) {
 	container.appendChild(translateButton);
 	container.appendChild(templateButton);
 	container.appendChild(modelSettingsButton);
+	container.appendChild(promptSettingsButton);
 	container.appendChild(settingsButton);
 	container.appendChild(testButton);
 	container.appendChild(generateButton);
@@ -5052,7 +5182,7 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32];
+	const buttonWidths = [36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36];
 	const gap = 0;
 	let rows = 1;
 	let rowWidth = 0;
@@ -5065,7 +5195,7 @@ function lazyButtonsHeight(width, node = null) {
 			rowWidth = nextWidth;
 		}
 	}
-	return rows * 32 + (rows - 1) * gap;
+	return rows * 36 + (rows - 1) * gap;
 }
 
 function createImagePreview(node) {

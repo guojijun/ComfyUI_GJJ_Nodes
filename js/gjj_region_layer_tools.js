@@ -613,13 +613,11 @@ function setCropPanelImage(node, src, width = 0, height = 0, signature = "") {
 		panel.sourceHeight = Math.round(height || image.naturalHeight || image.height || 1);
 		const config = readCropConfig(node);
 		if (!config.width || !config.height || config.canvas_width !== panel.sourceWidth || config.canvas_height !== panel.sourceHeight) {
-			const defaultW = Math.max(1, Math.round(panel.sourceWidth / 2));
-			const defaultH = Math.max(1, Math.round(panel.sourceHeight / 2));
 			writeCropConfig(node, {
-				x: Math.max(0, Math.round((panel.sourceWidth - defaultW) / 2)),
-				y: Math.max(0, Math.round((panel.sourceHeight - defaultH) / 2)),
-				width: defaultW,
-				height: defaultH,
+				x: 0,
+				y: 0,
+				width: panel.sourceWidth,
+				height: panel.sourceHeight,
 				angle: 0,
 				canvas_width: panel.sourceWidth,
 				canvas_height: panel.sourceHeight,
@@ -743,8 +741,8 @@ function clampCropConfig(node, config = readCropConfig(node)) {
 	const panel = node.__gjjRegionCropPanel || {};
 	const sourceW = Math.max(1, panel.sourceWidth || config.canvas_width || 1);
 	const sourceH = Math.max(1, panel.sourceHeight || config.canvas_height || 1);
-	const w = clamp(Math.round(toNumber(config.width, Math.round(sourceW / 2))), 1, sourceW);
-	const h = clamp(Math.round(toNumber(config.height, Math.round(sourceH / 2))), 1, sourceH);
+	const w = clamp(Math.round(toNumber(config.width, sourceW)), 1, sourceW);
+	const h = clamp(Math.round(toNumber(config.height, sourceH)), 1, sourceH);
 	const x = clamp(Math.round(toNumber(config.x, 0)), 0, Math.max(0, sourceW - w));
 	const y = clamp(Math.round(toNumber(config.y, 0)), 0, Math.max(0, sourceH - h));
 	const angle = normalizeAngle(toNumber(config.angle, 0));
@@ -1372,29 +1370,33 @@ async function openCropSettings(node) {
 		].join(";");
 		const min = toNumber(attrs.min, 0);
 		const max = toNumber(attrs.max, 1);
+		const inputMax = toNumber(attrs.inputMax, max);
 		const step = toNumber(attrs.step, 1);
+		let currentValue = value;
 		const decimals = String(attrs.step ?? "").includes(".") ? String(attrs.step).split(".")[1].length : 0;
 		const normalize = (raw) => {
-			let next = clamp(toNumber(raw, value), min, max);
+			let next = clamp(toNumber(raw, value), min, inputMax);
 			if (step > 0) next = Math.round(next / step) * step;
 			return decimals > 0 ? Number(next.toFixed(decimals)) : Math.round(next);
 		};
 		const setValue = (raw) => {
 			const next = normalize(raw);
-			slider.value = String(next);
+			currentValue = next;
+			slider.value = String(Math.min(max, next));
 			valueButton.textContent = formatter(next);
 			updatePreview();
 			return next;
 		};
 		slider.addEventListener("input", () => setValue(slider.value));
-		valueButton.addEventListener("dblclick", (event) => {
+		valueButton.title = attrs.inputMax > attrs.max ? `点击输入；滑条最高 ${formatter(max)}` : "点击输入数值";
+		valueButton.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			const input = document.createElement("input");
 			input.type = "number";
-			input.value = slider.value;
+			input.value = String(currentValue);
 			input.min = String(min);
-			input.max = String(max);
+			input.max = String(inputMax);
 			input.step = String(step);
 			input.style.cssText = valueButton.style.cssText + ";width:74px;box-sizing:border-box;padding:0 6px;";
 			valueButton.replaceWith(input);
@@ -1412,10 +1414,10 @@ async function openCropSettings(node) {
 		});
 		wrap.append(slider, valueButton);
 		setValue(value);
-		return { wrap, slider, get value() { return slider.value; } };
+		return { wrap, slider, get value() { return currentValue; } };
 	};
 
-	const pixelsInput = makeSliderControl("total_pixels", Math.round(toNumber(getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value, 10)), { min: 10, max: 6400, step: 5 }, (v) => `${v}万`);
+	const pixelsInput = makeSliderControl("total_pixels", Math.round(toNumber(getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value, 10)), { min: 10, max: 400, inputMax: 6400, step: 10 }, (v) => `${v}万`);
 	const alignInput = makeSliderControl("align_multiple", cropAlignPowerIndex(getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET)?.value ?? 8), { min: 0, max: CROP_ALIGN_POWERS.length - 1, step: 1 }, (v) => `${CROP_ALIGN_POWERS[v]}`);
 
 	const aspectWrap = document.createElement("div");
@@ -1468,7 +1470,7 @@ async function openCropSettings(node) {
 	aspectHeight.addEventListener("input", applyAspectPreview);
 
 	body.append(
-		makeLabel("总像素(万)", "单位为万像素。30 表示约 30 万像素；最低 10 万，步长 5 万。"),
+		makeLabel("总像素(万)", "滑条每格 10 万像素，最高 400 万；超过 400 万请点击右侧数字框手动输入。"),
 		pixelsInput.wrap,
 		makeLabel("对齐倍数", "输出宽高按 2 的 n 次方对齐：1/2/4/8/16/32/64/128/256。"),
 		alignInput.wrap,
@@ -1588,7 +1590,7 @@ function mountCropPanel(node) {
 	const toolbar = document.createElement("div");
 	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-bottom:6px;";
 	const openButton = makeCropButton("📁", "打开图片文件；会上传到 ComfyUI/input，并在没有外部图像输入时使用。", (button) => openCropImageFile(node, button));
-	const settingsButton = makeCropButton("⚙️", "参数设置：总像素、对齐倍数、固定宽高比。", () => openCropSettings(node));
+	const settingsButton = makeCropButton("📐", "尺寸参数：总像素、对齐倍数、固定宽高比。", () => openCropSettings(node));
 	const linkButton = makeCropButton("🔗", "断开/恢复外部链接。", () => toggleCropExternalLinks(node));
 	const portsButton = makeCropButton("🔌", "显示/隐藏区域数据输入和裁剪遮罩输出。", () => toggleCropExtraPorts(node));
 	node.__gjjRegionCropLinkButton = linkButton;
