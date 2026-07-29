@@ -437,5 +437,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_WorkflowModelStatistics": "工作流模型统计",
+    "GJJ_WorkflowModelStatistics": "🔢 工作流模型统计",
 }

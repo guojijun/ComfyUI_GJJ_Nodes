@@ -4,6 +4,7 @@ import { api } from "../../scripts/api.js";
 const NODE_NAME = "GJJ_WorkflowModelStatistics";
 const API_PATH = "/gjj/workflow_model_statistics";
 const SNAPSHOT_PROPERTY = "gjj_workflow_model_statistics_snapshot";
+const LAZY_IMAGE_TRANSLATION_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const NODE_TITLE_COLOR = "#4B321F";
 const NODE_BODY_COLOR = "#6D5B35";
 const NODE_OUTLINE_COLOR = "#A58A52";
@@ -144,6 +145,37 @@ function collectWorkflowModels() {
 				methods,
 			});
 		}
+		if (
+			graphNode?.type === "GJJ_LazyImageStudio"
+			&& (
+				graphNode?.properties?.[LAZY_IMAGE_TRANSLATION_PROPERTY] === true
+				|| String(graphNode?.properties?.[LAZY_IMAGE_TRANSLATION_PROPERTY] || "").toLowerCase() === "true"
+			)
+		) {
+			items.push({
+				node_id: graphNode.id,
+				node_type: graphNode.type,
+				node_title: nodeTitle,
+				widget_name: "translation",
+				name: "opus-mt-zh-en.safetensors",
+				folder: "translation",
+			});
+		}
+		if (graphNode?.type === "GJJ_CLIPPromptEncodePanel") {
+			const translationWidget = graphNode.widgets?.find((widget) => widget?.name === "translation_enabled");
+			const savedValues = graphNode?.properties?.gjj_clip_prompt_encode_panel_values;
+			const translationValue = translationWidget?.value ?? savedValues?.translation_enabled;
+			if (translationValue === true || String(translationValue || "").toLowerCase() === "true") {
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: "translation",
+					name: "opus-mt-zh-en.safetensors",
+					folder: "translation",
+				});
+			}
+		}
 		for (const widget of graphNode?.widgets || []) {
 			const widgetName = inferWidgetKind(widget?.name) || "auto";
 			collectStructuredModels(widget?.value, graphNode, items);
@@ -202,15 +234,119 @@ function createPanel(node) {
 	copyAll.textContent = "📋";
 	copyAll.title = "复制完整统计文本";
 	copyAll.style.cssText = refresh.style.cssText + "flex:0 0 36px;";
-	toolbar.append(refresh, copyAll);
+	const sortButtons = {
+		directory: document.createElement("button"),
+		size: document.createElement("button"),
+		node: document.createElement("button"),
+	};
+	const sortState = {
+		field: "directory",
+		directions: { directory: 1, size: 1, node: 1 },
+	};
+	for (const [field, button] of Object.entries(sortButtons)) {
+		button.type = "button";
+		button.textContent = field === "directory" ? "📂" : (field === "size" ? "💾" : "☋");
+		button.style.cssText = refresh.style.cssText + "flex:0 0 36px;font-size:16px;transition:background .15s,border-color .15s,box-shadow .15s;";
+	}
+	toolbar.append(refresh, sortButtons.directory, sortButtons.size, sortButtons.node, copyAll);
 
 	const content = document.createElement("div");
 	content.textContent = "点击“统计当前工作流”读取所有节点使用的模型。";
 	root.append(toolbar, content);
 
+	const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+	const modelNodeKey = (model) => {
+		const usedBy = Array.isArray(model?.used_by) ? model.used_by.filter(Boolean) : [];
+		return String(usedBy[0] || model?.node_title || model?.node_type || model?.node_id || "");
+	};
+	const locateWorkflowNode = (title) => {
+		const targetTitle = String(title || "");
+		const target = (app.graph?._nodes || []).find((graphNode) =>
+			graphNode?.type !== NODE_NAME
+			&& (
+				String(graphNode?.title || "") === targetTitle
+				|| String(graphNode?.type || "") === targetTitle
+			));
+		if (!target) return false;
+		try {
+			app.canvas?.selectNode?.(target, false);
+			app.canvas?.centerOnNode?.(target);
+			app.canvas?.setDirty?.(true, true);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const compareModels = (left, right, field, direction) => {
+		let result = 0;
+		if (field === "size") {
+			result = Number(left?.size_bytes || 0) - Number(right?.size_bytes || 0);
+		} else if (field === "node") {
+			result = collator.compare(modelNodeKey(left), modelNodeKey(right));
+		}
+		if (!result) result = collator.compare(String(left?.name || ""), String(right?.name || ""));
+		return result * direction;
+	};
+	const sortedGroups = (report) => {
+		const groups = (report?.groups || []).map((group) => ({
+			...group,
+			models: [...(group.models || [])],
+		}));
+		const direction = sortState.directions.directory || 1;
+		groups.sort((left, right) => collator.compare(
+			String(left?.folder || ""),
+			String(right?.folder || ""),
+		) * direction);
+		for (const group of groups) {
+			group.models.sort((left, right) => compareModels(left, right, "directory", direction));
+		}
+		return groups;
+	};
+	const flattenedModels = (report) => (report?.groups || []).flatMap((group) =>
+		(group.models || []).map((model) => ({ ...model, folder: group.folder })));
+	const sizeModels = (report) => flattenedModels(report).sort((left, right) =>
+		compareModels(left, right, "size", sortState.directions.size || 1));
+	const nodeGroups = (report) => {
+		const groups = new Map();
+		for (const model of flattenedModels(report)) {
+			const usedBy = Array.isArray(model.used_by) && model.used_by.length
+				? model.used_by.filter(Boolean)
+				: [modelNodeKey(model) || "未标记使用节点"];
+			for (const nodeTitle of usedBy) {
+				if (!groups.has(nodeTitle)) groups.set(nodeTitle, []);
+				groups.get(nodeTitle).push(model);
+			}
+		}
+		const direction = sortState.directions.node || 1;
+		return [...groups.entries()]
+			.sort(([left], [right]) => collator.compare(left, right) * direction)
+			.map(([title, models]) => ({
+				title,
+				models: models.sort((left, right) =>
+					collator.compare(String(left?.name || ""), String(right?.name || "")) * direction),
+			}));
+	};
+	const updateSortButtons = () => {
+		const labels = { directory: "目录", size: "文件大小", node: "使用节点" };
+		for (const [field, button] of Object.entries(sortButtons)) {
+			const active = sortState.field === field;
+			const ascending = sortState.directions[field] > 0;
+			button.title = `按${labels[field]}${ascending ? "升序" : "降序"}排列${active ? "（当前）" : ""}；点击${active ? "切换方向" : "启用排序"}`;
+			button.setAttribute("aria-pressed", String(active));
+			button.dataset.direction = ascending ? "ascending" : "descending";
+			button.style.borderColor = active ? (ascending ? "#71D6C1" : "#F2A85E") : "#B79A5B";
+			button.style.background = active ? (ascending ? "#1F6259" : "#74451E") : "#514123";
+			button.style.color = active ? "#FFFFFF" : "#FFF3D8";
+			button.style.boxShadow = active
+				? `inset 0 -3px 0 ${ascending ? "#9CF2DF" : "#FFD09A"}`
+				: "none";
+		}
+	};
+
 	function render(report) {
 		node.__gjjWorkflowModelReport = report;
 		node.__gjjRenderWorkflowModelReport = render;
+		updateSortButtons();
 		content.replaceChildren();
 		const link = document.createElement("a");
 		link.href = report.download_url;
@@ -220,55 +356,118 @@ function createPanel(node) {
 		link.style.cssText = "display:inline-block;color:#6ecbff;font-size:20px;line-height:1.35;font-weight:800;text-decoration:none;margin-bottom:4px;";
 		content.append(link);
 
-		const top = document.createElement("div");
-		top.textContent = `📁 ComfyUI/\n└──📁 models/`;
-		top.style.whiteSpace = "pre";
-		content.append(top);
-
-		for (const group of report.groups || []) {
-			const folder = document.createElement("div");
-			folder.textContent = `　　└──📁 ${group.folder}/`;
-			folder.style.color = "#F2E4C5";
-			content.append(folder);
-			for (const model of group.models || []) {
-				const row = document.createElement("div");
-				const renderModelRow = () => {
-					row.replaceChildren();
-					const name = document.createElement("span");
-					name.textContent = `　　　　└──${model.icon}${model.name}`;
-					row.append(name);
-					if (model.size_text) {
-						const size = document.createElement("span");
-						size.textContent = `  [${model.size_text}]`;
-						size.style.cssText = "color:#76D7FF;font-weight:700;";
-						row.append(size);
-					}
-					if (!model.exists) {
-						const missing = document.createElement("span");
-						missing.textContent = "  ❌ 缺失";
-						missing.style.color = "#FF565F";
-						row.append(missing);
-					}
-				};
-				renderModelRow();
-				const usedBy = Array.isArray(model.used_by) ? model.used_by.filter(Boolean) : [];
-				row.title = model.empty
-					? "空模型项"
-					: `${usedBy.length ? `使用节点：\n${usedBy.map((title) => `• ${title}`).join("\n")}\n\n` : ""}双击复制：${model.name}`;
-				row.style.cssText = [
-					"white-space:nowrap", "overflow:hidden", "text-overflow:ellipsis",
-					model.exists ? "color:#e2e9ed" : "color:#ff565f;font-weight:700",
-					model.empty ? "opacity:.7" : "cursor:copy",
-				].join(";");
-				if (!model.empty) {
-					row.addEventListener("dblclick", async (event) => {
-						event.stopPropagation();
-						const ok = await copyText(model.name);
-						row.textContent = ok ? `　　　　└──✅ 已复制 ${model.name}` : `　　　　└──❌ 复制失败 ${model.name}`;
-						setTimeout(renderModelRow, 900);
-					});
+		const appendModelRow = (model, {
+			prefix = "　　　　└──",
+			showSizeFirst = false,
+			showFolder = false,
+		} = {}) => {
+			const row = document.createElement("div");
+			const renderModelRow = () => {
+				row.replaceChildren();
+				if (showSizeFirst) {
+					const size = document.createElement("span");
+					size.textContent = `${model.size_text || "0 B"}`.padStart(10, " ");
+					size.style.cssText = "display:inline-block;min-width:82px;color:#76D7FF;font-weight:700;";
+					row.append(size);
 				}
-				content.append(row);
+				const name = document.createElement("span");
+				name.textContent = `${prefix}${model.icon}${model.name}`;
+				row.append(name);
+				if (!showSizeFirst && model.size_text) {
+					const size = document.createElement("span");
+					size.textContent = `  [${model.size_text}]`;
+					size.style.cssText = "color:#76D7FF;font-weight:700;";
+					row.append(size);
+				}
+				if (showFolder) {
+					const folder = document.createElement("span");
+					folder.textContent = `  📁 ${model.folder || "models"}/`;
+					folder.style.cssText = "color:#D7BE86;";
+					row.append(folder);
+				}
+				if (!model.exists) {
+					const missing = document.createElement("span");
+					missing.textContent = "  ❌ 缺失";
+					missing.style.color = "#FF565F";
+					row.append(missing);
+				}
+			};
+			renderModelRow();
+			const usedBy = Array.isArray(model.used_by) ? model.used_by.filter(Boolean) : [];
+			row.title = model.empty
+				? "空模型项"
+				: `${usedBy.length ? `使用节点：\n${usedBy.map((title) => `• ${title}`).join("\n")}\n\n` : ""}双击复制：${model.name}`;
+			row.style.cssText = [
+				"white-space:nowrap", "overflow:hidden", "text-overflow:ellipsis",
+				model.exists ? "color:#e2e9ed" : "color:#ff565f;font-weight:700",
+				model.empty ? "opacity:.7" : "cursor:copy",
+			].join(";");
+			if (!model.empty) {
+				row.addEventListener("dblclick", async (event) => {
+					event.stopPropagation();
+					const ok = await copyText(model.name);
+					row.textContent = ok ? `✅ 已复制 ${model.name}` : `❌ 复制失败 ${model.name}`;
+					setTimeout(renderModelRow, 900);
+				});
+			}
+			content.append(row);
+		};
+
+		if (sortState.field === "directory") {
+			const top = document.createElement("div");
+			top.textContent = `📁 ComfyUI/\n└──📁 models/`;
+			top.style.whiteSpace = "pre";
+			content.append(top);
+			for (const group of sortedGroups(report)) {
+				const folder = document.createElement("div");
+				folder.textContent = `　　└──📁 ${group.folder}/`;
+				folder.style.color = "#F2E4C5";
+				content.append(folder);
+				for (const model of group.models || []) appendModelRow(model);
+			}
+		} else if (sortState.field === "size") {
+			const heading = document.createElement("div");
+			heading.textContent = `💾 全部模型 · 按文件大小${sortState.directions.size > 0 ? "升序" : "降序"}`;
+			heading.style.cssText = "color:#F2E4C5;font-weight:800;margin-bottom:3px;";
+			content.append(heading);
+			for (const model of sizeModels(report)) {
+				appendModelRow(model, { prefix: "  ", showSizeFirst: true, showFolder: true });
+			}
+		} else {
+			const heading = document.createElement("div");
+			heading.textContent = `☋ 使用节点 · ${sortState.directions.node > 0 ? "升序" : "降序"}`;
+			heading.style.cssText = "color:#F2E4C5;font-weight:800;margin-bottom:3px;";
+			content.append(heading);
+			for (const group of nodeGroups(report)) {
+				const nodeHeading = document.createElement("div");
+				nodeHeading.style.cssText = "display:flex;align-items:center;gap:5px;margin-top:4px;color:#F1D49A;font-weight:800;";
+				const nodeTitle = document.createElement("span");
+				nodeTitle.textContent = `　☋ ${group.title}`;
+				nodeTitle.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+				const locate = document.createElement("button");
+				locate.type = "button";
+				locate.textContent = "📍";
+				locate.title = `定位到节点：${group.title}`;
+				locate.style.cssText = "flex:0 0 25px;width:25px;height:22px;padding:0;border:1px solid #B79A5B;border-radius:5px;background:#514123;color:#FFF3D8;cursor:pointer;";
+				for (const eventName of ["pointerdown", "mousedown"]) {
+					locate.addEventListener(eventName, (event) => event.stopPropagation());
+				}
+				locate.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					const found = locateWorkflowNode(group.title);
+					locate.textContent = found ? "📍" : "❌";
+					locate.style.borderColor = found ? "#71D6C1" : "#FF7078";
+					setTimeout(() => {
+						locate.textContent = "📍";
+						locate.style.borderColor = "#B79A5B";
+					}, 900);
+				});
+				nodeHeading.append(nodeTitle, locate);
+				content.append(nodeHeading);
+				for (const model of group.models) {
+					appendModelRow(model, { prefix: "　　└──", showFolder: true });
+				}
 			}
 		}
 		if (!(report.groups || []).length) {
@@ -312,6 +511,18 @@ function createPanel(node) {
 	}
 
 	refresh.addEventListener("click", refreshReport);
+	for (const [field, button] of Object.entries(sortButtons)) {
+		button.addEventListener("click", () => {
+			if (sortState.field === field) {
+				sortState.directions[field] *= -1;
+			} else {
+				sortState.field = field;
+				sortState.directions[field] = 1;
+			}
+			updateSortButtons();
+			if (node.__gjjWorkflowModelReport) render(node.__gjjWorkflowModelReport);
+		});
+	}
 	copyAll.addEventListener("click", async () => {
 		const text = node.__gjjWorkflowModelReport?.text || "";
 		if (!text) return;
@@ -324,6 +535,7 @@ function createPanel(node) {
 		if (snapshot?.groups && typeof snapshot.text === "string") render(snapshot);
 		else refreshReport();
 	}, 200);
+	updateSortButtons();
 	return root;
 }
 
