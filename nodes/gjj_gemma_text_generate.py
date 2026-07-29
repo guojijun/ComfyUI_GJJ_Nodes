@@ -430,9 +430,10 @@ def _generate_text(
         "thinking": thinking_enabled,
         "use_default_template": default_template_enabled,
     }
-    try:
+
+    def execute_official(kwargs: dict[str, Any]) -> tuple[Any, float]:
         signature = inspect.signature(TextGenerate.execute)
-        official_kwargs = {key: value for key, value in official_kwargs.items() if key in signature.parameters}
+        usable_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
         with _OFFICIAL_TEXT_GENERATE_LOCK:
             server = getattr(PromptServer, "instance", None) if PromptServer is not None else None
             had_prompt_id = bool(server is not None and hasattr(server, "last_prompt_id"))
@@ -441,7 +442,7 @@ def _generate_text(
                 setattr(server, "last_prompt_id", f"gjj_gemma_{time.time_ns()}")
             try:
                 official_started = time.perf_counter()
-                official_output = TextGenerate.execute(**official_kwargs)
+                output = TextGenerate.execute(**usable_kwargs)
                 official_seconds = time.perf_counter() - official_started
             finally:
                 if server is not None:
@@ -449,14 +450,20 @@ def _generate_text(
                         setattr(server, "last_prompt_id", previous_prompt_id)
                     elif hasattr(server, "last_prompt_id"):
                         delattr(server, "last_prompt_id")
+        return output, official_seconds
+
+    try:
+        official_output, official_seconds = execute_official(official_kwargs)
     except Exception as exc:
         raise RuntimeError(f"调用 ComfyUI 官方 TextGenerate 失败：{exc}") from exc
 
-    official_result = getattr(official_output, "result", official_output)
-    if isinstance(official_result, (tuple, list)):
-        raw_text = str(official_result[0] if official_result else "")
-    else:
-        raw_text = str(official_result or "")
+    def output_text(output: Any) -> str:
+        result = getattr(output, "result", output)
+        if isinstance(result, (tuple, list)):
+            return str(result[0] if result else "")
+        return str(result or "")
+
+    raw_text = output_text(official_output)
     print(
         "[GJJ GemmaTextGenerate] 官方 TextGenerate 耗时: "
         f"total={official_seconds:.2f}s "
@@ -469,13 +476,46 @@ def _generate_text(
     if not thinking_enabled:
         text = _clean_no_think_output(text, effective_prompt)
     if not str(text or "").strip():
+        retry_prompt = (
+            f"{effective_prompt.rstrip()}\n\n"
+            "请直接给出最终正文；不要输出思考、分析、推理标签或空回答。"
+        )
+        retry_kwargs = dict(official_kwargs)
+        retry_kwargs["prompt"] = retry_prompt
+        retry_sampling = dict(sampling_payload)
+        retry_sampling["seed"] = (int(seed) + 1) & 0xFFFFFFFFFFFFFFFF
+        retry_kwargs["sampling_mode"] = retry_sampling
+        print(
+            "[GJJ GemmaTextGenerate] 首次输出无可用正文，自动重试一次最终正文生成。",
+            flush=True,
+        )
+        try:
+            retry_output, retry_seconds = execute_official(retry_kwargs)
+        except Exception as exc:
+            raise RuntimeError(f"首次输出为空，自动重试失败：{exc}") from exc
+        retry_raw_text = output_text(retry_output)
+        retry_text = _strip_after_think_end(retry_raw_text)
+        if not thinking_enabled:
+            retry_text = _clean_no_think_output(retry_text, retry_prompt)
+        print(
+            "[GJJ GemmaTextGenerate] 官方 TextGenerate 重试耗时: "
+            f"total={retry_seconds:.2f}s raw_chars={len(retry_raw_text)}",
+            flush=True,
+        )
+        if str(retry_text or "").strip():
+            return retry_text
         print(
             "[GJJ GemmaTextGenerate] 输出为空诊断: "
-            f"raw_length={len(raw_text)} "
+            f"raw_length={len(raw_text)} retry_raw_length={len(retry_raw_text)} "
             f"has_think_end={bool(re.search(r'</think\\s*>', raw_text, flags=re.IGNORECASE))} "
+            f"retry_has_think_end={bool(re.search(r'</think\\s*>', retry_raw_text, flags=re.IGNORECASE))} "
             f"official_output_type={type(official_output).__name__}",
             flush=True,
         )
+        had_generated_content = bool(raw_text.strip() or retry_raw_text.strip())
+        if had_generated_content:
+            raise RuntimeError("官方 TextGenerate 连续两次只返回思考过程，关闭思考后正文为空。")
+        raise RuntimeError("官方 TextGenerate 连续两次返回空内容，模型在生成首个正文 token 前提前结束。")
     return text
 
 
@@ -1133,6 +1173,7 @@ class GJJ_GemmaTextGenerate:
             load_time = time.time() - start_load
             print(
                 f"[GJJ GemmaTextGenerate] CLIP 模型加载耗时: {load_time:.2f} 秒 | "
+                f"model={_basename(clip_name)} clip_type={clip_type or 'stable_diffusion'} "
                 f"device_preference={device_preference} effective_device={effective_device} "
                 f"keep_model={keep_loaded} cache_hit={cache_hit}",
                 flush=True,
@@ -1166,8 +1207,9 @@ class GJJ_GemmaTextGenerate:
             )
             if not str(text or "").strip():
                 raise RuntimeError(
-                    "官方 TextGenerate 返回的内容只有思考过程，关闭思考后的正文为空。"
-                    "请确认模型设置中的 CLIP 类型为 stable_diffusion，并重新执行。"
+                    "官方 TextGenerate 连续两次返回空内容。"
+                    f"当前模型：{_basename(clip_name)}；CLIP 类型：{clip_type or 'stable_diffusion'}。"
+                    "请确认模型文件与 CLIP 类型匹配，或改用已验证可工作的 Qwen3.5 文本编码器。"
                 )
             gen_time = time.time() - start_gen
             total_time = time.time() - start_total

@@ -7179,7 +7179,10 @@ api.addEventListener("gjj_lazy_image_studio_test_preview", (event) => {
 	}
 	const images = detail.gjj_images || detail.images || detail.ui?.gjj_images || detail.ui?.images;
 	if (images) {
-		updateImagePreview(node, images);
+		const nextImages = detail.append
+			? [...(node.__gjjLazyPreview?.items || []), ...images]
+			: images;
+		updateImagePreview(node, nextImages);
 	}
 });
 

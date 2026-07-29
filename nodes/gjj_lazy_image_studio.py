@@ -7,6 +7,7 @@ import os
 import re
 import time
 import weakref
+from pathlib import Path
 from typing import Any
 
 import comfy.lora
@@ -228,7 +229,14 @@ def _send_soft_test_error(unique_id: Any, text: str) -> None:
         pass
 
 
-def _send_test_preview(unique_id: Any, image: torch.Tensor) -> None:
+def _send_test_preview(
+    unique_id: Any,
+    image: torch.Tensor,
+    *,
+    append: bool = False,
+    prompt_index: int | None = None,
+    prompt_count: int | None = None,
+) -> None:
     if not unique_id:
         return
     try:
@@ -241,6 +249,13 @@ def _send_test_preview(unique_id: Any, image: torch.Tensor) -> None:
                 "node": str(unique_id),
                 "gjj_images": preview_images,
                 "images": _standard_queue_images(preview_images),
+                "append": bool(append),
+                "prompt_index": (
+                    int(prompt_index) if prompt_index is not None else None
+                ),
+                "prompt_count": (
+                    int(prompt_count) if prompt_count is not None else None
+                ),
             },
         )
     except Exception:
@@ -625,6 +640,64 @@ def _is_krea2_family(
         or "krea2" in preset_text
         or "krea2turbo" in preset_text
     )
+
+
+def _without_krea2_edit_lora(value: Any) -> str:
+    """Remove the edit-only LoRA while preserving every other configured LoRA."""
+    if not str(value or "").strip():
+        return str(value or "")
+    try:
+        normalized = normalize_lora_chain_data(value)
+        rows = json.loads(normalized)
+    except Exception:
+        return str(value or "")
+    if not isinstance(rows, list):
+        return str(value or "")
+    edit_basename = Path(KREA2_IDENTITY_EDIT_LORA).name.casefold()
+    filtered = [
+        row
+        for row in rows
+        if not (
+            isinstance(row, dict)
+            and Path(str(row.get("name", "")).replace("\\", "/")).name.casefold()
+            == edit_basename
+        )
+    ]
+    return json.dumps(filtered, ensure_ascii=False)
+
+
+def _configured_krea2_edit_lora_strength(*values: Any) -> float:
+    edit_basename = Path(KREA2_IDENTITY_EDIT_LORA).name.casefold()
+    resolved: float | None = None
+    for value in values:
+        if not str(value or "").strip():
+            continue
+        try:
+            rows = json.loads(normalize_lora_chain_data(value))
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_basename = Path(
+                str(row.get("name", "")).replace("\\", "/")
+            ).name.casefold()
+            if row_basename != edit_basename:
+                continue
+            if row.get("enabled", True) is False:
+                resolved = 0.0
+                continue
+            try:
+                resolved = float(row.get("strength", 1.0))
+            except (TypeError, ValueError):
+                resolved = 1.0
+    return 1.0 if resolved is None else resolved
+
+
+def _is_empty_scene_prompt(value: Any) -> bool:
+    return "空镜" in str(value or "").replace(" ", "")
 
 
 def _is_ltx_family(
@@ -3795,6 +3868,24 @@ class GJJ_LazyImageStudio:
                 f"[GJJ] LazyImageStudio 实际接收图片：{len(pairs)} 张"
                 + (f"，张量尺寸 {', '.join(input_shapes)}" if input_shapes else "")
             )
+            is_krea2_runtime = _is_krea2_family(
+                unet_name,
+                resolved_clip_type,
+                preset,
+            )
+            krea2_edit_lora_strength = 1.0
+            if is_krea2_runtime:
+                krea2_edit_lora_strength = _configured_krea2_edit_lora_strength(
+                    lora_data,
+                    lora_chain_config,
+                )
+                lora_data = _without_krea2_edit_lora(lora_data)
+                lora_chain_config = _without_krea2_edit_lora(lora_chain_config)
+            if is_krea2_runtime and not pairs:
+                _send_status(
+                    unique_id,
+                    "Krea2 未收到参考图：切换为文生图，并跳过身份编辑 LoRA。",
+                )
             if use_input_image_size and pairs:
                 first_image = pairs[0].get("image")
                 if isinstance(first_image, torch.Tensor) and first_image.ndim >= 3:
@@ -3858,6 +3949,7 @@ class GJJ_LazyImageStudio:
                     "force_empty_latent_reference": _as_bool(force_empty_latent_reference),
                     "use_input_image_size": bool(use_input_image_size),
                     "pairs": _pairs_signature(pairs),
+                    "krea2_edit_lora_strength": float(krea2_edit_lora_strength),
                     "mask": _tensor_signature(mask) if mask is not None else "",
                     "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 }
@@ -3954,6 +4046,12 @@ class GJJ_LazyImageStudio:
                 local_width = int(width)
                 local_height = int(height)
                 task_pairs = _clone_image_pairs_for_task(pairs)
+                if is_krea2_runtime and _is_empty_scene_prompt(prompt_text):
+                    task_pairs = []
+                    _send_status(
+                        unique_id,
+                        f"Krea2 空镜{status_suffix}：忽略人物参考图，使用纯文生图。",
+                    )
                 task_mask = (
                     mask.detach().clone().contiguous()
                     if isinstance(mask, torch.Tensor)
@@ -4039,14 +4137,6 @@ class GJJ_LazyImageStudio:
                     ordered_krea2_pairs = _reorder_pairs_by_main_index(
                         task_pairs, int(main_image_index)
                     )
-                    configured_lora_text = (
-                        f"{str(lora_data or '')}\n{str(lora_chain_config or '')}"
-                    ).lower()
-                    identity_lora_strength = (
-                        0.0
-                        if KREA2_IDENTITY_EDIT_LORA.lower() in configured_lora_text
-                        else 1.0
-                    )
                     _send_status(
                         unique_id,
                         f"4/6 按 Krea2 Identity Edit 工作流编码{status_suffix}"
@@ -4067,7 +4157,7 @@ class GJJ_LazyImageStudio:
                         width=local_width,
                         height=local_height,
                         batch_size=int(batch_size),
-                        identity_lora_strength=identity_lora_strength,
+                        identity_lora_strength=float(krea2_edit_lora_strength),
                     )
                     krea2_reference_sample = True
                 elif task_pairs and resolved_clip_type == "flux2":
@@ -4294,6 +4384,18 @@ class GJJ_LazyImageStudio:
                     if repeat_count > 1:
                         generated_image = generated_image.repeat(repeat_count, 1, 1, 1)
                 generated_images.append(generated_image)
+                _send_test_preview(
+                    unique_id,
+                    generated_image,
+                    append=prompt_index > 0,
+                    prompt_index=prompt_index,
+                    prompt_count=len(prompt_items),
+                )
+                if len(prompt_items) > 1:
+                    _send_status(
+                        unique_id,
+                        f"第 {prompt_index + 1}/{len(prompt_items)} 张已完成并显示预览",
+                    )
             image = torch.cat(generated_images, dim=0) if len(generated_images) > 1 else generated_images[0]
             width = int(final_width)
             height = int(final_height)
