@@ -7,6 +7,7 @@ import gc
 import os
 import secrets
 import threading
+from pathlib import Path
 from typing import Any
 
 try:
@@ -821,6 +822,99 @@ def _is_audio_media(media: Any | None) -> bool:
         )
     )
 
+def _character_library_notes() -> dict[str, str]:
+    if folder_paths is None:
+        return {}
+    root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / "character_library"
+    if not root.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for path in root.glob("*/manifest.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(data.get("name") or data.get("id") or path.parent.name)).strip()
+        notes = re.sub(r"\s+", " ", str(data.get("notes") or "")).strip()
+        for key in {name, str(data.get("id") or "").strip(), path.parent.name}:
+            if key:
+                result[key.casefold()] = notes
+    return result
+
+
+def _inject_character_notes(prompt: str) -> tuple[str, str]:
+    notes_by_name = _character_library_notes()
+    if not notes_by_name:
+        return str(prompt or ""), ""
+    detailed_lines: list[str] = []
+    seen: set[str] = set()
+
+    def replace_actor(match: re.Match) -> str:
+        name = str(match.group(1) or "").strip()
+        key = name.casefold()
+        if key not in notes_by_name:
+            return match.group(0)
+        notes = notes_by_name.get(key, "")
+        detailed = f"@{name}{f'（{notes}）' if notes else ''}"
+        if key not in seen:
+            seen.add(key)
+            detailed_lines.append(detailed)
+        return detailed
+
+    injected = re.sub(r"@([^\s，。！？、,.!?（）()：:；;]+)", replace_actor, str(prompt or ""))
+    if detailed_lines:
+        actor_names = [
+            re.match(r"^@([^（\s]+)", line).group(1)
+            for line in detailed_lines
+            if re.match(r"^@([^（\s]+)", line)
+        ]
+        actor_refs = "、".join(f"@{name}" for name in actor_names)
+        injected = (
+            f"{injected}\n\n"
+            f"【参与演员硬性约束】本次共有 {len(actor_names)} 名演员：{actor_refs}。"
+            "生成内容必须让上述每一名演员明确参与并至少出现一次；"
+            "不得因“三角关系”、篇幅、分镜数量或其他叙事描述而省略、合并、替换任何一人。"
+            "人物括号内备注仅供后台理解角色外观，禁止在生成文本中单独输出人物表、角色备注或逐条复述这些备注。"
+        )
+    return injected, "\n".join(detailed_lines)
+
+
+def _merge_selected_actor_refs(prompt: str, selected_actors: Any) -> str:
+    source = str(prompt or "")
+    if not isinstance(selected_actors, list):
+        return source
+    existing = {
+        str(match.group(1) or "").strip().casefold()
+        for match in re.finditer(r"@([^\s，。！？、,.!?（）()：:；;]+)", source)
+    }
+    missing: list[str] = []
+    for value in selected_actors:
+        name = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(value or "")).strip().lstrip("@")
+        key = name.casefold()
+        if not name or key in existing:
+            continue
+        existing.add(key)
+        missing.append(f"@{name}")
+    if not missing:
+        return source
+    return f"{source}\n参与演员：{' '.join(missing)}"
+
+
+def _strip_leading_character_table(text: str, character_table: str) -> str:
+    table_lines = {
+        line.strip()
+        for line in str(character_table or "").splitlines()
+        if line.strip()
+    }
+    if not table_lines:
+        return str(text or "")
+    lines = str(text or "").lstrip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip() in table_lines):
+        lines.pop(0)
+    return "\n".join(lines).lstrip()
+
 
 class GJJ_GemmaTextGenerate:
     CATEGORY = "GJJ/视频/文本生成"
@@ -832,9 +926,12 @@ class GJJ_GemmaTextGenerate:
         else _ENVIRONMENT_REPORT.get("warning_message", NODE_DESCRIPTION)
     )
     SEARCH_ALIASES = ["TextGenerate", "Generate Text", "Gemma", "ideogram4", "文本生成", "加载CLIP"]
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("生成文本",)
-    OUTPUT_TOOLTIPS = ("由内部加载的 Gemma/CLIP 文本生成模型生成的文本。",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("生成文本", "角色表")
+    OUTPUT_TOOLTIPS = (
+        "由内部加载的 Gemma/CLIP 文本生成模型生成的文本，不包含后台人物备注表。",
+        "提示词中匹配到角色库 @人物 时，逐行输出 @人名（人物备注）；没有匹配人物时输出空字符串。",
+    )
     GJJ_HELP = build_node_help_payload(
         description=NODE_DESCRIPTION,
         dependencies=[
@@ -1186,9 +1283,14 @@ class GJJ_GemmaTextGenerate:
                 if str(sampling_mode or "on") == "on" and configured_seed == 0
                 else configured_seed
             )
+            prompt_with_selected_actors = _merge_selected_actor_refs(
+                prompt,
+                saved_values.get("selected_actors", []),
+            )
+            prompt_with_character_notes, character_table = _inject_character_notes(prompt_with_selected_actors)
             text = _generate_text(
                 clip,
-                str(prompt or "") if audio_only else _merged_generation_prompt(system_prompt, prompt),
+                str(prompt_with_character_notes or "") if audio_only else _merged_generation_prompt(system_prompt, prompt_with_character_notes),
                 _coerce_int(max_length, 512, 1, 32768),
                 sampling_mode,
                 image=image,
@@ -1211,6 +1313,7 @@ class GJJ_GemmaTextGenerate:
                     f"当前模型：{_basename(clip_name)}；CLIP 类型：{clip_type or 'stable_diffusion'}。"
                     "请确认模型文件与 CLIP 类型匹配，或改用已验证可工作的 Qwen3.5 文本编码器。"
                 )
+            text = _strip_leading_character_table(text, character_table)
             gen_time = time.time() - start_gen
             total_time = time.time() - start_total
             print(f"[GJJ GemmaTextGenerate] 文本生成耗时: {gen_time:.2f} 秒 | 总耗时: {total_time:.2f} 秒 | thinking={thinking}", flush=True)
@@ -1229,7 +1332,7 @@ class GJJ_GemmaTextGenerate:
                         "model_size": _format_model_size(_find_text_encoder_path(clip_name)),
                     }],
                 },
-                "result": (text,),
+                "result": (text, character_table),
             }
         except Exception as exc:
             report = getattr(exc, "gjj_report", None)

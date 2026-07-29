@@ -851,6 +851,18 @@ def _register_gjj_character_library_api():
 			next_item["size"] = stat.st_size
 			next_item["url"] = view_url(character_id, item.get("file", ""), stat.st_mtime)
 			views.append(next_item)
+		def view_sort_rank(item: dict) -> int:
+			text = f"{item.get('label') or ''} {item.get('id') or ''}".lower()
+			if any(keyword in text for keyword in ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait")):
+				return 0
+			if any(keyword in text for keyword in ("正面", "正视", "全身", "front")):
+				return 1
+			if any(keyword in text for keyword in ("侧面", "左侧", "右侧", "侧视", "side", "profile")):
+				return 2
+			if any(keyword in text for keyword in ("背面", "背部", "后视", "back", "rear")):
+				return 3
+			return 4
+		views.sort(key=view_sort_rank)
 		data = dict(data)
 		data["views"] = views
 		def is_head_view(item: dict) -> bool:
@@ -1474,7 +1486,24 @@ def _register_gjj_character_library_api():
 		return write_manifest(manifest)
 
 	def save_view_image(character_id: str, label: str, image: Image.Image) -> dict:
-		return save_view_bytes(character_id, label, png_bytes(image))
+		rgba = image.convert("RGBA")
+		alpha = rgba.getchannel("A").point(lambda value: 255 if value > 10 else 0)
+		bbox = alpha.getbbox()
+		if bbox:
+			subject_width = max(0, bbox[2] - bbox[0])
+			subject_height = max(0, bbox[3] - bbox[1])
+		else:
+			subject_width, subject_height = rgba.size
+		if str(label or "").strip() == "自动分类":
+			if subject_width >= subject_height:
+				resolved_label = "大头照"
+			elif subject_height >= subject_width * 1.6:
+				resolved_label = "全身"
+			else:
+				resolved_label = "人物资产"
+		else:
+			resolved_label = "大头照" if subject_width >= subject_height else label
+		return save_view_bytes(character_id, resolved_label, png_bytes(rgba))
 
 	@server.routes.get("/gjj/character_library/list")
 	async def gjj_character_library_list(request):
@@ -1815,6 +1844,7 @@ def _register_gjj_character_library_api():
 					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(fields.get("labels") or fields.get("views") or "")
 				prompt_labels = parse_view_labels(fields.get("prompt_labels") or "")
+				split_generated_sheet = str(fields.get("split_generated_sheet") or "").strip().lower() in {"1", "true", "yes", "on"}
 				multiview_unet_override = str(fields.get("multiview_unet") or "").strip()
 				multiview_clip_override = str(fields.get("multiview_clip") or "").strip()
 				multiview_vae_override = str(fields.get("multiview_vae") or "").strip()
@@ -1837,6 +1867,7 @@ def _register_gjj_character_library_api():
 					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(data.get("labels") or data.get("views") or "")
 				prompt_labels = parse_view_labels(data.get("prompt_labels") or "")
+				split_generated_sheet = str(data.get("split_generated_sheet") or "").strip().lower() in {"1", "true", "yes", "on"}
 				multiview_unet_override = str(data.get("multiview_unet") or "").strip()
 				multiview_clip_override = str(data.get("multiview_clip") or "").strip()
 				multiview_vae_override = str(data.get("multiview_vae") or "").strip()
@@ -1848,6 +1879,8 @@ def _register_gjj_character_library_api():
 			manifest = read_manifest(character_id)
 			manifest["name"] = name or manifest.get("name") or character_id
 			write_manifest(manifest)
+			uploaded_reference_image = image.copy() if image is not None else None
+			preserved_headshot = None
 			reference_count = 1
 			if image is None:
 				reference_images = []
@@ -1868,6 +1901,18 @@ def _register_gjj_character_library_api():
 					raise RuntimeError("缺少大头照：请先添加“大头照”视图，再用它自动生成其它角度。")
 				reference_count = len(reference_images)
 				image = make_character_reference_collage(reference_images)
+
+			if uploaded_reference_image is not None:
+				matted_references = comprehensive_matting_cutouts([uploaded_reference_image])
+				if matted_references:
+					reference_rgba = matted_references[0].convert("RGBA")
+					reference_bbox = reference_rgba.getchannel("A").point(lambda value: 255 if value > 10 else 0).getbbox()
+					if reference_bbox:
+						reference_width = reference_bbox[2] - reference_bbox[0]
+						reference_height = reference_bbox[3] - reference_bbox[1]
+						if reference_width >= reference_height:
+							preserved_headshot = reference_rgba
+							save_view_image(character_id, "大头照", reference_rgba)
 
 			try:
 				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor, _tensor_to_pil_list
@@ -2098,10 +2143,21 @@ def _register_gjj_character_library_api():
 			generated = _tensor_to_pil_list(batch_images)
 			if not generated:
 				raise RuntimeError("多视图节点没有返回单图批量图片。")
-			views = comprehensive_matting_cutouts(generated)
-			labels = output_labels if requested_labels else labels_for_multiview(len(views))
+			if split_generated_sheet:
+				matted_sheets = comprehensive_matting_cutouts([generated[0]])
+				sheet = matted_sheets[0] if matted_sheets else generated[0]
+				split_views = split_transparent_character_sheet(sheet)
+				if len(split_views) < 3:
+					raise RuntimeError(f"三视图抠图后只分割出 {len(split_views)} 个主体，至少需要 3 个。")
+				views = split_views[:3]
+				labels = ["正面", "侧面", "背面"]
+			else:
+				views = comprehensive_matting_cutouts(generated)
+				labels = output_labels if requested_labels else labels_for_multiview(len(views))
 			for label, view in zip(labels, views):
 				save_view_image(character_id, label, view)
+			if preserved_headshot is not None:
+				save_view_image(character_id, "大头照", preserved_headshot)
 			return web.json_response({
 				"ok": True,
 				"count": len(views),

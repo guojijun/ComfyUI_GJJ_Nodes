@@ -5998,7 +5998,6 @@ app.registerExtension({
 		{ commandId: "GJJ.NodeArranger.SmartCycle", combo: { key: "a", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
 		{ commandId: "GJJ.NodeArranger.TopoMain", combo: { key: "t", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
 		{ commandId: "GJJ.NodeArranger.Horizontal", combo: { key: "h", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
-		{ commandId: "GJJ.NodeArranger.Grid", combo: { key: "g", ctrl: true, shift: true }, targetElementId: "graph-canvas" },
 		{ commandId: "GJJ.NodeArranger.ToggleCollapse", combo: { key: "a", ctrl: true, alt: true }, targetElementId: "graph-canvas" },
 		{ commandId: "GJJ.NodeArranger.GapLeft", combo: { key: "ArrowLeft", alt: true }, targetElementId: "graph-canvas" },
 		{ commandId: "GJJ.NodeArranger.GapRight", combo: { key: "ArrowRight", alt: true }, targetElementId: "graph-canvas" },

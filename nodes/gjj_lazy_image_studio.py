@@ -316,6 +316,69 @@ def _resolve_lazy_unet_model_name(name: Any) -> str:
     return value
 
 
+def _switch_image_unet_for_input(
+    unet_name: Any, *, has_input_images: bool
+) -> str:
+    current = str(unet_name or "").strip()
+    canonical = _canonical_model_text(current)
+    family = ""
+    is_edit_model = False
+    if "qwenimageedit2511" in canonical:
+        family = "qwen"
+        is_edit_model = True
+    elif "qwenimage2512" in canonical and "edit" not in canonical:
+        family = "qwen"
+    elif "booguimageeditturbo" in canonical:
+        family = "boogu"
+        is_edit_model = True
+    elif "booguimageturbo" in canonical and "edit" not in canonical:
+        family = "boogu"
+    if not family:
+        return current
+    wants_edit_model = bool(has_input_images)
+    if wants_edit_model == is_edit_model:
+        return current
+    desired_tokens = {
+        ("qwen", True): ("qwenimageedit2511", "qwen_image_edit_2511"),
+        ("qwen", False): ("qwenimage2512", "qwen_image_2512"),
+        ("boogu", True): ("booguimageeditturbo", "boogu_image_edit_turbo"),
+        ("boogu", False): ("booguimageturbo", "boogu_image_turbo"),
+    }
+    desired_token, desired_label = desired_tokens[(family, wants_edit_model)]
+    candidates = [
+        str(item)
+        for item in _list_lazy_unet_models()
+        if desired_token in _canonical_model_text(item)
+        and ("edit" in _canonical_model_text(item)) == wants_edit_model
+    ]
+    if not candidates:
+        raise RuntimeError(
+            f"LazyImageStudio 需要自动切换到 {desired_label}，"
+            "但 diffusion_models / unet_gguf 中未找到对应模型。"
+        )
+
+    def candidate_score(candidate: str) -> tuple[int, int]:
+        candidate_lower = candidate.replace("\\", "/").lower()
+        if "int4_convrot" in candidate_lower:
+            quant_priority = 4
+        elif "int8_convrot" in candidate_lower:
+            quant_priority = 3
+        elif "int4" in candidate_lower:
+            quant_priority = 2
+        elif "int8" in candidate_lower:
+            quant_priority = 1
+        else:
+            quant_priority = 0
+        return quant_priority, -len(candidate)
+
+    selected = max(candidates, key=candidate_score)
+    print(
+        "[GJJ] LazyImageStudio 根据图片输入自动切换 UNET："
+        f"{current} -> {selected}"
+    )
+    return selected
+
+
 def _is_convrot_quantized_model_name(name: Any) -> bool:
     normalized = str(name or "").replace("\\", "/").lower()
     return any(token in normalized for token in ("int4_convrot", "int8_convrot", "convrot_w4a4"))
@@ -3474,6 +3537,28 @@ class GJJ_LazyImageStudio:
                 lora_data = ""
 
         use_checkpoint_model = _is_checkpoint_model_source(model_source, ckpt_name)
+        pairs = [
+            pair
+            for pair in collect_image_pairs(
+                kwargs,
+                prompt_graph=prompt_graph,
+                unique_id=unique_id,
+                batch_source_images=batch_source_images,
+            )
+            if pair["image"] is not None
+        ]
+        if not use_checkpoint_model and not test_config_data:
+            original_unet_name = str(unet_name or "")
+            unet_name = _switch_image_unet_for_input(
+                unet_name,
+                has_input_images=bool(pairs),
+            )
+            if unet_name != original_unet_name:
+                _send_status(
+                    unique_id,
+                    f"{'检测到' if pairs else '未检测到'}输入图片，"
+                    f"已自动切换 UNET：{unet_name}",
+                )
         active_model_name = str(ckpt_name or "").strip() if use_checkpoint_model else str(unet_name or "").strip()
 
         lora_trigger_text = self._lora_trigger_text(lora_data, lora_chain_config)
@@ -3849,16 +3934,6 @@ class GJJ_LazyImageStudio:
                     or is_mage_flow_name(unet_name)
                 )
             )
-            pairs = [
-                pair
-                for pair in collect_image_pairs(
-                    kwargs,
-                    prompt_graph=prompt_graph,
-                    unique_id=unique_id,
-                    batch_source_images=batch_source_images,
-                )
-                if pair["image"] is not None
-            ]
             input_shapes = [
                 "x".join(str(int(size)) for size in pair["image"].shape)
                 for pair in pairs

@@ -12,7 +12,7 @@ import { api } from "/scripts/api.js";
 	const LIGHTBOX_ID = "gjj-character-library-lightbox";
 	const STYLE_ID = "gjj-character-library-style";
 	const ENDPOINT = "/gjj/character_library";
-	const VIEW_LABELS = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "动作"];
+	const CHARACTER_TRIPTYCH_PROMPT = "<sks>把图中角色生成正面、侧面、背面三视图，体型修长，白色背景，成人身材比例，保证人物服饰一致性";
 	const CUSTOM_VIEW_GROUPS = [
 		{
 			key: "azimuth",
@@ -69,6 +69,7 @@ import { api } from "/scripts/api.js";
 		status: "",
 		progress: 0,
 		progressVisible: false,
+		busy: false,
 		progressTimer: null,
 		panelPosition: null,
 		panelSize: null,
@@ -382,6 +383,15 @@ import { api } from "/scripts/api.js";
 #${BUTTON_ID}:hover,#${BUTTON_ID}.active{border-color:rgba(105,184,139,.85);background:rgba(36,55,44,.96);}
 #${PANEL_ID}{position:fixed;z-index:100000;width:min(920px,calc(100vw - 20px));height:min(680px,calc(100vh - 20px));min-width:min(560px,calc(100vw - 20px));min-height:min(420px,calc(100vh - 20px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);resize:both;display:none;grid-template-columns:minmax(260px,320px) 1fr;gap:0;border:1px solid #40525b;border-radius:8px;background:#0f171b;color:#e7f2f4;box-shadow:0 18px 46px rgba(0,0,0,.54);font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:auto;}
 #${PANEL_ID}.open{display:grid;}
+#${PANEL_ID}.busy .gjj-cl-sidebar,#${PANEL_ID}.busy .gjj-cl-main{filter:grayscale(.75);opacity:.42;}
+.gjj-cl-busy-mask{position:absolute;z-index:100020;inset:0;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(5,10,12,.48);backdrop-filter:blur(1.5px);cursor:wait;}
+#${PANEL_ID}.busy .gjj-cl-busy-mask{display:flex;}
+.gjj-cl-busy-card{width:min(440px,calc(100% - 32px));padding:18px;border:1px solid #69c995;border-radius:12px;background:rgba(12,24,27,.97);box-shadow:0 18px 44px rgba(0,0,0,.62);color:#effff7;text-align:center;}
+.gjj-cl-busy-title{font-size:17px;font-weight:900;letter-spacing:.03em;}
+.gjj-cl-busy-status{margin-top:8px;color:#c8ddd5;font-size:12px;line-height:1.45;overflow-wrap:anywhere;}
+.gjj-cl-busy-progress{height:14px;margin-top:14px;border:1px solid #41675a;border-radius:999px;background:#081115;overflow:hidden;}
+.gjj-cl-busy-progress-bar{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#42c978,#5ee0cf,#72bfff);box-shadow:0 0 14px rgba(94,224,207,.62);transition:width .22s ease;}
+.gjj-cl-busy-percent{margin-top:7px;color:#80e6bc;font-size:14px;font-weight:900;}
 .gjj-cl-sidebar{min-width:0;min-height:0;border-right:1px solid #263842;background:#111a1f;display:flex;flex-direction:column;}
 .gjj-cl-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:#0c1418;}
 .gjj-cl-head{display:flex;align-items:center;gap:6px;min-height:42px;padding:7px 8px;border-bottom:1px solid #263842;}
@@ -441,7 +451,7 @@ import { api } from "/scripts/api.js";
 .gjj-cl-voice-empty{padding:14px;color:#8fa4aa;text-align:center;font-size:12px;}
 .gjj-cl-voice-pop audio{width:100%;height:28px;}
 .gjj-cl-status{font-size:12px;color:#94aeb4;min-height:18px;}
-.gjj-cl-progress{height:4px;border-radius:999px;background:#17242a;overflow:hidden;display:none;}
+.gjj-cl-progress{height:10px;border-radius:999px;background:#17242a;overflow:hidden;display:none;}
 .gjj-cl-progress.open{display:block;}
 .gjj-cl-progress-bar{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#56c184,#77d7f2);transition:width .22s ease;}
 .gjj-cl-views{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:9px;}
@@ -486,7 +496,15 @@ import { api } from "/scripts/api.js";
 	function setStatus(text) {
 		state.status = String(text || "");
 		const el = document.querySelector(`#${PANEL_ID} .gjj-cl-status`);
+		const busyStatus = document.querySelector(`#${PANEL_ID} .gjj-cl-busy-status`);
 		if (el) el.textContent = state.status;
+		if (busyStatus) busyStatus.textContent = state.status || "正在处理角色素材，请稍候…";
+	}
+
+	function setBusy(value) {
+		state.busy = Boolean(value);
+		const panel = document.getElementById(PANEL_ID);
+		panel?.classList.toggle("busy", state.busy);
 	}
 
 	function setProgress(value, visible = true) {
@@ -494,12 +512,17 @@ import { api } from "/scripts/api.js";
 		state.progress = Math.max(0, Math.min(100, Number(value) || 0));
 		const box = document.querySelector(`#${PANEL_ID} .gjj-cl-progress`);
 		const bar = document.querySelector(`#${PANEL_ID} .gjj-cl-progress-bar`);
+		const busyBar = document.querySelector(`#${PANEL_ID} .gjj-cl-busy-progress-bar`);
+		const busyPercent = document.querySelector(`#${PANEL_ID} .gjj-cl-busy-percent`);
 		if (box) box.classList.toggle("open", state.progressVisible);
 		if (bar) bar.style.width = `${state.progress}%`;
+		if (busyBar) busyBar.style.width = `${state.progress}%`;
+		if (busyPercent) busyPercent.textContent = `${Math.round(state.progress)}%`;
 	}
 
 	function startImportProgress() {
 		clearInterval(state.progressTimer);
+		setBusy(true);
 		setProgress(8, true);
 		state.progressTimer = setInterval(() => {
 			const next = state.progress < 45
@@ -517,6 +540,7 @@ import { api } from "/scripts/api.js";
 		clearInterval(state.progressTimer);
 		state.progressTimer = null;
 		setProgress(ok ? 100 : state.progress, true);
+		setBusy(false);
 		setTimeout(() => setProgress(0, false), ok ? 680 : 1400);
 	}
 
@@ -765,18 +789,6 @@ import { api } from "/scripts/api.js";
 		setStatus("音色设置已清除；如存在同名 mp3 会继续自动优先显示");
 	}
 
-	async function createCharacter() {
-		const name = autoCharacterName();
-		const data = await apiJson(`${ENDPOINT}/character`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ name }),
-		});
-		state.selectedId = data.character?.id || "";
-		await refreshCharacters(true);
-		setStatus("已创建角色");
-	}
-
 	async function deleteCharacter(character) {
 		if (!character) return;
 		setStatus(`正在删除角色「${character.name || character.id}」...`);
@@ -873,10 +885,6 @@ import { api } from "/scripts/api.js";
 		return (character?.views || []).some((view) => String(view?.label || view?.id || "").trim().toLowerCase() === key);
 	}
 
-	function missingDefaultViewLabels(character) {
-		return VIEW_LABELS.filter((label) => label !== "大头照" && !hasCharacterView(character, label));
-	}
-
 	function characterViewLabel(character, keywords = []) {
 		const tokens = (keywords || []).map((item) => String(item || "").toLowerCase()).filter(Boolean);
 		const views = Array.isArray(character?.views) ? character.views : [];
@@ -916,6 +924,46 @@ import { api } from "/scripts/api.js";
 			await refreshCharacters(true);
 			finishImportProgress(true);
 			setStatus(`已生成 ${data.count || 0} 个视图：${(data.labels || requested).join("、")}`);
+		} catch (error) {
+			finishImportProgress(false);
+			throw error;
+		}
+	}
+
+	async function generateCharacterTriptych(character, regenerate = false) {
+		if (!character?.id) return;
+		const headshotLabel = characterViewLabel(character, ["大头", "头像", "头部", "脸", "face", "head", "portrait", "cover"]);
+		if (!headshotLabel) {
+			setStatus("需要先有大头照，才能生成人物三视图");
+			return;
+		}
+		const randomSeed = regenerate
+			? (globalThis.crypto?.getRandomValues(new Uint32Array(1))[0] || 1)
+			: 0;
+		setStatus(
+			regenerate
+				? `正在更换随机种 ${randomSeed}，重新生成正面、侧面和背面三视图…`
+				: `正在用「${headshotLabel}」生成正面、侧面和背面三视图…`
+		);
+		startImportProgress();
+		try {
+			const data = await apiJson(`${ENDPOINT}/generate_multiview`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					id: character.id,
+					name: character.name || character.id,
+					labels: ["三视图"],
+					prompt_labels: [CHARACTER_TRIPTYCH_PROMPT],
+					reference_label: headshotLabel,
+					split_generated_sheet: true,
+					...(regenerate ? { seed: randomSeed } : {}),
+				}),
+			});
+			state.selectedId = data.character?.id || character.id;
+			await refreshCharacters(true);
+			finishImportProgress(true);
+			setStatus(`已生成 ${data.count || 0} 个视图：正面、侧面、背面`);
 		} catch (error) {
 			finishImportProgress(false);
 			throw error;
@@ -1269,15 +1317,21 @@ import { api } from "/scripts/api.js";
 			setStatus("没有需要补备注或性别符号的角色");
 			return;
 		}
-		setStatus("正在用 Gemma 批量生成角色备注和性别符号...");
+		await annotateCharacterIds(missing.map((item) => item.id).filter(Boolean));
+	}
+
+	async function annotateCharacterIds(ids) {
+		const targets = Array.from(new Set((ids || []).map(String).filter(Boolean)));
+		if (!targets.length) return;
+		setStatus(`正在用 Gemma 给 ${targets.length} 个角色自动打标…`);
 		startImportProgress();
 		try {
 			const data = await apiJson(`${ENDPOINT}/annotate_missing`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
-					ids: missing.map((item) => item.id).filter(Boolean),
-					limit: missing.length,
+					ids: targets,
+					limit: targets.length,
 				}),
 			});
 			await refreshCharacters(true);
@@ -1287,6 +1341,50 @@ import { api } from "/scripts/api.js";
 			finishImportProgress(false);
 			throw error;
 		}
+	}
+
+	function confirmImportedAutoAnnotate(count) {
+		return new Promise((resolve) => {
+			const panel = buildPanel();
+			panel.querySelector(".gjj-cl-annotate-confirm")?.remove();
+			const backdrop = document.createElement("div");
+			backdrop.className = "gjj-cl-model-backdrop gjj-cl-annotate-confirm";
+			const dialog = document.createElement("div");
+			dialog.className = "gjj-cl-model-dialog";
+			dialog.style.cssText = "width:min(440px,100%);padding:18px;text-align:center;";
+			const title = document.createElement("div");
+			title.className = "gjj-cl-model-title";
+			title.style.fontSize = "17px";
+			title.textContent = "🏷️ 是否自动打标？";
+			const message = document.createElement("div");
+			message.style.cssText = "margin:12px 0 16px;color:#b9cdd0;font-size:13px;line-height:1.55;";
+			const actions = document.createElement("div");
+			actions.className = "gjj-cl-row";
+			actions.style.justifyContent = "center";
+			let remaining = 30;
+			let timer = null;
+			const finish = (value) => {
+				clearInterval(timer);
+				backdrop.remove();
+				resolve(value);
+			};
+			const update = () => {
+				message.textContent = `本次导入了 ${count} 个角色。${remaining} 秒内未选择，将自动开始打标。`;
+			};
+			const skip = button("跳过", "本次不自动打标", "gjj-cl-btn", () => finish(false));
+			const confirm = button("立即打标", "立即生成性别符号和人物备注", "gjj-cl-btn", () => finish(true));
+			confirm.classList.add("active");
+			actions.append(skip, confirm);
+			dialog.append(title, message, actions);
+			backdrop.appendChild(dialog);
+			panel.appendChild(backdrop);
+			update();
+			timer = setInterval(() => {
+				remaining -= 1;
+				update();
+				if (remaining <= 0) finish(true);
+			}, 1000);
+		});
 	}
 
 	async function showModelTree() {
@@ -1442,9 +1540,7 @@ import { api } from "/scripts/api.js";
 			<section>
 				<h3>二、顶部按钮</h3>
 				<ul>
-					<li><b>➕ 新增角色：</b>创建空角色资料，再添加图片、备注和音色路径。</li>
-					<li><b>👥 批量多视图：</b>一次选择多张人物图片，每张图片建立一个角色并排队生成多视图。</li>
-					<li><b>🪄 智能导入：</b>从一张整图中抠出并拆分人物视图，自动建立新角色。</li>
+					<li><b>➕ 导入人物：</b>选择一张或多张人物图片；每张图片独立建立角色并自动分类。缺少大头照时用 2511 补充；只有大头照时，用固定提示词生成一张横向三视图，抠图后从左到右分割为正面、侧面和背面。</li>
 					<li><b>🧑‍🎨 批量打标：</b>使用推理文本编码器补充性别符号与人物备注；已有完整标注的角色会跳过。</li>
 					<li><b>🧠 模型树：</b>查看和选择抠图、多视图、LoRA、VAE、CLIP 与备注推理模型，选择后点击“保存设置”。</li>
 					<li><b>⚙️ 生成参数：</b>设置多视图生成的采样器、调度器、采样步数、CFG、降噪强度、种子和模型驻留方式。</li>
@@ -1462,7 +1558,7 @@ import { api } from "/scripts/api.js";
 			</section>
 			<section>
 				<h3>四、大头照与自动补视图</h3>
-				<p>没有大头照时，可从现有视图点击“生成大头照”。大头照会强制使用近距离头肩构图，不显示腰部、腿和鞋。已有大头照后，可用“补全部缺失”或单独的左侧、右侧、45度、半身、动作按钮生成其它视图。</p>
+				<p>需要补充视图时统一点击“自定义视图”，自行选择参考图、方位、机位和景别；大头照应使用近距离头肩构图，不显示腰部、腿和鞋。</p>
 				<p>“自定义视图”可组合方位、俯仰、景别；支持选择一张或多张已有视图作为身份参考。多张参考只用于统一五官、服装和身份，不会把参考拼图画进结果。</p>
 			</section>
 			<section>
@@ -1758,27 +1854,20 @@ import { api } from "/scripts/api.js";
 		);
 		const quick = document.createElement("div");
 		quick.className = "gjj-cl-row";
-		if (hasCharacterView(character, "大头照")) {
-			const missingLabels = missingDefaultViewLabels(character);
-			if (missingLabels.length > 1) {
-				quick.appendChild(button("补全部缺失", `使用大头照生成：${missingLabels.join("、")}`, "gjj-cl-btn", () => generateCharacterViews(character, missingLabels).catch((error) => setStatus(error.message))));
-			}
-			for (const label of missingLabels) {
-				quick.appendChild(button(label, `使用大头照自动生成 ${label} 视图`, "gjj-cl-btn", () => generateCharacterViews(character, [label]).catch((error) => setStatus(error.message))));
-			}
-			quick.appendChild(button("自定义视图", "选择一个或多个视角、景别、角度，用大头照自动生成", "gjj-cl-btn", () => generateCustomCharacterViews(character).catch((error) => setStatus(error.message))));
-		} else {
-			const referenceView = (character.views || [])[0];
-			const referenceLabel = String(referenceView?.label || referenceView?.id || "").trim();
-			if (referenceLabel) {
-				quick.appendChild(button("生成大头照", `使用「${referenceLabel}」作为参考，自动生成大头照`, "gjj-cl-btn", () => generateCharacterViews(character, ["大头照"], "", referenceLabel).catch((error) => setStatus(error.message))));
-			} else {
-				const hint = document.createElement("div");
-				hint.className = "gjj-cl-status";
-				hint.textContent = "请先添加一张角色视图，再自动生成大头照";
-				quick.appendChild(hint);
-			}
+		const headshotLabel = characterViewLabel(character, ["大头", "头像", "头部", "脸", "face", "head", "portrait", "cover"]);
+		if (headshotLabel) {
+			const hasFront = Boolean(characterViewLabel(character, ["正面", "front"]));
+			const hasSide = Boolean(characterViewLabel(character, ["侧面", "左侧", "右侧", "side", "profile"]));
+			const hasBack = Boolean(characterViewLabel(character, ["背面", "后面", "back", "rear"]));
+			const hasTriptych = hasFront && hasSide && hasBack;
+			quick.appendChild(button(
+				hasTriptych ? "重新生成人物三视图" : "生成人物三视图",
+				"使用大头照一次生成正面、侧面和背面，随后自动抠图分割",
+				"gjj-cl-btn",
+				() => generateCharacterTriptych(character, hasTriptych).catch((error) => setStatus(error.message))
+			));
 		}
+		quick.appendChild(button("自定义视图", "选择参考图、视角、景别和角度生成需要的视图", "gjj-cl-btn", () => generateCustomCharacterViews(character).catch((error) => setStatus(error.message))));
 		const status = document.createElement("div");
 		status.className = "gjj-cl-status";
 		status.textContent = state.status || "";
@@ -1941,6 +2030,103 @@ import { api } from "/scripts/api.js";
 		return el;
 	}
 
+	async function importCharacters() {
+		const files = await fileInputs("image/*");
+		if (!files.length) return;
+		let selectedId = "";
+		let imported = 0;
+		let generatedHeadshots = 0;
+		let generatedBodyViews = 0;
+		const importedIds = [];
+		setStatus(`准备导入 ${files.length} 张人物图片…`);
+		startImportProgress();
+		try {
+			for (let index = 0; index < files.length; index += 1) {
+				const file = files[index];
+				const name = autoCharacterName(file);
+				let createdId = "";
+				setStatus(`正在导入 ${index + 1}/${files.length}：「${name}」`);
+				try {
+					const created = await apiJson(`${ENDPOINT}/character`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ name }),
+					});
+					createdId = created.character?.id || "";
+					if (!createdId) throw new Error(`无法建立角色：${name}`);
+					const form = new FormData();
+					form.append("id", createdId);
+					form.append("name", created.character?.name || name);
+					form.append("label", "自动分类");
+					form.append("file", file, file.name);
+					const saved = await apiJson(`${ENDPOINT}/view`, { method: "POST", body: form });
+					let character = saved.character || created.character;
+					const views = Array.isArray(character?.views) ? character.views : [];
+					const hasHeadshot = views.some((view) => /大头|头像|头部|脸|face|head|portrait/i.test(`${view?.label || ""} ${view?.id || ""}`));
+					if (hasHeadshot && views.length === 1) {
+						setStatus(`导入 ${index + 1}/${files.length}：「${name}」只有大头照，2511 正在一次生成正面、侧面和背面…`);
+						const multiview = await apiJson(`${ENDPOINT}/generate_multiview`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								id: createdId,
+								name: character?.name || name,
+								labels: ["三视图"],
+								prompt_labels: [CHARACTER_TRIPTYCH_PROMPT],
+								reference_label: String(views[0]?.label || views[0]?.id || "大头照"),
+								split_generated_sheet: true,
+							}),
+						});
+						character = multiview.character || character;
+						if (Number(multiview.count || 0) < 3) throw new Error(`2511 未能为「${name}」完整生成正面、侧面和背面`);
+						generatedBodyViews += Number(multiview.count || 0);
+					} else if (!hasHeadshot && views.length) {
+						const referenceLabel = String(views[0]?.label || views[0]?.id || "").trim();
+						setStatus(`导入 ${index + 1}/${files.length}：「${name}」没有大头照，正在使用 2511 生成…`);
+						const generated = await apiJson(`${ENDPOINT}/generate_multiview`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								id: createdId,
+								name: character?.name || name,
+								labels: ["大头照"],
+								reference_label: referenceLabel,
+							}),
+						});
+						character = generated.character || character;
+						generatedHeadshots += Number(generated.count || 0) > 0 ? 1 : 0;
+					}
+					selectedId = character?.id || createdId;
+					importedIds.push(selectedId);
+					imported += 1;
+				} catch (error) {
+					if (createdId) {
+						await apiJson(`${ENDPOINT}/character?id=${encodeURIComponent(createdId)}`, { method: "DELETE" }).catch(() => {});
+					}
+					throw error;
+				}
+				setProgress(Math.min(96, Math.round(((index + 1) / files.length) * 92)), true);
+			}
+			state.selectedId = selectedId;
+			state.page = 1;
+			await refreshCharacters(true);
+			finishImportProgress(true);
+			setStatus(
+				`导入完成：已添加 ${imported} 个角色`
+				+ `${generatedHeadshots ? `，2511 补充 ${generatedHeadshots} 张大头照` : ""}`
+				+ `${generatedBodyViews ? `，生成 ${generatedBodyViews} 张全身/侧背视图` : ""}`
+			);
+			if (await confirmImportedAutoAnnotate(importedIds.length)) {
+				await annotateCharacterIds(importedIds);
+			} else {
+				setStatus(`导入完成：已添加 ${imported} 个角色，已跳过自动打标`);
+			}
+		} catch (error) {
+			finishImportProgress(false);
+			throw error;
+		}
+	}
+
 	function panelBoundsPosition(panel, left, top) {
 		const width = panel.offsetWidth || Math.min(920, window.innerWidth - 20);
 		const height = panel.offsetHeight || Math.min(680, window.innerHeight - 20);
@@ -2058,9 +2244,8 @@ import { api } from "/scripts/api.js";
 		title.textContent = "角色库";
 		const spacer = document.createElement("div");
 		spacer.className = "gjj-cl-spacer";
-		head.append(drag, title, spacer, button("➕", "新增角色", "gjj-cl-btn gjj-cl-icon", () => createCharacter().catch((error) => setStatus(error.message))));
-		head.appendChild(button("👥", "批量选择人物图片，自动队列生成四视图", "gjj-cl-btn gjj-cl-icon", () => generateMultiviewBatch().catch((error) => setStatus(error.message))));
-		head.appendChild(button("🪄", "智能导入整图为新角色", "gjj-cl-btn gjj-cl-icon", () => importSheet(null).catch((error) => setStatus(error.message))));
+		const importButton = button("➕", "选择一张或多张人物图片，自动抠图、分类并添加到角色库", "gjj-cl-btn gjj-cl-icon", () => importCharacters().catch((error) => setStatus(error.message)));
+		head.append(drag, title, spacer, importButton);
 		head.appendChild(button("🧑‍🎨", "批量给角色补备注和性别符号", "gjj-cl-btn gjj-cl-icon", () => annotateMissingNotes().catch((error) => setStatus(error.message))));
 		head.appendChild(button("🧠", "查看并设置角色库使用的模型树", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
 		head.appendChild(button("⚙️", "角色库生成参数设置", "gjj-cl-btn gjj-cl-icon", () => showGenerationSettings().catch((error) => setStatus(error.message))));
@@ -2143,7 +2328,29 @@ import { api } from "/scripts/api.js";
 		sidebar.append(head, search, tools, list, pager);
 		const main = document.createElement("div");
 		main.className = "gjj-cl-main";
-		panel.append(sidebar, main);
+		const busyMask = document.createElement("div");
+		busyMask.className = "gjj-cl-busy-mask";
+		const busyCard = document.createElement("div");
+		busyCard.className = "gjj-cl-busy-card";
+		const busyTitle = document.createElement("div");
+		busyTitle.className = "gjj-cl-busy-title";
+		busyTitle.textContent = "⏳ 正在导入角色";
+		const busyStatus = document.createElement("div");
+		busyStatus.className = "gjj-cl-busy-status";
+		busyStatus.textContent = state.status || "正在处理角色素材，请稍候…";
+		const busyProgress = document.createElement("div");
+		busyProgress.className = "gjj-cl-busy-progress";
+		const busyProgressBar = document.createElement("div");
+		busyProgressBar.className = "gjj-cl-busy-progress-bar";
+		busyProgressBar.style.width = `${state.progress}%`;
+		busyProgress.appendChild(busyProgressBar);
+		const busyPercent = document.createElement("div");
+		busyPercent.className = "gjj-cl-busy-percent";
+		busyPercent.textContent = `${Math.round(state.progress)}%`;
+		busyCard.append(busyTitle, busyStatus, busyProgress, busyPercent);
+		busyMask.appendChild(busyCard);
+		panel.classList.toggle("busy", state.busy);
+		panel.append(sidebar, main, busyMask);
 		document.body.appendChild(panel);
 		return panel;
 	}

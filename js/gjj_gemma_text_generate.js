@@ -16,6 +16,9 @@ const WORKFLOW_VALUES_PROPERTY = "gjj_gemma_text_generate_values";
 const WORKFLOW_VALUES_WIDGET = "workflow_values_json";
 const MODEL_FILTER_WIDGET = "model_filter_keywords";
 const MODEL_SIZES_ENDPOINT = "/gjj/text_encoder_model_sizes";
+const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
+const ACTORS_PROPERTY = "gjj_gemma_text_generate_actors";
+const ACTOR_PREFIXES_PROPERTY = "gjj_gemma_text_generate_actor_prefixes";
 const CLIP_TYPE_REFERENCE_MIGRATION = "gjj_text_generate_clip_type_reference_v1";
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
@@ -149,12 +152,264 @@ function setWidgetValue(node, name, value) {
 	markChanged(node);
 }
 
+function characterDisplayName(character) {
+	return String(character?.name || character?.id || "未命名角色").replace(/^\s*(?:♀️|♂️|♀|♂)\s*/, "").trim();
+}
+
+function actorPromptLine(character) {
+	return `@${characterDisplayName(character)}`;
+}
+
+function selectedActors(node) {
+	const actors = node?.properties?.[ACTORS_PROPERTY];
+	return Array.isArray(actors) ? actors.filter((item) => item && item.id) : [];
+}
+
+function saveActors(node, actors) {
+	node.properties ||= {};
+	node.properties[ACTORS_PROPERTY] = actors.map((item) => ({
+		id: String(item.id),
+		name: characterDisplayName(item),
+		notes: String(item.notes || ""),
+		cover: String(item.cover || ""),
+	}));
+	node.properties[ACTOR_PREFIXES_PROPERTY] = actors.map(actorPromptLine);
+	markChanged(node);
+	renderActorChips(node);
+}
+
+function insertActorAtCursor(node, character) {
+	const promptWidget = widget(node, PROMPT_WIDGET);
+	const input = promptWidget?.inputEl
+		|| promptWidget?.element?.querySelector?.("textarea,input")
+		|| promptWidget?.element;
+	const prompt = String(widgetValue(node, PROMPT_WIDGET, "") || "");
+	const trigger = node.__gjjGemmaActorTrigger;
+	node.__gjjGemmaActorTrigger = null;
+	let start = Number(trigger?.start);
+	let end = Number(trigger?.end);
+	if (!Number.isFinite(start) || !Number.isFinite(end) || prompt.slice(start, end) !== "@") {
+		start = Number(node.__gjjGemmaPromptCaret?.start);
+		end = Number(node.__gjjGemmaPromptCaret?.end);
+		if (!Number.isFinite(start)) start = Number(input?.selectionStart);
+		if (!Number.isFinite(end)) end = Number(input?.selectionEnd);
+		if (!Number.isFinite(start)) start = prompt.length;
+		if (!Number.isFinite(end)) end = start;
+	}
+	const insertion = `${actorPromptLine(character)} `;
+	const nextPrompt = `${prompt.slice(0, start)}${insertion}${prompt.slice(end)}`;
+	const caret = start + insertion.length;
+	node.__gjjGemmaPromptCaret = { start: caret, end: caret };
+	setWidgetValue(node, PROMPT_WIDGET, nextPrompt);
+	const actors = selectedActors(node).filter((actor) => String(actor.id) !== String(character.id));
+	saveActors(node, [character, ...actors]);
+	requestAnimationFrame(() => {
+		const currentInput = widget(node, PROMPT_WIDGET)?.inputEl
+			|| widget(node, PROMPT_WIDGET)?.element?.querySelector?.("textarea,input")
+			|| input;
+		currentInput?.focus?.();
+		currentInput?.setSelectionRange?.(caret, caret);
+	});
+}
+
+function renderActorChips(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state?.actorChips) return;
+	const actors = selectedActors(node);
+	state.actorChips.replaceChildren();
+	state.actorChips.style.display = actors.length ? "flex" : "none";
+	for (const actor of actors) {
+		const chip = document.createElement("button");
+		chip.type = "button";
+		chip.className = "gjj-gemma-actor-chip";
+		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击引用，Ctrl+点击删除`);
+		if (actor.cover) {
+			const image = document.createElement("img");
+			image.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
+			chip.appendChild(image);
+		}
+		const name = document.createElement("span");
+		name.textContent = `@${characterDisplayName(actor)}`;
+		chip.appendChild(name);
+		chip.addEventListener("mouseenter", () => {
+			if (!actor.cover) return;
+			const preview = document.createElement("div");
+			preview.className = "gjj-gemma-actor-preview";
+			const large = document.createElement("img");
+			large.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
+			const caption = document.createElement("div");
+			caption.textContent = actorPromptLine(actor);
+			preview.append(large, caption);
+			document.body.appendChild(preview);
+			const rect = chip.getBoundingClientRect();
+			preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
+			preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
+			chip.__gjjActorPreview = preview;
+		});
+		chip.addEventListener("mouseleave", () => {
+			chip.__gjjActorPreview?.remove();
+			chip.__gjjActorPreview = null;
+		});
+		chip.addEventListener("click", (event) => {
+			chip.__gjjActorPreview?.remove();
+			if (!event.ctrlKey) {
+				insertActorAtCursor(node, actor);
+				return;
+			}
+			const escapedName = characterDisplayName(actor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const prompt = String(widgetValue(node, PROMPT_WIDGET, "") || "");
+			const nextPrompt = prompt.replace(new RegExp(`@${escapedName}(?=\\s|$|[，。！？、,.!?])\\s?`, "gu"), "");
+			setWidgetValue(node, PROMPT_WIDGET, nextPrompt);
+			saveActors(node, actors.filter((item) => String(item.id) !== String(actor.id)));
+		});
+		state.actorChips.appendChild(chip);
+	}
+}
+
+function installActorPromptTrigger(node) {
+	if (!node || node.__gjjGemmaActorTriggerHandler) return;
+	const handler = (event) => {
+		const promptWidget = widget(node, PROMPT_WIDGET);
+		const input = promptWidget?.inputEl
+			|| promptWidget?.element?.querySelector?.("textarea,input")
+			|| promptWidget?.element;
+		if (!input || (event.target !== input && !input.contains?.(event.target))) return;
+		const caret = Number(input.selectionStart);
+		const selectionEnd = Number(input.selectionEnd);
+		if (Number.isFinite(caret)) {
+			node.__gjjGemmaPromptCaret = {
+				start: caret,
+				end: Number.isFinite(selectionEnd) ? selectionEnd : caret,
+			};
+		}
+		if (event.type !== "input") return;
+		if (!Number.isFinite(caret) || caret < 1 || input.value.slice(caret - 1, caret) !== "@") return;
+		node.__gjjGemmaActorTrigger = { start: caret - 1, end: caret };
+		const state = node.__gjjGemmaPanel;
+		if (!state || state.actorPicker || state.actorPickerLoading) return;
+		state.actorPickerLoading = true;
+		toggleActorPicker(node)
+			.catch((error) => console.error("[GJJ GemmaTextGenerate] 角色选择器打开失败：", error))
+			.finally(() => { state.actorPickerLoading = false; });
+	};
+	node.__gjjGemmaActorTriggerHandler = handler;
+	for (const eventName of ["input", "click", "keyup", "select"]) {
+		document.addEventListener(eventName, handler, true);
+	}
+}
+
+async function toggleActorPicker(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state) return;
+	if (state.actorPicker?.isConnected) {
+		state.actorPicker.remove();
+		state.actorPicker = null;
+		state.actorButton.classList.remove("active");
+		return;
+	}
+	const response = await api.fetchApi(CHARACTER_LIBRARY_ENDPOINT);
+	const data = await response.json();
+	if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取角色库失败");
+	const characters = Array.isArray(data.characters) ? data.characters : [];
+	const picker = document.createElement("div");
+	picker.className = "gjj-gemma-actor-picker";
+	const tools = document.createElement("div");
+	tools.className = "gjj-gemma-actor-tools";
+	const grid = document.createElement("div");
+	grid.className = "gjj-gemma-actor-grid";
+	let gender = "all";
+	let sort = "updated_desc";
+	const genderButtons = [];
+	const render = () => {
+		const selectedIds = new Set(selectedActors(node).map((item) => String(item.id)));
+		const filtered = characters.filter((character) => {
+			if (gender === "all") return true;
+			const rawName = String(character?.name || "");
+			return gender === "female" ? rawName.includes("♀") : rawName.includes("♂");
+		});
+		filtered.sort((left, right) => {
+			if (sort === "name_asc") return characterDisplayName(left).localeCompare(characterDisplayName(right), "zh-Hans");
+			return Number(right?.updated_at || 0) - Number(left?.updated_at || 0);
+		});
+		grid.replaceChildren();
+		for (const character of filtered) {
+			const item = document.createElement("button");
+			item.type = "button";
+			item.className = `gjj-gemma-actor-item${selectedIds.has(String(character.id)) ? " active" : ""}`;
+			const image = document.createElement("img");
+			if (character.cover) image.src = api.apiURL ? api.apiURL(character.cover) : character.cover;
+			const name = document.createElement("span");
+			name.textContent = characterDisplayName(character);
+			item.append(image, name);
+			item.addEventListener("mouseenter", () => {
+				if (!character.cover) return;
+				const preview = document.createElement("div");
+				preview.className = "gjj-gemma-actor-preview";
+				const large = document.createElement("img");
+				large.src = api.apiURL ? api.apiURL(character.cover) : character.cover;
+				const caption = document.createElement("div");
+				const notes = String(character?.notes || "").replace(/\s+/g, " ").trim();
+				caption.textContent = `${actorPromptLine(character)}${notes ? `（${notes}）` : ""}`;
+				preview.append(large, caption);
+				document.body.appendChild(preview);
+				const rect = item.getBoundingClientRect();
+				preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
+				preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
+				item.__gjjActorPreview = preview;
+			});
+			item.addEventListener("mouseleave", () => {
+				item.__gjjActorPreview?.remove();
+				item.__gjjActorPreview = null;
+			});
+			item.addEventListener("click", () => {
+				insertActorAtCursor(node, character);
+				item.__gjjActorPreview?.remove();
+				closeFloatingPanels(node);
+			});
+			grid.appendChild(item);
+		}
+		if (!filtered.length) {
+			const empty = document.createElement("div");
+			empty.className = "gjj-gemma-actor-empty";
+			empty.textContent = characters.length ? "没有符合过滤条件的人物" : "角色库中还没有人物";
+			grid.appendChild(empty);
+		}
+	};
+	for (const [value, label] of [["all", "全部"], ["female", "♀"], ["male", "♂"]]) {
+		const control = button(label, `过滤：${label}`, () => {
+			gender = value;
+			for (const entry of genderButtons) entry.classList.toggle("active", entry.dataset.gender === gender);
+			render();
+		});
+		control.classList.add("compact");
+		control.dataset.gender = value;
+		control.classList.toggle("active", value === gender);
+		genderButtons.push(control);
+		tools.appendChild(control);
+	}
+	const sortButton = button("🕘 最新", "切换按最新或名称排序", () => {
+		sort = sort === "updated_desc" ? "name_asc" : "updated_desc";
+		sortButton.textContent = sort === "updated_desc" ? "🕘 最新" : "🔤 名称";
+		render();
+	});
+	sortButton.classList.add("compact");
+	tools.appendChild(sortButton);
+	picker.append(tools, grid);
+	render();
+	state.root.appendChild(picker);
+	state.actorPicker = picker;
+	state.actorButton.classList.add("active");
+}
+
 function collectWorkflowValues(node) {
 	const values = {};
 	for (const name of STATE_WIDGETS) {
 		const target = widget(node, name);
 		if (target) values[name] = target.value ?? "";
 	}
+	values.selected_actors = selectedActors(node)
+		.map((actor) => characterDisplayName(actor))
+		.filter(Boolean);
 	return values;
 }
 
@@ -1303,6 +1558,9 @@ function closeFloatingPanels(node) {
 	state.templatesExpanded = false;
 	state.modelExpanded = false;
 	state.expanded = false;
+	state.actorPicker?.remove();
+	state.actorPicker = null;
+	state.actorButton?.classList.remove("active");
 	syncPanel(node);
 }
 
@@ -1335,6 +1593,21 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:5px; overflow:visible; padding:0 0 3px; scrollbar-width:thin; }
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings,.gjj-gemma-assistant-panel .gjj-ia-settings,.gjj-gemma-assistant-panel .gjj-gemma-model-panel { position:absolute; z-index:1000; top:62px; left:0; width:100%; max-height:min(520px,70vh); overflow:auto; box-shadow:0 12px 32px rgba(0,0,0,.55); }
 		.gjj-gemma-assistant-panel .gjj-ia-templates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; width:100%; min-width:0; overflow:visible; padding:1px 0 3px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-chips { display:none; flex-wrap:wrap; align-items:center; gap:5px; padding:2px 0; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip { display:flex; align-items:center; gap:5px; min-height:28px; padding:2px 8px 2px 3px; border:1px solid #4f7b68; border-radius:999px; background:#173126; color:#eafff3; cursor:pointer; font:700 11px/1.2 system-ui,sans-serif; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip img { width:23px; height:23px; border-radius:50%; object-fit:cover; background:#0c1518; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-picker { position:absolute; z-index:1002; top:34px; left:0; width:min(420px,100%); max-height:min(430px,70vh); overflow:hidden; display:flex; flex-direction:column; gap:6px; padding:7px; border:1px solid #526a73; border-radius:8px; background:rgba(13,22,25,.98); box-shadow:0 12px 32px rgba(0,0,0,.58); }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-tools { flex:0 0 auto; display:flex; align-items:center; gap:5px; padding-bottom:5px; border-bottom:1px solid rgba(82,106,115,.45); }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-tools > :last-child { margin-left:auto; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-grid { flex:1 1 auto; min-height:70px; overflow:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); align-content:start; gap:3px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item { position:relative; min-width:0; height:72px; padding:0; overflow:hidden; border:0; border-radius:5px; background:#091114; color:#fff; cursor:pointer; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item:hover,.gjj-gemma-assistant-panel .gjj-gemma-actor-item.active { outline:2px solid #6fc696; outline-offset:-2px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item img { display:block; width:100%; height:100%; object-fit:cover; background:#091114; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item span { position:absolute; left:0; right:0; bottom:0; display:block; padding:12px 3px 3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; background:linear-gradient(transparent,rgba(0,0,0,.88)); color:#fff; text-align:center; font-size:10px; font-weight:800; text-shadow:0 1px 2px #000; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-empty { grid-column:1/-1; padding:18px; color:#93a8ad; text-align:center; }
+		.gjj-gemma-actor-preview { position:fixed; z-index:100003; width:280px; max-height:380px; padding:7px; border:1px solid #628278; border-radius:9px; background:#0d171b; color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.64); pointer-events:none; font:12px/1.4 system-ui,sans-serif; }
+		.gjj-gemma-actor-preview img { display:block; width:100%; max-height:320px; object-fit:contain; border-radius:6px; background:#071014; }
+		.gjj-gemma-actor-preview div { padding:6px 3px 1px; overflow-wrap:anywhere; }
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.96); }
 		.gjj-gemma-assistant-panel .gjj-ia-window-actions { display:flex; justify-content:flex-end; align-items:center; gap:6px; padding-top:2px; border-top:1px solid rgba(73,93,101,.45); }
 		.gjj-gemma-assistant-panel .gjj-ia-button { flex:0 0 auto; height:27px; padding:0 9px; border:1px solid #3d5159; border-radius:6px; background:#172127; color:#dbe6e9; font:700 12px/25px system-ui,sans-serif; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
@@ -1366,7 +1639,7 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-param .gjj-ia-input { flex:1 1 54px; min-width:50px; height:27px; padding:4px 6px; }
 		.gjj-gemma-assistant-panel .gjj-ia-textarea { min-height:86px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
 		.gjj-gemma-assistant-panel .gjj-ia-textarea.rule { min-height:48px; }
-		.gjj-gemma-assistant-panel .gjj-ia-textarea.templates { min-height:118px; }
+		.gjj-gemma-assistant-panel .gjj-ia-textarea.templates { height:118px; min-height:48px; max-height:none; overflow:auto; resize:vertical; }
 		.gjj-ia-search-popup { position:fixed; z-index:100000; display:flex; flex-direction:column; gap:5px; max-height:360px; padding:7px; border:1px solid #526a73; border-radius:8px; background:#10181c; box-shadow:0 12px 32px rgba(0,0,0,.55); color:#eef5f5; font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
 		.gjj-ia-search-filter { flex:0 0 auto; }
 		.gjj-ia-search-hint { flex:0 0 auto; color:#8fa2a8; font-size:10px; padding:0 2px; }
@@ -1380,6 +1653,11 @@ function createPanel(node) {
 	toolbar.className = "gjj-ia-toolbar";
 	const templates = document.createElement("div");
 	templates.className = "gjj-ia-templates";
+	const actorChips = document.createElement("div");
+	actorChips.className = "gjj-gemma-actor-chips";
+	const actorButton = button("👤", "选择参与演员", () => {
+		toggleActorPicker(node).catch((error) => alert(`读取角色库失败：${error?.message || error}`));
+	});
 	const templateButton = button("📚", "展开模板设置", () => {
 		const state = node.__gjjGemmaPanel;
 		const open = !state.templatesExpanded;
@@ -1428,22 +1706,23 @@ function createPanel(node) {
 			runButton.disabled = false;
 		}
 	});
-	toolbar.append(templateButton, thinking, modelPanelButton, randomSeed, settingsButton, runButton);
+	toolbar.append(actorButton, templateButton, thinking, modelPanelButton, randomSeed, settingsButton, runButton);
 
 	const settingsState = buildSettings(node);
 	const modelState = buildModelPanel(node, settingsState);
 	settingsState.templateSettings.appendChild(floatingWindowActions(node));
 	modelState.panel.appendChild(floatingWindowActions(node));
 	settingsState.settings.appendChild(floatingWindowActions(node));
-	root.append(style, toolbar, templates, settingsState.templateSettings, modelState.panel, settingsState.settings);
+	root.append(style, toolbar, templates, actorChips, settingsState.templateSettings, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
 	});
 	domWidget.computeSize = (width) => {
 		const toolbarHeight = Number(toolbar.offsetHeight || 30);
+		const actorRowHeight = actorChips.style.display === "none" ? 0 : Number(actorChips.offsetHeight || 30);
 		const templateRowHeight = Number(templates.offsetHeight || 25);
-		const mainPanelHeight = Math.ceil(toolbarHeight + templateRowHeight + 13);
+		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + templateRowHeight + 13);
 		return [
 			Math.max(470, Number(width || node.size?.[0] || 470)),
 			Math.max(35, mainPanelHeight),
@@ -1452,6 +1731,9 @@ function createPanel(node) {
 	node.__gjjGemmaPanel = {
 		root,
 		domWidget,
+		actorButton,
+		actorChips,
+		actorPicker: null,
 		templates,
 		templateButtons: new Map(),
 		templateButton,
@@ -1478,7 +1760,7 @@ function createPanel(node) {
 	}
 	const handleOutsidePointerDown = (event) => {
 		const state = node.__gjjGemmaPanel;
-		if (!state || (!state.templatesExpanded && !state.modelExpanded && !state.expanded)) return;
+		if (!state || (!state.templatesExpanded && !state.modelExpanded && !state.expanded && !state.actorPicker)) return;
 		if (root.contains(event.target)) return;
 		if (event.target?.closest?.(".gjj-ia-search-popup")) return;
 		closeFloatingPanels(node);
@@ -1487,6 +1769,14 @@ function createPanel(node) {
 	const originalOnRemoved = node.onRemoved;
 	node.onRemoved = function (...args) {
 		document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+		if (this.__gjjGemmaActorTriggerHandler) {
+			for (const eventName of ["input", "click", "keyup", "select"]) {
+				document.removeEventListener(eventName, this.__gjjGemmaActorTriggerHandler, true);
+			}
+			this.__gjjGemmaActorTriggerHandler = null;
+		}
+		try { this.__gjjGemmaPanel?.actorPicker?.remove(); } catch (_) {}
+		document.querySelectorAll(".gjj-gemma-actor-preview").forEach((item) => item.remove());
 		try { clipName.__gjjSearchSelectPopup?.remove(); } catch (_) {}
 		return originalOnRemoved?.apply(this, args);
 	};
@@ -1500,6 +1790,9 @@ function createPanel(node) {
 		}
 		syncPanel(node);
 	});
+	const restoredActors = selectedActors(node);
+	if (restoredActors.length) saveActors(node, restoredActors);
+	else renderActorChips(node);
 	syncPanel(node);
 }
 
@@ -1563,6 +1856,7 @@ function stabilize(node) {
 		});
 	});
 	restorePromptWidget(node);
+	installActorPromptTrigger(node);
 	ensurePromptInput(node);
 	normalizeMediaInput(node);
 	syncMediaInputRoute(node);
