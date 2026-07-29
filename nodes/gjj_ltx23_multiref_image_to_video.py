@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from .common_utils.dependency_checker import (
     DEFAULT_PYPI,
 )
 from .common_utils.model_manager import gjjutils_model_search_state
+from .common_utils.mtv_ltx_prompt_settings import read_mtv_ltx_prompt_settings
 
 # 运行时依赖检查（零依赖导入模式，使用 importlib 安全检查）
 try:
@@ -336,6 +338,27 @@ def _unwrap_single_value(value: Any) -> Any:
     if isinstance(value, tuple) and len(value) == 1:
         return value[0]
     return value
+
+
+def _split_audio_queue(value: Any) -> list[dict[str, Any]]:
+    """展开 ComfyUI AUDIO 列表；普通单 AUDIO 返回一项，MTV 队列返回全部项。"""
+    result: list[dict[str, Any]] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict) and item.get("waveform") is not None and item.get("sample_rate"):
+            result.append(item)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return result
+
+
+def _split_mtv_prompts(value: Any) -> list[str]:
+    text = str(value or "")
+    return [item.strip() for item in re.split(r"\r?\n\s*---\s*\r?\n", text) if item.strip()]
 
 
 def _unwrap_main_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -763,6 +786,42 @@ def _append_test_lora_to_chain(lora_chain_config: Any, test_lora_name: Any, stre
     return json.dumps(items, ensure_ascii=False)
 
 
+def _normalize_lora_slots(value: Any) -> list[dict[str, Any]]:
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    slots: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or "ltx" not in name.lower():
+            continue
+        slots.append({
+            "enabled": _safe_bool(item.get("enabled"), True),
+            "name": name,
+            "strength": _safe_float(item.get("strength"), 1.0, -10.0, 10.0),
+        })
+    return slots
+
+
+def _append_lora_slots_to_chain(lora_chain_config: Any, slots: Any) -> str:
+    result = str(_unwrap_single_value(lora_chain_config) or "")
+    for item in _normalize_lora_slots(slots):
+        result = _append_test_lora_to_chain(
+            result,
+            item["name"],
+            item["strength"],
+            item["enabled"],
+        )
+    return result
+
+
 def _pop_miswired_scene_payloads(kwargs: dict[str, Any]) -> list[Any]:
     """兼容旧节点/错位连线：图片线误连到 LoRA 或音频口时，转移到场景输入。
     这样能避开 lora_chain_config received_type(GJJ_BATCH_IMAGE,IMAGE) 的校验/执行错位。
@@ -799,6 +858,20 @@ def _build_scene_schedule(
         guide_times = [duration * float(index) for index in range(1, len(scene_images))]
         total_duration = duration * float(max(1, len(scene_images) - 1))
     return guide_images, guide_times, total_duration
+
+
+def _audio_payload_duration_seconds(value: Any) -> float:
+    if not isinstance(value, dict):
+        return 0.0
+    waveform = value.get("waveform")
+    try:
+        sample_rate = int(value.get("sample_rate", 0) or 0)
+        sample_count = int(waveform.shape[-1])
+    except Exception:
+        return 0.0
+    if sample_rate <= 0 or sample_count <= 0:
+        return 0.0
+    return float(sample_count) / float(sample_rate)
 
 
 def _safe_bool(value: Any, default: bool = True) -> bool:
@@ -1513,6 +1586,7 @@ def _clean_config_defaults() -> dict[str, Any]:
         "size_source": "面板尺寸",
         "seed_mode": "固定",
         "global_prompt": "",
+        "lora_slots": [],
     }
 
 
@@ -1650,6 +1724,7 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
     if config["seed_mode"] not in ("固定", "随机", "递增", "递减"):
         config["seed_mode"] = "固定"
     config["global_prompt"] = str(config.get("global_prompt") or "").strip()
+    config["lora_slots"] = _normalize_lora_slots(config.get("lora_slots"))
     return config
 
 
@@ -1711,13 +1786,13 @@ class GJJ_LTX23ImageToVideoMultiRef:
     CATEGORY = "GJJ/视频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"
+    DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考；接入 MTV 人声分段列表时，按索引将每段音频与图片队列中的一张图配对生成并合并。"
     SEARCH_ALIASES = ["SSL","ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO", "IMAGE")
     RETURN_NAMES = ("🎬 视频生成结果", "🖼️ 视频帧序列")
     OUTPUT_TOOLTIPS = (
         "自动识别：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧（严格复刻最新工作流）；多张图片=多图参考。",
-        "生成后的视频帧 IMAGE 序列，可继续接预览、保存图片、抽帧或其它图像节点。",
+        "生成后的视频帧 IMAGE 序列；MTV 多段资源节约分支为避免数十 GB 内存占用，仅返回最终视频代表帧，完整结果使用 VIDEO 输出。",
     )
     INPUT_IS_LIST = True
 
@@ -1800,7 +1875,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "max": 600.0,
                         "step": 0.1,
                         "display_name": "⏱️ 场景间隔（秒）",
-                        "tooltip": "每段/场景间隔秒数。可在字段前接入 FLOAT 覆盖。",
+                        "tooltip": "无驱动音频时使用的每段/场景间隔秒数；接入驱动音频后自动禁用并改用实际音频时长。",
                     },
                 ),
                 "width": (
@@ -1878,7 +1953,14 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     "AUDIO",
                     {
                         "display_name": "🔊 驱动音频",
-                        "tooltip": "🔊 可选驱动音频。接入 AUDIO 后自动切换为 S2V / 数字人流程；音频 VAE 位于 models/vae。",
+                        "tooltip": "🔊 可选驱动音频。接入普通 AUDIO 后切换为 S2V / 数字人；接入 GJJ_MTVAudioToPrompt 的 AUDIO 列表后进入 MTV 分支，音频N与图片队列中的图片N一一配对。",
+                    },
+                ),
+                "character_reference": (
+                    GJJ_BATCH_IMAGE_TYPE,
+                    {
+                        "display_name": "👤 人物参考",
+                        "tooltip": "👤 可选。接入 GJJ_LazyImageStudio 的人物参考批次；按 LTX2.3+MSR 多图参考工作流，将人物参考作为 image、当前段场景图作为 background 写入 IC-LoRA Guide，所有分段共用同一组人物特征。",
                     },
                 ),
             },
@@ -1914,6 +1996,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
         extra_pnginfo = _unwrap_single_value(extra_pnginfo)
         unique_id = _unwrap_single_value(unique_id)
         config = _resolve_clean_config(config_json=config_json, extra_pnginfo=extra_pnginfo, unique_id=unique_id)
+        shared_prompts = read_mtv_ltx_prompt_settings()
 
         # Clean v40：参数优先级：
         # 1) 当前原生字段/外联输入（ComfyUI 会作为函数参数传入）
@@ -1937,6 +2020,12 @@ class GJJ_LTX23ImageToVideoMultiRef:
         # INPUT_IS_LIST=True 后，kwargs 中可能包含列表。主参数需要解包；场景输入保留列表用于多图合并。
         config = _resolve_clean_config(config_json=_apply_external_param_overrides(config, _unwrap_main_params(kwargs)), extra_pnginfo=None, unique_id=None)
 
+        raw_input_audio = kwargs.get("input_audio")
+        character_reference_images, skipped_character_placeholders = _filter_valid_scene_images(
+            _split_scene_batch(kwargs.get("character_reference"))
+        )
+        audio_queue = _split_audio_queue(raw_input_audio)
+        is_mtv_audio_queue = len(audio_queue) > 1
         moved_scene_payloads = _pop_miswired_scene_payloads(kwargs)
         image_sequence = _unwrap_single_value(image_sequence if image_sequence is not None else kwargs.get("image_sequence"))
         source_video_detected, source_video_fps, source_video_audio = _video_input_metadata(image_sequence)
@@ -1952,13 +2041,20 @@ class GJJ_LTX23ImageToVideoMultiRef:
         if moved_scene_payloads:
             scene_source_summary = (scene_source_summary + "，" if scene_source_summary else "") + f"错位口转场景={len(_flatten_scene_values(moved_scene_payloads))}"
         scene_images, skipped_placeholders = _filter_valid_scene_images(legacy_batch_scene_images + socket_scene_images)
-        scene_images, duplicate_removed = _dedupe_scene_images(scene_images)
+        if is_mtv_audio_queue:
+            duplicate_removed = 0
+        else:
+            scene_images, duplicate_removed = _dedupe_scene_images(scene_images)
         if duplicate_removed:
             _send_status(unique_id, f"Clean v40 场景去重：移除 {duplicate_removed} 个重复图片连接，避免批量口+单图口重复导致误入分段执行。")
             print(f"[GJJ LTX2.3 Clean v40] scene dedupe removed={duplicate_removed}", flush=True)
         target_width, target_height, target_source = _resolve_target_size_from_config_and_scenes(config, scene_images)
         scene_images, target_width, target_height = _normalize_ltx_scene_images(scene_images, target_width, target_height)
         _send_status(unique_id, f"Clean v40 输入统计：{scene_source_summary}；有效场景 {len(scene_images)} 张；重复移除 {duplicate_removed}；目标尺寸 {target_width}x{target_height}（{target_source} / 8倍数对齐 / INPUT_IS_LIST）")
+        if character_reference_images:
+            _send_status(unique_id, f"Clean v40 人物参考：已接收 {len(character_reference_images)} 张，将按 MSR 工作流应用到每一段；当前段场景图作为 background。")
+        elif skipped_character_placeholders:
+            _send_status(unique_id, "Clean v40 人物参考：仅收到空占位图，已忽略。")
         debug_parts = [f"{name}={_debug_value_signature(value)}→{_count_split_images(value)}" for name, _, value in scene_items]
         _send_status(unique_id, f"Clean v40 调试：scene_items={len(scene_items)}；socket拆分={len(socket_scene_images)}；legacy拆分={len(legacy_batch_scene_images)}；" + ("；".join(debug_parts) if debug_parts else "无"))
         print("[GJJ LTX2.3 Clean v40] scene debug:", " | ".join(debug_parts) if debug_parts else "no scene", flush=True)
@@ -1980,7 +2076,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
             )
         except Exception:
             pass
-        input_audio = _unwrap_single_value(kwargs.get("input_audio"))
+        input_audio = audio_queue if is_mtv_audio_queue else _unwrap_single_value(raw_input_audio)
         has_input_audio = input_audio is not None
 
         if source_video_detected:
@@ -1988,6 +2084,12 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 "video_resample",
                 "视频重采样",
                 f"图片/帧序列输入含{'帧率' if source_video_fps > 0 else '音频'}，走 LTX 视频重采样工作流分支。",
+            )
+        elif is_mtv_audio_queue:
+            route_key, route_label, route_tip = (
+                "mtv_audio_queue",
+                "MTV音频图片队列",
+                f"检测到 {len(audio_queue)} 段上游音频，按索引与图片队列逐段配对并合并视频。",
             )
         else:
             route_key, route_label, route_tip = _resolve_auto_route(len(scene_images), has_input_audio)
@@ -2011,15 +2113,29 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 f"effective_base_prompt={resolved_payload['positive_prompt']!r}",
                 flush=True,
             )
+        audio_schedule_duration = sum(
+            _audio_payload_duration_seconds(item) for item in audio_queue
+        ) if has_input_audio else 0.0
+        schedule_duration_override = resolved_payload.get("total_duration_override")
+        if audio_schedule_duration > 0:
+            schedule_duration_override = audio_schedule_duration
+            _send_status(
+                unique_id,
+                f"Clean v40 音频驱动：已忽略场景间隔，时长改由输入音频决定（{audio_schedule_duration:.3f} 秒）。",
+            )
         guide_images, guide_times, duration_seconds = _build_scene_schedule(
             scene_images,
             float(resolved_payload["segment_seconds"]),
-            resolved_payload.get("total_duration_override"),
+            schedule_duration_override,
         )
         mode = MODE_AUDIO_CONDITIONED if has_input_audio else MODE_GENERATED_AUDIO
         frame_trim_start = 0 if scene_images else (DEFAULT_FRAME_TRIM_START_AUDIO if has_input_audio else DEFAULT_FRAME_TRIM_START_VIDEO)
-        lora_chain_config_for_run = _append_test_lora_to_chain(
+        lora_chain_config_for_run = _append_lora_slots_to_chain(
             kwargs.get("lora_chain_config", ""),
+            config.get("lora_slots", []),
+        )
+        lora_chain_config_for_run = _append_test_lora_to_chain(
+            lora_chain_config_for_run,
             config.get("test_lora_name", ""),
             config.get("test_lora_strength", 1.0),
             config.get("test_lora_enabled", False),
@@ -2101,6 +2217,13 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 "source_video_has_audio": source_video_audio is not None,
             },
             unique_id=unique_id,
+            mtv_audio_queue=audio_queue if is_mtv_audio_queue else None,
+            mtv_prompts=_split_mtv_prompts(config["positive_prompt"]) if is_mtv_audio_queue else None,
+            character_reference=character_reference_images or None,
+            prompt_replace_find=shared_prompts.get("vocal_image_prompt", ""),
+            prompt_replace_with=shared_prompts.get("vocal_ltx_prompt", ""),
+            vocal_replace_find="",
+            vocal_replace_with="",
         )
 
 

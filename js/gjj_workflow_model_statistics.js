@@ -1,0 +1,366 @@
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
+const NODE_NAME = "GJJ_WorkflowModelStatistics";
+const API_PATH = "/gjj/workflow_model_statistics";
+const SNAPSHOT_PROPERTY = "gjj_workflow_model_statistics_snapshot";
+const NODE_TITLE_COLOR = "#4B321F";
+const NODE_BODY_COLOR = "#6D5B35";
+const NODE_OUTLINE_COLOR = "#A58A52";
+const MODEL_WIDGETS = new Set([
+	"diffusion", "checkpoint_model", "wanvideo_model",
+	"checkpoint_clip", "clip", "wan_t5_encoder",
+	"vae", "ltx_audio_vae", "checkpoint_vae", "wan_vae",
+	"clip_vision", "audio_encoder", "asr", "model_patch", "loras",
+	"latent_upscale_model", "name_any",
+	"geometry_estimation", "translation",
+]);
+
+function collectCanvasCandidates(value, result = []) {
+	if (typeof value === "string") {
+		const clean = value.trim().replace(/[\\/]+$/, "");
+		if (/^[\[{]/.test(clean)) {
+			try {
+				return collectCanvasCandidates(JSON.parse(clean), result);
+			} catch {
+				// Keep checking the original scalar below.
+			}
+		}
+		if (
+			clean
+			&& clean.length <= 512
+			&& !/[\r\n]/.test(clean)
+			&& !/[└├│📁]/u.test(clean)
+			&& !/^[+-]?\d+(?:\.\d+)?$/.test(clean)
+		) {
+			result.push(clean);
+		}
+		return result;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectCanvasCandidates(item, result);
+		return result;
+	}
+	if (value && typeof value === "object") {
+		for (const item of Object.values(value)) collectCanvasCandidates(item, result);
+	}
+	return result;
+}
+
+function inferWidgetKind(name) {
+	const text = String(name || "").trim().toLowerCase();
+	if (MODEL_WIDGETS.has(text)) return text;
+	if (/(?:^|_)(?:asr|aligner)(?:_|$)/.test(text)) return "asr";
+	if (/lora/.test(text)) return "loras";
+	if (/model[_\s-]*patch/.test(text)) return "model_patch";
+	if (/geometry[_\s-]*estimation/.test(text)) return "geometry_estimation";
+	if (/translat/.test(text)) return "translation";
+	if (/clip[_\s-]*vision/.test(text)) return "clip_vision";
+	if (/audio[_\s-]*(?:encoder|enc)/.test(text)) return "audio_encoder";
+	if (/latent[_\s-]*upscale/.test(text)) return "latent_upscale_model";
+	if (/vae/.test(text)) return "vae";
+	if (/(?:t5|text[_\s-]*encoder)/.test(text)) return "clip";
+	if (/clip/.test(text)) return "clip";
+	if (/(?:ckpt|checkpoint)/.test(text)) return "checkpoint_model";
+	if (/(?:unet|diffusion|dit_model)/.test(text)) return "diffusion";
+	return "";
+}
+
+function collectStructuredModels(value, node, items, visited = new WeakSet()) {
+	if (typeof value === "string") {
+		const text = value.trim();
+		if (!/^[\[{]/.test(text)) return;
+		try {
+			collectStructuredModels(JSON.parse(text), node, items, visited);
+		} catch {
+			// Ordinary multiline text may also begin with "[" or "{".
+		}
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	if (visited.has(value)) return;
+	visited.add(value);
+	if (!Array.isArray(value)) {
+		const kind = String(value.kind || value.model_kind || "").trim().toLowerCase();
+		if (MODEL_WIDGETS.has(kind)) {
+			const names = collectCanvasCandidates(
+				value.name ?? value.model_name ?? value.value ?? value.filename ?? value.file ?? "",
+			);
+			for (const name of names) {
+				items.push({
+					node_id: node.id,
+					node_type: node.type,
+					node_title: String(node.title || node.type || ""),
+					widget_name: kind,
+					name,
+					folder: String(value.folder || value.category || "").trim(),
+				});
+			}
+		}
+	}
+	for (const nested of Object.values(value)) {
+		if (nested && typeof nested === "object") collectStructuredModels(nested, node, items, visited);
+	}
+}
+
+function collectWorkflowModels() {
+	const items = [];
+	for (const graphNode of app.graph?._nodes || []) {
+		if (graphNode?.type === NODE_NAME) continue;
+		const nodeTitle = String(graphNode?.title || graphNode?.type || "");
+		if (graphNode?.type === "GJJ_AudioAceMusicGenerator") {
+			const widgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
+			const lyricsInput = graphNode.inputs?.find((input) => input?.name === "lyrics");
+			const hasLyrics = String(widgetValue("lyrics") || "").trim().length > 0 || lyricsInput?.link != null;
+			const modelTestMode = widgetValue("model_test_mode") === true
+				|| String(widgetValue("model_test_mode") || "").toLowerCase() === "true";
+			items.push({
+				node_id: graphNode.id,
+				node_type: graphNode.type,
+				node_title: nodeTitle,
+				widget_name: "__implicit_ace_asr__",
+				enabled: hasLyrics && !modelTestMode,
+			});
+		}
+		if (graphNode?.type === "GJJ_ComprehensiveMatting") {
+			const widgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
+			const fallback = String(widgetValue("matting_method") || "RMBG1.4");
+			const stored = widgetValue("selected_methods_json")
+				?? graphNode.properties?.selected_methods_json
+				?? "";
+			let methods = [];
+			try {
+				const parsed = JSON.parse(String(stored || ""));
+				if (Array.isArray(parsed)) methods = parsed.map(String).filter(Boolean);
+			} catch {
+				methods = String(stored || "").split(",").map((item) => item.trim()).filter(Boolean);
+			}
+			if (!methods.length) methods = [fallback];
+			items.push({
+				node_id: graphNode.id,
+				node_type: graphNode.type,
+				node_title: nodeTitle,
+				widget_name: "__implicit_matting_models__",
+				methods,
+			});
+		}
+		for (const widget of graphNode?.widgets || []) {
+			const widgetName = inferWidgetKind(widget?.name) || "auto";
+			collectStructuredModels(widget?.value, graphNode, items);
+			const names = collectCanvasCandidates(widget?.value);
+			for (const name of names) {
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: widgetName,
+					name,
+				});
+			}
+		}
+		collectStructuredModels(graphNode?.properties, graphNode, items);
+		for (const name of collectCanvasCandidates(graphNode?.properties)) {
+			items.push({
+				node_id: graphNode.id,
+				node_type: graphNode.type,
+				node_title: nodeTitle,
+				widget_name: "auto",
+				name,
+			});
+		}
+	}
+	return items;
+}
+
+async function copyText(text) {
+	try {
+		await navigator.clipboard.writeText(text);
+		return true;
+	} catch {
+		const area = document.createElement("textarea");
+		area.value = text;
+		area.style.position = "fixed";
+		area.style.opacity = "0";
+		document.body.appendChild(area);
+		area.select();
+		const ok = document.execCommand("copy");
+		area.remove();
+		return ok;
+	}
+}
+
+function createPanel(node) {
+	const root = document.createElement("div");
+	root.style.cssText = "box-sizing:border-box;padding:8px;color:#F4EAD5;font:12px/1.55 sans-serif;height:100%;overflow:auto;background:#6D5B35;border:1px solid #A58A52;border-radius:7px;";
+
+	const toolbar = document.createElement("div");
+	toolbar.style.cssText = "display:flex;gap:6px;position:sticky;top:0;z-index:2;background:#6D5B35;padding-bottom:7px;";
+	const refresh = document.createElement("button");
+	refresh.textContent = "🔄 统计当前工作流";
+	refresh.style.cssText = "flex:1;cursor:pointer;border:1px solid #B79A5B;border-radius:5px;background:#514123;color:#FFF3D8;padding:5px;";
+	const copyAll = document.createElement("button");
+	copyAll.textContent = "📋";
+	copyAll.title = "复制完整统计文本";
+	copyAll.style.cssText = refresh.style.cssText + "flex:0 0 36px;";
+	toolbar.append(refresh, copyAll);
+
+	const content = document.createElement("div");
+	content.textContent = "点击“统计当前工作流”读取所有节点使用的模型。";
+	root.append(toolbar, content);
+
+	function render(report) {
+		node.__gjjWorkflowModelReport = report;
+		node.__gjjRenderWorkflowModelReport = render;
+		content.replaceChildren();
+		const link = document.createElement("a");
+		link.href = report.download_url;
+		link.target = "_blank";
+		link.rel = "noreferrer";
+		link.textContent = "🌏 模型下载";
+		link.style.cssText = "display:inline-block;color:#6ecbff;font-size:20px;line-height:1.35;font-weight:800;text-decoration:none;margin-bottom:4px;";
+		content.append(link);
+
+		const top = document.createElement("div");
+		top.textContent = `📁 ComfyUI/\n└──📁 models/`;
+		top.style.whiteSpace = "pre";
+		content.append(top);
+
+		for (const group of report.groups || []) {
+			const folder = document.createElement("div");
+			folder.textContent = `　　└──📁 ${group.folder}/`;
+			folder.style.color = "#F2E4C5";
+			content.append(folder);
+			for (const model of group.models || []) {
+				const row = document.createElement("div");
+				const renderModelRow = () => {
+					row.replaceChildren();
+					const name = document.createElement("span");
+					name.textContent = `　　　　└──${model.icon}${model.name}`;
+					row.append(name);
+					if (model.size_text) {
+						const size = document.createElement("span");
+						size.textContent = `  [${model.size_text}]`;
+						size.style.cssText = "color:#76D7FF;font-weight:700;";
+						row.append(size);
+					}
+					if (!model.exists) {
+						const missing = document.createElement("span");
+						missing.textContent = "  ❌ 缺失";
+						missing.style.color = "#FF565F";
+						row.append(missing);
+					}
+				};
+				renderModelRow();
+				const usedBy = Array.isArray(model.used_by) ? model.used_by.filter(Boolean) : [];
+				row.title = model.empty
+					? "空模型项"
+					: `${usedBy.length ? `使用节点：\n${usedBy.map((title) => `• ${title}`).join("\n")}\n\n` : ""}双击复制：${model.name}`;
+				row.style.cssText = [
+					"white-space:nowrap", "overflow:hidden", "text-overflow:ellipsis",
+					model.exists ? "color:#e2e9ed" : "color:#ff565f;font-weight:700",
+					model.empty ? "opacity:.7" : "cursor:copy",
+				].join(";");
+				if (!model.empty) {
+					row.addEventListener("dblclick", async (event) => {
+						event.stopPropagation();
+						const ok = await copyText(model.name);
+						row.textContent = ok ? `　　　　└──✅ 已复制 ${model.name}` : `　　　　└──❌ 复制失败 ${model.name}`;
+						setTimeout(renderModelRow, 900);
+					});
+				}
+				content.append(row);
+			}
+		}
+		if (!(report.groups || []).length) {
+			const empty = document.createElement("div");
+			empty.textContent = "⚫ 当前工作流未识别到指定类型的模型控件。";
+			empty.style.color = "#8f9ba1";
+			content.append(empty);
+		}
+		const summary = document.createElement("div");
+		summary.textContent = `共 ${report.model_count || 0} 个模型，合计 ${report.total_size_text || "0 B"}，缺失 ${report.missing_count || 0} 个`;
+		summary.style.cssText = "margin-top:7px;padding-top:6px;border-top:1px solid #9B814C;color:#F1D49A;";
+		content.append(summary);
+	}
+
+	async function refreshReport() {
+		refresh.disabled = true;
+		refresh.textContent = "⏳ 正在统计…";
+		try {
+			const response = await api.fetchApi(API_PATH, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ items: collectWorkflowModels() }),
+			});
+			const report = await response.json();
+			if (!response.ok || report?.error) throw new Error(report?.error || `HTTP ${response.status}`);
+			render(report);
+			const snapshot = JSON.parse(JSON.stringify(report));
+			for (const group of snapshot.groups || []) {
+				for (const model of group.models || []) delete model.path;
+			}
+			node.properties = node.properties || {};
+			node.properties[SNAPSHOT_PROPERTY] = snapshot;
+			app.graph?.setDirtyCanvas?.(true, true);
+		} catch (error) {
+			content.textContent = `❌ 统计失败：${error?.message || error}`;
+			content.style.color = "#ff565f";
+		} finally {
+			refresh.disabled = false;
+			refresh.textContent = "🔄 统计当前工作流";
+		}
+	}
+
+	refresh.addEventListener("click", refreshReport);
+	copyAll.addEventListener("click", async () => {
+		const text = node.__gjjWorkflowModelReport?.text || "";
+		if (!text) return;
+		const ok = await copyText(text);
+		copyAll.textContent = ok ? "✅" : "❌";
+		setTimeout(() => { copyAll.textContent = "📋"; }, 900);
+	});
+	setTimeout(() => {
+		const snapshot = node.properties?.[SNAPSHOT_PROPERTY];
+		if (snapshot?.groups && typeof snapshot.text === "string") render(snapshot);
+		else refreshReport();
+	}, 200);
+	return root;
+}
+
+app.registerExtension({
+	name: "GJJ.WorkflowModelStatistics",
+	async beforeRegisterNodeDef(nodeType, nodeData) {
+		if (nodeData?.name !== NODE_NAME) return;
+		const applyNodeColors = (node) => {
+			node.color = NODE_TITLE_COLOR;
+			node.bgcolor = NODE_BODY_COLOR;
+			node.boxcolor = NODE_OUTLINE_COLOR;
+		};
+		const originalCreated = nodeType.prototype.onNodeCreated;
+		const originalConfigure = nodeType.prototype.onConfigure;
+		nodeType.prototype.onNodeCreated = function (...args) {
+			const result = originalCreated?.apply(this, args);
+			applyNodeColors(this);
+			if (!this.__gjjWorkflowModelPanel && typeof this.addDOMWidget === "function") {
+				const panel = createPanel(this);
+				this.__gjjWorkflowModelPanel = this.addDOMWidget(
+					"gjj_workflow_model_statistics_panel",
+					"HTML",
+					panel,
+					{ serialize: false, hideOnZoom: false },
+				);
+				this.setSize([430, 430]);
+			}
+			return result;
+		};
+		nodeType.prototype.onConfigure = function (...args) {
+			const result = originalConfigure?.apply(this, args);
+			applyNodeColors(this);
+			const snapshot = this.properties?.[SNAPSHOT_PROPERTY];
+			if (snapshot?.groups && typeof snapshot.text === "string") {
+				queueMicrotask(() => this.__gjjRenderWorkflowModelReport?.(snapshot));
+			}
+			return result;
+		};
+	},
+});

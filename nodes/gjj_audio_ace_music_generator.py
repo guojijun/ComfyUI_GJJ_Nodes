@@ -202,7 +202,6 @@ UI_PARAMETER_ORDER = (
 )
 HIDDEN_UI_PARAMETERS = tuple(
     name for name in UI_PARAMETER_ORDER
-    if name not in {"tags", "lyrics"}
 )
 _TIMESTAMP_ASR_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
@@ -328,6 +327,19 @@ def _pick_available_name(preferred: str, available: list[str], fallback: str = "
     return available[0] if available else ""
 
 
+def _match_available_name(preferred: str, available: list[str]) -> str:
+    preferred_text = str(preferred or "").strip()
+    if not preferred_text:
+        return ""
+    if preferred_text in available:
+        return preferred_text
+    preferred_base = preferred_text.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for name in available:
+        if str(name).replace("\\", "/").rsplit("/", 1)[-1].lower() == preferred_base:
+            return str(name)
+    return ""
+
+
 def _filter_ace_models(names: list[str], *, allow_checkpoint: bool) -> list[str]:
     filtered: list[str] = []
     for name in names:
@@ -343,6 +355,11 @@ def _filter_ace_models(names: list[str], *, allow_checkpoint: bool) -> list[str]
             if "acestep" in normalized or "unet" in normalized or "turbo" in normalized:
                 filtered.append(name)
     return filtered
+
+
+def _is_ace_aio_checkpoint(name: Any) -> bool:
+    normalized = _normalize_text(name)
+    return "aio" in normalized or "checkpoint" in normalized
 
 
 def _filter_ace_unet_models(names: list[str]) -> list[str]:
@@ -415,7 +432,9 @@ def _resolve_model_bundle(model_name: str) -> tuple[str, str]:
 
     model_name = str(model_name or "").strip()
     if model_name in checkpoints:
-        return "checkpoint", model_name
+        # checkpoints 目录中也常被误放分体 UNET。只有文件名明确标记 AIO /
+        # checkpoint 才按整包解包，其余 ACE 模型使用分体加载链路。
+        return ("checkpoint", model_name) if _is_ace_aio_checkpoint(model_name) else ("split", model_name)
     if model_name in diffusion_models:
         if model_name.replace("\\", "/").lower().endswith(".gguf"):
             return "gguf", model_name
@@ -423,7 +442,11 @@ def _resolve_model_bundle(model_name: str) -> tuple[str, str]:
 
     checkpoint_match = _pick_available_name(model_name, checkpoints, DEFAULT_CHECKPOINT)
     if checkpoint_match:
-        return "checkpoint", checkpoint_match
+        return (
+            ("checkpoint", checkpoint_match)
+            if _is_ace_aio_checkpoint(checkpoint_match)
+            else ("split", checkpoint_match)
+        )
 
     diffusion_match = _pick_available_name(model_name, diffusion_models, DEFAULT_UNET)
     if diffusion_match:
@@ -456,7 +479,13 @@ def _load_ace_unet(unet_name: str):
 
 
 def _load_split_bundle(unet_name: str, clip_1_name: str = DEFAULT_CLIP_1, clip_2_name: str = DEFAULT_CLIP_2, vae_name: str = DEFAULT_VAE):
-    resolved_unet = _require_category_name("diffusion_models", unet_name, "分体 UNET", DEFAULT_UNET)
+    diffusion_models = _filter_ace_unet_models(_safe_filename_list("diffusion_models"))
+    checkpoint_models = _filter_ace_models(_safe_filename_list("checkpoints"), allow_checkpoint=True)
+    resolved_unet = _match_available_name(unet_name, diffusion_models)
+    if not resolved_unet:
+        resolved_unet = _match_available_name(unet_name, checkpoint_models)
+    if not resolved_unet:
+        raise RuntimeError(f"未找到分体 UNET：{unet_name}")
     resolved_clip_1 = _require_category_name("text_encoders", clip_1_name, "文本编码器 1", DEFAULT_CLIP_1)
     resolved_clip_2 = _require_category_name("text_encoders", clip_2_name, "文本编码器 2", DEFAULT_CLIP_2)
     resolved_vae = _require_category_name("vae", vae_name, "VAE", DEFAULT_VAE)
@@ -464,6 +493,24 @@ def _load_split_bundle(unet_name: str, clip_1_name: str = DEFAULT_CLIP_1, clip_2
     model = _load_ace_unet(resolved_unet)
     clip = DualCLIPLoader().load_clip(resolved_clip_1, resolved_clip_2, "ace", "default")[0]
     vae = VAELoader().load_vae(resolved_vae)[0]
+    return model, clip, vae
+
+
+def _load_checkpoint_bundle(checkpoint_name: str):
+    result = CheckpointLoaderSimple().load_checkpoint(checkpoint_name)
+    if not isinstance(result, (tuple, list)) or len(result) < 3:
+        raise RuntimeError(
+            "整包 checkpoint 加载器没有返回 MODEL / CLIP / VAE。"
+            "该文件可能是误放在 models/checkpoints 的分体 UNET，"
+            "请将分体模型移到 models/diffusion_models；"
+            "只有文件名明确包含 aio 或 checkpoint 的整包模型才放 checkpoints。"
+        )
+    model, clip, vae = result[:3]
+    if model is None or clip is None or vae is None:
+        raise RuntimeError(
+            "整包 checkpoint 缺少 MODEL、CLIP 或 VAE 组件。"
+            "请确认使用真正的 ACE AIO 整包，或改用 diffusion_models + text_encoders + vae 分体模型组。"
+        )
     return model, clip, vae
 
 
@@ -935,7 +982,7 @@ class GJJ_AudioAceMusicGenerator:
         ],
     }
     GJJ_UI = {
-        "toolbar": ["🔄", "🎲", "🌐", "🪄", "⚡", "🧠", "▶️", "🧪"],
+        "toolbar": ["🔄", "🎲", "🌐", "📒", "⏰", "🎛️", "🧠", "▶️", "🧪"],
         "parameter_order": list(UI_PARAMETER_ORDER),
         "hidden_parameters": list(HIDDEN_UI_PARAMETERS),
     }
@@ -1271,7 +1318,7 @@ class GJJ_AudioAceMusicGenerator:
         try:
             mode, resolved_name = _resolve_model_bundle(model_name)
             if mode == "checkpoint":
-                model, clip, vae = CheckpointLoaderSimple().load_checkpoint(resolved_name)
+                model, clip, vae = _load_checkpoint_bundle(resolved_name)
             elif mode == "gguf":
                 model, clip, vae = _load_gguf_bundle(resolved_name, clip_1_name, clip_2_name, vae_name)
             else:

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import gc
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
+import uuid
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
@@ -285,6 +292,72 @@ def _send_status(unique_id: Any, text: str) -> None:
         pass
 
 
+def _send_segment_preview(
+    unique_id: Any,
+    frame: torch.Tensor,
+    *,
+    segment: int,
+    total_segments: int,
+    start_frame: int,
+    end_frame: int,
+    total_frames: int,
+    completed_seconds: float = 0.0,
+    completed_frames: int = 0,
+) -> None:
+    if not unique_id or not isinstance(frame, torch.Tensor) or frame.numel() == 0:
+        return
+    try:
+        import numpy as np
+        from PIL import Image
+        from server import PromptServer
+
+        preview = frame.detach().to(device="cpu", dtype=torch.float32).clamp(0, 1)
+        array = (preview.numpy() * 255.0).round().astype(np.uint8)
+        image = Image.fromarray(array[..., :3]).convert("RGB")
+        safe_node_id = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in str(unique_id)
+        ) or "unknown"
+        preview_root = Path(folder_paths.get_temp_directory()) / "GJJ"
+        preview_root.mkdir(parents=True, exist_ok=True)
+        preview_filename = f"seedvr2_preview_{safe_node_id}.png"
+        preview_path = preview_root / preview_filename
+        temporary_path = preview_path.with_name(
+            f".{preview_filename}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        image.save(temporary_path, format="PNG")
+        os.replace(temporary_path, preview_path)
+        payload = {
+            "node": str(unique_id),
+            "text": (
+                f"当前第 {int(segment)} 段："
+                f"{int(start_frame)}-{int(end_frame)}/{int(total_frames)} 帧"
+            ),
+            "preview_filename": preview_filename,
+            "segment": int(segment),
+            "total_segments": int(total_segments),
+            "start_frame": int(start_frame),
+            "end_frame": int(end_frame),
+            "total_frames": int(total_frames),
+            "completed_seconds": max(0.0, float(completed_seconds)),
+            "completed_frames": max(0, int(completed_frames)),
+        }
+        if completed_frames > 0 and completed_seconds > 0:
+            seconds_per_frame = float(completed_seconds) / int(completed_frames)
+            payload["seconds_per_frame"] = seconds_per_frame
+            payload["eta_seconds"] = seconds_per_frame * max(
+                0,
+                int(total_frames) - int(completed_frames),
+            )
+        # gjj_node_progress is already used by the status text and is known to
+        # pass through every supported ComfyUI frontend/proxy.  Keep the
+        # dedicated event too for older cached versions of this extension.
+        PromptServer.instance.send_sync("gjj_node_progress", payload)
+        PromptServer.instance.send_sync("gjj_seedvr2_segment_preview", payload)
+    except Exception as exc:
+        print(f"[GJJ SeedVR2] 当前段首帧预览生成失败：{exc}")
+
+
 def _get_seedvr2_model_options() -> tuple[list[str], list[str]]:
     dit_models = _ordered_model_choices(DEFAULT_DIT_MODEL, want_vae=False)
     vae_models = _ordered_model_choices(DEFAULT_VAE_MODEL, want_vae=True)
@@ -437,7 +510,14 @@ def _coerce_media_to_image_batch(value: Any) -> tuple[torch.Tensor, Any, float |
         tensor = tensor[..., :3]
     elif channels != 3:
         raise RuntimeError(f"输入图片/视频帧通道数无效：{tuple(tensor.shape)}。")
-    return tensor.detach().float().clamp(0.0, 1.0).contiguous(), source_audio, source_fps, output_mode
+    tensor = tensor.detach()
+    if tensor.dtype == torch.float32 and tensor.is_contiguous():
+        # Comfy IMAGE/VIDEO frames are already normalized float32.  Repeating
+        # float()+clamp()+contiguous() here duplicated the complete source video.
+        normalized = tensor
+    else:
+        normalized = tensor.to(dtype=torch.float32).clamp_(0.0, 1.0).contiguous()
+    return normalized, source_audio, source_fps, output_mode
 
 
 def _model_category_root_for(model_name: str) -> Path | None:
@@ -561,10 +641,14 @@ def _load_official_seedvr2_components(dit_model: str, vae_model: str):
     model = comfy.sd.load_diffusion_model_state_dict(dit_sd, model_options={}, metadata=dit_metadata)
     if model is None:
         raise RuntimeError(f"ComfyUI 无法识别 SeedVR2 主模型：{dit_model}")
+    del dit_sd, dit_metadata
+    gc.collect()
     vae_sd, vae_metadata = comfy.utils.load_torch_file(str(vae_path), return_metadata=True)
     _dequantize_seedvr2_vae_convrot(vae_sd)
     vae = comfy.sd.VAE(sd=vae_sd, metadata=vae_metadata)
     vae.throw_exception_if_invalid()
+    del vae_sd, vae_metadata
+    gc.collect()
     # ComfyUI 0.28 creates VAEs with CoreModelPatcher unconditionally.  When a
     # chunked dynamic DiT is replaced by that dynamic VAE, free_memory() can
     # iterate stale current_loaded_models indices.  SeedVR2's VAE is small
@@ -600,6 +684,31 @@ def _resize_for_seedvr2(images: torch.Tensor, resolution: int, max_resolution: i
     return common_upscale(samples, target_w, target_h, "lanczos", "disabled").movedim(1, -1)
 
 
+def _smart_decode_tile_geometry(
+    width: int,
+    height: int,
+    maximum_tile: int,
+    overlap: int,
+    alignment: int,
+) -> tuple[int, int, int]:
+    alignment = max(1, int(alignment))
+    maximum_tile = max(alignment, (int(maximum_tile) // alignment) * alignment)
+    overlap = max(0, min(int(overlap), maximum_tile - alignment))
+
+    def minimum_for_axis(length: int) -> int:
+        length = max(alignment, int(length))
+        if length <= maximum_tile:
+            return ((length + alignment - 1) // alignment) * alignment
+        stride = max(alignment, maximum_tile - overlap)
+        tile_count = max(2, (length - overlap + stride - 1) // stride)
+        required = (length + (tile_count - 1) * overlap + tile_count - 1) // tile_count
+        return min(maximum_tile, ((required + alignment - 1) // alignment) * alignment)
+
+    tile_width = minimum_for_axis(width)
+    tile_height = minimum_for_axis(height)
+    return max(tile_width, tile_height), tile_width, tile_height
+
+
 def _run_official_seedvr2_flow(
     images: torch.Tensor,
     *,
@@ -611,7 +720,7 @@ def _run_official_seedvr2_flow(
     encode_tiled: bool,
     encode_tile_size: int,
     encode_tile_overlap: int,
-    decode_tiled: bool,
+    decode_tiled: Any,
     decode_tile_size: int,
     decode_tile_overlap: int,
     color_correction: str,
@@ -621,6 +730,8 @@ def _run_official_seedvr2_flow(
     temporal_overlap: int,
     vae_temporal_size: int,
     vae_temporal_overlap: int,
+    tensor_offload_device: str,
+    loaded_components: tuple[Any, Any] | None = None,
     unique_id: Any = None,
 ) -> torch.Tensor:
     """Execute the official SeedVR2 graph in-process, without third-party nodes."""
@@ -634,7 +745,7 @@ def _run_official_seedvr2_flow(
     from nodes import KSampler, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled
 
     _send_status(unique_id, "2/6 加载官方 SeedVR2 模型...")
-    model, vae = _load_official_seedvr2_components(dit_model, vae_model)
+    model, vae = loaded_components or _load_official_seedvr2_components(dit_model, vae_model)
     resized = _resize_for_seedvr2(images, resolution, max_resolution)
 
     _send_status(unique_id, "3/6 官方预处理与 VAE 编码...")
@@ -674,9 +785,40 @@ def _run_official_seedvr2_flow(
         sampled = sampled_chunks[0]
 
     _send_status(unique_id, "5/6 VAE 分块解码...")
-    if decode_tiled:
+    decode_mode = (
+        "开启" if decode_tiled is True
+        else "关闭" if decode_tiled is False
+        else str(decode_tiled or "智能").strip()
+    )
+    use_tiled_decode = decode_mode != "关闭"
+    effective_decode_tile_size = int(decode_tile_size)
+    if decode_mode in ("智能", "自动"):
+        target_height, target_width = int(resized.shape[1]), int(resized.shape[2])
+        try:
+            alignment = max(64, int(vae.spacial_compression_decode()) * 8)
+        except Exception:
+            alignment = 64
+        effective_decode_tile_size, minimum_tile_width, minimum_tile_height = _smart_decode_tile_geometry(
+            target_width,
+            target_height,
+            int(decode_tile_size),
+            int(decode_tile_overlap),
+            alignment,
+        )
+        use_tiled_decode = max(target_width, target_height) > effective_decode_tile_size
+        _send_status(
+            unique_id,
+            (
+                f"5/6 智能解码：目标 {target_width}×{target_height}，"
+                f"最小块 {minimum_tile_width}×{minimum_tile_height}，"
+                f"实际方块 {effective_decode_tile_size}，对齐 {alignment}。"
+            ) if use_tiled_decode else (
+                f"5/6 智能解码：目标 {target_width}×{target_height} 可整图解码，跳过空间分块。"
+            ),
+        )
+    if use_tiled_decode:
         decoded = VAEDecodeTiled().decode(
-            vae, sampled, int(decode_tile_size), int(decode_tile_overlap),
+            vae, sampled, effective_decode_tile_size, int(decode_tile_overlap),
             temporal_size=int(vae_temporal_size), temporal_overlap=int(vae_temporal_overlap),
         )[0]
     else:
@@ -687,12 +829,528 @@ def _run_official_seedvr2_flow(
         correction = "wavelet"
     if correction not in ("lab", "wavelet", "adain", "none"):
         correction = "none"
-    return SeedVR2PostProcessing.execute(decoded, resized, correction)[0]
+    if not is_video:
+        result = SeedVR2PostProcessing.execute(decoded, resized, correction)[0]
+        del decoded, resized, prepared, latent, latent_chunks, sampled_chunks, sampled
+        return result
+
+    # Post-processing a complete long video creates another full float32 copy
+    # beside decoded + resized.  At 2K that copy alone can consume tens of GB.
+    # Write small processed slices directly to a float16 result buffer instead.
+    requested_output_device = str(tensor_offload_device or "none")
+    if requested_output_device == "none":
+        requested_output_device = "cpu"
+    output_device = torch.device(requested_output_device)
+    # Temporal VAE alignment may decode one padded frame beyond the source
+    # sequence (for example 41 decoded frames for 40 resized source frames).
+    # Post-processing pairs both tensors frame-by-frame, so only process the
+    # common range and never reserve a larger destination slice than it can
+    # actually return.
+    frame_count = min(int(decoded.shape[0]), int(resized.shape[0]))
+    postprocess_chunk = max(1, min(16, int(vae_temporal_size)))
+    result = None
+    for start in range(0, frame_count, postprocess_chunk):
+        end = min(frame_count, start + postprocess_chunk)
+        _send_status(
+            unique_id,
+            f"5/6 分段后处理并写入{('显存' if output_device.type == 'cuda' else '内存')} "
+            f"{end}/{frame_count}...",
+        )
+        processed = SeedVR2PostProcessing.execute(
+            decoded[start:end],
+            resized[start:end],
+            correction,
+        )[0]
+        if result is None:
+            # The VAE may decode to an aligned size (for example 1088 high)
+            # while SeedVR2 post-processing crops back to the requested 1080.
+            # Allocate from the real post-processed geometry, not decoded.
+            result = torch.empty(
+                (frame_count, *tuple(processed.shape[1:])),
+                dtype=torch.float16,
+                device=output_device,
+            )
+        result[start:end].copy_(
+            processed.to(device=output_device, dtype=torch.float16),
+        )
+        del processed
+
+    del decoded, resized, prepared, latent, latent_chunks, sampled_chunks, sampled
+    if result is None:
+        raise RuntimeError("SeedVR2 后处理没有生成任何视频帧。")
+    return result
+
+
+def _stream_source_path(video: Any) -> Path | None:
+    getter = getattr(video, "get_stream_source", None)
+    if not callable(getter):
+        return None
+    try:
+        source = getter()
+    except Exception:
+        return None
+    if not isinstance(source, (str, Path)):
+        return None
+    path = Path(source).resolve()
+    return path if path.is_file() else None
+
+
+def _resolve_local_media_file(value: str | Path | None) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    direct = Path(text).expanduser()
+    if direct.is_file():
+        return direct.resolve()
+    try:
+        annotated = Path(folder_paths.get_annotated_filepath(text))
+    except Exception:
+        annotated = Path(folder_paths.get_input_directory()) / text
+    return annotated.resolve() if annotated.is_file() else None
+
+
+def _load_local_media(path: Path) -> Any:
+    if path.suffix.lower() in {
+        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv",
+        ".mpeg", ".mpg", ".gif",
+    }:
+        return InputImpl.VideoFromFile(str(path))
+    import numpy as np
+    from PIL import Image, ImageOps
+
+    with Image.open(path) as opened:
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+        array = np.asarray(image).astype(np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0).contiguous()
+
+
+def _replace_media_file(path: Path, value: Any) -> Any:
+    temporary = path.with_name(f".{path.stem}.gjj-upscaled-{uuid.uuid4().hex}{path.suffix}")
+    try:
+        if isinstance(value, torch.Tensor):
+            import numpy as np
+            from PIL import Image
+
+            image = value[0].detach().to(device="cpu", dtype=torch.float32).clamp(0, 1)
+            array = (image.numpy() * 255.0).round().astype(np.uint8)
+            Image.fromarray(array).save(temporary)
+        else:
+            value.save_to(str(temporary))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if isinstance(value, torch.Tensor):
+        return value
+    return InputImpl.VideoFromFile(str(path))
+
+
+def _stream_target_dimensions(
+    video: Any,
+    resolution: int,
+    max_resolution: int,
+) -> tuple[int, int]:
+    """Estimate the real SeedVR2 output geometry without decoding video frames."""
+    try:
+        width, height = video.get_dimensions()
+        width, height = int(width), int(height)
+    except Exception:
+        width, height = int(resolution), int(resolution)
+    if width <= 0 or height <= 0:
+        width, height = int(resolution), int(resolution)
+    scale = max(2, int(resolution)) / max(2, min(width, height))
+    target_w = max(2, round(width * scale))
+    target_h = max(2, round(height * scale))
+    longest = max(target_w, target_h)
+    if int(max_resolution) > 0 and longest > int(max_resolution):
+        cap_scale = int(max_resolution) / longest
+        target_w = max(2, round(target_w * cap_scale))
+        target_h = max(2, round(target_h * cap_scale))
+    target_w += target_w % 2
+    target_h += target_h % 2
+    return target_w, target_h
+
+
+def _smart_stream_chunk_frames(
+    video: Any,
+    *,
+    resolution: int,
+    max_resolution: int,
+    video_chunk_mode: str,
+    frames_per_chunk: int,
+    vae_temporal_size: int,
+) -> tuple[int, str]:
+    """Choose an outer stream segment that amortizes I/O but stays RAM-safe."""
+    target_w, target_h = _stream_target_dimensions(video, resolution, max_resolution)
+    mpx = max(0.01, target_w * target_h / 1_000_000.0)
+    mode = str(video_chunk_mode).strip()
+
+    if mode == "手动":
+        sampler_frames = max(1, int(frames_per_chunk))
+        basis = f"手动采样段 {sampler_frames} 帧"
+    elif mode == "关闭":
+        # “关闭” only disables the inner latent split.  The outer stream split
+        # is deliberately retained so a long video never becomes one huge tensor.
+        # Since there is no second-level safety split, keep each outer segment
+        # deliberately small; 17 is a valid 4n+1 SeedVR2 frame count.
+        sampler_frames = 17
+        basis = "潜空间分块关闭，使用保守的 17 帧流式段"
+    else:
+        try:
+            import comfy.model_management as model_management
+            from comfy.ldm.seedvr.constants import (
+                SEEDVR2_CHUNK_GIB_PER_MPX_FRAME,
+                SEEDVR2_CHUNK_RESERVED_GIB,
+                SEEDVR2_CHUNK_SIGMA_GIB,
+                SEEDVR2_CHUNK_SIGMA_K,
+            )
+
+            device = model_management.get_torch_device()
+            free_gb = model_management.get_free_memory(device) / (1024 ** 3)
+            budget_gb = (
+                free_gb
+                - SEEDVR2_CHUNK_RESERVED_GIB
+                - SEEDVR2_CHUNK_SIGMA_K * SEEDVR2_CHUNK_SIGMA_GIB
+            )
+            latent_frames = max(
+                1,
+                int(budget_gb / (SEEDVR2_CHUNK_GIB_PER_MPX_FRAME * mpx)),
+            )
+            sampler_frames = max(1, 4 * (latent_frames - 1) + 1)
+            basis = f"可用显存 {free_gb:.1f} GB，单次采样约 {sampler_frames} 帧"
+        except Exception:
+            sampler_frames = max(17, int(frames_per_chunk))
+            basis = f"显存信息不可用，回退 {sampler_frames} 帧"
+
+    # Keep one sampler-sized outer segment.  Making the outer segment larger
+    # does not make DiT sampling cheaper (it is split again internally), while
+    # VAE encode/decode and post-processing still operate on the whole outer
+    # segment and can pin VRAM at 100% for a very long time.
+    minimum_frames = 1 if mode == "手动" else 9
+    desired = max(minimum_frames, sampler_frames)
+    try:
+        import psutil
+
+        available_bytes = int(psutil.virtual_memory().available)
+        estimated_bytes_per_frame = max(1, target_w * target_h * 3 * 4 * 4)
+        ram_cap = max(minimum_frames, int(available_bytes * 0.20 / estimated_bytes_per_frame))
+    except Exception:
+        ram_cap = 161
+    core_frames = min(desired, ram_cap, 161)
+    # Keep SeedVR's required 4n+1 temporal alignment.
+    if core_frames <= 1:
+        core_frames = 1
+    else:
+        core_frames = max(5 if mode == "手动" else 9, 4 * ((core_frames - 1) // 4) + 1)
+    detail = (
+        f"{target_w}×{target_h}，{basis}；"
+        f"外层每段 {core_frames} 帧（内存安全上限 {ram_cap} 帧）"
+    )
+    return core_frames, detail
+
+
+def _begin_segment_resource_sample() -> torch.device | None:
+    if not torch.cuda.is_available():
+        return None
+    try:
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.cuda.reset_peak_memory_stats(device)
+        return device
+    except Exception:
+        return None
+
+
+def _segment_resource_pressure(device: torch.device | None) -> tuple[float, float]:
+    vram_pressure = 0.0
+    if device is not None:
+        try:
+            torch.cuda.synchronize(device)
+            total = torch.cuda.get_device_properties(device).total_memory
+            # Reserved memory includes PyTorch's reusable cache.  Using it here
+            # makes a healthy, fully utilized GPU look permanently "100% full"
+            # and prevents later segments from growing.  Allocated is the real
+            # tensor peak produced by this segment.
+            vram_pressure = torch.cuda.max_memory_allocated(device) / max(1, total)
+        except Exception:
+            vram_pressure = 0.0
+    try:
+        import psutil
+
+        ram_pressure = float(psutil.virtual_memory().percent) / 100.0
+    except Exception:
+        ram_pressure = 0.0
+    return vram_pressure, ram_pressure
+
+
+def _next_adaptive_segment_frames(
+    current: int,
+    target: int,
+    vram_pressure: float,
+    ram_pressure: float,
+    minimum: int = 9,
+) -> int:
+    pressure = max(float(vram_pressure), float(ram_pressure))
+    if pressure >= 0.97:
+        candidate = max(minimum, current - 8)
+    elif pressure >= 0.94:
+        candidate = max(minimum, current - 4)
+    elif pressure <= 0.88:
+        candidate = min(target, current + 4)
+    else:
+        candidate = current
+    candidate = min(candidate, target)
+    return max(minimum, 4 * max(1, (candidate - 1) // 4) + 1)
+
+
+def _run_streaming_video_upscale(
+    video: Any,
+    *,
+    dit_model: str,
+    vae_model: str,
+    resolution: int,
+    max_resolution: int,
+    seed: int,
+    encode_tiled: bool,
+    encode_tile_size: int,
+    encode_tile_overlap: int,
+    decode_tiled: Any,
+    decode_tile_size: int,
+    decode_tile_overlap: int,
+    color_correction: str,
+    video_chunk_mode: str,
+    frames_per_chunk: int,
+    temporal_overlap: int,
+    vae_temporal_size: int,
+    vae_temporal_overlap: int,
+    tensor_offload_device: str,
+    unique_id: Any,
+    replace_path: Path | None = None,
+) -> Any | None:
+    source_path = _stream_source_path(video)
+    trim_getter = getattr(video, "get_active_trim_window", None)
+    trim_factory = getattr(video, "as_trimmed", None)
+    if source_path is None or not callable(trim_factory):
+        return None
+
+    fps = float(video.get_frame_rate())
+    duration = float(video.get_duration())
+    if fps <= 0 or duration <= 0:
+        return None
+    trim_start = 0.0
+    if callable(trim_getter):
+        try:
+            trim_start = float(trim_getter()[0])
+        except Exception:
+            trim_start = 0.0
+
+    try:
+        total_frames = max(1, int(video.get_frame_count()))
+    except Exception:
+        total_frames = max(1, int(round(duration * fps)))
+    target_core_frames, chunk_detail = _smart_stream_chunk_frames(
+        video,
+        resolution=resolution,
+        max_resolution=max_resolution,
+        video_chunk_mode=video_chunk_mode,
+        frames_per_chunk=frames_per_chunk,
+        vae_temporal_size=vae_temporal_size,
+    )
+    chunk_mode = str(video_chunk_mode).strip()
+    adaptive = chunk_mode != "手动"
+    adaptive_minimum = 5
+    core_frames = min(adaptive_minimum, target_core_frames) if adaptive else target_core_frames
+    _send_status(
+        unique_id,
+        f"智能视频分段：先用 {core_frames} 帧试跑，动态上限 {target_core_frames} 帧；{chunk_detail}"
+        if adaptive else f"手动视频分段：固定 {core_frames} 帧",
+    )
+    output_root = Path(folder_paths.get_temp_directory()).resolve() / "GJJ" / "seedvr2_stream"
+    output_root.mkdir(parents=True, exist_ok=True)
+    final_path = output_root / f"seedvr2_{uuid.uuid4().hex}.mp4"
+
+    try:
+        from .gjj_video_combine_runtime import get_ffmpeg_path
+    except ImportError:
+        from nodes.gjj_video_combine_runtime import get_ffmpeg_path
+    ffmpeg_value = get_ffmpeg_path()
+    if not ffmpeg_value:
+        raise RuntimeError("未找到 ffmpeg，无法拼接 SeedVR2 流式视频分段。")
+    ffmpeg = str(ffmpeg_value)
+    loaded_components = _load_official_seedvr2_components(dit_model, vae_model)
+
+    with tempfile.TemporaryDirectory(prefix="gjj_seedvr2_") as temp_name:
+        temp_root = Path(temp_name)
+        segment_paths: list[Path] = []
+        segment_index = 0
+        core_start_frame = 0
+        completed_processing_seconds = 0.0
+        best_seconds_per_frame: float | None = None
+        best_core_frames = core_frames
+        while core_start_frame < total_frames:
+            segment_started_at = time.perf_counter()
+            segment_index += 1
+            core_end_frame = min(total_frames, core_start_frame + core_frames)
+            overlap_frames = min(
+                max(0, core_frames // 8),
+                max(int(temporal_overlap) * 4, min(8, int(vae_temporal_overlap))),
+            )
+            total_segments = segment_index + (
+                total_frames - core_end_frame + core_frames - 1
+            ) // core_frames
+            load_start_frame = max(0, core_start_frame - overlap_frames)
+            load_end_frame = min(total_frames, core_end_frame + overlap_frames)
+            load_start = load_start_frame / fps
+            load_duration = (load_end_frame - load_start_frame) / fps
+            _send_status(
+                unique_id,
+                f"流式分段 {segment_index}/{total_segments}："
+                f"读取 {load_start_frame + 1}-{load_end_frame} 帧...",
+            )
+            trimmed = video.as_trimmed(load_start, load_duration, strict_duration=False)
+            if trimmed is None:
+                raise RuntimeError(f"无法读取 SeedVR2 视频分段：{load_start:.3f}s + {load_duration:.3f}s")
+            components = trimmed.get_components()
+            frames = _component_value(components, "images")
+            if not isinstance(frames, torch.Tensor) or frames.shape[0] == 0:
+                raise RuntimeError(f"SeedVR2 视频分段 {segment_index} 没有可用画面。")
+            sample_device = _begin_segment_resource_sample() if adaptive else None
+            sample = _run_official_seedvr2_flow(
+                frames,
+                dit_model=dit_model,
+                vae_model=vae_model,
+                resolution=resolution,
+                max_resolution=max_resolution,
+                seed=seed,
+                encode_tiled=encode_tiled,
+                encode_tile_size=encode_tile_size,
+                encode_tile_overlap=encode_tile_overlap,
+                decode_tiled=decode_tiled,
+                decode_tile_size=decode_tile_size,
+                decode_tile_overlap=decode_tile_overlap,
+                color_correction=color_correction,
+                is_video=True,
+                video_chunk_mode=video_chunk_mode,
+                frames_per_chunk=frames_per_chunk,
+                temporal_overlap=temporal_overlap,
+                vae_temporal_size=vae_temporal_size,
+                vae_temporal_overlap=vae_temporal_overlap,
+                # A completed streaming segment is immediately encoded to a
+                # temporary video, so retaining its output tensor on the GPU
+                # only steals VRAM from the next segment.
+                tensor_offload_device="cpu",
+                loaded_components=loaded_components,
+                unique_id=unique_id,
+            )
+            left_trim = core_start_frame - load_start_frame
+            wanted = core_end_frame - core_start_frame
+            sample = sample[left_trim:left_trim + wanted]
+            # Show the actual upscaled first frame after this segment finishes.
+            # The fixed filename is atomically overwritten so the node panel
+            # always monitors the latest completed segment's output quality.
+            _send_segment_preview(
+                unique_id,
+                sample[0],
+                segment=segment_index,
+                total_segments=total_segments,
+                start_frame=core_start_frame + 1,
+                end_frame=core_end_frame,
+                total_frames=total_frames,
+                completed_seconds=(
+                    completed_processing_seconds
+                    + max(0.0, time.perf_counter() - segment_started_at)
+                ),
+                completed_frames=core_end_frame,
+            )
+            segment_path = temp_root / f"segment_{segment_index:06d}.mp4"
+            segment_video = InputImpl.VideoFromComponents(
+                Types.VideoComponents(images=sample, audio=None, frame_rate=Fraction(fps).limit_denominator())
+            )
+            segment_video.save_to(str(segment_path))
+            segment_paths.append(segment_path)
+            segment_seconds = time.perf_counter() - segment_started_at
+            completed_processing_seconds += segment_seconds
+            segment_seconds_per_frame = segment_seconds / max(1, wanted)
+            vram_pressure, ram_pressure = _segment_resource_pressure(sample_device)
+            previous_core_frames = core_frames
+            if adaptive:
+                core_frames = _next_adaptive_segment_frames(
+                    core_frames,
+                    target_core_frames,
+                    vram_pressure,
+                    ram_pressure,
+                    adaptive_minimum,
+                )
+                if (
+                    best_seconds_per_frame is not None
+                    and previous_core_frames > best_core_frames
+                    and segment_seconds_per_frame > best_seconds_per_frame * 1.10
+                ):
+                    # A larger segment can be slower despite fitting in memory
+                    # when it triggers model/activation swapping.  Prefer the
+                    # empirically faster size rather than chasing VRAM usage.
+                    core_frames = best_core_frames
+                elif (
+                    best_seconds_per_frame is None
+                    or segment_seconds_per_frame < best_seconds_per_frame * 0.95
+                ):
+                    best_seconds_per_frame = segment_seconds_per_frame
+                    best_core_frames = previous_core_frames
+                _send_status(
+                    unique_id,
+                    f"第 {segment_index} 段完成：显存峰值 {vram_pressure * 100:.1f}% / "
+                    f"内存 {ram_pressure * 100:.1f}%，"
+                    f"{segment_seconds_per_frame:.2f} 秒/帧，"
+                    f"后续段长 {previous_core_frames} → {core_frames} 帧",
+                )
+            del components, frames, sample, segment_video, trimmed
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            core_start_frame = core_end_frame
+
+        concat_list = temp_root / "segments.txt"
+        concat_list.write_text(
+            "".join(f"file '{path.as_posix()}'\n" for path in segment_paths),
+            encoding="utf-8",
+        )
+        silent_path = temp_root / "joined.mp4"
+        concat_command = [
+            ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list), "-c", "copy", str(silent_path),
+        ]
+        completed = subprocess.run(concat_command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise RuntimeError(f"SeedVR2 分段拼接失败：{completed.stderr[-1200:]}")
+
+        mux_command = [
+            ffmpeg, "-y", "-v", "error", "-i", str(silent_path),
+            "-ss", f"{trim_start:.6f}", "-t", f"{duration:.6f}", "-i", str(source_path),
+            "-map", "0:v:0", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac",
+            "-shortest", str(final_path),
+        ]
+        completed = subprocess.run(mux_command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise RuntimeError(f"SeedVR2 恢复原音频失败：{completed.stderr[-1200:]}")
+
+    del loaded_components
+    gc.collect()
+    _send_status(unique_id, f"完成：流式放大 {total_frames} 帧，峰值内存不再随视频长度增长")
+    if replace_path is not None:
+        replacement = replace_path.with_name(
+            f".{replace_path.stem}.gjj-upscaled-{uuid.uuid4().hex}{replace_path.suffix}"
+        )
+        try:
+            shutil.copy2(final_path, replacement)
+            os.replace(replacement, replace_path)
+        finally:
+            replacement.unlink(missing_ok=True)
+        return InputImpl.VideoFromFile(str(replace_path))
+    return InputImpl.VideoFromFile(str(final_path))
 
 
 class GJJ_SeedVR2ImageUpscaler:
     CATEGORY = "GJJ"
     FUNCTION = "upscale_image"
+    OUTPUT_NODE = True
     DESCRIPTION = _DESCRIPTION_INTRO if _DEPENDENCIES_AVAILABLE else _ENVIRONMENT_REPORT.get("warning_message", _DESCRIPTION_INTRO)
     GJJ_HELP = _GJJ_HELP
 
@@ -790,9 +1448,9 @@ class GJJ_SeedVR2ImageUpscaler:
                     "tooltip": "进一步降低显存占用，但可能降低速度。",
                 }),
                 "encode_tiled": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "分块编码",
-                    "tooltip": "降低 VAE 编码显存占用。",
+                    "default": False,
+                    "display_name": "空间分块编码",
+                    "tooltip": "只对画面做空间切块以降低 VAE 编码显存；显存足够时关闭通常更快，与视频时间分段无关。",
                 }),
                 "encode_tile_size": ("INT", {
                     "default": 512,
@@ -803,28 +1461,28 @@ class GJJ_SeedVR2ImageUpscaler:
                     "tooltip": "VAE 编码阶段的分块大小。",
                 }),
                 "encode_tile_overlap": ("INT", {
-                    "default": 128,
+                    "default": 96,
                     "min": 0,
                     "max": 2048,
                     "step": 32,
                     "display_name": "编码分块重叠",
                     "tooltip": "VAE 编码阶段的分块重叠。",
                 }),
-                "decode_tiled": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "分块解码",
-                    "tooltip": "降低 VAE 解码显存占用。",
+                "decode_tiled": (["智能", "开启", "关闭"], {
+                    "default": "智能",
+                    "display_name": "空间分块解码",
+                    "tooltip": "智能会根据目标宽高、重叠和 VAE 对齐倍数计算最小安全块；整图能放入上限时自动跳过分块。",
                 }),
                 "decode_tile_size": ("INT", {
                     "default": 512,
                     "min": 64,
                     "max": 8192,
                     "step": 32,
-                    "display_name": "解码分块大小",
-                    "tooltip": "VAE 解码阶段的分块大小。",
+                    "display_name": "解码分块上限",
+                    "tooltip": "智能模式用作最大允许方块尺寸；实际尺寸会根据目标宽高、重叠和对齐倍数计算。",
                 }),
                 "decode_tile_overlap": ("INT", {
-                    "default": 128,
+                    "default": 96,
                     "min": 0,
                     "max": 2048,
                     "step": 32,
@@ -862,10 +1520,10 @@ class GJJ_SeedVR2ImageUpscaler:
                     "display_name": "开启调试模式",
                     "tooltip": "打印 SeedVR2 的详细执行和显存日志。",
                 }),
-                "video_chunk_mode": (["自动", "手动", "关闭"], {
-                    "default": "自动",
+                "video_chunk_mode": (["智能", "手动", "关闭"], {
+                    "default": "智能",
                     "display_name": "视频时间分块",
-                    "tooltip": "自动会按可用显存估算每段帧数；手动使用“每段视频帧数”；关闭会一次采样整段视频。",
+                    "tooltip": "智能会从 5 帧安全试跑，并按实际显存、内存和秒/帧逐段调整；手动使用“每段视频帧数”；关闭仅关闭段内潜空间切分，长视频仍会安全地流式分段。",
                 }),
                 "frames_per_chunk": ("INT", {
                     "default": 13,
@@ -898,6 +1556,16 @@ class GJJ_SeedVR2ImageUpscaler:
                     "step": 4,
                     "display_name": "VAE 时间重叠",
                     "tooltip": "VAE 时间块之间的重叠帧数；通常使用 4–8。",
+                }),
+                "local_media_file": ("STRING", {
+                    "default": "",
+                    "display_name": "节点本地媒体",
+                    "tooltip": "由 📁 按钮写入；输入媒体接口已连接时忽略。",
+                }),
+                "save_in_place": ("BOOLEAN", {
+                    "default": False,
+                    "display_name": "原地保存",
+                    "tooltip": "由 ▶️ 按钮临时启用；完成后替换 📁 选择的媒体文件。",
                 }),
             },
             "optional": {
@@ -946,6 +1614,8 @@ class GJJ_SeedVR2ImageUpscaler:
         temporal_overlap,
         vae_temporal_size,
         vae_temporal_overlap,
+        local_media_file,
+        save_in_place,
         media=None,
         unique_id=None,
         **kwargs,
@@ -956,14 +1626,46 @@ class GJJ_SeedVR2ImageUpscaler:
             media = kwargs.get("image", None)
         if media is None:
             media = kwargs.get("video", None)
+        local_media_path = None
+        if media is None:
+            local_media_path = _resolve_local_media_file(local_media_file)
+            if local_media_path is not None:
+                media = _load_local_media(local_media_path)
+        replace_path = local_media_path if bool(save_in_place) else None
 
-        _send_status(unique_id, "1/6 读取输入媒体...")
-        image, source_audio, source_fps, output_mode = _coerce_media_to_image_batch(media)
         if str(common_video_height) != "手动输入":
             try:
                 resolution = int(common_video_height)
             except (TypeError, ValueError):
                 pass
+        streamed_video = _run_streaming_video_upscale(
+            media,
+            dit_model=str(dit_model),
+            vae_model=str(vae_model),
+            resolution=int(resolution),
+            max_resolution=int(max_resolution),
+            seed=int(seed),
+            encode_tiled=bool(encode_tiled),
+            encode_tile_size=int(encode_tile_size),
+            encode_tile_overlap=int(encode_tile_overlap),
+            decode_tiled=decode_tiled,
+            decode_tile_size=int(decode_tile_size),
+            decode_tile_overlap=int(decode_tile_overlap),
+            color_correction=str(color_correction),
+            video_chunk_mode=str(video_chunk_mode),
+            frames_per_chunk=int(frames_per_chunk),
+            temporal_overlap=int(temporal_overlap),
+            vae_temporal_size=int(vae_temporal_size),
+            vae_temporal_overlap=int(vae_temporal_overlap),
+            tensor_offload_device=str(tensor_offload_device),
+            unique_id=unique_id,
+            replace_path=replace_path,
+        )
+        if streamed_video is not None:
+            return (streamed_video,)
+
+        _send_status(unique_id, "1/6 读取输入媒体...")
+        image, source_audio, source_fps, output_mode = _coerce_media_to_image_batch(media)
         sample = _run_official_seedvr2_flow(
             image,
             dit_model=str(dit_model),
@@ -974,7 +1676,7 @@ class GJJ_SeedVR2ImageUpscaler:
             encode_tiled=bool(encode_tiled),
             encode_tile_size=int(encode_tile_size),
             encode_tile_overlap=int(encode_tile_overlap),
-            decode_tiled=bool(decode_tiled),
+            decode_tiled=decode_tiled,
             decode_tile_size=int(decode_tile_size),
             decode_tile_overlap=int(decode_tile_overlap),
             color_correction=str(color_correction),
@@ -984,20 +1686,37 @@ class GJJ_SeedVR2ImageUpscaler:
             temporal_overlap=int(temporal_overlap),
             vae_temporal_size=int(vae_temporal_size),
             vae_temporal_overlap=int(vae_temporal_overlap),
+            tensor_offload_device=str(tensor_offload_device),
             unique_id=unique_id,
         )
-        if sample.is_cuda or sample.is_mps:
-            sample = sample.cpu()
-        sample = sample.to(torch.float32)
+        if isinstance(sample, torch.Tensor) and sample.shape[0] > 0:
+            _send_segment_preview(
+                unique_id,
+                sample[0],
+                segment=1,
+                total_segments=1,
+                start_frame=1,
+                end_frame=int(sample.shape[0]),
+                total_frames=int(sample.shape[0]),
+                completed_frames=int(sample.shape[0]),
+            )
         if output_mode == "video":
             _send_status(unique_id, "6/6 创建视频...")
-            return (InputImpl.VideoFromComponents(
+            output = InputImpl.VideoFromComponents(
                 Types.VideoComponents(
                     images=sample,
                     audio=source_audio,
                     frame_rate=Fraction(source_fps if source_fps and source_fps > 0 else 24.0),
                 )
-            ),)
+            )
+            if replace_path is not None:
+                output = _replace_media_file(replace_path, output)
+            return (output,)
+        if sample.is_cuda or sample.is_mps:
+            sample = sample.cpu()
+        sample = sample.to(torch.float32)
+        if replace_path is not None:
+            sample = _replace_media_file(replace_path, sample)
         _send_status(unique_id, f"完成：图像 {int(sample.shape[2])} × {int(sample.shape[1])}")
         return (sample,)
 
@@ -1137,7 +1856,7 @@ class GJJ_SeedVR2ImageUpscaler:
                 encode_tiled=bool(encode_tiled),
                 encode_tile_size=(int(encode_tile_size), int(encode_tile_size)),
                 encode_tile_overlap=(int(encode_tile_overlap), int(encode_tile_overlap)),
-                decode_tiled=bool(decode_tiled),
+                decode_tiled=decode_tiled,
                 decode_tile_size=(int(decode_tile_size), int(decode_tile_size)),
                 decode_tile_overlap=(int(decode_tile_overlap), int(decode_tile_overlap)),
                 tile_debug=str(tile_debug),

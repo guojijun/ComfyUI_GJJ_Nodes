@@ -44,6 +44,7 @@ const FP16_ACCUMULATION_WIDGET_NAME = "fp16_accumulation";
 const MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME = "missing_sage_attention_policy";
 const GLOBAL_PROMPT_WIDGET_NAME = "global_prompt";
 const DEFAULT_GLOBAL_QUALITY_PROMPT = "high quality, highly detailed, sharp focus, clean composition, professional lighting, natural colors";
+const DEFAULT_NEGATIVE_PROMPT = "low quality, worst quality, lowres, blurry, out of focus, jpeg artifacts, bad anatomy, deformed anatomy, malformed limbs, extra arms, extra legs, extra hands, extra feet, extra fingers, missing fingers, fused fingers, mutated hands, poorly drawn hands, malformed hands, broken hands, malformed feet, broken legs, severed hands, severed feet, severed limbs, dismembered, duplicate limbs, distorted face";
 const MODEL_OPTIMIZATION_WIDGETS = [
 	ENABLE_SAGE_ATTENTION_WIDGET_NAME,
 	SAGE_ATTENTION_MODE_WIDGET_NAME,
@@ -576,7 +577,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
-	negative_prompt: "",
+	negative_prompt: DEFAULT_NEGATIVE_PROMPT,
 	main_image_index: 1,
 	width: 1024,
 	height: 1024,

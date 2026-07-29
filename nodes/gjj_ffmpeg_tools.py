@@ -929,7 +929,13 @@ def _delete_merged_segment_files(segment_paths: list[Path], output_path: Path, t
     return deleted, errors
 
 
-def _concat_videos(video_paths: list[Path], output_path: Path, ffmpeg_path: str, reencode: bool = False) -> Path:
+def _concat_videos(
+    video_paths: list[Path],
+    output_path: Path,
+    ffmpeg_path: str,
+    reencode: bool = False,
+    fallback_reencode: bool = True,
+) -> Path:
     if not video_paths:
         raise RuntimeError("没有找到可合并的视频分段。")
     if len(video_paths) == 1:
@@ -951,8 +957,14 @@ def _concat_videos(video_paths: list[Path], output_path: Path, ffmpeg_path: str,
         try:
             _run(command)
         except RuntimeError:
-            if not reencode:
-                return _concat_videos(video_paths, output_path, ffmpeg_path, reencode=True)
+            if not reencode and fallback_reencode:
+                return _concat_videos(
+                    video_paths,
+                    output_path,
+                    ffmpeg_path,
+                    reencode=True,
+                    fallback_reencode=fallback_reencode,
+                )
             raise
     finally:
         try:

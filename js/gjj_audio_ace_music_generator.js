@@ -42,6 +42,8 @@ const PARAM_ORDER = [
 ];
 const HIDDEN_HOME_WIDGETS = new Set([
 	"model_name",
+	"tags",
+	"lyrics",
 	"duration",
 	"bpm",
 	"timesignature",
@@ -72,9 +74,10 @@ const HIDDEN_HOME_WIDGETS = new Set([
 const PANEL_GROUPS = {
 	seed: { title: "🎲 种子", names: ["seed"] },
 	music: { title: "🌐 音乐结构", names: ["bpm", "timesignature", "language", "keyscale"] },
-	text: { title: "🪄 文本采样", names: ["lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
+	text: { title: "📒 文本相关", names: ["tags", "lyrics", "lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
+	time: { title: "⏰ 时间相关", names: ["duration"] },
 	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes", "lora_enabled", "lora_name", "lora_strength"] },
-	generate: { title: "⚡ 生成参数", names: ["duration", "steps", "cfg", "sampler_name", "scheduler", "denoise"] },
+	generate: { title: "🎛️ 生成参数", names: ["steps", "cfg", "sampler_name", "scheduler", "denoise"] },
 };
 
 function isExecutionOutputNode(node) {
@@ -1056,8 +1059,9 @@ function ensureStatusWidget(node) {
 		createIconButton({ icon: "🔄", title: "刷新节点", color: "#315db9", onClick: () => refreshNode(node) }),
 		panelButton("seed", "🎲", "种子", "#4a4f5c"),
 		panelButton("music", "🌐", "音乐结构", "#16728d"),
-		panelButton("text", "🪄", "文本采样", "#a65f00"),
-		panelButton("generate", "⚡", "生成参数", "#72500f"),
+		panelButton("text", "📒", "文本相关：音乐标签、歌词与文本采样", "#a65f00"),
+		panelButton("time", "⏰", "时间相关：音乐生成时长", "#16697a"),
+		panelButton("generate", "🎛️", "生成参数", "#72500f"),
 		panelButton("model", "🧠", "模型相关", "#4d3d83"),
 		generateBtn,
 		testBtn,

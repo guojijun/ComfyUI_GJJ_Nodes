@@ -19,6 +19,8 @@ const LINKED_LOADER_PROP = "__gjj_ltx23_ref_loader_id";
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const CONVROT_STATUS_API = "/gjj/ltx23/convrot_w4a4_status";
 const CONVROT_INSTALL_API = "/gjj/ltx23/install_comfy_kitchen";
+const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
+const SHARED_PROMPT_SECTION = "mtv_ltx_prompt_bridge";
 
 const DEFAULT_CONFIG = {
   ltx_model_name: "",
@@ -56,6 +58,7 @@ const DEFAULT_CONFIG = {
   size_source: "面板尺寸",
   seed_mode: "固定",
   global_prompt: "",
+  lora_slots: [],
 };
 
 const SEED_MODES = ["固定", "随机", "递增", "递减"];
@@ -79,6 +82,28 @@ const MAIN_WIDGET_KEYS = [
 ];
 const NUMERIC_WIDGET_KEYS = new Set(["segment_seconds", "width", "height", "fps", "seed", "denoise_strength"]);
 const HIDDEN_WIDGET_KEYS = new Set(MAIN_WIDGET_KEYS.filter(key => key !== "positive_prompt"));
+
+async function readSharedPromptSettings() {
+  const response = await api.fetchApi(USER_SETTINGS_ENDPOINT);
+  const data = await response.json();
+  return data?.settings?.[SHARED_PROMPT_SECTION] || {};
+}
+
+async function writeSharedPromptSetting(name, value) {
+  await api.fetchApi(USER_SETTINGS_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ section: SHARED_PROMPT_SECTION, values: { [name]: value } }),
+  });
+}
+
+function sharedPromptInput(name, value, rows = 5) {
+  const input = document.createElement("textarea");
+  input.rows = rows;
+  input.value = value ?? "";
+  input.addEventListener("change", () => writeSharedPromptSetting(name, input.value));
+  return input;
+}
 
 function getWidget(node, name) {
   return node?.widgets?.find(widget => widget?.name === name) || null;
@@ -332,14 +357,7 @@ function clearNativePreview(node) {
 }
 
 function setStatus(node, detail = {}) {
-  const state = node?.__gjjLtxStatusPanel;
-  if (!state) return;
-  state.text.textContent = String(detail.text || "等待执行");
-  const progress = Number.isFinite(detail.progress)
-    ? Math.max(0, Math.min(100, Number(detail.progress) * 100))
-    : 0;
-  state.progressInner.style.width = `${progress}%`;
-  refreshNode(node);
+  // 运行进度由节点顶部的统一状态面板展示；此区域只在产生视频后显示预览。
 }
 
 function setVideoPreview(node, detail = {}) {
@@ -353,12 +371,14 @@ function setVideoPreview(node, detail = {}) {
   state.video.load?.();
   if (!url) {
     state.hasPreview = false;
+    state.wrap.style.display = "none";
     state.previewWrap.style.display = "none";
     resizeNodeToFit(node);
     refreshNode(node);
     return;
   }
   state.hasPreview = true;
+  state.wrap.style.display = "block";
   state.previewWrap.style.display = "block";
   state.video.src = url;
   state.video.load?.();
@@ -377,10 +397,10 @@ function configPreviewAspect(node) {
 
 function previewWidgetHeight(node, width) {
   const state = node?.__gjjLtxStatusPanel;
-  if (!state?.hasPreview) return 44;
+  if (!state?.hasPreview) return 0;
   const panelWidth = Math.max(300, Number(width || node?.size?.[0] || 360)) - 20;
   const previewWidth = Math.max(120, panelWidth - 16);
-  return Math.max(120, Math.round(previewWidth * (state.previewAspect || configPreviewAspect(node)))) + 44;
+  return Math.max(120, Math.round(previewWidth * (state.previewAspect || configPreviewAspect(node)))) + 12;
 }
 
 function setPreviewAspect(node, width, height) {
@@ -663,7 +683,9 @@ function moveMisplacedImageLinksToScenes(node) {
   if (!node?.graph?.links || !Array.isArray(node.inputs)) return;
   // Clean v40：保存/重开后，图片线有时会错挂到任意非场景口，并且 link 可能是 object 或 array。
   // 只要源输出口看起来是 IMAGE/GJJ_BATCH_IMAGE/图片输出，就自动迁回场景口。
-  const nonSceneInputs = node.inputs.filter(i => i && !isSceneInput(i));
+  const nonSceneInputs = node.inputs.filter(i =>
+    i && !isSceneInput(i) && String(i.name || "") !== "character_reference"
+  );
   for (const input of nonSceneInputs) {
     if (!input?.link) continue;
     const link = getGraphLink(node, input.link);
@@ -791,9 +813,17 @@ function normalizeInputs(node) {
   audio.label = "🔊 驱动音频";
   audio.localized_name = "🔊 驱动音频";
   audio.display_name = "🔊 驱动音频";
+  audio.tooltip = "普通 AUDIO 自动进入 S2V/数字人；GJJ_MTVAudioToPrompt 的音频列表自动进入 MTV 分支，并与图片队列按索引一一配对。";
   setInputType(audio, "AUDIO");
 
-  const fixed = [image, lora, audio];
+  const characterReference = ensureInput(node, "character_reference", "GJJ_BATCH_IMAGE,IMAGE");
+  characterReference.label = "👤 人物参考";
+  characterReference.localized_name = "👤 人物参考";
+  characterReference.display_name = "👤 人物参考";
+  characterReference.tooltip = "接入 GJJ_LazyImageStudio 的人物参考批次；所有视频分段共用，当前段场景图作为 MSR background。";
+  setInputType(characterReference, "GJJ_BATCH_IMAGE,IMAGE");
+
+  const fixed = [image, lora, audio, characterReference];
   const known = new Set(fixed);
   const others = node.inputs.filter(i => !known.has(i) && !isSceneInput(i));
   node.inputs = [...fixed, ...others];
@@ -1195,6 +1225,109 @@ function createLtxModelTreeView(node, entries, callbacks = {}) {
   return root;
 }
 
+function normalizeLtxLoraSlots(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows
+    .filter((item) => item && typeof item === "object" && String(item.name || "").trim())
+    .map((item) => ({
+      enabled: item.enabled !== false,
+      name: String(item.name || "").trim(),
+      strength: Math.max(-10, Math.min(10, Number(item.strength ?? 1) || 0)),
+    }));
+}
+
+function createLtxLoraSlots(node, fields) {
+  const root = document.createElement("div");
+  root.className = "gjj-ltx-general-lora-slots";
+  const allModels = (fields || [])
+    .filter((field) => String(field?.folder || "").replace(/^models[\\/]/, "") === "loras")
+    .flatMap((field) => Array.isArray(field?.models) ? field.models : []);
+  const ltxModels = [...new Set(allModels
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && item.toLowerCase().includes("ltx")))]
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+  const render = () => {
+    const configured = normalizeLtxLoraSlots(getConfig(node).lora_slots);
+    const rows = [...configured, { enabled: true, name: "", strength: 1.0 }];
+    root.replaceChildren();
+    rows.forEach((row, index) => {
+      const line = document.createElement("div");
+      line.className = "gjj-ltx-general-lora-row";
+
+      const enabled = document.createElement("button");
+      enabled.type = "button";
+      enabled.className = "gjj-ltx-lora-emoji-toggle";
+      enabled.textContent = row.enabled !== false ? "🟢" : "⚪";
+      enabled.title = row.enabled !== false ? "LoRA 已启用，点击关闭" : "LoRA 已关闭，点击启用";
+      enabled.disabled = !row.name;
+
+      const select = document.createElement("select");
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "未选择";
+      select.appendChild(empty);
+      for (const name of ltxModels) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      }
+      if (row.name && !ltxModels.includes(row.name)) {
+        const option = document.createElement("option");
+        option.value = row.name;
+        option.textContent = row.name;
+        select.appendChild(option);
+      }
+      select.value = row.name;
+
+      const strength = document.createElement("input");
+      strength.type = "number";
+      strength.min = "-10";
+      strength.max = "10";
+      strength.step = "0.05";
+      strength.value = String(row.strength ?? 1);
+      strength.disabled = !row.name || row.enabled === false;
+      strength.title = "LoRA 强度";
+
+      const saveRows = (nextRow) => {
+        const next = normalizeLtxLoraSlots(getConfig(node).lora_slots);
+        if (index < next.length) next[index] = nextRow;
+        else if (nextRow.name) next.push(nextRow);
+        setConfig(node, { lora_slots: next.filter((item) => item.name) });
+        render();
+      };
+      enabled.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!row.name) return;
+        saveRows({ ...row, enabled: row.enabled === false });
+      });
+      select.addEventListener("change", () => {
+        saveRows({
+          enabled: row.enabled !== false,
+          name: String(select.value || ""),
+          strength: Number(strength.value || 1),
+        });
+      });
+      strength.addEventListener("change", () => {
+        if (!row.name) return;
+        saveRows({
+          ...row,
+          strength: Math.max(-10, Math.min(10, Number(strength.value || 0))),
+        });
+      });
+
+      const number = document.createElement("span");
+      number.textContent = `LoRA ${index + 1}`;
+      line.append(number, select, enabled, strength);
+      root.appendChild(line);
+    });
+  };
+  render();
+  return root;
+}
+
 function showModelTreePanel(node, anchor) {
   showFloatingPanel(node, anchor, "模型", (body) => {
     body.style.gap = "9px";
@@ -1226,6 +1359,8 @@ function showModelTreePanel(node, anchor) {
           setConfig(node, { [entry.widget]: value });
         },
       }));
+      body.appendChild(modelGroupTitle("🧬 通用 LoRA", "仅显示名称包含 ltx 的模型；始终保留一个空插槽"));
+      body.appendChild(createLtxLoraSlots(node, fields));
     }).catch((error) => {
       body.replaceChildren();
       const fail = document.createElement("div");
@@ -1428,6 +1563,23 @@ function panelRow(label, element) {
   element.style.boxSizing = "border-box";
   row.append(span, element);
   return row;
+}
+
+function hasConnectedDrivingAudio(node) {
+  const input = node?.inputs?.find(item => item?.name === "input_audio");
+  return input?.link != null;
+}
+
+function syncSegmentSecondsAvailability(node) {
+  const state = node?.__gjjLtxSegmentSecondsControl;
+  if (!state?.row || !state?.input) return;
+  const disabled = hasConnectedDrivingAudio(node);
+  state.input.disabled = disabled;
+  state.row.style.opacity = disabled ? "0.38" : "1";
+  state.row.style.filter = disabled ? "grayscale(1)" : "";
+  state.row.title = disabled
+    ? "已接入驱动音频，场景时长由实际音频长度决定，场景间隔不参与执行。"
+    : "无驱动音频时，使用该数值安排场景间隔。";
 }
 
 function configInput(node, key, type = "text", options = {}) {
@@ -1846,6 +1998,10 @@ function buildPanel(node) {
       panelRow("全局提示词", configInput(node, "global_prompt", "textarea", { rows: 5, placeholder: "自动添加到每一段提示词最前面" })),
       panelRow("反向提示词", configInput(node, "negative_prompt", "textarea", { rows: 7 })),
     );
+    readSharedPromptSettings().then((values) => body.append(
+      panelRow("有人声图片提示（闭嘴、特写）", sharedPromptInput("vocal_image_prompt", values.vocal_image_prompt, 5)),
+      panelRow("有人声 LTX 替换（开口、运镜）", sharedPromptInput("vocal_ltx_prompt", values.vocal_ltx_prompt, 7)),
+    ));
   }, { width: 460 }));
   const sizeBtn = makeToolButton("📐", "尺寸设置", (button) => showFloatingPanel(node, button, "尺寸", (body) => {
     const widthControl = configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 });
@@ -1875,11 +2031,18 @@ function buildPanel(node) {
     syncDimensionAvailability();
   }, { width: 460 }));
   const timingBtn = makeToolButton("🎞️", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "时长", (body) => {
+    const segmentSecondsInput = configInput(node, "segment_seconds", "number", { min: 0.1, max: 600, step: 0.1 });
+    const segmentSecondsRow = panelRow("场景间隔", segmentSecondsInput);
+    node.__gjjLtxSegmentSecondsControl = {
+      row: segmentSecondsRow,
+      input: segmentSecondsInput,
+    };
     body.append(
-      panelRow("场景间隔", configInput(node, "segment_seconds", "number", { min: 0.1, max: 600, step: 0.1 })),
+      segmentSecondsRow,
       panelRow("帧率", configInput(node, "fps", "number", { min: 1, max: 120, step: 1 })),
       panelRow("降噪", configInput(node, "denoise_strength", "number", { min: 0, max: 1, step: 0.01 })),
     );
+    syncSegmentSecondsAvailability(node);
   }));
   const seedBtn = makeToolButton("🎲", "种子模式", (button) => showFloatingPanel(node, button, "种子", (body) => {
     body.append(
@@ -1961,15 +2124,8 @@ function ensureStatusPanel(node) {
 
   const wrap = document.createElement("div");
   wrap.className = "gjj-ltx-status";
+  wrap.style.display = "none";
   stopCanvasEvents(wrap);
-  const text = document.createElement("div");
-  text.className = "gjj-ltx-status-text";
-  text.textContent = "等待执行";
-  const progressOuter = document.createElement("div");
-  progressOuter.className = "gjj-ltx-progress";
-  const progressInner = document.createElement("div");
-  progressInner.className = "gjj-ltx-progress-inner";
-  progressOuter.appendChild(progressInner);
   const previewWrap = document.createElement("div");
   previewWrap.className = "gjj-ltx-preview";
   previewWrap.style.display = "none";
@@ -1985,9 +2141,9 @@ function ensureStatusPanel(node) {
   }
   video.addEventListener("loadedmetadata", () => setPreviewAspect(node, video.videoWidth, video.videoHeight));
   previewWrap.appendChild(video);
-  wrap.append(text, progressOuter, previewWrap);
+  wrap.append(previewWrap);
 
-  const state = { widget: null, wrap, text, progressInner, previewWrap, video, hasPreview: false, previewAspect: configPreviewAspect(node) };
+  const state = { widget: null, wrap, previewWrap, video, hasPreview: false, previewAspect: configPreviewAspect(node) };
   const widget = node.addDOMWidget?.(STATUS_WIDGET, STATUS_WIDGET, wrap, {
     serialize: false,
     hideOnZoom: false,
@@ -2099,6 +2255,10 @@ function injectStyles() {
     .gjj-ltx-lora-inline-controls.is-off .gjj-ltx-lora-emoji-toggle{background:#11181c;color:#7f8b91;border-color:#2d3a40;}
     .gjj-ltx-lora-strength{width:82px!important;height:24px;text-align:center;padding:3px 5px!important;}
     .gjj-ltx-lora-strength:disabled{cursor:not-allowed;color:#879197;background:#10171b;border-color:#2b3940;}
+    .gjj-ltx-general-lora-slots{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;}
+    .gjj-ltx-general-lora-row{display:grid;grid-template-columns:58px minmax(0,1fr) 28px 82px;gap:6px;align-items:center;color:#b8c8cf;font-size:11px;}
+    .gjj-ltx-general-lora-row select,.gjj-ltx-general-lora-row input{box-sizing:border-box;height:26px;min-width:0;border:1px solid #3d535d;border-radius:5px;background:#111d22;color:#e7f3f3;padding:2px 6px;}
+    .gjj-ltx-general-lora-row input{text-align:center;}
     .gjj-ltx-convrot-panel{display:flex;flex-direction:column;gap:7px;border:1px solid #8a5b1d;border-radius:7px;background:#21170b;color:#ffe7bd;padding:8px;white-space:normal;}
     .gjj-ltx-convrot-panel[data-supported="true"]{border-color:#2f7356;background:#10241c;color:#d8ffe9;}
     .gjj-ltx-convrot-text{font-size:12px;line-height:1.42;overflow-wrap:anywhere;}
@@ -2136,12 +2296,26 @@ function stabilize(node) {
   ensureStatusPanel(node);
   installExecutionPreviewHooks(node);
   refreshToolbarState(node);
+  syncSegmentSecondsAvailability(node);
   scheduleConvrotSupportCheck(node);
   repairLinks(node);
 }
 
 app.registerExtension({
   name: "GJJ.LTX23.CleanV40",
+  setup() {
+    api.addEventListener("gjj_ltx23_multiref_segment", (event) => {
+      const detail = event?.detail || {};
+      for (const node of app.graph?._nodes || []) {
+        if (!isTarget(node) || String(node.id) !== String(detail.node)) continue;
+        setVideoPreview(node, {
+          preview_media: detail.media ? [detail.media] : [],
+          preview_main_path: detail.path || "",
+          preview_is_video: true,
+        });
+      }
+    });
+  },
   beforeRegisterNodeDef(nodeType, nodeData) {
     const typeName = nodeData?.name || nodeData?.display_name || nodeData?.title || "";
     if (!String(typeName).includes(NODE_CLASS) && !/GJJ.*LTX.*多图/i.test(String(typeName))) return;

@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_SeedVR2ImageUpscaler"]);
 const STATUS_WIDGET_NAME = "gjj_seedvr2_status";
@@ -17,10 +18,12 @@ const COMMON_VIDEO_HEIGHT_WIDGET = "common_video_height";
 const RESOLUTION_WIDGET = "resolution";
 const SEED_CONTROL_WIDGET = "control_after_generate";
 const SEED_CONTROL_DEFAULT = "randomize";
+const LOCAL_MEDIA_WIDGET = "local_media_file";
+const SAVE_IN_PLACE_WIDGET = "save_in_place";
 const SEED_CONTROL_VALUES = new Set(["fixed", "randomize", "increment", "decrement"]);
 const MODEL_FILE_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft|pkl)$/i;
 const BOOLEAN_WIDGETS = [
-	{ name: "enable_debug", on: "调试 开", off: "调试", title: "打印 SeedVR2 的详细执行和显存日志。" },
+	{ name: "enable_debug", on: "🐛", off: "🐛", title: "开启或关闭 SeedVR2 调试日志与显存日志。" },
 ];
 const BOOLEAN_WIDGET_NAMES = new Set(BOOLEAN_WIDGETS.map((item) => item.name));
 const HIDDEN_SETTING_WIDGETS = [
@@ -47,6 +50,8 @@ const HIDDEN_SETTING_WIDGETS = [
 	"temporal_overlap",
 	"vae_temporal_size",
 	"vae_temporal_overlap",
+	LOCAL_MEDIA_WIDGET,
+	SAVE_IN_PLACE_WIDGET,
 ];
 const MODEL_SETTING_WIDGETS = [
 	"dit_model",
@@ -75,18 +80,20 @@ const TILE_SETTING_WIDGETS = [
 const SIZE_SETTING_WIDGETS = [COMMON_VIDEO_HEIGHT_WIDGET, RESOLUTION_WIDGET, "max_resolution"];
 const COLOR_SETTING_WIDGETS = ["color_correction"];
 const COLOR_METHODS = [
-	{ value: "lab", label: "LAB 色彩匹配 / LAB Color Match" },
-	{ value: "wavelet", label: "小波匹配 / Wavelet" },
-	{ value: "wavelet_adaptive", label: "自适应小波 / Adaptive Wavelet" },
-	{ value: "hsv", label: "HSV 色彩匹配 / HSV Color Match" },
-	{ value: "adain", label: "AdaIN 色彩匹配 / AdaIN Color Match" },
-	{ value: "none", label: "关闭 / None" },
+	{ value: "lab", icon: "🔬", label: "LAB 色彩匹配 / LAB Color Match" },
+	{ value: "wavelet", icon: "🌊", label: "小波匹配 / Wavelet" },
+	{ value: "wavelet_adaptive", icon: "〰️", label: "自适应小波 / Adaptive Wavelet" },
+	{ value: "hsv", icon: "🌈", label: "HSV 色彩匹配 / HSV Color Match" },
+	{ value: "adain", icon: "🎯", label: "AdaIN 色彩匹配 / AdaIN Color Match" },
+	{ value: "none", icon: "🚫", label: "关闭 / None" },
 ];
 const ADVANCED_SETTING_WIDGETS = HIDDEN_SETTING_WIDGETS.filter(
 	(name) => !MODEL_SETTING_WIDGETS.includes(name)
 		&& !TILE_SETTING_WIDGETS.includes(name)
 		&& !SIZE_SETTING_WIDGETS.includes(name)
-		&& !COLOR_SETTING_WIDGETS.includes(name),
+		&& !COLOR_SETTING_WIDGETS.includes(name)
+		&& name !== LOCAL_MEDIA_WIDGET
+		&& name !== SAVE_IN_PLACE_WIDGET,
 );
 const LEGACY_HIDDEN_SETTING_WIDGETS = [
 	COMMON_VIDEO_HEIGHT_WIDGET,
@@ -122,6 +129,8 @@ const REQUIRED_WIDGET_ORDER = [
 	"temporal_overlap",
 	"vae_temporal_size",
 	"vae_temporal_overlap",
+	LOCAL_MEDIA_WIDGET,
+	SAVE_IN_PLACE_WIDGET,
 ];
 const SETTING_LABELS = {
 	common_video_height: "目标短边预设",
@@ -138,7 +147,7 @@ const SETTING_LABELS = {
 	blocks_to_swap: "模块交换数量",
 	encode_tile_size: "编码分块大小",
 	encode_tile_overlap: "编码分块重叠",
-	decode_tile_size: "解码分块大小",
+	decode_tile_size: "解码分块上限",
 	decode_tile_overlap: "解码分块重叠",
 	tile_debug: "分块调试显示",
 	color_correction: "色彩校正",
@@ -251,6 +260,11 @@ function coerceWidgetValue(widget, value) {
 	if (!widget) return value;
 	const choices = widgetChoices(widget);
 	if (choices?.length) {
+		if (String(widget.name || "") === "decode_tiled") {
+			if (value === true || String(value).toLowerCase() === "true") return "开启";
+			if (value === false || String(value).toLowerCase() === "false") return "关闭";
+			if (String(value) === "自动") return "智能";
+		}
 		const text = String(value ?? "");
 		if (choices.includes(text)) return text;
 		const match = choices.find((item) => item.toLowerCase() === text.toLowerCase());
@@ -274,6 +288,10 @@ function isWidgetValueCompatible(widget, value) {
 	if (value === undefined) return false;
 	const choices = widgetChoices(widget);
 	if (choices?.length) {
+		if (String(widget.name || "") === "decode_tiled" && (
+			typeof value === "boolean"
+			|| ["true", "false", "自动"].includes(String(value ?? "").toLowerCase())
+		)) return true;
 		const text = String(value ?? "");
 		return choices.some((item) => item.toLowerCase() === text.toLowerCase());
 	}
@@ -290,6 +308,18 @@ function serializedWidgetValues(node) {
 }
 
 function normalizeSerializedValues(values) {
+	if (values.length === REQUIRED_WIDGET_ORDER.length - 2) {
+		values = [...values, "", false];
+	} else if (values.length === REQUIRED_WIDGET_ORDER.length - 3) {
+		const seedControlIndex = REQUIRED_WIDGET_ORDER.indexOf(SEED_CONTROL_WIDGET);
+		values = [
+			...values.slice(0, seedControlIndex),
+			SEED_CONTROL_DEFAULT,
+			...values.slice(seedControlIndex),
+			"",
+			false,
+		];
+	}
 	const seedControlIndex = REQUIRED_WIDGET_ORDER.indexOf(SEED_CONTROL_WIDGET);
 	if (seedControlIndex < 0) return values;
 	if (values.length === REQUIRED_WIDGET_ORDER.length - 1) {
@@ -333,7 +363,7 @@ function restoreSerializedValues(node, serializedNode) {
 		} else if (!isWidgetValueCompatible(firstWidget, values[0]) && isWidgetValueCompatible(secondWidget, values[1])) {
 			values = values.slice(1);
 		}
-	} else if (values.length === REQUIRED_WIDGET_ORDER.length - 5) {
+	} else if (values.length === REQUIRED_WIDGET_ORDER.length - 7) {
 		// Workflows saved before video temporal chunk controls were appended.
 		names = REQUIRED_WIDGET_ORDER.slice(0, values.length);
 	} else if (values.length === HIDDEN_SETTING_WIDGETS.length) {
@@ -356,6 +386,76 @@ function restoreSerializedValues(node, serializedNode) {
 function markCanvasDirty() {
 	app.graph?.setDirtyCanvas?.(true, true);
 	app.canvas?.setDirty?.(true, true);
+}
+
+function mediaInputLinked(node) {
+	return getInputByName(node, MEDIA_INPUT_NAME)?.link != null;
+}
+
+function uploadFilename(data, file) {
+	const name = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	const subfolder = String(data?.subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	return name.includes("/") || !subfolder ? name : `${subfolder}/${name}`;
+}
+
+async function chooseLocalMedia(node) {
+	if (mediaInputLinked(node)) return;
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = "image/*,video/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.gif,.mp4,.mov,.mkv,.webm,.avi,.m4v,.wmv,.flv,.mpeg,.mpg";
+	input.style.display = "none";
+	document.body.appendChild(input);
+	try {
+		const file = await new Promise((resolve) => {
+			input.addEventListener("change", () => resolve(input.files?.[0] || null), { once: true });
+			input.click();
+		});
+		if (!file) return;
+		let value = String(file.path || "").trim();
+		if (!value) {
+			const form = new FormData();
+			form.append("image", file, file.name);
+			form.append("type", "input");
+			form.append("overwrite", "true");
+			const response = await api.fetchApi("/upload/image", { method: "POST", body: form });
+			if (!response?.ok) throw new Error(`上传媒体失败：HTTP ${response?.status || "?"}`);
+			value = uploadFilename(await response.json().catch(() => ({})), file);
+		}
+		if (!value) throw new Error("没有取得所选媒体路径");
+		setWidgetValue(getWidget(node, LOCAL_MEDIA_WIDGET), value);
+		setStatus(node, `已选择：${file.name}`);
+		syncWidgetValuesCache(node);
+		markCanvasDirty();
+	} catch (error) {
+		setStatus(node, `打开媒体失败：${error?.message || error}`);
+	} finally {
+		input.remove();
+	}
+}
+
+async function executeAndReplace(node) {
+	const linked = mediaInputLinked(node);
+	const path = String(getWidgetValue(node, LOCAL_MEDIA_WIDGET) || "").trim();
+	if (!linked && !path) {
+		setStatus(node, "请先点击 📁 选择图片或视频。");
+		return;
+	}
+	const saveWidget = getWidget(node, SAVE_IN_PLACE_WIDGET);
+	setWidgetValue(saveWidget, !linked);
+	syncWidgetValuesCache(node);
+	setStatus(node, linked
+		? "正在单独执行当前节点..."
+		: "正在单独执行当前节点；完成后原地替换所选媒体...");
+	try {
+		await queueOnlyCurrentNode(node);
+	} catch (error) {
+		setStatus(node, `执行失败：${error?.message || error}`);
+	} finally {
+		// The queued prompt already contains true; restore the workflow control
+		// immediately so a later normal queue cannot overwrite the source again.
+		setWidgetValue(saveWidget, false);
+		syncWidgetValuesCache(node);
+	}
 }
 
 function rememberWidget(widget) {
@@ -541,30 +641,91 @@ function patchCommonVideoHeight(node) {
 }
 
 function ensureStatusWidget(node) {
-	if (node.__gjjSeedvr2Status) return node.__gjjSeedvr2Status;
-	const box = document.createElement("div");
-	box.textContent = "等待执行";
+	const existing = node.__gjjSeedvr2Status;
+	if (existing?.preview && existing?.progress && existing?.text) {
+		return existing;
+	}
+	const box = existing?.box || document.createElement("div");
 	box.className = "gjj-seedvr2-status";
-	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
-		serialize: false,
-		hideOnZoom: false,
-		getHeight: () => 42,
-	});
+	box.replaceChildren();
+	const preview = document.createElement("img");
+	preview.className = "gjj-seedvr2-segment-preview";
+	preview.alt = "当前视频段放大后的首帧";
+	preview.hidden = true;
+	const text = document.createElement("div");
+	text.className = "gjj-seedvr2-status-text";
+	text.textContent = "等待执行";
+	const progress = document.createElement("div");
+	progress.className = "gjj-seedvr2-segment-meta";
+	progress.hidden = true;
+	box.append(preview, progress, text);
+	const widget = existing?.widget || node.addDOMWidget?.(
+		STATUS_WIDGET_NAME,
+		STATUS_WIDGET_NAME,
+		box,
+		{
+			serialize: false,
+			hideOnZoom: false,
+			getHeight: () => preview.hidden ? 42 : 258,
+		},
+	);
 	if (widget) {
 		widget.serialize = false;
 		widget.options ||= {};
 		widget.options.serialize = false;
 		widget.value = undefined;
+		widget.computeSize = (width) => [
+			Math.round(width || node.size?.[0] || 360),
+			preview.hidden ? 42 : 258,
+		];
+		widget.getHeight = () => preview.hidden ? 42 : 258;
 	}
-	node.__gjjSeedvr2Status = { widget, box };
+	node.__gjjSeedvr2Status = { widget, box, preview, progress, text };
 	return node.__gjjSeedvr2Status;
 }
 
 function setStatus(node, text) {
 	const state = ensureStatusWidget(node);
-	if (!state?.box) return;
-	state.box.textContent = String(text || "等待执行");
+	if (!state?.text) return;
+	state.text.textContent = String(text || "等待执行");
 	refreshNode(node);
+}
+
+function setSegmentPreview(node, detail) {
+	const state = ensureStatusWidget(node);
+	const item = detail?.preview_image;
+	const fixedFilename = String(detail?.preview_filename || `seedvr2_preview_${String(node?.id || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_")}.png`);
+	const source = detail?.preview || (item?.filename
+		? api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`)
+		: api.apiURL(`/view?filename=${encodeURIComponent(fixedFilename)}&type=temp&subfolder=GJJ&rand=${Date.now()}`));
+	if (!state?.preview || !source) return;
+	state.preview.onload = () => {
+		state.preview.hidden = false;
+		state.progress.hidden = false;
+		refreshNode(node);
+		requestAnimationFrame(() => fitNode(node));
+	};
+	state.preview.onerror = () => {
+		state.preview.hidden = true;
+	};
+	state.preview.src = String(source);
+	if (detail?.segment == null) return;
+	const segment = Number(detail.segment || 1);
+	const totalSegments = Math.max(1, Number(detail.total_segments || 1));
+	const start = Number(detail.start_frame || 1);
+	const end = Number(detail.end_frame || start);
+	const totalFrames = Math.max(end, Number(detail.total_frames || end));
+	const percent = Math.min(100, Math.max(0, (start - 1) / totalFrames * 100));
+	const etaValue = Math.max(0, Math.round(Number(detail.eta_seconds || 0)));
+	const etaHours = Math.floor(etaValue / 3600);
+	const etaMinutes = Math.floor((etaValue % 3600) / 60);
+	const etaSeconds = etaValue % 60;
+	const etaText = etaValue > 0
+		? ` · 预计剩余 ${etaHours > 0 ? `${etaHours}小时${etaMinutes}分` : etaMinutes > 0 ? `${etaMinutes}分${etaSeconds}秒` : `${etaSeconds}秒`}`
+		: " · 正在统计剩余时间";
+	state.progress.textContent = `当前第 ${segment} 段 · 预计共 ${totalSegments} 段 · 原视频 ${start}–${end}/${totalFrames} 帧 · 已完成前 ${percent.toFixed(1)}%${etaText}`;
+	refreshNode(node);
+	requestAnimationFrame(() => fitNode(node));
 }
 
 function stopProp(element) {
@@ -583,8 +744,13 @@ function injectStyle() {
 	style.id = "gjj-seedvr2-style";
 	style.textContent = `
 		.gjj-seedvr2-status{min-height:24px;padding:6px 10px;border:1px solid #41535b;border-radius:8px;background:#121a1f;color:#dce7e2;font:12px sans-serif;line-height:1.35;white-space:pre-wrap;word-break:break-word;box-sizing:border-box;}
+		.gjj-seedvr2-segment-preview{display:block;width:100%;height:190px;object-fit:contain;border-radius:6px;background:#060a0d;margin:0 0 5px;}
+		.gjj-seedvr2-segment-preview[hidden]{display:none;}
+		.gjj-seedvr2-segment-meta{color:#63d5ff;font-weight:700;margin:0 0 5px;}
+		.gjj-seedvr2-segment-meta[hidden]{display:none;}
 		.gjj-seedvr2-controls{display:flex;flex-wrap:wrap;gap:5px;width:100%;box-sizing:border-box;padding:2px 0;color:#d8e5e8;font:12px sans-serif;pointer-events:auto;}
-		.gjj-seedvr2-controls button{flex:1 1 0;min-width:0;height:26px;border:1px solid #7b4b52;border-radius:5px;background:#39272b;color:#d8c8cb;cursor:pointer;font:700 12px sans-serif;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background-color .12s,border-color .12s,color .12s;}
+		.gjj-seedvr2-controls button{flex:none;height:26px;border:1px solid #7b4b52;border-radius:5px;background:#39272b;color:#d8c8cb;cursor:pointer;font:700 16px sans-serif;padding:0 6px;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s;}
+		.gjj-seedvr2-controls button:disabled{opacity:.38;cursor:not-allowed;filter:grayscale(1);}
 		.gjj-seedvr2-controls button:hover{border-color:#59c38f;color:#fff;}
 		.gjj-seedvr2-controls button.on{background:#175c38;border-color:#5bd28b;color:#fff;box-shadow:inset 0 0 0 1px rgba(91,210,139,.18);}
 		.gjj-seedvr2-controls .model-settings{font-size:16px;background:#2b2538;border-color:#64557f;color:#d8cfee;}
@@ -648,11 +814,43 @@ function renderModelPanel(node) {
 	requestAnimationFrame(() => fitNode(node));
 }
 
+function tileSettingIsRelevant(node, name) {
+	const encodeTiled = asBool(getWidgetValue(node, "encode_tiled"));
+	const decodeMode = String(getWidgetValue(node, "decode_tiled") ?? "智能");
+	const decodeTiled = decodeMode === "智能" || decodeMode === "自动" || decodeMode === "开启" || asBool(decodeMode);
+	const anySpatialTiling = encodeTiled || decodeTiled;
+	const temporalMode = String(getWidgetValue(node, "video_chunk_mode") || "智能");
+	if (["encode_tile_size", "encode_tile_overlap"].includes(name)) return encodeTiled;
+	if (["decode_tile_size", "decode_tile_overlap"].includes(name)) return decodeTiled;
+	if (name === "tile_debug") return anySpatialTiling;
+	if (["vae_temporal_size", "vae_temporal_overlap"].includes(name)) return anySpatialTiling;
+	if (name === "frames_per_chunk") return temporalMode === "手动";
+	if (name === "temporal_overlap") return temporalMode !== "关闭";
+	return true;
+}
+
+function patchTileVisibilityCallbacks(node) {
+	for (const name of ["encode_tiled", "decode_tiled", "video_chunk_mode"]) {
+		const widget = getWidget(node, name);
+		if (!widget || widget.__gjjSeedvr2TileVisibilityPatched) continue;
+		const originalCallback = widget.callback;
+		widget.callback = function (value, ...args) {
+			const result = originalCallback?.call?.(this, value, ...args);
+			requestAnimationFrame(() => {
+				renderTilePanel(node);
+				syncWidgetValuesCache(node);
+			});
+			return result;
+		};
+		widget.__gjjSeedvr2TileVisibilityPatched = true;
+	}
+}
+
 function renderTilePanel(node) {
 	const open = Boolean(node?.properties?.[TILE_OPEN_PROPERTY]);
 	for (const name of TILE_SETTING_WIDGETS) {
 		const widget = getWidget(node, name);
-		if (open) {
+		if (open && tileSettingIsRelevant(node, name)) {
 			restoreNativeWidget(widget);
 			ensureWidgetInput(node, name);
 		} else {
@@ -705,10 +903,16 @@ function refreshButtons(node) {
 		button.setAttribute("aria-pressed", enabled ? "true" : "false");
 		button.textContent = enabled ? config.on : config.off;
 	}
+	const linked = mediaInputLinked(node);
+	state.openButton.disabled = linked;
+	state.openButton.title = linked ? "输入媒体接口已有连接，📁 已禁用。" : "打开本地图片或视频。";
+	state.runButton.title = linked
+		? "单独执行当前节点及其上游依赖。"
+		: "单独执行当前节点，并原地替换 📁 选择的媒体文件。";
 	const open = Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
 	state.settingsButton.classList.toggle("on", open);
 	state.settingsButton.setAttribute("aria-pressed", open ? "true" : "false");
-	state.settingsButton.textContent = open ? "⚙️收起" : "⚙️设置";
+	state.settingsButton.textContent = "⚙️";
 	const modelOpen = Boolean(node?.properties?.[MODEL_OPEN_PROPERTY]);
 	state.modelButton.classList.toggle("on", modelOpen);
 	state.modelButton.setAttribute("aria-pressed", modelOpen ? "true" : "false");
@@ -731,6 +935,8 @@ function applyWidgetVisibility(node) {
 	normalizeMediaInputSlot(node);
 	removeWidgetInput(node, SEED_CONTROL_WIDGET);
 	setWidgetHidden(getWidget(node, SEED_CONTROL_WIDGET), true);
+	setWidgetHidden(getWidget(node, LOCAL_MEDIA_WIDGET), true);
+	setWidgetHidden(getWidget(node, SAVE_IN_PLACE_WIDGET), true);
 	for (const config of BOOLEAN_WIDGETS) {
 		removeWidgetInput(node, config.name);
 		setWidgetHidden(getWidget(node, config.name), true);
@@ -750,6 +956,18 @@ function ensureControlWidget(node) {
 	const root = document.createElement("div");
 	root.className = "gjj-seedvr2-controls";
 	const buttons = {};
+	const openButton = document.createElement("button");
+	openButton.type = "button";
+	openButton.textContent = "📁";
+	openButton.title = "打开本地图片或视频。";
+	openButton.setAttribute("aria-label", "打开本地媒体");
+	openButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		void chooseLocalMedia(node);
+	});
+	stopProp(openButton);
+	root.appendChild(openButton);
 	for (const config of BOOLEAN_WIDGETS) {
 		const button = document.createElement("button");
 		button.type = "button";
@@ -870,13 +1088,25 @@ function ensureControlWidget(node) {
 	});
 	stopProp(settingsButton);
 	root.appendChild(settingsButton);
+	const runButton = document.createElement("button");
+	runButton.type = "button";
+	runButton.textContent = "▶️";
+	runButton.title = "执行当前节点，并原地替换 📁 选择的媒体文件。";
+	runButton.setAttribute("aria-label", "执行并原地保存");
+	runButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		void executeAndReplace(node);
+	});
+	stopProp(runButton);
+	root.appendChild(runButton);
 	const colorMethods = document.createElement("div");
 	colorMethods.className = "gjj-seedvr2-color-methods";
 	const colorMethodButtons = {};
 	for (const method of COLOR_METHODS) {
 		const button = document.createElement("button");
 		button.type = "button";
-		button.textContent = method.label;
+		button.textContent = method.icon;
 		button.title = method.label;
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
@@ -912,7 +1142,7 @@ function ensureControlWidget(node) {
 		node.widgets.unshift(widget);
 	}
 	node.__gjjSeedvr2Controls = {
-		widget, root, buttons, modelButton, tileButton, sizeButton, colorButton, settingsButton,
+		widget, root, buttons, openButton, modelButton, tileButton, sizeButton, colorButton, settingsButton, runButton,
 		colorMethods, colorMethodButtons,
 	};
 	if (typeof ResizeObserver !== "undefined") {
@@ -933,6 +1163,7 @@ function patchNode(node) {
 	ensureControlWidget(node);
 	ensureStatusWidget(node);
 	patchCommonVideoHeight(node);
+	patchTileVisibilityCallbacks(node);
 	setStatus(node, node.__gjjSeedvr2Status?.box?.textContent || "等待执行");
 	applyWidgetVisibility(node);
 	syncWidgetValuesCache(node);
@@ -949,6 +1180,14 @@ api.addEventListener("gjj_node_progress", (event) => {
 	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
 	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) return;
 	setStatus(targetNode, detail.text || "处理中...");
+	setSegmentPreview(targetNode, detail);
+});
+
+api.addEventListener("gjj_seedvr2_segment_preview", (event) => {
+	const detail = event?.detail || {};
+	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
+	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) return;
+	setSegmentPreview(targetNode, detail);
 });
 
 app.registerExtension({

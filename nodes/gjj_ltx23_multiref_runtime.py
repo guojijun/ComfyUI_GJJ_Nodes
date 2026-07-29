@@ -9,6 +9,7 @@ import importlib
 import inspect
 import json
 import math
+from pathlib import Path
 import re
 import sys
 import time
@@ -1956,6 +1957,26 @@ def _ltx_internal_frame_count(output_frame_count: int, trim_start: int = 0) -> i
 	return int(math.ceil(float(needed - 1) / 8.0) * 8 + 1)
 
 
+def _msr_guide_frame_count_for_latent(
+	latent: dict[str, Any],
+	vae: Any,
+	preferred: int = 41,
+) -> int:
+	"""Choose the largest MSR 8n+1 guide that fits the current video latent."""
+	samples = latent.get("samples") if isinstance(latent, dict) else None
+	if not isinstance(samples, torch.Tensor) or samples.ndim < 3:
+		return 1
+	latent_length = max(1, int(samples.shape[2]))
+	scale_factors = getattr(vae, "downscale_index_formula", (8, 32, 32))
+	try:
+		time_scale_factor = max(1, int(scale_factors[0]))
+	except (TypeError, ValueError, IndexError):
+		time_scale_factor = 8
+	pixel_capacity = (latent_length - 1) * time_scale_factor + 1
+	limit = min(max(1, int(preferred)), pixel_capacity)
+	return max(count for count in (1, 9, 17, 25, 33, 41) if count <= limit)
+
+
 def _guide_frame_index(seconds: float, fps: int, output_frame_count: int, trim_start: int = 0) -> int:
 	last_output_index = max(0, int(output_frame_count) - 1)
 	index = int(round(max(0.0, float(seconds)) * float(max(1, int(fps)))))
@@ -2547,6 +2568,70 @@ def _save_final_video_preview(
 	}
 
 
+def _purge_before_stream_concat() -> None:
+	"""最终文件拼接前释放推理资源，避免模型和整段帧同时占用内存。"""
+	try:
+		unload_all_models = getattr(comfy.model_management, "unload_all_models", None)
+		if callable(unload_all_models):
+			unload_all_models()
+	except Exception:
+		pass
+	try:
+		comfy.model_management.soft_empty_cache()
+	except Exception:
+		pass
+	gc.collect()
+
+
+def _concat_saved_video_segments(
+	paths: list[str],
+	*,
+	fps: float,
+	filename_prefix: str,
+) -> tuple[Any, dict[str, Any], int, int, int]:
+	"""用 FFmpeg concat demuxer 直接流拷贝已编码分段，不展开视频帧或回退重编码。"""
+	from .gjj_ffmpeg_tools import (
+		_concat_videos,
+		_ffmpeg,
+		_ffprobe,
+		_preview_item,
+		_safe_output_info,
+		_unique_output_path,
+	)
+
+	source_paths = [Path(str(item)).resolve() for item in paths if str(item or "").strip()]
+	missing = [str(path) for path in source_paths if not path.exists()]
+	if not source_paths or missing:
+		raise RuntimeError(
+			"MTV 流式合并缺少已保存的视频分段。"
+			+ (f"未找到：{', '.join(missing)}" if missing else "")
+		)
+	ffmpeg = _ffmpeg("")
+	ffprobe = _ffprobe("", ffmpeg)
+	output_path = _unique_output_path(filename_prefix, ".mp4", marker="MTVConcat")
+	_concat_videos(
+		source_paths,
+		output_path,
+		ffmpeg,
+		reencode=False,
+		fallback_reencode=False,
+	)
+	_, width, height, output_fps, frame_count, _duration, _ = _safe_output_info(
+		output_path,
+		ffprobe,
+		float(fps),
+	)
+	preview = _preview_item(output_path, "output", "video/mp4")
+	preview.update({
+		"format": "video/h264-mp4",
+		"frame_rate": float(output_fps or fps),
+		"width": int(width),
+		"height": int(height),
+		"frame_count": int(frame_count),
+	})
+	return InputImpl.VideoFromFile(str(output_path)), preview, int(width), int(height), int(frame_count)
+
+
 def _resolve_output_dimension(value: int | None, fallback: int) -> int:
 	try:
 		numeric = int(value) if value is not None else 0
@@ -2830,27 +2915,18 @@ def _check_audio_conditioned_budget(
 ):
 	safe_frame_count, pixel_frame_budget, safe_seconds = _resolve_audio_conditioned_budget(width, height, fps)
 	estimated_pixel_frames = int(width) * int(height) * int(frame_count)
-	aligned_overflow_ok = (
-		bool(allow_ltx_8n1_alignment)
-		and int(frame_count) > 1
-		and (int(frame_count) - 1) % 8 == 0
-		and int(frame_count) - 1 <= int(safe_frame_count)
-	)
-
-	if int(frame_count) > int(safe_frame_count) and not aligned_overflow_ok:
-		raise RuntimeError(
-			f"当前 {route_label} + 音频驱动任务预计显存压力过高：采样尺寸 {int(width)}x{int(height)}，"
-			f"{int(fps)}fps，音频时长 {_format_seconds(audio_duration)}，约 {int(frame_count)} 帧，"
-			f"{int(guide_count)} 张参考图。按当前显卡建议控制在约 {safe_frame_count} 帧 / {_format_seconds(safe_seconds)} 以内，"
-			"否则很容易卡在 “Model Initializing” 并持续占用共享显存。请优先缩短音频，其次降低面板宽高或 fps 后再试。"
-		)
-
 	usage_ratio = float(frame_count) / float(max(1, safe_frame_count))
 	if usage_ratio >= DEFAULT_AUDIO_SAFE_WARNING_RATIO:
+		over_budget_text = ""
+		if int(frame_count) > int(safe_frame_count):
+			over_budget_text = (
+				f"；已超过建议值 {safe_frame_count} 帧 / {_format_seconds(safe_seconds)}，"
+				"节点不会人为中断，将继续执行并以实际显存结果为准"
+			)
 		return (
-			f"提示：当前任务显存压力较高，采样尺寸 {int(width)}x{int(height)}，"
+			f"提示：当前 {route_label} 任务显存压力较高，采样尺寸 {int(width)}x{int(height)}，"
 			f"{int(fps)}fps，约 {int(frame_count)} 帧，像素帧负载 {estimated_pixel_frames / 1_000_000:.1f}M / "
-			f"{pixel_frame_budget / 1_000_000:.1f}M。"
+			f"{pixel_frame_budget / 1_000_000:.1f}M{over_budget_text}。"
 		)
 
 
@@ -2892,6 +2968,13 @@ def run_ltx23_multiref_video(
 	branch_debug: Any = None,
 	unique_id: Any = None,
 	source_video: Any = None,
+	mtv_audio_queue: Any = None,
+	mtv_prompts: Any = None,
+	character_reference: Any = None,
+	prompt_replace_find: Any = "",
+	prompt_replace_with: Any = "",
+	vocal_replace_find: Any = "",
+	vocal_replace_with: Any = "",
 ):
 	_ensure_runtime_dependencies()
 	run_started_at = time.perf_counter()
@@ -2966,6 +3049,9 @@ def run_ltx23_multiref_video(
 		return f"当前分支：{route_label}{key_text} / 有效场景 {visual_scene_count} 张{source_text}"
 
 	def _execute():
+		# MTV 合并前会主动解除这些外层推理输入引用。显式声明 nonlocal，
+		# 避免 Python 因后续赋值而把它们误判成尚未初始化的局部变量。
+		nonlocal main_image, base_guide_images, base_guide_times, input_audio, mtv_audio_queue
 		_send_status(unique_id, _branch_status_text())
 		_send_status(unique_id, f"1/8 加载 LTX 模型与默认资源...（{route_label} / {visual_scene_count}张）")
 		try:
@@ -3104,11 +3190,44 @@ def run_ltx23_multiref_video(
 			render_branch_kind: str = "default",
 			render_segment_index: int | None = None,
 			status_prefix: str = "",
+			render_prompt_override: str | None = None,
 		) -> dict[str, Any]:
 			prefix = f"{status_prefix} · " if status_prefix else ""
 			render_segment_lora_enabled = _resolve_transition_lora_switch_for_segment(segment_switch_text, render_segment_index)
 			render_segment_label = "启用" if render_segment_lora_enabled else "关闭"
-			render_prompt_text = prompt_text
+			segment_base_prompt = str(render_prompt_override or "").strip() or prompt_text
+			configured_find = str(prompt_replace_find or "").strip()
+			configured_replacement = str(prompt_replace_with or "")
+			replacement_candidates = [configured_find] if configured_find else []
+			matched_static_center_tag = next(
+				(tag for tag in replacement_candidates if tag.lower() in segment_base_prompt.lower()),
+				"",
+			)
+			if matched_static_center_tag:
+				segment_base_prompt = re.sub(
+					re.escape(matched_static_center_tag),
+					configured_replacement,
+					segment_base_prompt,
+					flags=re.IGNORECASE,
+				).strip(" ,，;；")
+				_send_status(unique_id, f"{prefix}已把静态图特写约束替换为 LTX 动态近景约束：保持人物清晰，禁止远景小人。")
+			configured_vocal_find = str(vocal_replace_find or "").strip()
+			configured_vocal_replacement = str(vocal_replace_with or "")
+			matched_ltx_singing_tag = (
+				configured_vocal_find
+				if configured_vocal_find.lower() in segment_base_prompt.lower()
+				else ""
+			)
+			has_ltx_singing_tag = bool(matched_ltx_singing_tag)
+			if has_ltx_singing_tag:
+				segment_base_prompt = re.sub(
+					re.escape(matched_ltx_singing_tag),
+					configured_vocal_replacement,
+					segment_base_prompt,
+					flags=re.IGNORECASE,
+				).strip(" ,，;；")
+				_send_status(unique_id, f"{prefix}已按 📒 面板配置替换有人声标签。")
+			render_prompt_text = segment_base_prompt
 			render_trigger_added = False
 			gemma_transition_prompt = ""
 			selected_transition_prompt_model = ""
@@ -3141,7 +3260,7 @@ def run_ltx23_multiref_video(
 							# Gemma 只负责补充当前首尾帧的转场描述；用户正向提示词始终是
 							# 全段主体约束，不能被自动过渡词覆盖。
 							render_prompt_text = ", ".join(
-								part for part in (prompt_text, gemma_transition_prompt) if str(part or "").strip()
+								part for part in (segment_base_prompt, gemma_transition_prompt) if str(part or "").strip()
 							)
 					except Exception as exc:
 						print(
@@ -3162,7 +3281,7 @@ def run_ltx23_multiref_video(
 							"route": render_route_label,
 							"branch": render_branch_kind,
 							"auto_transition_prompt": auto_transition_prompt,
-							"user_positive_prompt": prompt_text,
+							"user_positive_prompt": segment_base_prompt,
 							"gemma_transition_prompt": gemma_transition_prompt,
 							"transition_prompt_model_requested": transition_prompt_model,
 							"transition_prompt_model_effective": selected_transition_prompt_model,
@@ -3293,7 +3412,7 @@ def run_ltx23_multiref_video(
 						audio_duration=audio_duration,
 						route_label=render_route_label,
 						guide_count=len(guides),
-						allow_ltx_8n1_alignment=bool(render_segment_index is not None and "音频分段" in str(render_route_label)),
+						allow_ltx_8n1_alignment=bool(render_segment_index is not None),
 					)
 					if pressure_notice:
 						_send_status(unique_id, pressure_notice)
@@ -3369,6 +3488,40 @@ def run_ltx23_multiref_video(
 					pass
 
 				video_latent = EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
+				if character_reference is not None and render_main_image is not None:
+					try:
+						from .gjj_add_video_iclora_guide import GJJ_AddVideoICLoRAGuide
+						msr_guide_frame_count = _msr_guide_frame_count_for_latent(
+							video_latent,
+							video_vae,
+							preferred=41,
+						)
+						positive, negative, video_latent = GJJ_AddVideoICLoRAGuide().generate(
+							positive,
+							negative,
+							video_vae,
+							video_latent,
+							image=character_reference,
+							frame_idx=0,
+							strength=1.0,
+							latent_downscale_factor=1.0,
+							crop="disabled",
+							use_tiled_encode=False,
+							tile_size=256,
+							tile_overlap=64,
+							bypass=False,
+							background=render_main_image,
+							frame_count=str(msr_guide_frame_count),
+							guide_mode="写入Latent",
+						)
+						_send_status(
+							unique_id,
+							f"{prefix}人物一致性：已按 LTX2.3+MSR 工作流注入人物参考"
+							f"（image=人物参考，background=当前场景，strength=1，"
+							f"frame_count={msr_guide_frame_count}）。",
+						)
+					except Exception as exc:
+						raise RuntimeError(f"MSR 人物参考注入失败：{exc}") from exc
 				if workflow_first_last:
 					try:
 						print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] before latent injection: {_debug_tensor_info(video_latent)}", flush=True)
@@ -3609,7 +3762,7 @@ def run_ltx23_multiref_video(
 						"output_size": [int(output_width), int(output_height)],
 						"output_frame_count": int(output_frame_count),
 						"effective_prompt": render_prompt_text,
-						"user_positive_prompt": prompt_text,
+						"user_positive_prompt": segment_base_prompt,
 						"gemma_transition_prompt": gemma_transition_prompt,
 						"transition_prompt_model_effective": selected_transition_prompt_model,
 						"transition_trigger_added": render_trigger_added,
@@ -3641,8 +3794,140 @@ def run_ltx23_multiref_video(
 			}
 
 		scene_images = [main_image] + [image for image in base_guide_images if image is not None] if main_image is not None else []
+		mtv_audio_segments = [
+			item for item in list(mtv_audio_queue or [])
+			if isinstance(item, dict) and item.get("waveform") is not None
+		]
+		mtv_prompt_segments = [str(item or "").strip() for item in list(mtv_prompts or []) if str(item or "").strip()]
 		auto_workflow_multiframe = mode == MODE_GENERATED_AUDIO and len(scene_images) >= 3
 		use_segmented = (bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2) or auto_workflow_multiframe
+		if mtv_audio_segments:
+			if len(scene_images) != len(mtv_audio_segments):
+				raise RuntimeError(
+					"MTV 分支要求人声分段列表与图片队列数量完全一致。"
+					f"当前音频 {len(mtv_audio_segments)} 段，图片 {len(scene_images)} 张。"
+					"请确认 GJJ_MTVAudioToPrompt 与 GJJ_LazyImageStudio 输出的是同一分段数量。"
+				)
+			if mtv_prompt_segments and len(mtv_prompt_segments) not in (1, len(mtv_audio_segments)):
+				_send_status(
+					unique_id,
+					f"MTV 提示：检测到 {len(mtv_prompt_segments)} 条提示词，与 {len(mtv_audio_segments)} 段音频不一致；本次各段使用完整正向提示词。",
+				)
+				mtv_prompt_segments = []
+			_send_status(
+				unique_id,
+				f"MTV 分支：{len(mtv_audio_segments)} 段音频与 {len(scene_images)} 张图片按索引一一配对。",
+			)
+			segment_previews: list[dict[str, Any]] = []
+			segment_video_paths: list[str] = []
+			representative_frame: torch.Tensor | None = None
+			segment_start_frame = 0
+			for segment_index, (segment_audio, segment_image) in enumerate(
+				zip(mtv_audio_segments, scene_images),
+				start=1,
+			):
+				segment_duration = _audio_duration_seconds(segment_audio)
+				segment_output_frames = _requested_frame_count(segment_duration, fps)
+				segment_label = f"MTV 第{segment_index}段（共{len(mtv_audio_segments)}段）"
+				segment_prompt = (
+					mtv_prompt_segments[segment_index - 1]
+					if len(mtv_prompt_segments) == len(mtv_audio_segments)
+					else (mtv_prompt_segments[0] if len(mtv_prompt_segments) == 1 else prompt_text)
+				)
+				_send_status(
+					unique_id,
+					f"{segment_label}：音频{segment_index} ↔ 图片{segment_index}，"
+					f"时长 {_format_seconds(segment_duration)}，约 {segment_output_frames} 帧。",
+				)
+				result = _render_once(
+					render_main_image=segment_image,
+					render_guide_images=[],
+					render_guide_times=[],
+					render_duration_seconds=segment_duration,
+					render_mode=MODE_AUDIO_CONDITIONED,
+					render_input_audio=segment_audio,
+					render_seed=int(seed) + (segment_index - 1) * 2,
+					render_frame_trim_start=0,
+					render_route_label="MTV音频图片配对",
+					render_branch_kind="default",
+					render_segment_index=segment_index,
+					status_prefix=segment_label,
+					render_prompt_override=segment_prompt,
+				)
+				if representative_frame is None:
+					representative_frame = result["frames"][:1].detach().float().cpu().clamp(0.0, 1.0).contiguous()
+				preview = _save_segment_video_preview(
+					frames=result["frames"],
+					audio=result["audio"],
+					fps=fps,
+					save_preset=segment_save_preset,
+					format_name=segment_video_format,
+					unique_id=unique_id,
+					segment_index=segment_index,
+					segment_count=len(mtv_audio_segments),
+					start_index=segment_start_frame,
+					end_index=segment_start_frame + max(0, segment_output_frames - 1),
+					output_width=result["output_width"],
+					output_height=result["output_height"],
+					model_name=checkpoint_name,
+					lora_name=test_lora_name,
+					elapsed_seconds=time.perf_counter() - run_started_at,
+				)
+				segment_start_frame += max(0, segment_output_frames)
+				segment_previews.append(preview)
+				if preview.get("path"):
+					segment_video_paths.append(str(preview["path"]))
+				del result
+				_maybe_purge_vram()
+			if representative_frame is None:
+				raise RuntimeError("MTV 分支没有生成可用视频帧。")
+			_send_status(unique_id, "MTV 合并前正在释放模型、显存与临时帧资源...")
+			# 合并只需要磁盘上的分段路径。先解除循环尾项和推理输入的强引用，
+			# 避免图片/音频张量及模型缓存与 FFmpeg 合并阶段叠加占用内存。
+			segment_audio = None
+			segment_image = None
+			scene_images = []
+			mtv_audio_segments = []
+			main_image = None
+			base_guide_images = []
+			base_guide_times = []
+			input_audio = None
+			mtv_audio_queue = None
+			_purge_before_stream_concat()
+			final_prefix = _format_segment_save_prefix(
+				segment_save_preset,
+				unique_id,
+				0,
+				0,
+				max(0, segment_start_frame - 1),
+				checkpoint_name,
+				test_lora_name,
+				time.perf_counter() - run_started_at,
+			)
+			final_prefix = re.sub(r"([/_])段00_场景00-", r"\1MTV最终视频_帧00-", final_prefix)
+			final_video, final_media, output_width, output_height, final_frame_count = _concat_saved_video_segments(
+				segment_video_paths,
+				fps=float(fps),
+				filename_prefix=final_prefix,
+			)
+			_send_status(
+				unique_id,
+				f"完成：MTV 分支 {len(segment_video_paths)} 段 / FFmpeg 直接流拷贝合并 / "
+				f"{output_width}x{output_height} / {final_frame_count} 帧。",
+			)
+			return {
+				"ui": {
+					"preview_media": (final_media,),
+					"preview_is_video": (True,),
+					"final_video": (final_media,),
+					"segment_videos": segment_previews,
+					"preview_segments": segment_previews,
+				},
+				"result": (
+					final_video,
+					representative_frame,
+				),
+			}
 		if bool(segmented_execution) and mode == MODE_AUDIO_CONDITIONED:
 			_send_status(unique_id, "提示：接入驱动音频时将按显存预算自动切成多段，再合并输出。")
 			if input_audio is None:

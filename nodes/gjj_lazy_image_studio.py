@@ -143,6 +143,14 @@ DEFAULT_GLOBAL_QUALITY_PROMPT = (
     "high quality, highly detailed, sharp focus, clean composition, "
     "professional lighting, natural colors"
 )
+DEFAULT_NEGATIVE_PROMPT = (
+    "low quality, worst quality, lowres, blurry, out of focus, jpeg artifacts, "
+    "bad anatomy, deformed anatomy, malformed limbs, extra arms, extra legs, "
+    "extra hands, extra feet, extra fingers, missing fingers, fused fingers, "
+    "mutated hands, poorly drawn hands, malformed hands, broken hands, "
+    "malformed feet, broken legs, severed hands, severed feet, severed limbs, "
+    "dismembered, duplicate limbs, distorted face"
+)
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
@@ -2221,11 +2229,11 @@ class GJJ_LazyImageStudio:
                 "negative_prompt": (
                     "STRING",
                     {
-                        "default": "",
+                        "default": DEFAULT_NEGATIVE_PROMPT,
                         "multiline": False,
                         "dynamicPrompts": True,
                         "display_name": "🚫 反向提示词",
-                        "tooltip": "反向提示词；为空时会自动生成零反向条件。",
+                        "tooltip": "反向提示词；默认包含低质量、模糊和常见肢体畸形排除词，清空后会生成零反向条件。",
                     },
                 ),
                 "main_image_index": (
