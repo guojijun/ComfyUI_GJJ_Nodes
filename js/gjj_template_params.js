@@ -1172,12 +1172,12 @@ function addButtonParamWidget(node, field, name, initialValue, type) {
 	let storedValue = isBool ? Boolean(initialValue) : String(initialValue ?? "");
 	let widget = null;
 	const root = document.createElement("div");
-	root.style.cssText = "width:100%;height:30px;display:grid;grid-template-columns:86px minmax(0,1fr);gap:5px;align-items:center;box-sizing:border-box;padding:0 10px 0 12px;pointer-events:auto;";
+	root.style.cssText = "width:100%;min-width:0;min-height:30px;height:auto;display:grid;grid-template-columns:86px minmax(0,1fr);gap:5px;align-items:start;box-sizing:border-box;padding:0 10px 0 12px;pointer-events:auto;";
 	const label = document.createElement("span");
 	label.textContent = field.label || field.key;
-	label.style.cssText = "color:#b8c0cc;font:13px Arial;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;";
+	label.style.cssText = "color:#b8c0cc;font:13px/28px Arial;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;";
 	const buttons = document.createElement("div");
-	buttons.style.cssText = `display:grid;grid-template-columns:repeat(${Math.max(1, items.length)},minmax(0,1fr));gap:5px;min-width:0;pointer-events:auto;`;
+	buttons.style.cssText = "display:flex;flex-wrap:wrap;align-items:flex-start;align-content:flex-start;gap:5px;min-width:0;width:100%;pointer-events:auto;";
 	root.append(label, buttons);
 
 	const selectedValues = () => isBool ? [Boolean(storedValue)] : normalizeEnumSelection(field, storedValue);
@@ -1203,7 +1203,7 @@ function addButtonParamWidget(node, field, name, initialValue, type) {
 		button.type = "button";
 		button.textContent = item.label;
 		button.__gjjValue = item.value;
-		button.style.cssText = "height:28px;min-width:0;padding:2px 7px;border:1px solid #44565f;border-radius:7px;background:#252b31;color:#dce7e2;cursor:pointer;pointer-events:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px Arial;";
+		button.style.cssText = "height:28px;min-width:34px;max-width:100%;flex:0 0 auto;padding:2px 7px;border:1px solid #44565f;border-radius:7px;background:#252b31;color:#dce7e2;cursor:pointer;pointer-events:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px Arial;";
 		for (const eventName of ["pointerdown", "mousedown", "mouseup"]) {
 			button.addEventListener(eventName, (event) => event.stopPropagation());
 		}
@@ -1238,8 +1238,16 @@ function addButtonParamWidget(node, field, name, initialValue, type) {
 	});
 	if (!widget) return null;
 	widget.gjj_template_widget_type = type;
-	widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), 30];
-	widget.getHeight = () => 30;
+	const wrappedHeight = (width = 0) => {
+		const resolvedWidth = Math.max(120, Math.round(Number(width || currentNodeWidth(node))));
+		root.style.width = `${resolvedWidth}px`;
+		return Math.max(30, Math.ceil(root.scrollHeight || buttons.scrollHeight || 30));
+	};
+	widget.computeSize = (width) => {
+		const resolvedWidth = Math.max(120, Math.round(Number(width || currentNodeWidth(node))));
+		return [resolvedWidth, wrappedHeight(resolvedWidth)];
+	};
+	widget.getHeight = () => wrappedHeight();
 	widget.serializeValue = () => storedValue;
 	sync();
 	return widget;
