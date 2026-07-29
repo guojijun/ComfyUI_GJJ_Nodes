@@ -715,6 +715,11 @@ function setSegmentPreview(node, detail) {
 	const start = Number(detail.start_frame || 1);
 	const end = Number(detail.end_frame || start);
 	const totalFrames = Math.max(end, Number(detail.total_frames || end));
+	const contextStart = Number(detail.context_start_frame || start);
+	const contextEnd = Number(detail.context_end_frame || end);
+	const contextText = contextStart !== start || contextEnd !== end
+		? ` · 推理上下文 ${contextStart}–${contextEnd} 帧`
+		: "";
 	const percent = Math.min(100, Math.max(0, (start - 1) / totalFrames * 100));
 	const etaValue = Math.max(0, Math.round(Number(detail.eta_seconds || 0)));
 	const etaHours = Math.floor(etaValue / 3600);
@@ -723,7 +728,7 @@ function setSegmentPreview(node, detail) {
 	const etaText = etaValue > 0
 		? ` · 预计剩余 ${etaHours > 0 ? `${etaHours}小时${etaMinutes}分` : etaMinutes > 0 ? `${etaMinutes}分${etaSeconds}秒` : `${etaSeconds}秒`}`
 		: " · 正在统计剩余时间";
-	state.progress.textContent = `当前第 ${segment} 段 · 预计共 ${totalSegments} 段 · 原视频 ${start}–${end}/${totalFrames} 帧 · 已完成前 ${percent.toFixed(1)}%${etaText}`;
+	state.progress.textContent = `当前第 ${segment} 段 · 预计共 ${totalSegments} 段 · 输出 ${start}–${end}/${totalFrames} 帧${contextText} · 已完成前 ${percent.toFixed(1)}%${etaText}`;
 	refreshNode(node);
 	requestAnimationFrame(() => fitNode(node));
 }

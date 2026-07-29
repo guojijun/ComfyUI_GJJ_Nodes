@@ -303,6 +303,8 @@ def _send_segment_preview(
     total_frames: int,
     completed_seconds: float = 0.0,
     completed_frames: int = 0,
+    context_start_frame: int | None = None,
+    context_end_frame: int | None = None,
 ) -> None:
     if not unique_id or not isinstance(frame, torch.Tensor) or frame.numel() == 0:
         return
@@ -341,6 +343,8 @@ def _send_segment_preview(
             "total_frames": int(total_frames),
             "completed_seconds": max(0.0, float(completed_seconds)),
             "completed_frames": max(0, int(completed_frames)),
+            "context_start_frame": int(context_start_frame or start_frame),
+            "context_end_frame": int(context_end_frame or end_frame),
         }
         if completed_frames > 0 and completed_seconds > 0:
             seconds_per_frame = float(completed_seconds) / int(completed_frames)
@@ -1189,9 +1193,17 @@ def _run_streaming_video_upscale(
             segment_started_at = time.perf_counter()
             segment_index += 1
             core_end_frame = min(total_frames, core_start_frame + core_frames)
-            overlap_frames = min(
-                max(0, core_frames // 8),
-                max(int(temporal_overlap) * 4, min(8, int(vae_temporal_overlap))),
+            requested_overlap_frames = max(
+                int(temporal_overlap) * 4,
+                min(8, int(vae_temporal_overlap)),
+            )
+            # Streaming overlap is inference context, not duplicated output.
+            # A five-frame probe previously produced core_frames // 8 == 0,
+            # leaving the first boundary without temporal context.
+            overlap_frames = (
+                min(max(1, core_frames - 1), requested_overlap_frames)
+                if requested_overlap_frames > 0
+                else 0
             )
             total_segments = segment_index + (
                 total_frames - core_end_frame + core_frames - 1
@@ -1259,6 +1271,8 @@ def _run_streaming_video_upscale(
                     + max(0.0, time.perf_counter() - segment_started_at)
                 ),
                 completed_frames=core_end_frame,
+                context_start_frame=load_start_frame + 1,
+                context_end_frame=load_end_frame,
             )
             segment_path = temp_root / f"segment_{segment_index:06d}.mp4"
             segment_video = InputImpl.VideoFromComponents(
