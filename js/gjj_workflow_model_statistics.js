@@ -104,11 +104,32 @@ function collectStructuredModels(value, node, items, visited = new WeakSet()) {
 	}
 }
 
+function omitObjectKeys(value, omittedKeys, visited = new WeakMap()) {
+	if (!value || typeof value !== "object") return value;
+	if (visited.has(value)) return visited.get(value);
+	const copy = Array.isArray(value) ? [] : {};
+	visited.set(value, copy);
+	for (const [key, nested] of Object.entries(value)) {
+		if (omittedKeys.has(key)) continue;
+		copy[key] = omitObjectKeys(nested, omittedKeys, visited);
+	}
+	return copy;
+}
+
 function collectWorkflowModels() {
 	const items = [];
 	for (const graphNode of app.graph?._nodes || []) {
 		if (graphNode?.type === NODE_NAME) continue;
 		const nodeTitle = String(graphNode?.title || graphNode?.type || "");
+		const lazyModelSource = graphNode?.type === "GJJ_LazyImageStudio"
+			? String(
+				graphNode.widgets?.find((widget) => widget?.name === "model_source")?.value
+				?? graphNode?.properties?.gjj_lazy_image_studio_param_values?.model_source
+				?? "UNET 主模型",
+			)
+			: "";
+		const lazyUsesUnet = graphNode?.type === "GJJ_LazyImageStudio"
+			&& lazyModelSource !== "底模 checkpoint";
 		if (graphNode?.type === "GJJ_AudioAceMusicGenerator") {
 			const widgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
 			const lyricsInput = graphNode.inputs?.find((input) => input?.name === "lyrics");
@@ -176,7 +197,35 @@ function collectWorkflowModels() {
 				});
 			}
 		}
+		if (graphNode?.type === "GJJ_VideoUniversalModelLoader") {
+			let activeEntries = [];
+			try {
+				const provider = graphNode.__gjjHelpModelEntries
+					|| graphNode.__gjjHelpModelTreeEntries
+					|| graphNode.__gjjModelHelpEntries;
+				activeEntries = typeof provider === "function" ? provider.call(graphNode) : [];
+			} catch (error) {
+				console.warn("[GJJ WorkflowModelStatistics] 读取视频通用加载器当前模型失败：", error);
+			}
+			for (const entry of Array.isArray(activeEntries) ? activeEntries : []) {
+				const folder = String(entry?.folder || "").replace(/^models[\\/]/i, "");
+				let kind = String(entry?.kind || "").trim().toLowerCase();
+				if (folder.toLowerCase() === "loras" || ["name", "wan_lora"].includes(kind)) kind = "loras";
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: kind || "auto",
+					name: String(entry?.value || entry?.name || ""),
+					folder,
+				});
+			}
+			// 此节点属性中包含完整预设库和备用资源；继续通用扫描会把字体、
+			// LatentSync VAE、其它预设 LoRA 等未启用资源误判为当前模型。
+			continue;
+		}
 		for (const widget of graphNode?.widgets || []) {
+			if (lazyUsesUnet && widget?.name === "ckpt_name") continue;
 			const widgetName = inferWidgetKind(widget?.name) || "auto";
 			collectStructuredModels(widget?.value, graphNode, items);
 			const names = collectCanvasCandidates(widget?.value);
@@ -190,8 +239,11 @@ function collectWorkflowModels() {
 				});
 			}
 		}
-		collectStructuredModels(graphNode?.properties, graphNode, items);
-		for (const name of collectCanvasCandidates(graphNode?.properties)) {
+		const scannedProperties = lazyUsesUnet
+			? omitObjectKeys(graphNode?.properties, new Set(["ckpt_name"]))
+			: graphNode?.properties;
+		collectStructuredModels(scannedProperties, graphNode, items);
+		for (const name of collectCanvasCandidates(scannedProperties)) {
 			items.push({
 				node_id: graphNode.id,
 				node_type: graphNode.type,
@@ -325,6 +377,43 @@ function createPanel(node) {
 				models: models.sort((left, right) =>
 					collator.compare(String(left?.name || ""), String(right?.name || "")) * direction),
 			}));
+	};
+	const modelTextSuffix = (model, { includeFolder = false } = {}) => {
+		const size = model?.size_text ? ` [${model.size_text}]` : "";
+		const folder = includeFolder ? ` 📁 ${model?.folder || "models"}/` : "";
+		const missing = model?.exists ? "" : " ❌ 缺失";
+		return `${model?.icon || "⚪"}${model?.name || ""}${size}${folder}${missing}`;
+	};
+	const currentViewText = (report) => {
+		if (!report) return "";
+		const lines = [`## [🌏 模型下载](${report.download_url || ""})`];
+		if (sortState.field === "directory") {
+			lines.push("📁 ComfyUI/", "└──📁 models/");
+			for (const group of sortedGroups(report)) {
+				lines.push(`　　└──📁 ${group.folder}/`);
+				for (const model of group.models || []) {
+					lines.push(`　　　　└──${modelTextSuffix(model)}`);
+				}
+			}
+		} else if (sortState.field === "size") {
+			lines.push(`💾 全部模型 · 按文件大小${sortState.directions.size > 0 ? "升序" : "降序"}`);
+			for (const model of sizeModels(report)) {
+				lines.push(`　└──${modelTextSuffix(model, { includeFolder: true })}`);
+			}
+		} else {
+			lines.push(`☋ 使用节点 · ${sortState.directions.node > 0 ? "升序" : "降序"}`);
+			for (const group of nodeGroups(report)) {
+				lines.push(`　☋ ${group.title}`);
+				for (const model of group.models) {
+					lines.push(`　　└──${modelTextSuffix(model, { includeFolder: true })}`);
+				}
+			}
+		}
+		lines.push(
+			"",
+			`共 ${report.model_count || 0} 个模型，合计 ${report.total_size_text || "0 B"}，缺失 ${report.missing_count || 0} 个`,
+		);
+		return lines.join("\n");
 	};
 	const updateSortButtons = () => {
 		const labels = { directory: "目录", size: "文件大小", node: "使用节点" };
@@ -524,7 +613,7 @@ function createPanel(node) {
 		});
 	}
 	copyAll.addEventListener("click", async () => {
-		const text = node.__gjjWorkflowModelReport?.text || "";
+		const text = currentViewText(node.__gjjWorkflowModelReport);
 		if (!text) return;
 		const ok = await copyText(text);
 		copyAll.textContent = ok ? "✅" : "❌";

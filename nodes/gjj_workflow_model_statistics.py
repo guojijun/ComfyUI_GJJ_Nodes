@@ -18,6 +18,8 @@ MODEL_FILE_EXTENSIONS = {
 }
 CACHE_CATEGORIES = {"latency", "cache", "caches", "temp", "tmp"}
 CACHE_PATH_PARTS = {"auxiliary", "__pycache__", ".cache", ".git"}
+NON_MODEL_CATEGORIES = {"fonts"}
+DIRECTORY_MODEL_CATEGORIES = {"asr", "translation"}
 
 # Widget name -> (display folder, icon, folder_paths categories).
 MODEL_WIDGETS: dict[str, tuple[str, str, tuple[str, ...]]] = {
@@ -105,6 +107,8 @@ def _models_tree_index() -> dict[str, tuple[str, str, str]]:
         if str(parts[0]).casefold() in CACHE_CATEGORIES or lowered_parts & CACHE_PATH_PARTS:
             return
         category = str(parts[0])
+        if full_path.is_dir() and category.casefold() not in DIRECTORY_MODEL_CATEGORIES:
+            return
         display_name = str(Path(*parts[1:])).replace("/", "\\")
         entry = (category, display_name, str(full_path))
         relative_key = _model_lookup_key(str(relative))
@@ -288,6 +292,8 @@ def _build_report(items: list[dict[str, Any]]) -> dict[str, Any]:
             categories,
             tree_index,
         )
+        if str(matched_category or "").strip().casefold() in NON_MODEL_CATEGORIES:
+            continue
         # Broad canvas scanning also sees prompts, Markdown previews and report
         # text.  An unresolved value without a known model kind is prose, not a
         # missing model.  Known model widgets still retain red missing entries.

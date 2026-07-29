@@ -153,6 +153,13 @@ def _gjj_default_user_settings() -> dict:
 			"multiview_lora_1": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 			"multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
 			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+			"sampling_sampler": "自动",
+			"sampling_scheduler": "自动",
+			"sampling_steps": 0,
+			"sampling_cfg": -1.0,
+			"sampling_denoise": -1.0,
+			"sampling_seed": 0,
+			"keep_model": True,
 		},
 		"scene_library": {
 			"panorama_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
@@ -1494,6 +1501,13 @@ def _register_gjj_character_library_api():
 	async def gjj_character_library_model_tree(_request):
 		settings = _gjj_section_settings("character_library")
 		choices = _gjj_library_model_choices()
+		try:
+			import comfy.samplers
+			sampler_names = ["自动", *list(comfy.samplers.KSampler.SAMPLERS)]
+			scheduler_names = ["自动", *list(comfy.samplers.KSampler.SCHEDULERS)]
+		except Exception:
+			sampler_names = ["自动", "euler", "dpmpp_2m", "dpmpp_2m_sde", "lcm"]
+			scheduler_names = ["自动", "simple", "normal", "karras", "exponential", "sgm_uniform"]
 		matting_method = str(settings.get("matting_method") or "RMBG1.4")
 		matting_model_paths = {
 			"RMBG1.4": "models/RMBG/rmbg1.4.safetensors",
@@ -1509,6 +1523,15 @@ def _register_gjj_character_library_api():
 			"title": "角色库模型树",
 			"settings_section": "character_library",
 			"settings": settings,
+			"generation_controls": [
+				{"key": "sampling_sampler", "label": "采样器", "type": "select", "options": sampler_names},
+				{"key": "sampling_scheduler", "label": "调度器", "type": "select", "options": scheduler_names},
+				{"key": "sampling_steps", "label": "采样步数", "type": "number", "min": 0, "max": 100, "step": 1, "hint": "0 = 自动"},
+				{"key": "sampling_cfg", "label": "CFG", "type": "number", "min": -1, "max": 30, "step": 0.1, "hint": "-1 = 自动"},
+				{"key": "sampling_denoise", "label": "降噪强度", "type": "number", "min": -1, "max": 1, "step": 0.01, "hint": "-1 = 自动"},
+				{"key": "sampling_seed", "label": "种子", "type": "number", "min": 0, "max": 4294967295, "step": 1},
+				{"key": "keep_model", "label": "生成后保持模型", "type": "boolean"},
+			],
 			"controls": [
 				{"key": "matting_method", "label": "抠图模型", "options": choices.get("matting_methods") or ["RMBG1.4"]},
 				{"key": "multiview_unet", "label": "多视图 UNET", "options": choices.get("diffusion_models") or []},
@@ -1910,6 +1933,13 @@ def _register_gjj_character_library_api():
 			])
 			lora_models = _safe_filename_list("loras") or []
 			character_settings = _gjj_section_settings("character_library")
+			sampling_steps = int(character_settings.get("sampling_steps", 0) or 0)
+			sampling_cfg = float(character_settings.get("sampling_cfg", -1.0))
+			sampling_sampler = str(character_settings.get("sampling_sampler") or "自动")
+			sampling_scheduler = str(character_settings.get("sampling_scheduler") or "自动")
+			sampling_denoise = float(character_settings.get("sampling_denoise", -1.0))
+			sampling_seed = int(character_settings.get("sampling_seed", 0) or 0)
+			keep_model = bool(character_settings.get("keep_model", True))
 			def basename_seed(value: str) -> str:
 				return str(value or "").replace("\\", "/").split("/")[-1].strip()
 			def pick_model_any_subdir(folder_type: str, seed: str, available: list[str], fallback: str = "", extensions: tuple[str, ...] = ()) -> str:
@@ -2038,11 +2068,17 @@ def _register_gjj_character_library_api():
 					lora_2_strength=lora_2_strength,
 					lora_3_name=lora_3_name,
 					lora_3_strength=1.0 if lora_3_name else 0.0,
-					seed=seed,
+					seed=seed if seed else sampling_seed,
 					save_each_image=False,
+					keep_model=keep_model,
 					clip_name=multiview_clip_override if multiview_clip_override != "不使用" else "",
 					vae_name=multiview_vae_override if multiview_vae_override != "不使用" else "",
 					rmbg_model_name=rmbg_model_override if rmbg_model_override != "不使用" else "",
+					sampling_steps=sampling_steps,
+					sampling_cfg=sampling_cfg,
+					sampling_sampler=sampling_sampler,
+					sampling_scheduler=sampling_scheduler,
+					sampling_denoise=sampling_denoise,
 					prompt={},
 					extra_pnginfo={},
 					unique_id=context_unique_id,

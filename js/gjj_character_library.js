@@ -308,6 +308,8 @@ import { api } from "/scripts/api.js";
 					}
 					choicePanel = makeModelChoicePanel(control, values, (value) => {
 						values[control.key] = String(value || "");
+						choicePanel?.remove();
+						choicePanel = null;
 						renderLine();
 					});
 					host.appendChild(choicePanel);
@@ -1337,6 +1339,83 @@ import { api } from "/scripts/api.js";
 		panel.appendChild(backdrop);
 	}
 
+	async function showGenerationSettings() {
+		const data = await apiJson(`${ENDPOINT}/model_tree`);
+		const panel = buildPanel();
+		panel.querySelector(".gjj-cl-model-backdrop")?.remove();
+		const backdrop = document.createElement("div");
+		backdrop.className = "gjj-cl-model-backdrop";
+		const dialog = document.createElement("div");
+		dialog.className = "gjj-cl-model-dialog";
+		dialog.style.maxWidth = "520px";
+		const head = document.createElement("div");
+		head.className = "gjj-cl-model-head";
+		const title = document.createElement("div");
+		title.className = "gjj-cl-model-title";
+		title.textContent = "⚙️ 角色库生成参数设置";
+		const spacer = document.createElement("div");
+		spacer.className = "gjj-cl-spacer";
+		const values = { ...(data.settings || {}) };
+		const save = button("保存设置", "保存角色库生成参数", "gjj-cl-btn", async () => {
+			await apiJson("/gjj/user_settings", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ section: data.settings_section || "character_library", values }),
+			});
+			setStatus("角色库生成参数已保存");
+			backdrop.remove();
+		});
+		head.append(title, spacer, save, button("❌关闭", "关闭", "gjj-cl-btn gjj-cl-close", () => backdrop.remove()));
+		const body = document.createElement("div");
+		body.className = "gjj-cl-model-body";
+		const form = document.createElement("div");
+		form.style.cssText = "display:grid;grid-template-columns:130px minmax(180px,1fr);gap:10px 12px;align-items:center;padding:14px;";
+		for (const control of data.generation_controls || []) {
+			const label = document.createElement("label");
+			label.textContent = control.label || control.key;
+			label.style.cssText = "font-size:12px;font-weight:800;color:#dce7e2;";
+			let input;
+			if (control.type === "select") {
+				input = document.createElement("select");
+				for (const optionValue of control.options || []) {
+					const option = document.createElement("option");
+					option.value = String(optionValue);
+					option.textContent = String(optionValue);
+					input.appendChild(option);
+				}
+				input.value = String(values[control.key] ?? "");
+				input.addEventListener("change", () => { values[control.key] = input.value; });
+			} else if (control.type === "boolean") {
+				input = document.createElement("input");
+				input.type = "checkbox";
+				input.checked = values[control.key] !== false;
+				input.style.justifySelf = "start";
+				input.addEventListener("change", () => { values[control.key] = input.checked; });
+			} else {
+				input = document.createElement("input");
+				input.type = "number";
+				if (control.min != null) input.min = String(control.min);
+				if (control.max != null) input.max = String(control.max);
+				if (control.step != null) input.step = String(control.step);
+				input.value = String(values[control.key] ?? 0);
+				input.addEventListener("input", () => {
+					values[control.key] = Number(input.value);
+				});
+			}
+			input.classList.add("gjj-cl-input");
+			if (control.hint) input.title = control.hint;
+			form.append(label, input);
+		}
+		body.appendChild(form);
+		dialog.append(head, body);
+		backdrop.appendChild(dialog);
+		backdrop.addEventListener("click", (event) => {
+			stopBubble(event);
+			if (event.target === backdrop) backdrop.remove();
+		});
+		panel.appendChild(backdrop);
+	}
+
 	function showCharacterLibraryHelp() {
 		const panel = buildPanel();
 		panel.querySelector(".gjj-cl-help-backdrop")?.remove();
@@ -1368,6 +1447,7 @@ import { api } from "/scripts/api.js";
 					<li><b>🪄 智能导入：</b>从一张整图中抠出并拆分人物视图，自动建立新角色。</li>
 					<li><b>🧑‍🎨 批量打标：</b>使用推理文本编码器补充性别符号与人物备注；已有完整标注的角色会跳过。</li>
 					<li><b>🧠 模型树：</b>查看和选择抠图、多视图、LoRA、VAE、CLIP 与备注推理模型，选择后点击“保存设置”。</li>
+					<li><b>⚙️ 生成参数：</b>设置多视图生成的采样器、调度器、采样步数、CFG、降噪强度、种子和模型驻留方式。</li>
 				</ul>
 			</section>
 			<section>
@@ -1496,8 +1576,14 @@ import { api } from "/scripts/api.js";
 	}
 
 	function updateSortButtons(panel) {
-		panel.querySelectorAll("[data-cl-sort]").forEach((node) => {
-			node.classList.toggle("active", node.dataset.clSort === state.sort);
+		panel.querySelectorAll("[data-cl-sort-first]").forEach((node) => {
+			const firstActive = node.dataset.clSortFirst === state.sort;
+			const secondActive = node.dataset.clSortSecond === state.sort;
+			node.classList.toggle("active", firstActive || secondActive);
+			node.textContent = secondActive ? node.dataset.clSortSecondLabel : node.dataset.clSortFirstLabel;
+			node.title = secondActive
+				? `当前：${node.dataset.clSortSecondLabel}；点击切换为${node.dataset.clSortFirstLabel}`
+				: `当前：${node.dataset.clSortFirstLabel}；点击切换为${node.dataset.clSortSecondLabel}`;
 		});
 	}
 
@@ -1977,6 +2063,7 @@ import { api } from "/scripts/api.js";
 		head.appendChild(button("🪄", "智能导入整图为新角色", "gjj-cl-btn gjj-cl-icon", () => importSheet(null).catch((error) => setStatus(error.message))));
 		head.appendChild(button("🧑‍🎨", "批量给角色补备注和性别符号", "gjj-cl-btn gjj-cl-icon", () => annotateMissingNotes().catch((error) => setStatus(error.message))));
 		head.appendChild(button("🧠", "查看并设置角色库使用的模型树", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("⚙️", "角色库生成参数设置", "gjj-cl-btn gjj-cl-icon", () => showGenerationSettings().catch((error) => setStatus(error.message))));
 		head.appendChild(button("❓", "查看整个角色库的详细实用方法", "gjj-cl-btn gjj-cl-icon", showCharacterLibraryHelp));
 		const search = document.createElement("input");
 		search.className = "gjj-cl-search";
@@ -2014,21 +2101,21 @@ import { api } from "/scripts/api.js";
 		sortLabel.className = "gjj-cl-sort-label";
 		sortLabel.textContent = "排序";
 		tools.appendChild(sortLabel);
-		for (const [value, label] of [
-			["updated_desc", "🕘 最新"],
-			["updated_asc", "⏳ 最旧"],
-			["size_desc", "📦 大文件"],
-			["size_asc", "📦 小文件"],
-			["name_asc", "🔤 A-Z"],
-			["name_desc", "🔡 Z-A"],
+		for (const [firstValue, firstLabel, secondValue, secondLabel] of [
+			["updated_desc", "🕘 最新", "updated_asc", "⏳ 最旧"],
+			["size_desc", "📦 大文件", "size_asc", "📦 小文件"],
+			["name_asc", "🔤 A-Z", "name_desc", "🔡 Z-A"],
 		]) {
 			const item = document.createElement("button");
 			item.type = "button";
 			item.className = "gjj-cl-sort-btn";
-			item.dataset.clSort = value;
-			item.textContent = label;
+			item.dataset.clSortFirst = firstValue;
+			item.dataset.clSortFirstLabel = firstLabel;
+			item.dataset.clSortSecond = secondValue;
+			item.dataset.clSortSecondLabel = secondLabel;
+			item.textContent = firstLabel;
 			item.addEventListener("click", () => {
-				state.sort = value;
+				state.sort = state.sort === firstValue ? secondValue : firstValue;
 				state.page = 1;
 				refreshCharacters(true).catch((error) => setStatus(error.message));
 			});
