@@ -58,6 +58,7 @@ import { api } from "/scripts/api.js";
 	const SHARED_PANEL_LAYOUT_KEY = "gjj.libraryPanel.layout";
 	let state = {
 		characters: [],
+		allCharacters: [],
 		selectedId: "",
 		search: "",
 		gender: "all",
@@ -552,9 +553,13 @@ import { api } from "/scripts/api.js";
 			gender: state.gender || "all",
 			sort: state.sort || "updated_desc",
 		});
-		const data = await apiJson(`${ENDPOINT}/list?${params.toString()}`);
+		const [data, allData] = await Promise.all([
+			apiJson(`${ENDPOINT}/list?${params.toString()}`),
+			apiJson(`${ENDPOINT}/list`),
+		]);
 		const previous = keepSelection ? state.selectedId : "";
 		state.characters = Array.isArray(data.characters) ? data.characters : [];
+		state.allCharacters = Array.isArray(allData.characters) ? allData.characters : state.characters.slice();
 		state.total = Number(data.total || state.characters.length || 0);
 		state.page = Math.max(1, Number(data.page || state.page || 1));
 		state.pageSize = Math.max(1, Number(data.page_size || state.pageSize || 15));
@@ -563,6 +568,9 @@ import { api } from "/scripts/api.js";
 			? previous
 			: (state.characters[0]?.id || "");
 		renderPanel();
+		globalThis.dispatchEvent(new CustomEvent("gjj_character_library_updated", {
+			detail: { characters: state.allCharacters.slice() },
+		}));
 		return state.characters;
 	}
 
@@ -2454,7 +2462,7 @@ import { api } from "/scripts/api.js";
 			resolve: resolveReference,
 			referenceText,
 			get characters() {
-				return state.characters.slice();
+				return state.allCharacters.slice();
 			},
 		};
 	}

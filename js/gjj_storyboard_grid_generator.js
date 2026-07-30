@@ -9,6 +9,7 @@ const SETTINGS_OPEN_PROPERTY = "gjj_storyboard_grid_settings_open_v3";
 const EXECUTE_BUTTON_NAME = "__gjj_storyboard_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_storyboard_image_preview";
 const PARAM_VALUES_PROPERTY = "gjj_storyboard_grid_param_values_v3";
+const SYNCED_PROMPT_PROPERTY = "gjj_storyboard_synced_prompt_v1";
 const SELECTED_CELL_PROPERTY = "gjj_storyboard_selected_cell_v1";
 const SELECTED_CELLS_PROPERTY = "gjj_storyboard_selected_cells_v1";
 const UNET_FILTER_PROPERTY = "gjj_storyboard_unet_filter_v1";
@@ -84,6 +85,26 @@ const DEFAULT_LORA_ROW = { enabled: true, name: "", strength: 1.0 };
 const NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors";
 const FLUX_STORYBOARD_LORA = "f2k_9B_lcs_consist";
 
+function normalizeStoryboardLoraData(value) {
+	let rows;
+	try {
+		rows = JSON.parse(String(value || "[]"));
+	} catch {
+		rows = [];
+	}
+	if (!Array.isArray(rows)) rows = [];
+	const configured = rows
+		.filter((row) => row && typeof row === "object" && String(row.name || "").trim())
+		.map((row) => ({
+			...row,
+			enabled: row.enabled !== false,
+			name: String(row.name || "").trim(),
+			strength: normalizeStrength(row.strength, 1.0),
+		}));
+	configured.push({ ...DEFAULT_LORA_ROW });
+	return JSON.stringify(configured);
+}
+
 function isTarget(node) {
 	return TARGET_NODES.has(node?.comfyClass || node?.type);
 }
@@ -94,6 +115,77 @@ function getWidget(node, name) {
 
 function getInput(node, name) {
 	return node?.inputs?.find((input) => String(input?.name || "") === name);
+}
+
+function linkedPromptSource(node) {
+	const input = getInput(node, "prompt");
+	if (input?.link == null) return null;
+	const link = getGraphLink(input.link, node?.graph || app.graph);
+	if (!link) return null;
+	const sourceId = linkOriginId(link);
+	const graph = node?.graph || app.graph;
+	const sourceNode = graph?.getNodeById?.(sourceId)
+		|| graph?._nodes?.find((item) => String(item?.id) === String(sourceId))
+		|| null;
+	if (!sourceNode) return { node: null, text: "" };
+	const liveTextCandidates = [
+		sourceNode.__gjjTextInputLiveText,
+		sourceNode.__gjjAnyPreviewText,
+		sourceNode.__gjjPreviewText,
+		sourceNode.__previewText,
+	];
+	for (const liveText of liveTextCandidates) {
+		if (liveText !== undefined && liveText !== null && String(liveText) !== "") {
+			return { node: sourceNode, text: String(liveText) };
+		}
+	}
+	const preferredNames = ["text", "prompt", "value"];
+	for (const name of preferredNames) {
+		const widget = sourceNode.widgets?.find((item) => String(item?.name || "") === name);
+		if (widget && typeof widget.value === "string") {
+			return { node: sourceNode, text: widget.value };
+		}
+	}
+	return { node: sourceNode, text: "" };
+}
+
+function refreshStoryboardsFromPromptSource(sourceNode) {
+	setTimeout(() => {
+		for (const node of app.graph?._nodes || []) {
+			if (!isTarget(node)) continue;
+			const linked = linkedPromptSource(node);
+			if (!linked?.node || linked.node !== sourceNode) continue;
+			const nextPrompt = currentPromptText(node);
+			const changed = reconcilePreviewForPromptChange(node, nextPrompt);
+			void resolvePromptCharacters(node, nextPrompt);
+			if (!changed) drawPromptGridPreview(node);
+		}
+	}, 0);
+}
+
+function observeLinkedPromptSource(node) {
+	const sourceNode = linkedPromptSource(node)?.node;
+	if (!sourceNode) return;
+	for (const widget of sourceNode.widgets || []) {
+		if (!["text", "prompt", "value"].includes(String(widget?.name || ""))) continue;
+		if (widget.__gjjStoryboardSourceObserved) continue;
+		widget.__gjjStoryboardSourceObserved = true;
+		const original = widget.callback;
+		widget.callback = function (value, ...args) {
+			const result = original?.apply(this, [value, ...args]);
+			refreshStoryboardsFromPromptSource(sourceNode);
+			return result;
+		};
+	}
+	if (!sourceNode.__gjjStoryboardExecutionObserved) {
+		sourceNode.__gjjStoryboardExecutionObserved = true;
+		const originalOnExecuted = sourceNode.onExecuted;
+		sourceNode.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			refreshStoryboardsFromPromptSource(this);
+			return result;
+		};
+	}
 }
 
 function getGraphLink(linkId, graph = app.graph) {
@@ -811,7 +903,8 @@ function patchStoryboardSeedIntoPromptData(promptData) {
 		const singleIndices = Array.isArray(node.__gjjStoryboardSingleCellIndices)
 			? node.__gjjStoryboardSingleCellIndices
 			: (Number.isInteger(node.__gjjStoryboardSingleCellIndex) ? [node.__gjjStoryboardSingleCellIndex] : []);
-		const fullPrompt = getWidget(node, "prompt")?.value || "";
+		const linkedSource = linkedPromptSource(node);
+		const fullPrompt = linkedSource ? linkedSource.text : (getWidget(node, "prompt")?.value || "");
 		const parts = singleIndices.length ? parsePromptParts(fullPrompt) : [];
 		const clampedIndices = parts.length
 			? [...new Set(singleIndices.map((value) => Math.max(0, Math.min(value, parts.length - 1))))].sort((left, right) => left - right)
@@ -932,7 +1025,7 @@ function setPresetLoraData(node, preset, unetName = "") {
 	const widget = getWidget(node, "lora_data");
 	if (!widget) return;
 	const rows = presetLoraRows(preset, unetName);
-	setWidgetValue(widget, JSON.stringify(rows.length ? rows : []));
+	setWidgetValue(widget, normalizeStoryboardLoraData(JSON.stringify(rows)));
 }
 
 function setStoryboardLoraForModel(node, preset, unetName = "", force = false) {
@@ -1095,7 +1188,8 @@ function setSettingsOpen(node, open) {
 function closeParameterDialog() {
 	if (!activeParameterDialog) return;
 	closeModelSearchPopup();
-	const { root, node } = activeParameterDialog;
+	const { root, node, cleanup } = activeParameterDialog;
+	cleanup?.();
 	root?.remove();
 	activeParameterDialog = null;
 	for (const button of [
@@ -1443,7 +1537,73 @@ function renderStoryboardModelTree(node, controls, host) {
 	});
 	tree.style.gridColumn = "1 / -1";
 	tree.style.maxHeight = "360px";
-	host.replaceChildren(tree);
+	const slots = renderStoryboardLoraSlots(node, controls, host);
+	host.replaceChildren(tree, slots);
+}
+
+function storyboardLoraRows(node) {
+	const widget = getWidget(node, "lora_data");
+	const normalized = normalizeStoryboardLoraData(widget?.value);
+	try {
+		return JSON.parse(normalized);
+	} catch {
+		return [{ ...DEFAULT_LORA_ROW }];
+	}
+}
+
+function renderStoryboardLoraSlots(node, controls, host) {
+	const wrapper = document.createElement("div");
+	wrapper.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #2b3d44;";
+	const title = document.createElement("div");
+	title.textContent = "🔗 LoRA 插槽";
+	title.style.cssText = "color:#c9d8dc;font:700 12px sans-serif;";
+	wrapper.append(title);
+	const rows = storyboardLoraRows(node);
+	const optionWidget = controls.get(STORYBOARD_LORA_NAME)?.widget || getWidget(node, STORYBOARD_LORA_NAME);
+	const options = [...new Set(["", ...allWidgetOptions(optionWidget).filter((value) => String(value || "").trim())])];
+	rows.forEach((row, index) => {
+		const line = document.createElement("div");
+		line.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 82px;gap:6px;align-items:center;";
+		const select = document.createElement("select");
+		select.style.cssText = "min-width:0;height:30px;border:1px solid #415761;border-radius:6px;background:#111c21;color:#e9f4ef;padding:0 7px;";
+		for (const value of options) {
+			const option = document.createElement("option");
+			option.value = value;
+			option.textContent = value || "＋ 空 LoRA 插槽";
+			select.append(option);
+		}
+		if (row.name && !options.includes(row.name)) {
+			const option = document.createElement("option");
+			option.value = row.name;
+			option.textContent = row.name;
+			select.append(option);
+		}
+		select.value = row.name || "";
+		const strength = document.createElement("input");
+		strength.type = "number";
+		strength.step = "0.05";
+		strength.value = String(normalizeStrength(row.strength, 1.0));
+		strength.disabled = !row.name;
+		strength.title = row.name ? "LoRA 强度" : "选择 LoRA 后可设置强度";
+		strength.style.cssText = "width:100%;box-sizing:border-box;height:30px;border:1px solid #415761;border-radius:6px;background:#111c21;color:#e9f4ef;padding:0 7px;";
+		const commit = (nextName = select.value, nextStrength = strength.value) => {
+			const currentRows = storyboardLoraRows(node);
+			while (currentRows.length <= index) currentRows.push({ ...DEFAULT_LORA_ROW });
+			currentRows[index] = {
+				enabled: Boolean(nextName),
+				name: String(nextName || ""),
+				strength: normalizeStrength(nextStrength, 1.0),
+			};
+			setWidgetValue(getWidget(node, "lora_data"), normalizeStoryboardLoraData(JSON.stringify(currentRows)));
+			saveParamValues(node);
+			renderStoryboardModelTree(node, controls, host);
+		};
+		select.addEventListener("change", () => commit());
+		strength.addEventListener("change", () => commit());
+		line.append(select, strength);
+		wrapper.append(line);
+	});
+	return wrapper;
 }
 
 function clampParameterDialogPosition(root, left, top) {
@@ -1483,14 +1643,16 @@ function nodeScreenRect(node) {
 	};
 }
 
-function positionParameterDialog(node, root) {
+function positionParameterDialog(node, root, anchorButton = null) {
 	const remembered = node?.__gjjStoryboardParameterDialogPosition;
 	const nodeRect = nodeScreenRect(node);
-	const initialLeft = remembered?.left ?? nodeRect?.left ?? 18;
-	const initialTop = remembered?.top ?? ((nodeRect?.top || 18) + (nodeRect?.height || 0) + 8);
-	if (!remembered && nodeRect) {
-		const availableBelow = Math.max(72, window.innerHeight - initialTop - 8);
-		root.style.maxHeight = `${Math.min(window.innerHeight - 16, availableBelow)}px`;
+	const anchorRect = anchorButton?.getBoundingClientRect?.();
+	const initialLeft = anchorRect?.left ?? remembered?.left ?? nodeRect?.left ?? 18;
+	const initialTop = anchorRect?.bottom != null
+		? anchorRect.bottom + 8
+		: (remembered?.top ?? ((nodeRect?.top || 18) + (nodeRect?.height || 0) + 8));
+	if (anchorRect?.bottom != null) {
+		root.style.maxHeight = `${Math.max(96, window.innerHeight - initialTop - 8)}px`;
 	}
 	const position = clampParameterDialogPosition(root, initialLeft, initialTop);
 	root.style.left = `${position.left}px`;
@@ -1553,7 +1715,7 @@ function openParameterDialog(node, groupName) {
 	].join(";");
 
 	const header = document.createElement("div");
-	header.style.cssText = "display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #2c3d44;background:#111c21;";
+	header.style.cssText = "display:flex;flex:0 0 auto;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #2c3d44;background:#111c21;";
 	const title = document.createElement("strong");
 	title.textContent = group.title;
 	title.style.cssText = "flex:1;color:#edf7f2;font:700 14px sans-serif;";
@@ -1571,7 +1733,7 @@ function openParameterDialog(node, groupName) {
 	header.append(title, cancel, confirm);
 
 	const body = document.createElement("div");
-	body.style.cssText = "display:grid;grid-template-columns:minmax(110px,150px) minmax(0,1fr);gap:9px 12px;overflow:auto;padding:12px;";
+	body.style.cssText = "display:grid;min-height:0;grid-template-columns:minmax(110px,150px) minmax(0,1fr);gap:9px 12px;overflow:auto;padding:12px;";
 	const controls = new Map();
 	const modelTreeHost = document.createElement("div");
 	modelTreeHost.style.cssText = "display:block;grid-column:1/-1;min-width:0;";
@@ -1623,16 +1785,23 @@ function openParameterDialog(node, groupName) {
 		GJJ_Utils.refreshNode?.(node);
 	});
 	root.append(header, body);
-	document.body.append(root);
-	positionParameterDialog(node, root);
-	makeParameterDialogDraggable(node, root, header);
-	activeParameterDialog = { root, node, group: groupName };
-
 	const activeButton = groupName === "size"
 		? node.__gjjStoryboardSizeButton
 		: groupName === "model"
 			? node.__gjjStoryboardModelButton
 			: node.__gjjStoryboardSettingsButton;
+	document.body.append(root);
+	positionParameterDialog(node, root, activeButton);
+	makeParameterDialogDraggable(node, root, header);
+	const reposition = () => positionParameterDialog(node, root, activeButton);
+	window.addEventListener("resize", reposition);
+	activeParameterDialog = {
+		root,
+		node,
+		group: groupName,
+		cleanup: () => window.removeEventListener("resize", reposition),
+	};
+
 	if (activeButton) {
 		activeButton.classList.add("on");
 		activeButton.style.background = "linear-gradient(135deg, #4b5563, #64748b)";
@@ -1968,16 +2137,29 @@ function createButtons(node) {
 
 	async function handleGenerate(event) {
 		protectEvent(event);
-		resetLivePreview(node);
+		const effectivePrompt = currentPromptText(node);
+		reconcilePreviewForPromptChange(node, effectivePrompt);
+		drawPromptGridPreview(node);
 		const originalText = generateButton.innerHTML;
-		generateButton.innerHTML = "⏳ 执行中";
+		generateButton.innerHTML = "⏳ 解析人物";
 		generateButton.disabled = true;
 		generateButton.style.opacity = "0.7";
-		node.__gjjStoryboardForceGenerateAll = true;
+		if (node.__gjjStoryboardPreviewStatus) {
+			node.__gjjStoryboardPreviewStatus.textContent = `已建立 ${Math.max(1, parsePromptParts(effectivePrompt).length)} 个提示词宫格 · 正在解析人物...`;
+		}
+		await resolvePromptCharacters(node, effectivePrompt);
+		generateButton.innerHTML = "⏳ 执行中";
+		const promptCount = Math.max(1, parsePromptParts(effectivePrompt).length);
+		const generatedCount = storyboardPreviewImageItems(node).length;
+		node.__gjjStoryboardForceGenerateAll = Boolean(node.__gjjStoryboardPromptChangedSinceGenerate)
+			|| generatedCount >= promptCount;
 		try {
 			prepareRandomSeedForGenerate(node);
 			updateDiceButtonState();
 			const ok = await queueOnlyCurrentNode(node);
+			if (ok && currentPromptText(node) === effectivePrompt) {
+				node.__gjjStoryboardPromptChangedSinceGenerate = false;
+			}
 			generateButton.innerHTML = ok ? "✅ 执行中" : "❌ 执行失败";
 			generateButton.style.background = ok
 				? "linear-gradient(135deg, #064e3b, #059669)"
@@ -2019,11 +2201,18 @@ function createButtons(node) {
 	async function handleSingleGenerate(event) {
 		protectEvent(event);
 		const selectedIndices = selectedCellIndices(node);
-		resetLivePreview(node, { onlyIndices: selectedIndices });
+		const effectivePrompt = currentPromptText(node);
+		reconcilePreviewForPromptChange(node, effectivePrompt);
+		drawPromptGridPreview(node);
 		const originalText = singleButton.textContent;
-		singleButton.textContent = selectedIndices.length > 1 ? "⏳ 多格" : "⏳ 单格";
+		singleButton.textContent = "⏳ 解析人物";
 		singleButton.disabled = true;
 		singleButton.style.opacity = "0.7";
+		if (node.__gjjStoryboardPreviewStatus) {
+			node.__gjjStoryboardPreviewStatus.textContent = `已建立 ${Math.max(1, parsePromptParts(effectivePrompt).length)} 个提示词宫格 · 正在解析人物...`;
+		}
+		await resolvePromptCharacters(node, effectivePrompt);
+		singleButton.textContent = selectedIndices.length > 1 ? "⏳ 多格" : "⏳ 单格";
 		node.__gjjStoryboardSingleCellIndex = selectedIndices[0];
 		node.__gjjStoryboardSingleCellIndices = selectedIndices;
 		try {
@@ -2263,7 +2452,7 @@ function refKey(value) {
 }
 
 function itemAliasKeys(item) {
-	const values = [item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
+	const values = [item?.reference_name, item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
 	return values.map(refKey).filter(Boolean);
 }
 
@@ -2275,12 +2464,18 @@ function findLibraryItem(items, name) {
 		|| null;
 }
 
+function findExactLibraryItem(items, name) {
+	const key = refKey(name);
+	if (!key) return null;
+	return (items || []).find((item) => itemAliasKeys(item).includes(key)) || null;
+}
+
 function referenceDisplayName(item) {
 	return String(item?.name || item?.id || item?._folder_id || "").trim();
 }
 
 function referenceAliases(item) {
-	const values = [item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
+	const values = [item?.reference_name, item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
 	const result = [];
 	const seen = new Set();
 	for (const value of values) {
@@ -2448,15 +2643,32 @@ function completeStoryboardReferenceSyntax(node, button = null) {
 	return changed;
 }
 
-function splitCharacterViewSuffix(name) {
+function splitCharacterViewSuffix(name, characterItems = null) {
 	const text = String(name || "").trim();
 	if (!text) return ["", ""];
-	const exact = findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], text);
+	const characters = characterItems || globalThis.GJJ_CharacterLibrary?.characters || [];
+	const exact = findExactLibraryItem(characters, text);
 	if (exact) return [text, ""];
+	const textKey = refKey(text);
+	const prefixMatches = [];
+	for (const character of characters) {
+		for (const aliasKey of itemAliasKeys(character)) {
+			if (aliasKey && textKey.startsWith(aliasKey)) {
+				prefixMatches.push({ character, aliasKey });
+			}
+		}
+	}
+	if (prefixMatches.length) {
+		prefixMatches.sort((left, right) => right.aliasKey.length - left.aliasKey.length);
+		const best = prefixMatches[0];
+		const remainder = textKey.slice(best.aliasKey.length);
+		const suffixView = /^[a-g](?:$|[^0-9a-z._-])/i.test(remainder) ? remainder[0].toLowerCase() : "";
+		return [characterReferenceName(best.character, best.character?.id), suffixView];
+	}
 	const match = text.match(/^(.+?)([a-gA-G])$/);
 	if (!match) return [text, ""];
 	const base = match[1].trim();
-	return findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], base) ? [base, match[2].toLowerCase()] : [text, ""];
+	return findExactLibraryItem(characters, base) ? [base, match[2].toLowerCase()] : [text, ""];
 }
 
 function sceneCoverUrl(scene) {
@@ -2482,11 +2694,125 @@ function characterReferenceName(character, fallback = "") {
 	return String(character?.reference_name || character?.name || character?.id || fallback || "").replace(/^\s*(?:♀️|♂️|♀|♂)\s*/, "").trim();
 }
 
-function promptReferenceIcons(promptText) {
+function storyboardCharacterItems(node) {
+	const libraryItems = globalThis.GJJ_CharacterLibrary?.characters || [];
+	const resolvedItems = [...(node?.__gjjStoryboardResolvedCharacters?.values?.() || [])].filter(Boolean);
+	const result = [];
+	const seen = new Set();
+	for (const item of [...resolvedItems, ...libraryItems]) {
+		const key = refKey(item?.id || item?.name || item?._folder_id);
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		result.push(item);
+	}
+	return result;
+}
+
+async function resolvePromptCharacters(node, promptText, attempt = 0) {
+	if (!isTarget(node)) return;
+	const resolve = globalThis.GJJ_CharacterLibrary?.resolve;
+	if (typeof resolve !== "function") {
+		if (attempt >= 20) return;
+		await new Promise((done) => setTimeout(done, 120));
+		return resolvePromptCharacters(node, promptText, attempt + 1);
+	}
+	const token = Number(node.__gjjStoryboardCharacterResolveToken || 0) + 1;
+	node.__gjjStoryboardCharacterResolveToken = token;
+	const names = [];
+	const seen = new Set();
+	CHARACTER_REF_PATTERN.lastIndex = 0;
+	for (const match of String(promptText || "").matchAll(CHARACTER_REF_PATTERN)) {
+		const rawName = String(match[1] || "").trim();
+		const key = refKey(rawName);
+		if (!rawName || !key || seen.has(key)) continue;
+		seen.add(key);
+		names.push(rawName);
+	}
+	const entries = await Promise.all(names.map(async (rawName) => {
+		try {
+			const result = await resolve(rawName);
+			return [refKey(rawName), result?.character || null];
+		} catch (_) {
+			const libraryMatch = splitCharacterViewSuffix(rawName, globalThis.GJJ_CharacterLibrary?.characters || []);
+			if (libraryMatch[0] && refKey(libraryMatch[0]) !== refKey(rawName)) {
+				try {
+					const result = await resolve(libraryMatch[0]);
+					return [refKey(rawName), result?.character || null];
+				} catch (_) {}
+			}
+			const suffix = rawName.match(/^(.+?)[a-gA-G]$/);
+			if (!suffix) return [refKey(rawName), null];
+			try {
+				const result = await resolve(suffix[1]);
+				return [refKey(rawName), result?.character || null];
+			} catch (_) {
+				return [refKey(rawName), null];
+			}
+		}
+	}));
+	if (node.__gjjStoryboardCharacterResolveToken !== token) return;
+	node.__gjjStoryboardResolvedCharacters = new Map(entries);
+	node.__gjjStoryboardReferenceIconImages?.clear?.();
+	drawPromptGridPreview(node);
+}
+
+function currentPromptText(node) {
+	const linkedSource = linkedPromptSource(node);
+	if (linkedSource) {
+		const linkedText = String(linkedSource.text || "");
+		if (linkedText) {
+			syncPromptSnapshot(node, linkedText);
+			return linkedText;
+		}
+		const snapshot = String(node?.properties?.[SYNCED_PROMPT_PROPERTY] || "");
+		if (snapshot) return snapshot;
+		const actualParts = node?.__gjjStoryboardActualPromptParts || [];
+		if (actualParts.some((part) => typeof part === "string" && part.trim())) {
+			return serializePromptParts(actualParts.map((part) => String(part || "")));
+		}
+	}
+	return String(getWidget(node, "prompt")?.value || "");
+}
+
+function syncPromptSnapshot(node, promptText) {
+	const text = String(promptText ?? "");
+	if (!text) return;
+	const widget = getWidget(node, "prompt");
+	if (widget && String(widget.value || "") !== text) {
+		widget.value = text;
+		if (widget.inputEl) widget.inputEl.value = text;
+		if (widget.element && "value" in widget.element) widget.element.value = text;
+	}
+	node.properties ||= {};
+	node.properties[SYNCED_PROMPT_PROPERTY] = text;
+	node.properties[PARAM_VALUES_PROPERTY] ||= {};
+	node.properties[PARAM_VALUES_PROPERTY].prompt = text;
+}
+
+function reconcilePreviewForPromptChange(node, nextText) {
+	const normalized = String(nextText ?? "");
+	const previous = node.__gjjStoryboardLastEffectivePromptText;
+	node.__gjjStoryboardLastEffectivePromptText = normalized;
+	if (previous === undefined || previous === normalized) return false;
+	const nextParts = parsePromptParts(normalized);
+	node.__gjjStoryboardCellPreviewUrls = [];
+	node.__gjjStoryboardCellPreviewImages = [];
+	node.__gjjStoryboardCellPreviewItems = [];
+	node.__gjjStoryboardActualPromptParts = [];
+	node.__gjjStoryboardActualPromptTotal = nextParts.length;
+	node.__gjjStoryboardResolvedCharacters = new Map();
+	node.__gjjStoryboardReferenceIconImages?.clear?.();
+	node.__gjjStoryboardPromptChangedSinceGenerate = true;
+	closeReferencePicker(node);
+	drawPromptGridPreview(node);
+	return true;
+}
+
+function promptReferenceIcons(promptText, node = null) {
 	const text = String(promptText || "");
 	const icons = [];
 	const scenes = globalThis.GJJ_SceneLibrary?.scenes || [];
-	const characters = globalThis.GJJ_CharacterLibrary?.characters || [];
+	const characters = storyboardCharacterItems(node);
 	const costumes = globalThis.GJJ_CostumeLibrary?.items || [];
 	for (const match of text.matchAll(SCENE_VIEW_REF_PATTERN)) {
 		const rawName = String(match[1] || "").trim();
@@ -2507,8 +2833,8 @@ function promptReferenceIcons(promptText) {
 		}
 	}
 	for (const match of text.matchAll(CHARACTER_REF_PATTERN)) {
-		const [name, suffixView] = splitCharacterViewSuffix(match[1] || "");
-		const character = findLibraryItem(characters, name);
+		const [name, suffixView] = splitCharacterViewSuffix(match[1] || "", characters);
+		const character = findExactLibraryItem(characters, name);
 		if (character) {
 			const icon = addUniqueReferenceIcon(icons, "character", character.name || character.id || name, character.cover, "👤");
 			if (icon) icon.source = { pattern: match[0], character, view: match[2] || suffixView || "" };
@@ -2628,12 +2954,16 @@ function replaceCurrentCellReference(node, icon, nextText) {
 		let replaced = false;
 		const target = icon.source.character;
 		parts[index] = parts[index].replace(CHARACTER_REF_PATTERN, (match, rawName) => {
-			const [name] = splitCharacterViewSuffix(rawName || "");
-			const character = findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], name);
+			const rawText = String(rawName || "");
+			const [name] = splitCharacterViewSuffix(rawText);
+			const character = findExactLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], name);
 			if (character !== target) return match;
 			if (replaced) return "";
 			replaced = true;
-			return nextText;
+			const suffix = refKey(rawText).startsWith(refKey(name))
+				? rawText.slice(String(name || "").length)
+				: "";
+			return `${nextText}${suffix}`;
 		}).replace(/[ \t]{2,}/g, " ").replace(/\s+([,，.。;；!！?？])/g, "$1").trim();
 		if (!replaced) parts[index] = parts[index].replace(icon.source.pattern, nextText);
 	} else {
@@ -2921,8 +3251,8 @@ function drawImageCover(ctx, image, left, top, width, height, bleedScale = 1) {
 function drawPromptGridPreview(node) {
 	const canvas = node?.__gjjStoryboardGridCanvas;
 	if (!canvas) return;
-	const parts = parsePromptParts(getWidget(node, "prompt")?.value || "");
-	const count = Math.max(1, parts.length);
+	const parts = parsePromptParts(currentPromptText(node));
+	const count = Math.max(1, parts.length, Number(node.__gjjStoryboardActualPromptTotal || 0));
 	const outputW = Math.max(320, Number(node.size?.[0] || 520) - 24);
 	const targetW = Math.max(64, Number(getWidget(node, "width")?.value || 1024) || 1024);
 	const targetH = Math.max(64, Number(getWidget(node, "height")?.value || 1024) || 1024);
@@ -2965,8 +3295,8 @@ function drawPromptGridPreview(node) {
 		}
 	}
 	for (const rect of rects) {
-		const text = parts[rect.index] || `宫格 ${rect.index + 1}`;
-		const icons = promptReferenceIcons(text).map((icon) => ({ ...icon, cellIndex: rect.index }));
+		const text = parts[rect.index] ?? `宫格 ${rect.index + 1}`;
+		const icons = promptReferenceIcons(text, node).map((icon) => ({ ...icon, cellIndex: rect.index }));
 		drawReferenceIcons(
 			ctx,
 			node,
@@ -3012,17 +3342,29 @@ function storyboardCellHit(node, event) {
 }
 
 function editStoryboardCellPrompt(node, index) {
-	const parts = parsePromptParts(getWidget(node, "prompt")?.value || "");
+	const linkedSource = linkedPromptSource(node);
+	const effectivePrompt = currentPromptText(node);
+	const parts = parsePromptParts(effectivePrompt);
 	while (parts.length <= index) parts.push("");
+	const sourceNode = linkedSource?.node || null;
+	const sourceType = String(sourceNode?.comfyClass || sourceNode?.type || "");
+	const sourceHasUpstream = sourceNode?.inputs?.some((input) => input?.link != null) || false;
+	const sourceWidget = sourceType === "GJJ_TextInput" && !sourceHasUpstream
+		? sourceNode?.widgets?.find((widget) => widget?.name === "text")
+		: null;
+	const editable = !linkedSource || Boolean(sourceWidget);
 	const overlay = document.createElement("div");
 	overlay.style.cssText = "position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);";
 	const box = document.createElement("div");
 	box.style.cssText = "width:min(560px,calc(100vw - 32px));background:#0c1215;border:1px solid #34444b;border-radius:8px;padding:10px;box-shadow:0 18px 48px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:8px;";
 	const title = document.createElement("div");
-	title.textContent = `宫格 ${index + 1} 提示词`;
+	title.textContent = linkedSource
+		? `宫格 ${index + 1} 提示词 · ${editable ? "编辑上游文本" : "上游输出只读"}`
+		: `宫格 ${index + 1} 提示词`;
 	title.style.cssText = "color:#e8f1ed;font:700 13px sans-serif;";
 	const area = document.createElement("textarea");
 	area.value = parts[index] || "";
+	area.readOnly = !editable;
 	area.style.cssText = "min-height:150px;resize:vertical;background:#111a1f;color:#e8f1ed;border:1px solid #34444b;border-radius:6px;padding:8px;font:13px/1.35 sans-serif;outline:none;";
 	const actions = document.createElement("div");
 	actions.style.cssText = "display:flex;justify-content:flex-end;gap:6px;";
@@ -3036,10 +3378,25 @@ function editStoryboardCellPrompt(node, index) {
 		btn.style.cssText = "height:28px;border:1px solid #38464d;border-radius:6px;background:#121a1f;color:#eef7f2;padding:0 12px;cursor:pointer;";
 	}
 	cancel.onclick = () => overlay.remove();
+	if (!editable) {
+		save.disabled = true;
+		save.style.opacity = "0.45";
+		save.style.cursor = "not-allowed";
+	}
 	save.onclick = () => {
+		if (!editable) return;
 		parts[index] = area.value.trim();
-		setWidgetValue(getWidget(node, "prompt"), serializePromptParts(parts));
-		saveParamValues(node);
+		const serialized = serializePromptParts(parts);
+		if (sourceWidget) {
+			setWidgetValue(sourceWidget, serialized);
+			sourceNode?.graph?.change?.();
+			sourceNode?.setDirtyCanvas?.(true, true);
+		} else {
+			setWidgetValue(getWidget(node, "prompt"), serialized);
+			saveParamValues(node);
+		}
+		reconcilePreviewForPromptChange(node, serialized);
+		void resolvePromptCharacters(node, serialized);
 		drawPromptGridPreview(node);
 		overlay.remove();
 	};
@@ -3096,6 +3453,15 @@ function updateLivePreview(node, detail) {
 	const image = node.__gjjStoryboardPreviewImage;
 	const index = Number(detail?.index || 0);
 	const total = Number(detail?.total || 0);
+	if (total > 0) node.__gjjStoryboardActualPromptTotal = total;
+	if (index > 0 && typeof detail?.prompt === "string") {
+		node.__gjjStoryboardActualPromptParts ||= [];
+		node.__gjjStoryboardActualPromptParts[index - 1] = detail.prompt;
+		const completedParts = node.__gjjStoryboardActualPromptParts.slice(0, total);
+		if (total > 0 && completedParts.length === total && completedParts.every((part) => typeof part === "string")) {
+			syncPromptSnapshot(node, serializePromptParts(completedParts));
+		}
+	}
 	if (status) {
 		status.textContent = total > 0 ? `已生成 ${index}/${total}` : "已生成预览";
 	}
@@ -3137,11 +3503,14 @@ function resetLivePreview(node, options = {}) {
 			node.__gjjStoryboardCellPreviewUrls[index] = "";
 			node.__gjjStoryboardCellPreviewImages[index] = null;
 			node.__gjjStoryboardCellPreviewItems[index] = null;
+			if (node.__gjjStoryboardActualPromptParts) node.__gjjStoryboardActualPromptParts[index] = undefined;
 		}
 	} else {
 		node.__gjjStoryboardCellPreviewUrls = [];
 		node.__gjjStoryboardCellPreviewImages = [];
 		node.__gjjStoryboardCellPreviewItems = [];
+		node.__gjjStoryboardActualPromptParts = [];
+		node.__gjjStoryboardActualPromptTotal = 0;
 	}
 	drawPromptGridPreview(node);
 	GJJ_Utils.refreshNode?.(node);
@@ -3228,9 +3597,26 @@ function hookPromptWidget(node) {
 	const original = widget.callback;
 	widget.callback = function (value, ...args) {
 		const result = original?.apply(this, [value, ...args]);
-		setTimeout(() => drawPromptGridPreview(node), 0);
+		const nextPrompt = currentPromptText(node);
+		const changed = reconcilePreviewForPromptChange(node, nextPrompt);
+		void resolvePromptCharacters(node, nextPrompt);
+		if (!changed) setTimeout(() => drawPromptGridPreview(node), 0);
 		return result;
 	};
+}
+
+function hookLoraDataWidget(node) {
+	const widget = getWidget(node, "lora_data");
+	if (!widget || widget.__gjjStoryboardTrailingSlotHooked) return;
+	widget.__gjjStoryboardTrailingSlotHooked = true;
+	const original = widget.callback;
+	widget.callback = function (value, ...args) {
+		const normalized = normalizeStoryboardLoraData(value);
+		if (String(widget.value || "") !== normalized) widget.value = normalized;
+		return original?.apply(this, [normalized, ...args]);
+	};
+	const normalized = normalizeStoryboardLoraData(widget.value);
+	if (String(widget.value || "") !== normalized) setWidgetValue(widget, normalized);
 }
 
 function hookPreviewRefreshWidgets(node) {
@@ -3256,7 +3642,11 @@ function saveParamValues(node) {
 	}
 	values[SEED_CONTROL_KEY] = seedControlMode(node);
 	const loraData = getWidget(node, "lora_data");
-	if (loraData) values.lora_data = loraData.value;
+	if (loraData) {
+		const normalized = normalizeStoryboardLoraData(loraData.value);
+		if (String(loraData.value || "") !== normalized) loraData.value = normalized;
+		values.lora_data = normalized;
+	}
 	node.properties ||= {};
 	node.properties[PARAM_VALUES_PROPERTY] = values;
 	return values;
@@ -3269,7 +3659,7 @@ function restoreParamValues(node, values) {
 		setWidgetValue(getWidget(node, name), values[name]);
 	}
 	if (Object.prototype.hasOwnProperty.call(values, "lora_data")) {
-		setWidgetValue(getWidget(node, "lora_data"), values.lora_data);
+		setWidgetValue(getWidget(node, "lora_data"), normalizeStoryboardLoraData(values.lora_data));
 	}
 	if (Object.prototype.hasOwnProperty.call(values, SEED_CONTROL_KEY)) {
 		const widget = findSeedControlWidget(node);
@@ -3283,6 +3673,7 @@ function patchNode(node) {
 	configureInputs(node);
 	hookUnetWidget(node);
 	hookPromptWidget(node);
+	hookLoraDataWidget(node);
 	hookPreviewRefreshWidgets(node);
 	syncSeedControlWidget(node);
 	if (!node.__gjjStoryboardExecuteWidget && typeof node.addDOMWidget === "function") {
@@ -3302,6 +3693,12 @@ function patchNode(node) {
 	void applyModelFamilyPreset(node, false);
 	recordCurrentStoryboardLinks(node);
 	updateReconnectButton(node);
+	observeLinkedPromptSource(node);
+	const effectivePrompt = currentPromptText(node);
+	if (node.__gjjStoryboardLastEffectivePromptText === undefined) {
+		node.__gjjStoryboardLastEffectivePromptText = effectivePrompt;
+	}
+	void resolvePromptCharacters(node, effectivePrompt);
 	if (node.__gjjStoryboardPatched) return;
 	node.__gjjStoryboardPatched = true;
 
@@ -3310,6 +3707,11 @@ function patchNode(node) {
 		const result = originalOnConnectionsChange?.apply(this, args);
 		recordStoryboardLinkFromConnectionEvent(this, args);
 		updateReconnectButton(this);
+		observeLinkedPromptSource(this);
+		const nextPrompt = currentPromptText(this);
+		const changed = reconcilePreviewForPromptChange(this, nextPrompt);
+		void resolvePromptCharacters(this, nextPrompt);
+		if (!changed) drawPromptGridPreview(this);
 		return result;
 	};
 
@@ -3340,6 +3742,17 @@ api.addEventListener("gjj_storyboard_grid_preview", (event) => {
 		if (isTarget(node) && String(node.id) === nodeId) {
 			updateLivePreview(node, detail);
 		}
+	}
+});
+
+globalThis.addEventListener("gjj_character_library_updated", () => {
+	for (const node of app.graph?._nodes || []) {
+		if (!isTarget(node)) continue;
+		node.__gjjStoryboardResolvedCharacters = new Map();
+		node.__gjjStoryboardReferenceIconImages?.clear?.();
+		closeReferencePicker(node);
+		void resolvePromptCharacters(node, currentPromptText(node));
+		drawPromptGridPreview(node);
 	}
 });
 

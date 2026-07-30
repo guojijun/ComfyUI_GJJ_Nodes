@@ -178,6 +178,23 @@ def _gjj_default_user_settings() -> dict:
 			"newest_first": False,
 			"collapsed": False,
 		},
+		"queue_finish_command": {
+			"enabled": False,
+			"action": "none",
+			"custom_command": "",
+			"delay_seconds": 10,
+			"only_on_success": True,
+			"audio_file": "",
+			"smtp_host": "",
+			"smtp_port": 465,
+			"smtp_security": "ssl",
+			"smtp_username": "",
+			"smtp_password": "",
+			"mail_from": "",
+			"mail_to": "",
+			"mail_subject": "ComfyUI 队列已完成",
+			"mail_body": "ComfyUI 队列已全部执行完成。",
+		},
 	}
 
 def _gjj_merge_dict(defaults: dict, value) -> dict:
@@ -329,6 +346,152 @@ def _register_gjj_user_settings_api():
 
 	server._gjj_user_settings_api_registered = True
 _register_gjj_user_settings_api()
+
+def _register_gjj_queue_finish_command_api():
+	try:
+		from email.message import EmailMessage
+		import os
+		import platform
+		import signal
+		import smtplib
+		import subprocess
+		import threading
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 队列完成命令接口注册失败：{exc}")
+		return
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_queue_finish_command_api_registered", False):
+		return
+
+	def command_for_action(action: str, custom_command: str) -> str:
+		system = platform.system().lower()
+		if action == "custom":
+			return str(custom_command or "").strip()
+		if system == "windows":
+			return {
+				"shutdown": "shutdown.exe /s /t 0",
+				"sleep": "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
+				"hibernate": "shutdown.exe /h",
+			}.get(action, "")
+		if system == "darwin":
+			return {
+				"shutdown": "osascript -e 'tell application \"System Events\" to shut down'",
+				"sleep": "pmset sleepnow",
+				"hibernate": "pmset sleepnow",
+			}.get(action, "")
+		return {
+			"shutdown": "systemctl poweroff",
+			"sleep": "systemctl suspend",
+			"hibernate": "systemctl hibernate",
+		}.get(action, "")
+
+	def launch_command(command: str):
+		try:
+			creationflags = 0
+			startupinfo = None
+			if os.name == "nt":
+				creationflags = (
+					getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+					| getattr(subprocess, "DETACHED_PROCESS", 0)
+				)
+				startupinfo = subprocess.STARTUPINFO()
+				startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+			subprocess.Popen(
+				command,
+				shell=True,
+				stdin=subprocess.DEVNULL,
+				stdout=subprocess.DEVNULL,
+				stderr=subprocess.DEVNULL,
+				cwd=str(_gjj_package_root()),
+				creationflags=creationflags,
+				startupinfo=startupinfo,
+			)
+			print(f"[GJJ] 队列已完成，系统命令已启动：{command}")
+		except Exception as exc:
+			print(f"[GJJ] 队列完成命令执行失败：{exc}")
+
+	def play_audio(config: dict):
+		raw_path = str(config.get("audio_file") or "").strip()
+		if not raw_path:
+			raise ValueError("未设置音频文件。")
+		path = _gjj_expand_setting_path(raw_path, str(_gjj_package_root()))
+		if not os.path.isfile(path):
+			raise FileNotFoundError(f"音频文件不存在：{path}")
+		system = platform.system().lower()
+		if system == "windows":
+			os.startfile(path)
+		elif system == "darwin":
+			subprocess.Popen(["afplay", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		else:
+			subprocess.Popen(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+	def send_email(config: dict):
+		host = str(config.get("smtp_host") or "").strip()
+		username = str(config.get("smtp_username") or "").strip()
+		password = str(config.get("smtp_password") or "")
+		sender = str(config.get("mail_from") or username).strip()
+		recipients = [
+			item.strip()
+			for item in str(config.get("mail_to") or "").replace(";", ",").split(",")
+			if item.strip()
+		]
+		if not host or not sender or not recipients:
+			raise ValueError("发送邮件需要填写 SMTP 服务器、发件人和收件人。")
+		try:
+			port = int(config.get("smtp_port") or 465)
+		except Exception:
+			port = 465
+		security = str(config.get("smtp_security") or "ssl").strip().lower()
+		message = EmailMessage()
+		message["From"] = sender
+		message["To"] = ", ".join(recipients)
+		message["Subject"] = str(config.get("mail_subject") or "ComfyUI 队列已完成")
+		message.set_content(str(config.get("mail_body") or "ComfyUI 队列已全部执行完成。"))
+		client_cls = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
+		with client_cls(host, port, timeout=30) as client:
+			if security == "starttls":
+				client.starttls()
+			if username:
+				client.login(username, password)
+			client.send_message(message)
+
+	def run_finish_action(action: str, config: dict):
+		try:
+			if action == "audio":
+				play_audio(config)
+				print("[GJJ] 队列已完成，已启动播放提示音。")
+			elif action == "email":
+				send_email(config)
+				print("[GJJ] 队列已完成，通知邮件已发送。")
+			elif action == "close_comfyui":
+				print("[GJJ] 队列已完成，正在关闭 ComfyUI...")
+				os.kill(os.getpid(), signal.SIGINT)
+			else:
+				command = command_for_action(action, config.get("custom_command"))
+				if not command:
+					raise ValueError("没有可执行的队列完成操作。")
+				launch_command(command)
+		except Exception as exc:
+			print(f"[GJJ] 队列完成操作失败：{exc}")
+
+	@server.routes.post("/gjj/queue_finish_command/run")
+	async def gjj_queue_finish_command_run(_request):
+		config = _gjj_section_settings("queue_finish_command")
+		if config.get("enabled") is not True:
+			return web.json_response({"ok": False, "error": "队列完成命令未启用。"}, status=403)
+		action = str(config.get("action") or "none").strip().lower()
+		if action == "none":
+			return web.json_response({"ok": True, "action": action, "skipped": True})
+		if action not in {"shutdown", "sleep", "hibernate", "custom", "audio", "email", "close_comfyui"}:
+			return web.json_response({"ok": False, "error": "不支持的队列完成操作。"}, status=400)
+		threading.Timer(0.35, run_finish_action, args=(action, config)).start()
+		return web.json_response({"ok": True, "action": action})
+
+	server._gjj_queue_finish_command_api_registered = True
+
+_register_gjj_queue_finish_command_api()
 
 def _register_gjj_workflow_screenshot_api():
 	try:
@@ -640,7 +803,7 @@ def _register_gjj_character_library_api():
 		import uuid
 		from pathlib import Path
 		from urllib.parse import urlencode
-		from PIL import Image, ImageFilter
+		from PIL import Image, ImageFilter, ImageOps
 		from aiohttp import web
 		from server import PromptServer
 	except Exception as exc:
@@ -838,6 +1001,56 @@ def _register_gjj_character_library_api():
 			"mtime": int(mtime or time.time()),
 		})
 
+	def thumbnail_path(character_id: str) -> Path:
+		character_id = clean_key(character_id, "")
+		if not character_id:
+			raise ValueError("缺少角色 ID。")
+		base = root_dir().resolve()
+		path = (base / f"{character_id}.png").resolve()
+		if path.parent != base:
+			raise ValueError("角色缩略图路径不安全。")
+		return path
+
+	def thumbnail_url(character_id: str) -> str:
+		return f"/gjj/character_library/thumbnail/{clean_key(character_id, '')}.png"
+
+	def write_character_thumbnail(character_id: str, source_path: Path) -> bool:
+		if not source_path.is_file():
+			return False
+		target = thumbnail_path(character_id)
+		with Image.open(source_path) as source:
+			rgba = source.convert("RGBA")
+			alpha_bbox = rgba.getchannel("A").point(lambda value: 255 if value > 10 else 0).getbbox()
+			if alpha_bbox:
+				rgba = rgba.crop(alpha_bbox)
+			resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+			thumbnail = ImageOps.fit(rgba, (64, 64), method=resample, centering=(0.5, 0.38))
+			tmp = target.with_suffix(".png.tmp")
+			thumbnail.save(tmp, format="PNG", optimize=True)
+			os.replace(str(tmp), str(target))
+		return True
+
+	def sync_character_thumbnail(data: dict, force: bool = False) -> str:
+		character_id = clean_key(data.get("id") or "", "")
+		if not character_id:
+			return ""
+		target = thumbnail_path(character_id)
+		if target.is_file() and not force:
+			return thumbnail_url(character_id)
+		views = data.get("views") if isinstance(data.get("views"), list) else []
+		def is_head_view(item: dict) -> bool:
+			text = f"{item.get('label') or ''} {item.get('id') or ''}".lower()
+			return any(keyword in text for keyword in ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait"))
+		source_view = next((item for item in views if is_head_view(item)), None) or (views[0] if views else None)
+		if source_view:
+			source_path = character_dir(character_id) / str(source_view.get("file") or "")
+			try:
+				if write_character_thumbnail(character_id, source_path):
+					return thumbnail_url(character_id)
+			except Exception as exc:
+				print(f"[GJJ] 生成角色缩略图失败（{character_id}）：{exc}")
+		return ""
+
 	def enrich_manifest(data: dict) -> dict:
 		character_id = data.get("id") or ""
 		base = character_dir(character_id)
@@ -869,7 +1082,7 @@ def _register_gjj_character_library_api():
 			text = f"{item.get('label') or ''} {item.get('id') or ''}".lower()
 			return any(keyword in text for keyword in ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait"))
 		cover_view = next((item for item in views if is_head_view(item)), None) or (views[0] if views else None)
-		data["cover"] = cover_view["url"] if cover_view else ""
+		data["cover"] = sync_character_thumbnail(data)
 		data["cover_view"] = cover_view["id"] if cover_view else ""
 		data["reference_name"] = character_reference_name(data, character_id)
 		data["reference"] = f"@{data['reference_name']}"
@@ -1483,7 +1696,12 @@ def _register_gjj_character_library_api():
 			"updated_at": t,
 		})
 		manifest["views"] = views
-		return write_manifest(manifest)
+		manifest = write_manifest(manifest)
+		if any(keyword in f"{label} {view_id}".lower() for keyword in ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait")):
+			sync_character_thumbnail(manifest, force=True)
+		elif not thumbnail_path(character_id).is_file():
+			sync_character_thumbnail(manifest)
+		return manifest
 
 	def save_view_image(character_id: str, label: str, image: Image.Image) -> dict:
 		rgba = image.convert("RGBA")
@@ -1622,10 +1840,16 @@ def _register_gjj_character_library_api():
 				if next_id != requested_id:
 					old_path = character_dir(requested_id)
 					new_path = character_dir(next_id)
+					old_thumbnail = thumbnail_path(requested_id)
+					new_thumbnail = thumbnail_path(next_id)
 					if old_path.exists():
 						if new_path.exists():
 							raise ValueError(f"角色文件夹已存在：{next_id}")
 						old_path.rename(new_path)
+					if old_thumbnail.is_file():
+						if new_thumbnail.exists():
+							new_thumbnail.unlink()
+						old_thumbnail.rename(new_thumbnail)
 					manifest["id"] = next_id
 					character_id = next_id
 			return web.json_response({"ok": True, "character": enrich_manifest(write_manifest(manifest))})
@@ -1707,6 +1931,7 @@ def _register_gjj_character_library_api():
 			path = character_dir(character_id)
 			if path.exists():
 				shutil.rmtree(path)
+			thumbnail_path(character_id).unlink(missing_ok=True)
 			return web.json_response({"ok": True})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -1767,7 +1992,9 @@ def _register_gjj_character_library_api():
 					break
 			if not changed:
 				raise ValueError("没有找到要修改的视图。")
-			return web.json_response({"ok": True, "character": enrich_manifest(write_manifest(manifest))})
+			manifest = write_manifest(manifest)
+			sync_character_thumbnail(manifest, force=True)
+			return web.json_response({"ok": True, "character": enrich_manifest(manifest)})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
@@ -2346,9 +2573,26 @@ def _register_gjj_character_library_api():
 				else:
 					next_views.append(item)
 			manifest["views"] = next_views
-			return web.json_response({"ok": True, "character": enrich_manifest(write_manifest(manifest))})
+			manifest = write_manifest(manifest)
+			thumbnail_path(character_id).unlink(missing_ok=True)
+			sync_character_thumbnail(manifest)
+			return web.json_response({"ok": True, "character": enrich_manifest(manifest)})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/character_library/thumbnail/{file_name}")
+	async def gjj_character_library_thumbnail(request):
+		try:
+			file_name = clean_key(request.match_info.get("file_name") or "", "")
+			if not file_name.lower().endswith(".png"):
+				raise ValueError("只能读取 PNG 缩略图。")
+			character_id = clean_key(Path(file_name).stem, "")
+			path = thumbnail_path(character_id)
+			if not path.is_file():
+				return web.Response(status=404, text="not found")
+			return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+		except Exception as exc:
+			return web.Response(status=400, text=str(exc))
 
 	@server.routes.get("/gjj/character_library/file")
 	async def gjj_character_library_file(request):

@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 
 NODE_NAME = "GJJ_VideoSubtitleOverlay"
 NODE_DISPLAY_NAME = "GJJ · 💬 视频字幕添加"
+_FONT_CANDIDATE_CACHE: list[dict[str, str]] = []
+_FONT_CANDIDATE_CACHE_TIME = 0.0
 SRT_BLOCK_PATTERN = re.compile(
     r"(?ms)^\s*(?:\d+\s*\n)?"
     r"(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*"
@@ -45,6 +48,106 @@ def _escape_filter_path(path: Path) -> str:
     text = text.replace(",", r"\,")
     text = text.replace("[", r"\[").replace("]", r"\]")
     return text
+
+
+def _hidden_options(options: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **options,
+        "hidden": True,
+        "display": "hidden",
+        "advanced": True,
+    }
+
+
+def _font_file_candidates(refresh: bool = False) -> list[dict[str, str]]:
+    global _FONT_CANDIDATE_CACHE, _FONT_CANDIDATE_CACHE_TIME
+    if not refresh and _FONT_CANDIDATE_CACHE and time.time() - _FONT_CANDIDATE_CACHE_TIME < 60.0:
+        return _FONT_CANDIDATE_CACHE
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(path: Path, source: str, value: str | None = None) -> None:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        key = str(resolved).lower()
+        if key in seen or not resolved.is_file() or resolved.suffix.lower() not in {".ttf", ".ttc", ".otf", ".otc"}:
+            return
+        seen.add(key)
+        results.append({
+            "name": resolved.name,
+            "family": resolved.stem,
+            "path": str(resolved),
+            "source": source,
+            "value": str(value or resolved),
+        })
+
+    try:
+        import folder_paths
+
+        for name in folder_paths.get_filename_list("fonts"):
+            try:
+                full_path = folder_paths.get_full_path("fonts", name)
+            except Exception:
+                full_path = None
+            if full_path:
+                add(Path(full_path), "models/fonts", str(name))
+    except Exception:
+        pass
+
+    system_roots: list[Path] = []
+    if os.name == "nt":
+        system_roots.append(Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts")
+    elif os.sys.platform == "darwin":
+        system_roots.extend([Path("/System/Library/Fonts"), Path("/Library/Fonts"), Path.home() / "Library/Fonts"])
+    else:
+        system_roots.extend([Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path.home() / ".fonts"])
+    for root in system_roots:
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("*"):
+                add(path, "系统字体")
+        except Exception:
+            continue
+    _FONT_CANDIDATE_CACHE = sorted(results, key=lambda item: (item["source"] != "models/fonts", item["name"].lower()))
+    _FONT_CANDIDATE_CACHE_TIME = time.time()
+    return _FONT_CANDIDATE_CACHE
+
+
+def _resolve_font_selection(value: Any) -> tuple[str, Path | None]:
+    text = str(value or "").strip()
+    if not text:
+        return "Microsoft YaHei", None
+    direct = Path(os.path.expandvars(os.path.expanduser(text)))
+    if direct.is_file():
+        family = direct.stem
+        try:
+            from PIL import ImageFont
+
+            family = str(ImageFont.truetype(str(direct), 12).getname()[0] or family)
+        except Exception:
+            pass
+        return family, direct.resolve().parent
+    for item in _font_file_candidates():
+        if text in {item["value"], item["name"], item["path"]}:
+            return item["family"], Path(item["path"]).parent
+    return text, None
+
+
+def _unique_custom_output_path(directory: Any, filename_prefix: Any, suffix: str) -> Path:
+    folder = Path(os.path.expandvars(os.path.expanduser(str(directory or "").strip()))).resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = Path(str(filename_prefix or "字幕视频").replace("\\", "/")).name.strip() or "字幕视频"
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", stem).strip(" .") or "字幕视频"
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    candidate = folder / f"Subtitle_{stem}_{stamp}{suffix}"
+    index = 1
+    while candidate.exists():
+        candidate = folder / f"Subtitle_{stem}_{stamp}_{index:03d}{suffix}"
+        index += 1
+    return candidate
 
 
 def _ass_time(value: str) -> str:
@@ -236,18 +339,18 @@ class GJJ_VideoSubtitleOverlay:
                 ),
                 "filename_prefix": (
                     "STRING",
-                    {
+                    _hidden_options({
                         "default": "GJJ/字幕视频",
                         "display_name": "保存文件名前缀",
                         "tooltip": "保存到 ComfyUI output 目录；MP4 与 SRT 使用相同文件名主体。",
-                    },
+                    }),
                 ),
                 "font_name": (
                     "STRING",
-                    {
+                    _hidden_options({
                         "default": "Microsoft YaHei",
                         "display_name": "字幕字体",
-                    },
+                    }),
                 ),
                 "font_size": (
                     "INT",
@@ -264,19 +367,19 @@ class GJJ_VideoSubtitleOverlay:
                 ),
                 "font_color": (
                     "STRING",
-                    {
+                    _hidden_options({
                         "default": "#FFFFFF",
                         "display_name": "字幕颜色",
                         "tooltip": "使用 #RRGGBB 格式。",
-                    },
+                    }),
                 ),
                 "outline_color": (
                     "STRING",
-                    {
+                    _hidden_options({
                         "default": "#000000",
                         "display_name": "描边颜色",
                         "tooltip": "使用 #RRGGBB 格式。",
-                    },
+                    }),
                 ),
                 "outline_width": (
                     "FLOAT",
@@ -306,36 +409,82 @@ class GJJ_VideoSubtitleOverlay:
                 ),
                 "font_size_percent": (
                     "FLOAT",
-                    {
+                    _hidden_options({
                         "default": 5.0,
                         "min": 0.5,
                         "max": 20.0,
                         "step": 0.1,
                         "display_name": "字幕尺寸（画面高度%）",
                         "tooltip": "字幕字号按视频高度自动换算；不同分辨率的视频保持相近视觉比例。",
-                    },
+                    }),
                 ),
                 "bottom_margin_percent": (
                     "FLOAT",
-                    {
+                    _hidden_options({
                         "default": 8.0,
                         "min": 0.0,
                         "max": 50.0,
                         "step": 0.1,
                         "display_name": "字幕距底部（画面高度%）",
                         "tooltip": "字幕基线与视频底边的距离，按画面高度百分比计算。",
-                    },
+                    }),
                 ),
                 "outline_width_percent": (
                     "FLOAT",
-                    {
+                    _hidden_options({
                         "default": 6.0,
                         "min": 0.0,
                         "max": 30.0,
                         "step": 0.25,
                         "display_name": "描边宽度（字号%）",
                         "tooltip": "描边宽度按换算后的字幕字号计算，随视频分辨率同步缩放。",
-                    },
+                    }),
+                ),
+                "save_directory": (
+                    "STRING",
+                    _hidden_options({
+                        "default": "",
+                        "display_name": "自定义保存目录",
+                        "tooltip": "留空时使用 ComfyUI output；设置绝对路径时保存到指定目录。",
+                    }),
+                ),
+                "output_format": (
+                    ["mp4", "mkv", "webm"],
+                    _hidden_options({
+                        "default": "mp4",
+                        "display_name": "视频格式",
+                    }),
+                ),
+                "video_codec": (
+                    ["H.264", "H.265", "VP9"],
+                    _hidden_options({
+                        "default": "H.264",
+                        "display_name": "视频编码",
+                    }),
+                ),
+                "encoding_preset": (
+                    ["ultrafast", "fast", "medium", "slow", "veryslow"],
+                    _hidden_options({
+                        "default": "medium",
+                        "display_name": "编码预设",
+                    }),
+                ),
+                "crf": (
+                    "INT",
+                    _hidden_options({
+                        "default": 18,
+                        "min": 0,
+                        "max": 51,
+                        "step": 1,
+                        "display_name": "画质 CRF",
+                    }),
+                ),
+                "save_srt": (
+                    "BOOLEAN",
+                    _hidden_options({
+                        "default": True,
+                        "display_name": "保存同名 SRT",
+                    }),
                 ),
             },
             "hidden": {
@@ -362,6 +511,12 @@ class GJJ_VideoSubtitleOverlay:
         font_size_percent=5.0,
         bottom_margin_percent=8.0,
         outline_width_percent=6.0,
+        save_directory="",
+        output_format="mp4",
+        video_codec="H.264",
+        encoding_preset="medium",
+        crf=18,
+        save_srt=True,
     ):
         from .gjj_ffmpeg_tools import (
             VIDEO_SUFFIXES,
@@ -404,12 +559,22 @@ class GJJ_VideoSubtitleOverlay:
             prompt,
             extra_pnginfo=extra_pnginfo,
         )
-        output_path = _unique_output_path(rendered_prefix, ".mp4", marker="Subtitle")
+        output_format = str(output_format or "mp4").lower()
+        if output_format not in {"mp4", "mkv", "webm"}:
+            output_format = "mp4"
+        suffix = f".{output_format}"
+        output_path = (
+            _unique_custom_output_path(save_directory, rendered_prefix, suffix)
+            if str(save_directory or "").strip()
+            else _unique_output_path(rendered_prefix, suffix, marker="Subtitle")
+        )
         srt_path = output_path.with_suffix(".srt")
         ass_path = output_path.with_suffix(".subtitle.ass")
-        srt_path.write_text(subtitle_text, encoding="utf-8-sig")
+        if bool(save_srt):
+            srt_path.write_text(subtitle_text, encoding="utf-8-sig")
 
-        safe_font_name = str(font_name or "Microsoft YaHei").replace(",", " ").replace("'", " ").strip()
+        resolved_font_name, fonts_directory = _resolve_font_selection(font_name)
+        safe_font_name = resolved_font_name.replace(",", " ").replace("'", " ").strip()
         ass_path.write_text(
             _srt_to_ass(
                 subtitle_text,
@@ -425,6 +590,17 @@ class GJJ_VideoSubtitleOverlay:
             encoding="utf-8-sig",
         )
         subtitle_filter = f"ass=filename='{_escape_filter_path(ass_path)}'"
+        if fonts_directory is not None:
+            subtitle_filter += f":fontsdir='{_escape_filter_path(fonts_directory)}'"
+        codec_name = str(video_codec or "H.264")
+        if output_format == "webm":
+            codec_name = "VP9"
+        codec_args = {
+            "H.264": ["-c:v", "libx264", "-preset", str(encoding_preset or "medium"), "-crf", str(max(0, min(51, int(crf))))],
+            "H.265": ["-c:v", "libx265", "-preset", str(encoding_preset or "medium"), "-crf", str(max(0, min(51, int(crf))))],
+            "VP9": ["-c:v", "libvpx-vp9", "-crf", str(max(0, min(51, int(crf)))), "-b:v", "0"],
+        }.get(codec_name, ["-c:v", "libx264", "-preset", "medium", "-crf", "18"])
+        audio_args = ["-c:a", "libopus"] if output_format == "webm" else ["-c:a", "copy"]
         command = [
             ffmpeg_path,
             "-y",
@@ -436,39 +612,39 @@ class GJJ_VideoSubtitleOverlay:
             "0:v:0",
             "-map",
             "0:a?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
+            *codec_args,
             "-pix_fmt",
             "yuv420p",
-            "-c:a",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(output_path),
+            *audio_args,
         ]
+        if output_format == "mp4":
+            command.extend(["-movflags", "+faststart"])
+        command.append(str(output_path))
         try:
             _run(command)
         except Exception:
             output_path.unlink(missing_ok=True)
-            srt_path.unlink(missing_ok=True)
+            if bool(save_srt):
+                srt_path.unlink(missing_ok=True)
             raise
         finally:
             ass_path.unlink(missing_ok=True)
             if temporary_source_path is not None:
                 temporary_source_path.unlink(missing_ok=True)
 
-        preview = _preview_item(output_path, "output", "video/mp4")
+        preview_mime = {
+            "mp4": "video/mp4",
+            "mkv": "video/x-matroska",
+            "webm": "video/webm",
+        }[output_format]
+        preview = _preview_item(output_path, "output", preview_mime)
         return {
             "ui": {
                 "preview_media": [preview],
                 "preview_is_video": [True],
                 "text": [
                     f"字幕添加完成：{output_path.name}\n"
-                    f"同名字幕：{srt_path.name}\n"
+                    f"同名字幕：{srt_path.name if bool(save_srt) else '未保存'}\n"
                     f"视频尺寸：{video_width}×{video_height}；字幕字号：{resolved_font_size}px；"
                     f"距底部：{resolved_bottom_margin}px；描边：{resolved_outline_width:g}px"
                 ],
@@ -479,6 +655,48 @@ class GJJ_VideoSubtitleOverlay:
                 str(output_path),
             ),
         }
+
+
+def _register_video_subtitle_overlay_api() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+    server = getattr(PromptServer, "instance", None)
+    if server is None or getattr(server, "_gjj_video_subtitle_overlay_api_registered", False):
+        return
+
+    @server.routes.get("/gjj/video_subtitle_overlay/fonts")
+    async def gjj_video_subtitle_overlay_fonts(request):
+        try:
+            page = max(1, int(request.query.get("page") or 1))
+            page_size = max(10, min(100, int(request.query.get("page_size") or 20)))
+        except Exception:
+            page, page_size = 1, 20
+        query = str(request.query.get("search") or "").strip().lower()
+        fonts = _font_file_candidates(refresh=str(request.query.get("refresh") or "") == "1")
+        if query:
+            fonts = [
+                item for item in fonts
+                if query in f"{item.get('name', '')} {item.get('family', '')} {item.get('source', '')}".lower()
+            ]
+        total = len(fonts)
+        start = (page - 1) * page_size
+        items = fonts[start:start + page_size]
+        return web.json_response({
+            "ok": True,
+            "fonts": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": start + len(items) < total,
+        })
+
+    server._gjj_video_subtitle_overlay_api_registered = True
+
+
+_register_video_subtitle_overlay_api()
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoSubtitleOverlay}

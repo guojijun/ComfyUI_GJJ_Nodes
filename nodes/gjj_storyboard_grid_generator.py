@@ -142,7 +142,13 @@ def _send_status(unique_id: Any, text: str) -> None:
         pass
 
 
-def _send_live_preview(unique_id: Any, image: torch.Tensor, index: int, total: int) -> None:
+def _send_live_preview(
+    unique_id: Any,
+    image: torch.Tensor,
+    index: int,
+    total: int,
+    prompt_text: Any = "",
+) -> None:
     if unique_id is None or _safe_text(unique_id).strip() == "" or not isinstance(image, torch.Tensor):
         return
     try:
@@ -161,6 +167,7 @@ def _send_live_preview(unique_id: Any, image: torch.Tensor, index: int, total: i
                 "node": str(unique_id),
                 "index": int(index),
                 "total": int(total),
+                "prompt": _safe_text(prompt_text),
                 "image": {
                     "filename": filename,
                     "subfolder": PREVIEW_SUBFOLDER,
@@ -657,25 +664,7 @@ def _normalize_character_key(value: Any) -> str:
 
 
 def _find_character(name: str) -> dict[str, Any] | None:
-    key = _normalize_character_key(name)
-    if not key:
-        return None
-    items = _character_library_items()
-    for item in items:
-        if (
-            _normalize_character_key(item.get("id")) == key
-            or _normalize_character_key(item.get("_folder_id")) == key
-            or _normalize_character_key(item.get("name")) == key
-        ):
-            return item
-    for item in items:
-        if (
-            key in _normalize_character_key(item.get("name"))
-            or key in _normalize_character_key(item.get("id"))
-            or key in _normalize_character_key(item.get("_folder_id"))
-        ):
-                return item
-    return None
+    return _find_exact_character(name)
 
 
 def _character_alias_keys(character: dict[str, Any]) -> list[tuple[str, str]]:
@@ -817,7 +806,18 @@ def _prompt_wants_back(text: str) -> bool:
 
 
 def _prompt_without_character_refs(text: str) -> str:
-    return CHARACTER_REF_RE.sub("", _safe_text(text))
+    def replace(match: re.Match) -> str:
+        raw_name = _safe_text(match.group(1))
+        raw_view = _safe_text(match.group(2))
+        resolved_name, _resolved_view = _resolve_character_ref_name_view(raw_name, raw_view)
+        if _normalize_character_key(raw_name) == _normalize_character_key(resolved_name):
+            return ""
+        clean_resolved = GENDER_PREFIX_RE.sub("", resolved_name).strip()
+        if clean_resolved and raw_name.casefold().startswith(clean_resolved.casefold()):
+            return raw_name[len(clean_resolved) :]
+        return ""
+
+    return CHARACTER_REF_RE.sub(replace, _safe_text(text))
 
 
 def _reference_wants_back(prompt_text: str, explicit_label: str = "") -> bool:
@@ -2367,6 +2367,15 @@ def _resolve_character_ref_name_view(name: str, view: str = "") -> tuple[str, st
     prefix_match = _split_character_view_suffix(clean_name)
     if prefix_match:
         return prefix_match
+    normalized_name = _normalize_character_key(clean_name)
+    prefix_candidates: list[tuple[int, str]] = []
+    for item in _character_library_items():
+        for alias, alias_key in _character_alias_keys(item):
+            if alias_key and normalized_name.startswith(alias_key):
+                prefix_candidates.append((len(alias_key), alias))
+    if prefix_candidates:
+        _length, alias = max(prefix_candidates, key=lambda item: item[0])
+        return GENDER_PREFIX_RE.sub("", alias).strip(), clean_view
     match = CHARACTER_VIEW_SUFFIX_RE.match(clean_name)
     if not match:
         return clean_name, clean_view
@@ -3812,8 +3821,13 @@ class GJJ_StoryboardGridGenerator:
         if not force_generate_all and not single_cell_mode and not selected_cell_mode:
             cached_count_before_preview = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
             preview_cells = _load_storyboard_preview_cells(storyboard_preview_images, cell_w, cell_h)
-            recent_preview_cells = _load_recent_storyboard_preview_cells(cell_w, cell_h, geometry_count)
-            if preview_cells or cached_count_before_preview > 0 or len(recent_preview_cells) >= geometry_count:
+            has_explicit_preview_manifest = bool(_safe_text(storyboard_preview_images).strip())
+            recent_preview_cells = (
+                {}
+                if has_explicit_preview_manifest
+                else _load_recent_storyboard_preview_cells(cell_w, cell_h, geometry_count)
+            )
+            if cached_count_before_preview > 0 or recent_preview_cells:
                 for preview_index, preview_cell in recent_preview_cells.items():
                     preview_cells.setdefault(preview_index, preview_cell)
             if preview_cells:
@@ -3863,6 +3877,7 @@ class GJJ_StoryboardGridGenerator:
                 preview_index = seed_offset + index if single_cell_mode else index
             if resume_missing_indices and preview_index not in resume_missing_indices:
                 continue
+            preview_prompt_text = line
             line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(
                 line,
                 cell_w,
@@ -3997,7 +4012,7 @@ class GJJ_StoryboardGridGenerator:
             generated.append(current)
             generated_positions.append(preview_index)
             cache["cells"][int(preview_index)] = current.detach().contiguous()
-            _send_live_preview(unique_id, current, preview_index, preview_total)
+            _send_live_preview(unique_id, current, preview_index, preview_total, preview_prompt_text)
 
         cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
         stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
@@ -4005,6 +4020,11 @@ class GJJ_StoryboardGridGenerator:
             output_images = [
                 _normalize_storyboard_cell(item, cell_w, cell_h) for item in stitched_cells if isinstance(item, torch.Tensor)
             ]
+            if not single_cell_mode and not selected_cell_mode:
+                display_prompts = full_prompts_for_cache if len(full_prompts_for_cache) >= geometry_count else prompts
+                for display_index, display_image in enumerate(output_images, start=1):
+                    display_prompt = display_prompts[display_index - 1] if display_index <= len(display_prompts) else ""
+                    _send_live_preview(unique_id, display_image, display_index, geometry_count, display_prompt)
             _send_status(unique_id, f"直接拼接缓存分镜：{len(output_images)}/{geometry_count}")
         else:
             output_images = [_normalize_storyboard_cell(item, cell_w, cell_h) for item in generated]
