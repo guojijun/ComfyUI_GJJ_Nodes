@@ -60,6 +60,7 @@ CLIP_TYPE_OPTIONS = [
     "longcat_image",
     "boogu",
     "joyimage",
+    "mage",
 ]
 CLIP_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32"]
 CLIP_DEVICE_OPTIONS = ["default", "cpu"]
@@ -710,10 +711,17 @@ def _clip_type_enum(name: str):
     aliases = {
         "flux1": "flux",
         "ltx": "ltxv",
+        "mage_flow": "mage",
     }
     normalized = _normalize_text(name)
     enum_name = aliases.get(normalized, normalized).upper()
-    return getattr(comfy.sd.CLIPType, enum_name, comfy.sd.CLIPType.STABLE_DIFFUSION)
+    clip_type = getattr(comfy.sd.CLIPType, enum_name, None)
+    if clip_type is None:
+        raise RuntimeError(
+            f"当前 ComfyUI 不支持 CLIP 类型：{name}。"
+            "请更新 ComfyUI，避免把模型族专用文本编码器误载为 Stable Diffusion CLIP。"
+        )
+    return clip_type
 
 
 def _load_boogu_clip_compatible(clip_paths: list[str], clip_dtype: str, clip_device: str):

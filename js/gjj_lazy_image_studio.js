@@ -2027,36 +2027,58 @@ function closeUnetModelPicker(node) {
 }
 
 function positionUnetModelPicker(node, panel, anchor) {
-	const anchorRect = anchor?.getBoundingClientRect?.();
-	const hostRect = node.__gjjLazyModelFloatingPanel?.panel?.getBoundingClientRect?.();
+	if (panel?.__gjjManualPosition) {
+		const rect = panel.getBoundingClientRect();
+		const position = clampFloatingPanelToViewport(panel, rect.left, rect.top);
+		panel.style.left = `${Math.round(position.left)}px`;
+		panel.style.top = `${Math.round(position.top)}px`;
+		return;
+	}
 	const viewportWidth = Math.max(320, window.innerWidth || 320);
 	const viewportHeight = Math.max(240, window.innerHeight || 240);
-	const padding = 12;
-	const boundaryLeft = hostRect ? Math.max(padding, Math.floor(hostRect.left) + 8) : padding;
-	const boundaryRight = hostRect ? Math.min(viewportWidth - padding, Math.ceil(hostRect.right) - 8) : viewportWidth - padding;
-	const boundaryTop = hostRect ? Math.max(padding, Math.floor(hostRect.top) + 8) : padding;
-	const boundaryBottom = hostRect ? Math.min(viewportHeight - padding, Math.ceil(hostRect.bottom) - 8) : viewportHeight - padding;
-	const availableWidth = Math.max(280, boundaryRight - boundaryLeft);
-	const width = Math.min(availableWidth, Math.max(280, Math.ceil(anchorRect?.width || 360)));
-	const maxHeight = Math.max(160, Math.min(320, boundaryBottom - Math.ceil(anchorRect?.bottom || boundaryTop) - 6));
-	const left = Math.max(boundaryLeft, Math.min(Math.floor(anchorRect?.left || boundaryLeft), boundaryRight - width));
-	const top = Math.min(Math.ceil(anchorRect?.bottom || boundaryTop) + 6, boundaryBottom - maxHeight);
+	const padding = 14;
+	const width = Math.min(760, viewportWidth - padding * 2);
+	const maxHeight = Math.min(680, viewportHeight - padding * 2);
+	const left = Math.max(padding, Math.round((viewportWidth - width) / 2));
+	const top = Math.max(padding, Math.round((viewportHeight - maxHeight) / 2));
 	panel.style.width = `${width}px`;
 	panel.style.maxHeight = `${maxHeight}px`;
 	panel.style.left = `${left}px`;
-	panel.style.top = `${Math.max(boundaryTop, top)}px`;
+	panel.style.top = `${top}px`;
 }
 
-function modelNameMatchesKeywordFilter(name, query) {
-	const groups = String(query || "")
+function parseModelFilterGroups(query) {
+	return String(query || "")
 		.split("|")
-		.map((group) => group.trim().toLowerCase().split(/\s+/).filter(Boolean))
-		.filter((tokens) => tokens.length);
+		.map((group) => {
+			const include = [];
+			const exclude = [];
+			for (const token of group.trim().toLowerCase().split(/\s+/).filter(Boolean)) {
+				if (token.startsWith("-") && token.length > 1) {
+					exclude.push(token.slice(1));
+				} else {
+					include.push(token);
+				}
+			}
+			return { include, exclude };
+		})
+		.filter((group) => group.include.length || group.exclude.length);
+}
+
+function textMatchesModelFilter(text, query) {
+	const groups = parseModelFilterGroups(query);
 	if (!groups.length) {
 		return true;
 	}
-	const haystack = String(name ?? "").toLowerCase();
-	return groups.some((tokens) => tokens.every((token) => haystack.includes(token)));
+	const haystack = String(text ?? "").toLowerCase();
+	return groups.some(({ include, exclude }) => (
+		include.every((token) => haystack.includes(token))
+		&& exclude.every((token) => !haystack.includes(token))
+	));
+}
+
+function modelNameMatchesKeywordFilter(name, query) {
+	return textMatchesModelFilter(name, query);
 }
 
 function openUnetModelPicker(node, anchor) {
@@ -2075,29 +2097,47 @@ function openUnetModelPicker(node, anchor) {
 	panel.__gjjAnchor = anchor;
 	panel.style.cssText = [
 		"position:fixed",
-		"z-index:100000",
+		"z-index:100002",
 		"display:flex",
 		"flex-direction:column",
-		"gap:6px",
-		"padding:6px",
+		"gap:8px",
+		"padding:10px",
 		"box-sizing:border-box",
 		"border:1px solid #41535b",
-		"border-radius:8px",
+		"border-radius:10px",
 		"background:#10171b",
-		"box-shadow:0 10px 28px rgba(0,0,0,0.42)",
+		"box-shadow:0 18px 54px rgba(0,0,0,0.62)",
 		"overflow:hidden",
 		"pointer-events:auto",
 	].join(";");
 
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto;touch-action:none";
+	const title = document.createElement("div");
+	title.textContent = "🟣 选择 UNET 主模型";
+	title.style.cssText = "font-size:13px;font-weight:800;color:#f2faf7";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "×";
+	close.title = "关闭";
+	close.style.cssText = "width:28px;height:26px;border:1px solid #41535b;border-radius:6px;background:#1a2328;color:#dce7e2;cursor:pointer";
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeUnetModelPicker(node);
+	});
+	header.append(title, close);
+	makeFloatingPanelDraggable(panel, header);
+
 	const search = document.createElement("input");
 	search.type = "text";
-	search.placeholder = "关键词过滤 UNET 主模型";
-	search.title = "空格表示同时包含，| 表示任一组匹配。例如：qwen gguf|flux schnell";
-	search.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:5px 7px;font-size:12px";
+	search.placeholder = "关键词过滤；-XXX 表示排除";
+	search.title = "空格表示同时包含，-XXX 表示不含 XXX，| 表示任一组匹配。例如：mage -turbo | flux schnell";
+	search.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #526872;border-radius:7px;background:#11181c;color:#dce7e2;padding:8px 10px;font-size:13px";
 
 	const list = document.createElement("div");
-	list.style.cssText = "display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:260px";
-	panel.append(search, list);
+	list.style.cssText = "display:flex;flex-direction:column;gap:5px;overflow:auto;max-height:min(560px,calc(100vh - 150px));overscroll-behavior:contain";
+	panel.append(header, search, list);
 	document.body.appendChild(panel);
 	node.__gjjUnetModelPicker = panel;
 
@@ -2876,9 +2916,11 @@ function modelFamilyStem(value) {
 		.pop()
 		.replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
 		.replace(
-			/[_-](?:fp8mixed|fp\d+|bf16|float\d+|int\d+|q\d+(?:_\d+)?|e4m3fn|e5m2|nvfp4|mxfp4)(?:[_-].*)?$/i,
-			"",
-		);
+			/(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed|convrot|w4a4|padded)(?=$|[_\-. ])/gi,
+			"$1",
+		)
+		.replace(/[_\-. ]+/g, "_")
+		.replace(/^_+|_+$/g, "");
 }
 
 function lazyModelTreeEntries(node) {
@@ -2893,11 +2935,19 @@ function lazyModelTreeEntries(node) {
 		.filter(Boolean)
 		.sort((left, right) => right.length - left.length)
 		.find((keyword) => {
-			const normalizedKeyword = normalizeText(keyword);
-			const canonicalKeyword = canonicalizeText(keyword);
-			return normalizedUnet.includes(normalizedKeyword)
-				|| Boolean(canonicalKeyword && canonicalUnet.includes(canonicalKeyword));
+			const terms = String(keyword || "").split("+").map((term) => term.trim()).filter(Boolean);
+			return terms.length > 0 && terms.every((term) => {
+				const normalizedKeyword = normalizeText(term);
+				const canonicalKeyword = canonicalizeText(term);
+				return normalizedUnet.includes(normalizedKeyword)
+					|| Boolean(canonicalKeyword && canonicalUnet.includes(canonicalKeyword));
+			});
 		}) || String(presetKeywords[0] || "").trim();
+	const familySearchValue = familyKeyword
+		.split("+")
+		.map((term) => term.trim())
+		.filter(Boolean)
+		.join("_");
 	const entries = useCheckpoint
 		? [{
 			widget: CHECKPOINT_WIDGET_NAME,
@@ -2914,7 +2964,7 @@ function lazyModelTreeEntries(node) {
 			folder: "models/diffusion_models",
 			icon: "🟣",
 			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "gguf"],
-			searchValue: familyKeyword,
+			searchValue: familySearchValue,
 			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
 			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
 		},
@@ -2997,7 +3047,10 @@ function renderModelPanelControls(node, body) {
 	}
 	const tree = GJJ_Utils.createModelTreeView({
 		node,
-		entries: lazyModelTreeEntries(node),
+		entries: lazyModelTreeEntries(node).map((entry) => ({
+			...entry,
+			floatingChoices: true,
+		})),
 		refresh: () => {
 			applySettingsVisibility(node);
 			GJJ_Utils.refreshNode(node);
@@ -4095,20 +4148,8 @@ async function syncSizeFromPrimaryInput(node) {
 	}
 }
 
-function parseTestFilterGroups(query) {
-	return String(query || "")
-		.split("|")
-		.map((group) => group.trim().toLowerCase().split(/\s+/).filter(Boolean))
-		.filter((tokens) => tokens.length);
-}
-
 function modelMatchesTestFilter(item, query) {
-	const groups = parseTestFilterGroups(query);
-	if (!groups.length) {
-		return true;
-	}
-	const haystack = `${item?.name || ""} ${item?.size || ""}`.toLowerCase();
-	return groups.some((tokens) => tokens.every((token) => haystack.includes(token)));
+	return textMatchesModelFilter(`${item?.name || ""} ${item?.size || ""}`, query);
 }
 
 async function fetchLazyTestModels(kind, node) {
@@ -4294,7 +4335,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 		</div>
 		<div data-tabs style="display:flex;gap:6px;padding:9px 12px 0;"></div>
 		<div style="display:flex;gap:8px;padding:9px 12px;">
-			<input data-filter placeholder="关键词过滤，支持 | 和空格" style="flex:1 1 auto;height:30px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 9px;outline:none;">
+			<input data-filter placeholder="关键词过滤；-XXX 排除，| 分组" title="示例：mage -turbo 表示包含 mage 且不含 turbo；mage-flow 中间的连字符不受影响。" style="flex:1 1 auto;height:30px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 9px;outline:none;">
 			<button data-select-all style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">全选</button>
 			<button data-clear style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">清空</button>
 		</div>
@@ -5657,18 +5698,28 @@ function configureImagePreviewWidget(node, widget, container) {
 function matchPreset(unetName) {
 	const normalized = normalizeText(unetName);
 	const canonical = canonicalizeText(unetName);
+	const familyCanonical = canonicalizeText(modelFamilyStem(unetName));
 	let best = null;
 	let bestLength = -1;
 	for (const preset of MODEL_PRESETS) {
 		for (const keyword of preset.keywords || []) {
-			const normalizedKeyword = normalizeText(keyword);
-			const canonicalKeyword = canonicalizeText(keyword);
-			if (
-				(normalized.includes(normalizedKeyword) || (canonicalKeyword && canonical.includes(canonicalKeyword))) &&
-				(canonicalKeyword || normalizedKeyword).length > bestLength
-			) {
+			const terms = String(keyword || "").split("+").map((term) => term.trim()).filter(Boolean);
+			let matchLength = 0;
+			const matches = terms.length > 0 && terms.every((term) => {
+				const normalizedKeyword = normalizeText(term);
+				const canonicalKeyword = canonicalizeText(term);
+				const familyKeyword = canonicalizeText(modelFamilyStem(term));
+				const matched = normalized.includes(normalizedKeyword)
+					|| (canonicalKeyword && canonical.includes(canonicalKeyword))
+					|| (familyKeyword && familyCanonical.includes(familyKeyword));
+				if (matched) {
+					matchLength += (familyKeyword || canonicalKeyword || normalizedKeyword).length;
+				}
+				return Boolean(matched);
+			});
+			if (matches && matchLength > bestLength) {
 				best = preset;
-				bestLength = (canonicalKeyword || normalizedKeyword).length;
+				bestLength = matchLength;
 			}
 		}
 	}
@@ -5843,11 +5894,18 @@ function applyPreset(node, force = false) {
 		setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, (preset.clipNames || [])[0] || ""));
 	}
 	setWidgetValue(vaeWidget, preferredValue(vaeValues, preset.vaeName || ""));
-	if (Number.isFinite(preset.steps)) {
-		setWidgetValue(getWidget(node, "steps"), Number(preset.steps));
-	}
-	if (Number.isFinite(preset.cfg)) {
-		setWidgetValue(getWidget(node, "cfg"), Number(preset.cfg));
+	const isMageFlowPreset = canonicalizeText(preset.id) === "mageflow";
+	const isMageFlowTurbo = isMageFlowPreset && canonicalizeText(currentUnet).includes("turbo");
+	if (isMageFlowPreset) {
+		setWidgetValue(getWidget(node, "steps"), isMageFlowTurbo ? 4 : 30);
+		setWidgetValue(getWidget(node, "cfg"), isMageFlowTurbo ? 1.0 : 5.0);
+	} else {
+		if (Number.isFinite(preset.steps)) {
+			setWidgetValue(getWidget(node, "steps"), Number(preset.steps));
+		}
+		if (Number.isFinite(preset.cfg)) {
+			setWidgetValue(getWidget(node, "cfg"), Number(preset.cfg));
+		}
 	}
 	if (preset.sampler) {
 		setWidgetValue(getWidget(node, "sampler_name"), preset.sampler);

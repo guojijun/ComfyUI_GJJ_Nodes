@@ -24,6 +24,40 @@ from .model_manager import gjjutils_model_stem_without_quant
 # ============================================================================
 
 
+def _keyword_terms(keyword: Any) -> list[str]:
+    """Split a preset expression; ``a + b`` means both terms are required."""
+    return [part.strip() for part in str(keyword or "").split("+") if part.strip()]
+
+
+def _keyword_expression_matches(
+    keyword: Any,
+    normalized_target: str,
+    canonical_target: str,
+    canonical_family_target: str,
+) -> tuple[bool, int]:
+    terms = _keyword_terms(keyword)
+    if not terms:
+        return False, 0
+    score = 0
+    for term in terms:
+        normalized_term = _normalize_text(term)
+        canonical_term = _canonical_model_text(term)
+        canonical_family_term = _canonical_model_text(
+            gjjutils_model_stem_without_quant(term)
+        )
+        if not (
+            normalized_term in normalized_target
+            or (canonical_term and canonical_term in canonical_target)
+            or (
+                canonical_family_term
+                and canonical_family_term in canonical_family_target
+            )
+        ):
+            return False, 0
+        score += len(canonical_family_term or canonical_term or normalized_term)
+    return True, score
+
+
 def gjjutils_model_family_match_preset(
     unet_name: str,
     presets: list[dict[str, Any]] | None = None,
@@ -56,6 +90,8 @@ def gjjutils_model_family_match_preset(
     """
     normalized_name = _normalize_text(unet_name)
     canonical_name = _canonical_model_text(unet_name)
+    family_name = gjjutils_model_stem_without_quant(unet_name)
+    canonical_family_name = _canonical_model_text(family_name)
     best: dict[str, Any] | None = None
     best_length = -1
 
@@ -63,16 +99,15 @@ def gjjutils_model_family_match_preset(
 
     for preset in target_presets:
         for keyword in preset.get("keywords", []):
-            normalized_keyword = _normalize_text(keyword)
-            canonical_keyword = _canonical_model_text(keyword)
-            if not normalized_keyword:
-                continue
-            if (
-                normalized_keyword in normalized_name
-                or (canonical_keyword and canonical_keyword in canonical_name)
-            ) and len(canonical_keyword or normalized_keyword) > best_length:
+            matched, match_length = _keyword_expression_matches(
+                keyword,
+                normalized_name,
+                canonical_name,
+                canonical_family_name,
+            )
+            if matched and match_length > best_length:
                 best = preset
-                best_length = len(canonical_keyword or normalized_keyword)
+                best_length = match_length
 
     if best:
         return best
@@ -467,7 +502,7 @@ def gjjutils_model_family_pick_model_name(
     requested: str,
     available: list[str],
     fallback: str = "",
-    match_strategy: str = "basename",
+    match_strategy: str = "canonical",
 ) -> str:
     """从可用模型列表中选择最匹配的名称（支持多种匹配策略）。
 
@@ -477,8 +512,8 @@ def gjjutils_model_family_pick_model_name(
             fallback: 备选模型名称
             match_strategy: 匹配策略
                     - "exact": 仅精确匹配
-                    - "basename": basename 匹配（默认）
-                    - "canonical": 规范化匹配（去除所有特殊字符）
+                    - "basename": basename 与模型族关键词匹配
+                    - "canonical": 规范化关键词匹配（默认，兼容量化后缀）
 
     Returns:
             最佳匹配的模型名称
@@ -507,8 +542,15 @@ def gjjutils_model_family_pick_model_name(
         fallback = str(fallback or "").strip()
         return fallback if fallback in available else ""
 
-    # 使用内部实现（支持 basename 和 canonical 匹配）
-    return _pick_available_name(requested, available, fallback)
+    # 预设允许保存模型族关键词而非完整文件名。使用统一模型解析器，
+    # 让 qwen3vl_4b / mage_flow_vae 等关键词兼容 BF16、FP8、INT4、
+    # INT8、GGUF 等文件名后缀，同时仍优先精确路径和 basename。
+    return gjjutils_pick_available_model_name(
+        requested,
+        available,
+        fallback,
+        allow_first=False,
+    )
 
 
 # ============================================================================
@@ -826,20 +868,42 @@ def gjjutils_match_model_family_preset(
             ...     print(preset["clip_type"])
     """
     normalized_unet = _normalize_lookup_text(unet_name)
+    normalized_family = _normalize_lookup_text(
+        gjjutils_model_stem_without_quant(unet_name)
+    )
     if not normalized_unet:
         return None
     best: dict[str, Any] | None = None
     best_length = -1
     for preset in presets or gjjutils_load_model_family_presets():
         for keyword in preset.get("keywords", []) or []:
-            normalized_keyword = _normalize_lookup_text(keyword)
-            if (
-                normalized_keyword
-                and normalized_keyword in normalized_unet
-                and len(normalized_keyword) > best_length
-            ):
+            terms = _keyword_terms(keyword)
+            term_lengths: list[int] = []
+            matched = bool(terms)
+            for term in terms:
+                normalized_keyword = _normalize_lookup_text(term)
+                normalized_family_keyword = _normalize_lookup_text(
+                    gjjutils_model_stem_without_quant(term)
+                )
+                if not (
+                    normalized_keyword
+                    and (
+                        normalized_keyword in normalized_unet
+                        or (
+                            normalized_family_keyword
+                            and normalized_family_keyword in normalized_family
+                        )
+                    )
+                ):
+                    matched = False
+                    break
+                term_lengths.append(
+                    len(normalized_family_keyword or normalized_keyword)
+                )
+            match_length = sum(term_lengths)
+            if matched and match_length > best_length:
                 best = preset
-                best_length = len(normalized_keyword)
+                best_length = match_length
     return best
 
 
@@ -849,7 +913,7 @@ def gjjutils_match_model_family_preset(
 
 # CLIP 类型关键词映射
 CLIP_TYPE_KEYWORDS = [
-    (("mage-flow", "mage_flow", "mageflow"), "mage_flow"),
+    (("mage-flow", "mage_flow", "mageflow"), "mage"),
     (("krea2", "krea-2", "krea2_turbo", "krea2-turbo"), "krea2"),
     (("boogu", "boogu_image", "boogu-image"), "boogu"),
     (("flux2", "klein"), "flux2"),

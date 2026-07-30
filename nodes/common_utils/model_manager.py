@@ -380,8 +380,9 @@ def gjjutils_model_search_state(
 _GJJ_MODEL_EXT_RE = re.compile(r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|engine|torchscript)$", re.IGNORECASE)
 _GJJ_QUANT_TOKEN_RE = re.compile(
     r"(?i)(^|[_\-. ])("
-    r"fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:8|16|32)|bf16|f16|f32|"
-    r"q[2-8](?:_[a-z0-9]+)?|int(?:4|8)|"
+    r"fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|"
+    r"bf16|f16|f32|nvfp4|mxfp4|mxfp8|"
+    r"q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|"
     r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed|convrot|w4a4|padded"
     r")(?=$|[_\-. ])"
 )

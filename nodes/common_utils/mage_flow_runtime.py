@@ -1,4 +1,4 @@
-"""Helpers for the bundled, ComfyUI-native Mage-Flow runtime."""
+"""Small helpers for ComfyUI's native Mage-Flow implementation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
+import comfy.model_management
 import comfy.utils
+import node_helpers
 
 
 def is_mage_flow_name(value: Any) -> bool:
@@ -18,7 +19,7 @@ def is_mage_flow_name(value: Any) -> bool:
 
 @contextmanager
 def safe_bf16_accumulation():
-    """Prevent the global --fast fp16_accumulation flag from corrupting Mage."""
+    """Keep the global FP16 accumulation option away from Mage BF16 sampling."""
     matmul = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
     has_option = matmul is not None and hasattr(matmul, "allow_fp16_accumulation")
     previous = getattr(matmul, "allow_fp16_accumulation", None) if has_option else None
@@ -37,60 +38,41 @@ def make_empty_latent(width: int, height: int, batch_size: int) -> dict[str, Any
     return {
         "samples": torch.zeros(
             [max(1, int(batch_size)), 128, height // 16, width // 16],
-            device=torch.device("cpu"),
-        ),
-        "downscale_ratio_spacial": 16,
-        "width": width,
-        "height": height,
+            device=comfy.model_management.intermediate_device(),
+        )
     }
 
 
-def fit_reference(
+def _resize_image(
     image: torch.Tensor,
-    target_width: int,
-    target_height: int,
+    width: int,
+    height: int,
 ) -> torch.Tensor:
-    """Aspect-fit and pad a ComfyUI IMAGE tensor to the Mage latent canvas."""
-    samples = image[:, :, :, :3]
-    _, height, width, channels = samples.shape
-    if height == target_height and width == target_width:
-        return samples
-    scale = min(target_height / max(1, height), target_width / max(1, width))
-    resized_height = min(target_height, max(1, round(height * scale)))
-    resized_width = min(target_width, max(1, round(width * scale)))
-    resized = F.interpolate(
-        samples.movedim(-1, 1),
-        size=(resized_height, resized_width),
-        mode="bicubic",
-        align_corners=False,
-    )
-    padded = torch.zeros(
-        (samples.shape[0], channels, target_height, target_width),
-        device=resized.device,
-        dtype=resized.dtype,
-    )
-    top = max(0, (target_height - resized_height) // 2)
-    left = max(0, (target_width - resized_width) // 2)
-    padded[:, :, top : top + resized_height, left : left + resized_width] = resized
-    return padded.movedim(1, -1)
+    samples = image[:, :, :, :3].movedim(-1, 1)
+    if samples.shape[3] != width or samples.shape[2] != height:
+        samples = comfy.utils.common_upscale(
+            samples,
+            width,
+            height,
+            "bicubic",
+            "disabled",
+        )
+    return samples.movedim(1, -1)
 
 
-def resize_for_vl(image: torch.Tensor, max_long_edge: int = 384) -> torch.Tensor:
-    samples = image.movedim(-1, 1)
-    _, _, height, width = samples.shape
-    long_edge = max(height, width)
-    if max_long_edge <= 0 or long_edge <= max_long_edge:
-        return image
-    scale = max_long_edge / max(1, long_edge)
-    resized_width = max(1, round(width * scale))
-    resized_height = max(1, round(height * scale))
-    return comfy.utils.common_upscale(
-        samples,
-        resized_width,
-        resized_height,
-        "bicubic",
-        "disabled",
-    ).movedim(1, -1)
+def _resize_for_vl(image: torch.Tensor, max_long_edge: int = 384) -> torch.Tensor:
+    samples = image[:, :, :, :3].movedim(-1, 1)
+    long_edge = max(samples.shape[3], samples.shape[2])
+    if max_long_edge > 0 and long_edge > max_long_edge:
+        scale = max_long_edge / long_edge
+        samples = comfy.utils.common_upscale(
+            samples,
+            max(1, round(samples.shape[3] * scale)),
+            max(1, round(samples.shape[2] * scale)),
+            "bicubic",
+            "disabled",
+        )
+    return samples.movedim(1, -1)
 
 
 def encode_conditioning(
@@ -101,20 +83,23 @@ def encode_conditioning(
     target_width: int,
     target_height: int,
 ):
-    canonical = [
-        fit_reference(image, target_width, target_height)
+    references = [
+        image
         for image in images[:3]
         if isinstance(image, torch.Tensor)
     ]
-    visual = [resize_for_vl(image) for image in canonical]
-    tokens = clip.tokenize(str(prompt or " "), images=visual)
-    conditioning = clip.encode_from_tokens_scheduled(tokens)
-    if canonical:
-        reference_latents = [vae.encode(image) for image in canonical]
-        conditioned = []
-        for cond, data in conditioning:
-            copied = data.copy()
-            copied["reference_latents"] = reference_latents
-            conditioned.append([cond, copied])
-        conditioning = conditioned
+    visual_references = [_resize_for_vl(image) for image in references]
+    conditioning = clip.encode_from_tokens_scheduled(
+        clip.tokenize(str(prompt or " "), images=visual_references)
+    )
+    if references:
+        reference_latents = [
+            vae.encode(_resize_image(image, target_width, target_height))
+            for image in references
+        ]
+        conditioning = node_helpers.conditioning_set_values(
+            conditioning,
+            {"reference_latents": reference_latents},
+            append=True,
+        )
     return conditioning

@@ -77,7 +77,10 @@ from .gjj_model_patch_bundle import (
     MISSING_SAGE_HANDLING_MODES,
     SAGE_ATTENTION_MODES,
 )
-from .common_utils.model_manager import gjjutils_find_model_list
+from .common_utils.model_manager import (
+    gjjutils_find_model_list,
+    gjjutils_model_stem_without_quant,
+)
 from .common_utils.model_family import (
     gjjutils_model_family_match_preset as match_model_family,
     gjjutils_model_family_resolve_clip_type as resolve_clip_type,
@@ -333,6 +336,9 @@ def _switch_image_unet_for_input(
         is_edit_model = True
     elif "booguimageturbo" in canonical and "edit" not in canonical:
         family = "boogu"
+    elif "mageflow" in canonical:
+        family = "mage_flow"
+        is_edit_model = "edit" in canonical
     if not family:
         return current
     wants_edit_model = bool(has_input_images)
@@ -343,6 +349,14 @@ def _switch_image_unet_for_input(
         ("qwen", False): ("qwenimage2512", "qwen_image_2512"),
         ("boogu", True): ("booguimageeditturbo", "boogu_image_edit_turbo"),
         ("boogu", False): ("booguimageturbo", "boogu_image_turbo"),
+        ("mage_flow", True): (
+            "mageflowedit",
+            "mage_flow_edit_turbo" if "turbo" in canonical else "mage_flow_edit",
+        ),
+        ("mage_flow", False): (
+            "mageflowturbo" if "turbo" in canonical else "mageflow",
+            "mage_flow_turbo" if "turbo" in canonical else "mage_flow",
+        ),
     }
     desired_token, desired_label = desired_tokens[(family, wants_edit_model)]
     candidates = [
@@ -350,6 +364,10 @@ def _switch_image_unet_for_input(
         for item in _list_lazy_unet_models()
         if desired_token in _canonical_model_text(item)
         and ("edit" in _canonical_model_text(item)) == wants_edit_model
+        and (
+            family != "mage_flow"
+            or ("turbo" in _canonical_model_text(item)) == ("turbo" in canonical)
+        )
     ]
     if not candidates:
         raise RuntimeError(
@@ -357,8 +375,29 @@ def _switch_image_unet_for_input(
             "但 diffusion_models / unet_gguf 中未找到对应模型。"
         )
 
-    def candidate_score(candidate: str) -> tuple[int, int]:
+    current_lower = current.replace("\\", "/").lower()
+    quant_tokens = (
+        "int4_convrot_padded",
+        "int4_convrot",
+        "int8_convrot",
+        "nvfp4",
+        "mxfp4",
+        "mxfp8",
+        "fp8_e4m3fn",
+        "fp8_scaled",
+        "fp8",
+        "bf16",
+        "fp16",
+        "gguf",
+    )
+    current_quant = next(
+        (token for token in quant_tokens if token in current_lower),
+        "",
+    )
+
+    def candidate_score(candidate: str) -> tuple[int, int, int]:
         candidate_lower = candidate.replace("\\", "/").lower()
+        same_quant = int(bool(current_quant) and current_quant in candidate_lower)
         if "int4_convrot" in candidate_lower:
             quant_priority = 4
         elif "int8_convrot" in candidate_lower:
@@ -369,7 +408,7 @@ def _switch_image_unet_for_input(
             quant_priority = 1
         else:
             quant_priority = 0
-        return quant_priority, -len(candidate)
+        return same_quant, quant_priority, -len(candidate)
 
     selected = max(candidates, key=candidate_score)
     print(
@@ -873,8 +912,53 @@ def _lazy_preset_for_unet(unet_name: str) -> dict[str, Any]:
     return preset
 
 
+def _model_matches_preset_expression(model_name: Any, expression: Any) -> bool:
+    terms = [
+        part.strip()
+        for part in str(expression or "").split("+")
+        if part.strip()
+    ]
+    if not terms:
+        return False
+    model_canonical = _canonical_model_text(model_name)
+    model_family = _canonical_model_text(
+        gjjutils_model_stem_without_quant(str(model_name or ""))
+    )
+    return all(
+        (
+            (term_canonical := _canonical_model_text(term)) in model_canonical
+            or (
+                (term_family := _canonical_model_text(
+                    gjjutils_model_stem_without_quant(term)
+                ))
+                and term_family in model_family
+            )
+        )
+        for term in terms
+    )
+
+
+def _require_legal_preset_model(
+    family_id: str,
+    model_kind: str,
+    model_name: str,
+    expression: str,
+) -> str:
+    if model_name and _model_matches_preset_expression(model_name, expression):
+        return model_name
+    raise RuntimeError(
+        f"模型族 {family_id or '(未识别)'} 的 {model_kind} 配套解析失败："
+        f"需要匹配关键词“{expression or '(未配置)'}”，"
+        f"实际解析为“{model_name or '(空)'}”。"
+    )
+
+
 def _resolve_lazy_test_model_pair(unet_name: str) -> tuple[dict[str, Any], str, str]:
     preset = _lazy_preset_for_unet(unet_name)
+    if str(preset.get("id", "")) == "generic":
+        raise RuntimeError(
+            f"主模型 {unet_name} 未匹配任何模型族预设，不能执行合法配套测试。"
+        )
     clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
     vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
     clip_names = resolve_clip_names_for_preset(
@@ -883,12 +967,25 @@ def _resolve_lazy_test_model_pair(unet_name: str) -> tuple[dict[str, Any], str, 
         exposed_clip_name="",
         legacy_clip_names=[],
     )
-    if not clip_names:
-        clip_names.append(_pick_available_name("", clip_models, DEFAULT_CLIP_NAME))
+    preset_clip_names = list(preset.get("clip_names", []))
+    for index, expression in enumerate(preset_clip_names):
+        resolved = str(clip_names[index] if index < len(clip_names) else "")
+        _require_legal_preset_model(
+            str(preset.get("id", "")),
+            f"CLIP {index + 1}",
+            resolved,
+            str(expression),
+        )
     vae_name = _pick_available_name(
-        preset.get("vae_name", DEFAULT_VAE_NAME),
+        preset.get("vae_name", ""),
         vae_models,
-        DEFAULT_VAE_NAME,
+        "",
+    )
+    _require_legal_preset_model(
+        str(preset.get("id", "")),
+        "VAE",
+        str(vae_name or ""),
+        str(preset.get("vae_name", "")),
     )
     selected_clip_name = str(clip_names[0] if clip_names else "")
     if (
@@ -1035,6 +1132,7 @@ def _clip_type_enum(name: str):
     aliases = {
         "krea": "krea2",
         "krea2turbo": "krea2",
+        "mage_flow": "mage",
     }
     enum_key = aliases.get(normalized, normalized)
     enum_name = enum_key.upper()
@@ -1763,7 +1861,7 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
     try:
         if normalized_type == "boogu":
             clip = _load_boogu_clip_compatible(clip_paths, "default", "default")
-        elif normalized_type == "mage_flow":
+        elif normalized_type in {"mage", "mage_flow"}:
             clip = comfy.sd.load_clip(
                 ckpt_paths=clip_paths,
                 embedding_directory=embedding_directory,
@@ -3606,6 +3704,14 @@ class GJJ_LazyImageStudio:
                 test_width = max(8, int(width))
                 test_height = max(8, int(height))
                 test_seed = int(seed)
+                test_family_clip_name = str(clip_name1 or "")
+                test_family_vae_name = str(vae_name or "")
+                if mode != "checkpoint" and not use_checkpoint_model:
+                    (
+                        _test_family_preset,
+                        test_family_clip_name,
+                        test_family_vae_name,
+                    ) = _resolve_lazy_test_model_pair(unet_name)
                 _send_status(unique_id, f"模型测试开始：{len(test_entries)} 项")
                 progress = comfy.utils.ProgressBar(len(test_entries))
                 captioned_images: list[torch.Tensor] = []
@@ -3619,8 +3725,8 @@ class GJJ_LazyImageStudio:
                     try:
                         item_lora_data = lora_data
                         item_unet_name = unet_name
-                        item_clip_name1 = clip_name1
-                        item_vae_name = vae_name
+                        item_clip_name1 = test_family_clip_name
+                        item_vae_name = test_family_vae_name
                         item_steps = steps
                         item_cfg = cfg
                         item_sampler_name = sampler_name
@@ -3842,7 +3948,7 @@ class GJJ_LazyImageStudio:
                 resolved_vae_name = ""
                 resolved_clip_type = "stable_diffusion"
             else:
-                preset_driven_model = bool(unet_name_is_linked and not clip_name_is_linked)
+                preset_driven_model = bool(unet_name_is_linked)
                 exposed_clip_name = "" if preset_driven_model else clip_name1
                 legacy_clip_names = [] if preset_driven_model else [clip_name1]
                 selected_clip_name = (
@@ -3880,6 +3986,10 @@ class GJJ_LazyImageStudio:
                         legacy_clip_names=legacy_clip_names,
                     )
                 if not resolved_clip_names:
+                    if preset_driven_model:
+                        raise RuntimeError(
+                            f"模型族 {preset.get('id', '(未识别)')} 未解析到合法 CLIP。"
+                        )
                     resolved_clip_names.append(
                         _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
                     )
@@ -3887,11 +3997,29 @@ class GJJ_LazyImageStudio:
             # 验证 CLIP 模型是否正确匹配 UNET 模型
             preset_clip_names = preset.get("clip_names", [])
             if (not use_checkpoint_model) and preset_clip_names and resolved_clip_names:
+                if unet_name_is_linked:
+                    for index, expression in enumerate(preset_clip_names):
+                        _require_legal_preset_model(
+                            str(preset.get("id", "")),
+                            f"CLIP {index + 1}",
+                            str(
+                                resolved_clip_names[index]
+                                if index < len(resolved_clip_names)
+                                else ""
+                            ),
+                            str(expression),
+                        )
                 # 检查解析后的 CLIP 名称是否与预设中的推荐名称匹配
                 for i, (resolved, recommended) in enumerate(
                     zip(resolved_clip_names, preset_clip_names)
                 ):
-                    if resolved != recommended and recommended:
+                    if (
+                        recommended
+                        and not _model_matches_preset_expression(
+                            resolved,
+                            recommended,
+                        )
+                    ):
                         # 如果解析的名称与推荐的不一致，发出警告
                         print(f"[GJJ_LazyImageStudio] 警告: CLIP 模型不匹配！")
                         print(f"  UNET: {unet_name}")
@@ -3901,14 +4029,17 @@ class GJJ_LazyImageStudio:
                             f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。"
                         )
             if not use_checkpoint_model:
-                vae_fallback = (
-                    DEFAULT_VAE_NAME
-                    if unet_name_is_linked and not vae_name_is_linked
-                    else vae_name
-                )
+                vae_fallback = "" if unet_name_is_linked else vae_name
                 resolved_vae_name = _pick_available_name(
-                    preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_fallback
+                    preset.get("vae_name", ""), vae_models, vae_fallback
                 )
+                if unet_name_is_linked:
+                    _require_legal_preset_model(
+                        str(preset.get("id", "")),
+                        "VAE",
+                        str(resolved_vae_name or ""),
+                        str(preset.get("vae_name", "")),
+                    )
                 resolved_clip_type = resolve_clip_type(
                     unet_name,
                     resolved_clip_names,
@@ -3930,10 +4061,22 @@ class GJJ_LazyImageStudio:
             is_mage_flow_runtime = (
                 not use_checkpoint_model
                 and (
-                    str(resolved_clip_type or "") == "mage_flow"
+                    str(resolved_clip_type or "") in {"mage", "mage_flow"}
                     or is_mage_flow_name(unet_name)
                 )
             )
+            if is_mage_flow_runtime:
+                mage_is_turbo = "turbo" in _canonical_model_text(unet_name)
+                mage_steps = 4 if mage_is_turbo else 30
+                mage_cfg = 1.0 if mage_is_turbo else 5.0
+                if int(steps) != mage_steps or float(cfg) != mage_cfg:
+                    print(
+                        "[GJJ] LazyImageStudio 按 Mage-Flow 主模型联动采样参数："
+                        f"steps {int(steps)} -> {mage_steps}，"
+                        f"cfg {float(cfg):g} -> {mage_cfg:g}"
+                    )
+                steps = mage_steps
+                cfg = mage_cfg
             input_shapes = [
                 "x".join(str(int(size)) for size in pair["image"].shape)
                 for pair in pairs

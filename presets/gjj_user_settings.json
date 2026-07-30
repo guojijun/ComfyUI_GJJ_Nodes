@@ -172,7 +172,7 @@
     "favorites": []
   },
   "region_crop": {
-    "total_pixels": 180,
+    "total_pixels": 100,
     "align_multiple": 16
   },
   "text_merge": {

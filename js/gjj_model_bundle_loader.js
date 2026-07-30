@@ -112,6 +112,7 @@ const CLIP_TYPE_VALUES = new Set([
 	"newbie",
 	"longcat_image",
 	"boogu",
+	"mage",
 ]);
 const MODEL_IGNORED_TOKENS = new Set([
 	"fp8", "fp16", "fp32", "bf16", "float8", "float16", "float32",
@@ -591,7 +592,7 @@ function ensureState(node) {
 		clipDtypes: ["default", "float16", "bfloat16", "float32"],
 		clipDevices: ["default", "cpu"],
 		vaeDtypes: ["default", "float16", "bfloat16", "float32"],
-		clipTypes: ["stable_diffusion", "flux", "flux2", "qwen_image", "krea2", "wan", "ltx", "ltxv", "hidream", "lumina2", "boogu"],
+		clipTypes: ["stable_diffusion", "flux", "flux2", "qwen_image", "krea2", "wan", "ltx", "ltxv", "hidream", "lumina2", "boogu", "mage"],
 		presets: [],
 		loading: false,
 		loadingPromise: null,
@@ -1245,11 +1246,14 @@ function scoreModelForPreset(modelName, preset) {
 	if (!normalizedModel) return 0;
 	let score = 0;
 	for (const keyword of presetKeywords(preset)) {
-		const normalizedKeyword = normalizeLookupText(keyword);
-		if (!normalizedKeyword || normalizedKeyword.length < 3) continue;
-		if (normalizedModel === normalizedKeyword) score = Math.max(score, 10000 + normalizedKeyword.length);
-		else if (normalizedModel.includes(normalizedKeyword)) score = Math.max(score, 1000 + normalizedKeyword.length);
-		else if (normalizedKeyword.includes(normalizedModel) && normalizedModel.length >= 6) score = Math.max(score, 100 + normalizedModel.length);
+		const terms = String(keyword || "")
+			.split("+")
+			.map(normalizeLookupText)
+			.filter((term) => term.length >= 3);
+		if (!terms.length || !terms.every((term) => normalizedModel.includes(term))) continue;
+		const expressionLength = terms.reduce((total, term) => total + term.length, 0);
+		if (terms.length === 1 && normalizedModel === terms[0]) score = Math.max(score, 10000 + expressionLength);
+		else score = Math.max(score, 1000 + expressionLength);
 	}
 	return score;
 }

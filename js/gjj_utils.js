@@ -1208,9 +1208,31 @@ export class GJJ_Utils {
         return { row, button };
     }
 
-    static _modelTreeChoicePanel(node, entry, widget, onApply, strengthWidget = null) {
+    static _modelTreeChoicePanel(node, entry, widget, onApply, strengthWidget = null, onClose = null) {
         const wrap = document.createElement("div");
-        wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;margin:3px 0 5px 26px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#11181c;";
+        const floating = entry?.floatingChoices === true;
+        wrap.style.cssText = floating
+            ? "position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:100004;display:flex;flex-direction:column;gap:8px;width:min(760px,calc(100vw - 28px));max-height:min(680px,calc(100vh - 28px));padding:10px;box-sizing:border-box;border:1px solid #526872;border-radius:10px;background:#10171b;box-shadow:0 20px 64px rgba(0,0,0,.68);"
+            : "display:flex;flex-direction:column;gap:5px;margin:3px 0 5px 26px;padding:7px;border:1px solid #33454c;border-radius:8px;background:#11181c;";
+        if (floating) {
+            const header = document.createElement("div");
+            header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;flex:0 0 auto;";
+            const title = document.createElement("div");
+            title.textContent = `🟣 选择${entry?.label || entry?.name || "模型"}`;
+            title.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#f2faf7;font-size:14px;font-weight:800;";
+            const close = document.createElement("button");
+            close.type = "button";
+            close.textContent = "×";
+            close.title = "关闭";
+            close.style.cssText = "width:28px;height:26px;flex:0 0 28px;border:1px solid #526872;border-radius:6px;background:#1a2328;color:#dce7e2;cursor:pointer;";
+            close.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onClose?.();
+            });
+            header.append(title, close);
+            wrap.appendChild(header);
+        }
         if (strengthWidget) {
             const strengthRow = document.createElement("label");
             strengthRow.style.cssText = "display:grid;grid-template-columns:52px minmax(0,1fr);gap:6px;align-items:center;color:#b9c9cf;";
@@ -1239,7 +1261,9 @@ export class GJJ_Utils {
         search.value = String(initialSearch || "");
         search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
         const list = document.createElement("div");
-        list.style.cssText = "display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;";
+        list.style.cssText = floating
+            ? "display:flex;flex-direction:column;gap:5px;max-height:min(560px,calc(100vh - 150px));overflow:auto;overscroll-behavior:contain;"
+            : "display:flex;flex-direction:column;gap:4px;max-height:210px;overflow:auto;";
 
         const render = (autoPick = false) => {
             const options = GJJ_Utils._modelTreeFilteredChoices(entry, widget, search.value, 100);
@@ -1306,6 +1330,11 @@ export class GJJ_Utils {
         };
         search.addEventListener("input", () => render(false));
         search.addEventListener("keydown", (event) => {
+            if (event.key === "Escape" && floating) {
+                event.preventDefault();
+                onClose?.();
+                return;
+            }
             if (event.key === "Enter") {
                 event.preventDefault();
                 const first = GJJ_Utils._modelTreeFilteredChoices(entry, widget, search.value, 1)[0];
@@ -1316,6 +1345,11 @@ export class GJJ_Utils {
             }
         });
         wrap.append(search, list);
+        if (floating) {
+            for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "keydown"]) {
+                wrap.addEventListener(eventName, (event) => event.stopPropagation());
+            }
+        }
         render(false);
         setTimeout(() => search.focus(), 0);
         return wrap;
@@ -1334,6 +1368,12 @@ export class GJJ_Utils {
         }
         const host = document.createElement("div");
         let choicePanel = null;
+        const closeChoicePanel = () => {
+            if (!choicePanel) return;
+            choicePanel.remove();
+            choicePanel = null;
+            renderLine();
+        };
         const renderLine = () => {
             const { currentMissing, missing, value } = GJJ_Utils._modelTreeState(entry, widget);
             const filename = missing ? value : GJJ_Utils._modelTreeFilename(value);
@@ -1362,18 +1402,18 @@ export class GJJ_Utils {
             }
             if (!readOnly) button.addEventListener("click", () => {
                 if (choicePanel) {
-                    choicePanel.remove();
-                    choicePanel = null;
-                    renderLine();
+                    closeChoicePanel();
                     return;
                 }
                 choicePanel = GJJ_Utils._modelTreeChoicePanel(node, entry, widget, (nextValue) => {
+                    if (entry?.floatingChoices === true) closeChoicePanel();
                     GJJ_Utils._modelTreeSetWidgetValue(widget, nextValue, entry, node);
                     callbacks.onApply?.(entry, nextValue, widget);
                     callbacks.refresh?.();
                     renderLine();
-                }, strengthWidget);
-                host.appendChild(choicePanel);
+                }, strengthWidget, closeChoicePanel);
+                if (entry?.floatingChoices === true) document.body.appendChild(choicePanel);
+                else host.appendChild(choicePanel);
                 renderLine();
             });
             const existing = host.firstChild;
