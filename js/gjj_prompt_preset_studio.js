@@ -11,6 +11,7 @@ const TOOLBAR_WIDGET_NAME = "gjj_prompt_preset_toolbar";
 const PANEL_WIDGET_NAME = "gjj_prompt_preset_panel";
 const CONFIG_STORE_WIDGET = "配置存储";
 const SECTION_PROPERTY_KEY = "gjj_prompt_preset_section";
+const STYLE_IMAGE_DRAG_MIME = "application/x-gjj-prompt-preset-style-image";
 
 const MIN_NODE_WIDTH = 364;
 const MIN_NODE_HEIGHT = 220;
@@ -1413,6 +1414,7 @@ function buildStyleCard(node, item, selectedSet) {
 	imageFrame.appendChild(image);
 	button.appendChild(imageFrame);
 	button.appendChild(title);
+	setupStyleImageDrag(button, image, node, item);
 	if (isSelected) {
 		const selectedBadge = document.createElement("span");
 		selectedBadge.textContent = "✓";
@@ -1444,6 +1446,241 @@ function buildStyleCard(node, item, selectedSet) {
 	button.style.background = "#121a1f";
 	button.style.boxShadow = "none";
 	return button;
+}
+
+function graphDropPosition(event, fallbackNode = null) {
+	if (app.canvas?.convertEventToCanvasOffset) {
+		try {
+			const point = app.canvas.convertEventToCanvasOffset(event);
+			if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+				return [Math.round(point[0]), Math.round(point[1])];
+			}
+		} catch (_) {}
+	}
+	const canvas = app.canvas?.canvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	const ds = app.canvas?.ds;
+	if (rect && ds) {
+		const scale = Number(ds.scale || 1);
+		const offset = Array.isArray(ds.offset) ? ds.offset : [0, 0];
+		return [
+			Math.round((Number(event.clientX) - rect.left) / Math.max(0.01, scale) - Number(offset[0] || 0)),
+			Math.round((Number(event.clientY) - rect.top) / Math.max(0.01, scale) - Number(offset[1] || 0)),
+		];
+	}
+	return [
+		Math.round(Number(fallbackNode?.pos?.[0] || 0) + Number(fallbackNode?.size?.[0] || 364) + 80),
+		Math.round(Number(fallbackNode?.pos?.[1] || 0)),
+	];
+}
+
+function graphNodeAtDrop(event) {
+	const graph = app.canvas?.graph || app.graph;
+	const point = graphDropPosition(event);
+	if (!graph || !Array.isArray(point)) {
+		return null;
+	}
+	if (typeof graph.getNodeOnPos === "function") {
+		return graph.getNodeOnPos(point[0], point[1], app.canvas?.visible_nodes) || null;
+	}
+	const nodes = Array.isArray(graph?._nodes) ? [...graph._nodes].reverse() : [];
+	return nodes.find((node) => {
+		const x = Number(node?.pos?.[0] || 0);
+		const y = Number(node?.pos?.[1] || 0);
+		const width = Number(node?.size?.[0] || 0);
+		const height = Number(node?.size?.[1] || 0);
+		return point[0] >= x && point[0] <= x + width && point[1] >= y && point[1] <= y + height;
+	}) || null;
+}
+
+function styleImageFilename(item, blob) {
+	const url = normalizeText(item?.thumbnail);
+	let extension = "";
+	try {
+		extension = new URL(url, window.location.href).pathname.match(/\.[a-z0-9]{2,5}$/i)?.[0] || "";
+	} catch (_) {}
+	if (!extension) {
+		const mimeExtension = {
+			"image/jpeg": ".jpg",
+			"image/png": ".png",
+			"image/webp": ".webp",
+			"image/gif": ".gif",
+		};
+		extension = mimeExtension[blob?.type] || ".png";
+	}
+	const stem = normalizeText(item?.name || item?.name_cn || "style")
+		.replace(/[^a-z0-9\u4e00-\u9fff_-]+/gi, "_")
+		.replace(/^_+|_+$/g, "")
+		.slice(0, 80) || "style";
+	return `gjj_prompt_preset_${stem}${extension}`;
+}
+
+async function uploadStyleImage(item) {
+	const url = normalizeText(item?.thumbnail);
+	if (!url) {
+		throw new Error("该风格没有可用的预览图");
+	}
+	const imageResponse = await fetch(url, { credentials: "same-origin" });
+	if (!imageResponse.ok) {
+		throw new Error(`下载预览图失败（HTTP ${imageResponse.status}）`);
+	}
+	const blob = await imageResponse.blob();
+	if (!String(blob.type || "").startsWith("image/")) {
+		throw new Error("预览地址返回的不是图片");
+	}
+	const filename = styleImageFilename(item, blob);
+	let lastError = null;
+	for (const endpoint of ["/upload/image", "/api/upload/image"]) {
+		const form = new FormData();
+		form.append("image", new File([blob], filename, { type: blob.type || "image/png" }), filename);
+		form.append("type", "input");
+		form.append("overwrite", "true");
+		try {
+			const response = await (api?.fetchApi
+				? api.fetchApi(endpoint, { method: "POST", body: form })
+				: fetch(endpoint, { method: "POST", body: form }));
+			if (!response.ok) {
+				lastError = new Error(`上传图片失败（HTTP ${response.status}）`);
+				continue;
+			}
+			const data = await response.json().catch(() => ({}));
+			return {
+				filename: normalizeText(data?.name || data?.filename || filename).replace(/\\/g, "/"),
+				subfolder: normalizeText(data?.subfolder).replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""),
+			};
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError || new Error("图片上传失败");
+}
+
+function setLoadImageValue(imageNode, uploaded) {
+	const widget = imageNode?.widgets?.find((entry) => entry?.name === "image");
+	if (!widget) {
+		throw new Error("LoadImage 节点缺少 image 控件");
+	}
+	const value = uploaded.subfolder && !uploaded.filename.startsWith(`${uploaded.subfolder}/`)
+		? `${uploaded.subfolder}/${uploaded.filename}`
+		: uploaded.filename;
+	if (Array.isArray(widget.options?.values) && !widget.options.values.includes(value)) {
+		widget.options.values = [value, ...widget.options.values];
+	}
+	widget.value = value;
+	if (widget.inputEl && "value" in widget.inputEl) {
+		widget.inputEl.value = value;
+	}
+	widget.callback?.(value);
+}
+
+async function createLoadImageFromStyle(item, event, sourceNode) {
+	const uploaded = await uploadStyleImage(item);
+	const graph = app.canvas?.graph || app.graph;
+	const imageNode = globalThis.LiteGraph?.createNode?.("LoadImage");
+	if (!graph?.add || !imageNode) {
+		throw new Error("无法创建 LoadImage 节点");
+	}
+	graph.add(imageNode);
+	try {
+		imageNode.title = normalizeText(item?.name_cn || item?.name || "风格参考图");
+		imageNode.pos = graphDropPosition(event, sourceNode);
+		setLoadImageValue(imageNode, uploaded);
+		app.canvas?.selectNode?.(imageNode, false);
+		imageNode.setDirtyCanvas?.(true, true);
+		graph.change?.();
+		graph.setDirtyCanvas?.(true, true);
+		app.canvas?.setDirty?.(true, true);
+	} catch (error) {
+		graph.remove?.(imageNode);
+		throw error;
+	}
+}
+
+async function applyStyleImageDrop(item, event, sourceNode) {
+	const targetNode = graphNodeAtDrop(event);
+	const targetType = String(targetNode?.comfyClass || targetNode?.type || "");
+	if (targetType === "LoadImage") {
+		const uploaded = await uploadStyleImage(item);
+		setLoadImageValue(targetNode, uploaded);
+		targetNode.setDirtyCanvas?.(true, true);
+		(app.canvas?.graph || app.graph)?.change?.();
+		app.canvas?.setDirty?.(true, true);
+		return;
+	}
+	await createLoadImageFromStyle(item, event, sourceNode);
+}
+
+function setupStyleImageDrag(button, image, node, item) {
+	const thumbnail = normalizeText(item?.thumbnail);
+	if (!thumbnail) {
+		return;
+	}
+	button.draggable = true;
+	image.draggable = true;
+	button.title = `${normalizeText(item?.name_cn || item?.name)}；可拖到画布创建 LoadImage，或拖到 LoadImage / GJJ_MultiImageLoader`;
+	const onDragStart = (event) => {
+		event.stopPropagation();
+		if (!event.dataTransfer) {
+			return;
+		}
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(STYLE_IMAGE_DRAG_MIME, JSON.stringify({
+			item,
+			nodeId: node?.id ?? null,
+		}));
+		event.dataTransfer.setData("text/uri-list", thumbnail);
+		event.dataTransfer.setData("text/plain", thumbnail);
+		try {
+			event.dataTransfer.setDragImage(image, Math.min(48, image.width / 2 || 24), Math.min(48, image.height / 2 || 24));
+		} catch (_) {}
+	};
+	button.addEventListener("dragstart", onDragStart);
+	image.addEventListener("dragstart", onDragStart);
+}
+
+function ensureStyleImageDropHandler() {
+	if (window.__gjjPromptPresetStyleImageDropHandler) {
+		return;
+	}
+	window.__gjjPromptPresetStyleImageDropHandler = true;
+	const hasStyleImage = (transfer) => Array.from(transfer?.types || []).includes(STYLE_IMAGE_DRAG_MIME);
+	const isCanvasTarget = (event) => {
+		const target = event?.target;
+		const canvas = app.canvas?.canvas;
+		return !target
+			|| target === document
+			|| target === document.body
+			|| target === canvas
+			|| target instanceof HTMLCanvasElement;
+	};
+	document.addEventListener("dragover", (event) => {
+		if (!hasStyleImage(event.dataTransfer) || !isCanvasTarget(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.dataTransfer.dropEffect = "copy";
+	}, true);
+	document.addEventListener("drop", (event) => {
+		const raw = event.dataTransfer?.getData?.(STYLE_IMAGE_DRAG_MIME);
+		if (!raw || !isCanvasTarget(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		let payload = null;
+		try {
+			payload = JSON.parse(raw);
+		} catch (_) {}
+		if (!payload?.item?.thumbnail) {
+			return;
+		}
+		const graph = app.canvas?.graph || app.graph;
+		const sourceNode = payload.nodeId != null ? graph?.getNodeById?.(payload.nodeId) : null;
+		applyStyleImageDrop(payload.item, event, sourceNode).catch((error) => {
+			console.warn("[GJJ PromptPresetStudio] 拖拽写入图片节点失败。", error);
+			window.alert?.(`拖拽图片失败：${error?.message || error}`);
+		});
+	}, true);
 }
 
 function updateStylePanelContents(node) {
@@ -1813,6 +2050,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		ensureStyleImageDropHandler();
 		loadSchema();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass || node?.type)) {

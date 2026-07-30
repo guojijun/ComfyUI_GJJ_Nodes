@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+krea2_style_reference	krea2_style_reference	Krea2风格迁移		1.0	让你以参考图像的风格推断Krea2 Turbo模型。它通过AI Toolkit和实验性的Krea2参考图像训练器和Turbo训练适配器进行训练。它是基于多年来手工挑选的成千上万对风格对的训练。它被训练为处理1-2张参考图像。	https://huggingface.co/ostris/krea2_turbo_style_reference
 Best_FaceID_v1.0_LoRA	Best_FaceID_v1.0_LoRA	人物身份参考	ref_t2v	1.0	保身份视频引用LoRA。给它一个参考 照片 + 文本提示，生成一个保持该人身份的视频。	https://huggingface.co/Alissonerdx/LTX-Best-Face-ID
 Best_FaceID_CharacterSheet	Best_FaceID_CharacterSheet	角色资产参考	ref_t2v	1.0	保身份视频引用LoRA。给它一个参考 照片 + 文本提示，生成一个保持该人身份的视频。	https://huggingface.co/Alissonerdx/LTX-Best-Face-ID
 LTX_2.3_Cinematic_Sci-fi-Cyberpunk_Style_LoRa	LTX_2.3_Cinematic_Sci-fi-Cyberpunk_Style_LoRa	赛博朋克科幻风格	C6b4rP8nk	1.0	营造出一种赛博朋克新黑色电影的视觉效果。它专为现实科幻风格的生成设计，融合了浓郁的城市氛围、霓虹灯闪烁的环境、高科技界面以及充满写实感的未来角色场景。它特别适合文本转视频生成。制作样视频的工作流程可以在这里找到。只需替换LoRA和提示词即可。所有示例视频均为文本转视频。不是图片转视频。这种风格中的角色常以黑客、士兵、商贩、旅行者以及受黑色电影启发的人物出现在密集的未来城市空间中穿梭。视觉识别强调湿润反光路面、雨痕斑斑的车窗、浓雾、烟雾、蒸汽、发光的青绿色界面元素、青橙色灯光、品红色霓虹招牌和高对比度阴影。等等。	https://huggingface.co/vrgamedevgirl84/LTX_2.3_Cinematic_Sci-fi-Cyberpunk_Style_LoRa

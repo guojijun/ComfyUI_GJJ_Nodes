@@ -183,6 +183,8 @@ QWEN_IMAGE_EDIT_LLAMA_TEMPLATE = (
 )
 QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES = 3
+KREA2_STYLE_REFERENCE_LORA_STEM = "krea2_style_reference"
+KREA2_STYLE_REFERENCE_WORKFLOW_VERSION = 10
 
 register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
@@ -796,6 +798,45 @@ def _configured_krea2_edit_lora_strength(*values: Any) -> float:
             except (TypeError, ValueError):
                 resolved = 1.0
     return 1.0 if resolved is None else resolved
+
+
+def _has_enabled_lora(lora_stem: str, *values: Any) -> bool:
+    expected_stem = Path(str(lora_stem or "")).stem.casefold()
+    if not expected_stem:
+        return False
+    for value in values:
+        if not str(value or "").strip():
+            continue
+        try:
+            rows = json.loads(normalize_lora_chain_data(value))
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or row.get("enabled", True) is False:
+                continue
+            row_stem = Path(
+                str(row.get("name", "")).replace("\\", "/")
+            ).stem.casefold()
+            try:
+                strength = float(row.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            if row_stem == expected_stem and abs(strength) > 1e-6:
+                return True
+    return False
+
+
+def _is_empty_lora_config(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or text.casefold() in {"null", "none"}:
+        return True
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return False
+    return isinstance(parsed, list) and not parsed
 
 
 def _is_empty_scene_prompt(value: Any) -> bool:
@@ -2874,6 +2915,51 @@ class GJJ_LazyImageStudio:
                     clip_type,
                     final_lora_data,
                 )
+            elif _has_enabled_lora(
+                KREA2_STYLE_REFERENCE_LORA_STEM,
+                final_lora_data,
+            ):
+                for row in effective_lora_rows:
+                    lora_name = clean_lora_config_name(row.get("name", ""))
+                    try:
+                        strength = float(row.get("strength", 1.0))
+                    except (TypeError, ValueError):
+                        strength = 1.0
+                    if abs(strength) < 1e-5:
+                        continue
+                    if (
+                        Path(lora_name.replace("\\", "/")).stem.casefold()
+                        == KREA2_STYLE_REFERENCE_LORA_STEM.casefold()
+                    ):
+                        try:
+                            from nodes import LoraLoaderModelOnly
+
+                            current_model = LoraLoaderModelOnly().load_lora_model_only(
+                                current_model,
+                                lora_name,
+                                strength,
+                            )[0]
+                        except Exception:
+                            lora_state = self._load_lora_state(lora_name)
+                            current_model, _ = comfy.sd.load_lora_for_models(
+                                current_model,
+                                None,
+                                lora_state,
+                                strength,
+                                0.0,
+                            )
+                        print(
+                            "[GJJ] LazyImageStudio Krea2 Style Reference "
+                            f"按源工作流仅应用到 MODEL：{lora_name} ({strength:g})"
+                        )
+                        continue
+                    single_lora_data = json.dumps([row], ensure_ascii=False)
+                    current_model, current_clip, _ = apply_lora_chain_config(
+                        current_model,
+                        current_clip,
+                        lora_data=single_lora_data,
+                        loaded_lora_cache=None,
+                    )
             else:
                 current_model, current_clip, _ = apply_lora_chain_config(
                     current_model,
@@ -3154,6 +3240,122 @@ class GJJ_LazyImageStudio:
             max(1, int(batch_size)),
         )
         return patched_model, positive, negative, latent_out
+
+    def _encode_krea2_style_reference(
+        self,
+        clip,
+        vae,
+        prompt: str,
+        pairs: list[dict[str, Any]],
+        width: int,
+        height: int,
+        batch_size: int,
+    ):
+        reference_images = [
+            pair["image"]
+            for pair in pairs[:QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES]
+            if isinstance(pair.get("image"), torch.Tensor)
+        ]
+        if not reference_images:
+            raise RuntimeError("Krea2 Style Reference 分支至少需要一张有效参考图。")
+        if len(pairs) > QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES:
+            print(
+                f"[GJJ_LazyImageStudio] Krea2 Style Reference 最多支持 "
+                f"{QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES} 张参考图，当前收到 {len(pairs)} 张，"
+                f"仅使用主图优先排序后的前 {QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES} 张。"
+            )
+
+        try:
+            from comfy_extras.nodes_qwen import TextEncodeQwenImageEditPlus
+        except ImportError:
+            from comfy_extras.nodes_qwen_image import TextEncodeQwenImageEditPlus
+        from comfy_extras.nodes_flux import FluxKontextMultiReferenceLatentMethod
+        from nodes import ConditioningZeroOut
+
+        image_inputs = reference_images + [None] * (
+            QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES - len(reference_images)
+        )
+        if hasattr(TextEncodeQwenImageEditPlus, "execute"):
+            encoded = TextEncodeQwenImageEditPlus.execute(
+                clip=clip,
+                vae=vae,
+                prompt=str(prompt or ""),
+                image1=image_inputs[0],
+                image2=image_inputs[1],
+                image3=image_inputs[2],
+            )
+        else:
+            encoded = TextEncodeQwenImageEditPlus().encode(
+                clip=clip,
+                vae=vae,
+                prompt=str(prompt or ""),
+                image1=image_inputs[0],
+                image2=image_inputs[1],
+                image3=image_inputs[2],
+            )
+        encoded_args = getattr(encoded, "args", encoded)
+        positive = encoded_args[0]
+
+        method_node = FluxKontextMultiReferenceLatentMethod
+        if hasattr(method_node, "execute"):
+            method_result = method_node.execute(
+                conditioning=positive,
+                reference_latents_method="index_timestep_zero",
+            )
+        else:
+            method_result = method_node().append(
+                conditioning=positive,
+                reference_latents_method="index_timestep_zero",
+            )
+        method_args = getattr(method_result, "args", method_result)
+        positive = method_args[0]
+        negative = ConditioningZeroOut().zero_out(positive)[0]
+        latent_out = EmptyLatentImage().generate(
+            1024,
+            1024,
+            max(1, int(batch_size)),
+        )[0]
+        return positive, negative, latent_out
+
+    def _sample_krea2_style_reference_workflow(
+        self,
+        model,
+        positive,
+        negative,
+        latent_out,
+        seed: int,
+    ):
+        from comfy_extras.nodes_custom_sampler import (
+            BasicScheduler,
+            CFGGuider as OfficialCFGGuider,
+            KSamplerSelect as OfficialKSamplerSelect,
+            RandomNoise as OfficialRandomNoise,
+            SamplerCustomAdvanced as OfficialSamplerCustomAdvanced,
+        )
+
+        def output_args(value):
+            args = getattr(value, "args", value)
+            return args if isinstance(args, (tuple, list)) else (args,)
+
+        noise = output_args(OfficialRandomNoise().get_noise(int(seed)))[0]
+        guider = output_args(
+            OfficialCFGGuider().get_guider(model, positive, negative, 1.0)
+        )[0]
+        sampler = output_args(
+            OfficialKSamplerSelect().get_sampler("euler")
+        )[0]
+        sigmas = output_args(
+            BasicScheduler().get_sigmas(model, "simple", 8, 1.0)
+        )[0]
+        return output_args(
+            OfficialSamplerCustomAdvanced().sample(
+                noise,
+                guider,
+                sampler,
+                sigmas,
+                latent_out,
+            )
+        )[0]
 
     def _rewrite_qwen_image_references(self, prompt: str, image_count: int = QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES) -> str:
         text = str(prompt or "")
@@ -3523,7 +3725,8 @@ class GJJ_LazyImageStudio:
         **kwargs,
     ):
         global_prompt = str(_unwrap_list_input(kwargs.pop("global_prompt", "")) or "").strip()
-        prompt_items = _prompt_batch_items(prompt)
+        raw_prompt_items = _prompt_batch_items(prompt)
+        prompt_items = list(raw_prompt_items)
         if global_prompt:
             prompt_items = [
                 f"{global_prompt}, {item}" if str(item or "").strip() else global_prompt
@@ -3618,7 +3821,7 @@ class GJJ_LazyImageStudio:
                         for n in nodes:
                             if isinstance(n, dict) and str(n.get("id")) == uid:
                                 props = n.get("properties", {}) or {}
-                                if not str(lora_data or "").strip():
+                                if _is_empty_lora_config(lora_data):
                                     lora_data = str(props.get("lora_data", ""))
                                 if not str(ckpt_name or "").strip():
                                     ckpt_name = str(props.get("ckpt_name", ""))
@@ -3658,6 +3861,22 @@ class GJJ_LazyImageStudio:
                     f"已自动切换 UNET：{unet_name}",
                 )
         active_model_name = str(ckpt_name or "").strip() if use_checkpoint_model else str(unet_name or "").strip()
+        krea2_style_lora_selected = _has_enabled_lora(
+            KREA2_STYLE_REFERENCE_LORA_STEM,
+            lora_data,
+            lora_chain_config,
+        )
+        if (
+            krea2_style_lora_selected
+            and _is_krea2_family(unet_name)
+        ):
+            prompt_items = list(raw_prompt_items)
+            prompt = prompt_items[0] if prompt_items else ""
+            if global_prompt:
+                print(
+                    "[GJJ] LazyImageStudio Krea2 Style Reference 按源工作流 "
+                    "不向 TextEncodeQwenImageEditPlus 前置全局提示词。"
+                )
 
         lora_trigger_text = self._lora_trigger_text(lora_data, lora_chain_config)
         if lora_trigger_text:
@@ -3993,7 +4212,6 @@ class GJJ_LazyImageStudio:
                     resolved_clip_names.append(
                         _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
                     )
-
             # 验证 CLIP 模型是否正确匹配 UNET 模型
             preset_clip_names = preset.get("clip_names", [])
             if (not use_checkpoint_model) and preset_clip_names and resolved_clip_names:
@@ -4091,6 +4309,18 @@ class GJJ_LazyImageStudio:
                 resolved_clip_type,
                 preset,
             )
+            is_krea2_style_reference = (
+                is_krea2_runtime
+                and krea2_style_lora_selected
+            )
+            if is_krea2_style_reference:
+                width = 1024
+                height = 1024
+                steps = 8
+                cfg = 1.0
+                sampler_name = "euler"
+                scheduler = "simple"
+                denoise = 1.0
             krea2_edit_lora_strength = 1.0
             if is_krea2_runtime:
                 krea2_edit_lora_strength = _configured_krea2_edit_lora_strength(
@@ -4104,7 +4334,7 @@ class GJJ_LazyImageStudio:
                     unique_id,
                     "Krea2 未收到参考图：切换为文生图，并跳过身份编辑 LoRA。",
                 )
-            if use_input_image_size and pairs:
+            if use_input_image_size and pairs and not is_krea2_style_reference:
                 first_image = pairs[0].get("image")
                 if isinstance(first_image, torch.Tensor) and first_image.ndim >= 3:
                     input_width = _ceil_to_multiple(int(first_image.shape[2]), 8)
@@ -4142,6 +4372,11 @@ class GJJ_LazyImageStudio:
                     "cfg_norm_strength": float(preset.get("cfg_norm_strength", 0.0)),
                     "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                     "optimization": optimization_params,
+                    "krea2_style_reference_workflow_version": (
+                        KREA2_STYLE_REFERENCE_WORKFLOW_VERSION
+                        if is_krea2_style_reference
+                        else 0
+                    ),
                 }
             )
             effective_steps_for_cache = _resolve_effective_steps(int(steps), preset)
@@ -4168,6 +4403,12 @@ class GJJ_LazyImageStudio:
                     "use_input_image_size": bool(use_input_image_size),
                     "pairs": _pairs_signature(pairs),
                     "krea2_edit_lora_strength": float(krea2_edit_lora_strength),
+                    "krea2_style_reference": bool(is_krea2_style_reference),
+                    "krea2_style_reference_workflow_version": (
+                        KREA2_STYLE_REFERENCE_WORKFLOW_VERSION
+                        if is_krea2_style_reference
+                        else 0
+                    ),
                     "mask": _tensor_signature(mask) if mask is not None else "",
                     "device_preference": str(device_preference or DEFAULT_DEVICE_PREFERENCE),
                 }
@@ -4277,6 +4518,7 @@ class GJJ_LazyImageStudio:
                 )
                 flux2_sample_size = None
                 krea2_reference_sample = False
+                krea2_style_reference_sample = False
                 krea2_patched_model = None
                 boogu_turbo_sample = False
                 effective_negative_prompt = (
@@ -4351,6 +4593,28 @@ class GJJ_LazyImageStudio:
                     local_width = int(boogu_width)
                     local_height = int(boogu_height)
                     boogu_turbo_sample = True
+                elif task_pairs and is_krea2_style_reference:
+                    ordered_krea2_pairs = _reorder_pairs_by_main_index(
+                        task_pairs, int(main_image_index)
+                    )
+                    _send_status(
+                        unique_id,
+                        f"4/6 按 Krea2 Style Reference 工作流编码{status_suffix}"
+                        f"（image1-image{min(len(ordered_krea2_pairs), QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES)}，"
+                        "最多三张参考图）...",
+                    )
+                    positive, negative, latent_out = (
+                        self._encode_krea2_style_reference(
+                            clip=clip,
+                            vae=vae,
+                            prompt=prompt_text,
+                            pairs=ordered_krea2_pairs,
+                            width=local_width,
+                            height=local_height,
+                            batch_size=int(batch_size),
+                        )
+                    )
+                    krea2_style_reference_sample = True
                 elif task_pairs and _is_krea2_family(unet_name, resolved_clip_type, preset):
                     ordered_krea2_pairs = _reorder_pairs_by_main_index(
                         task_pairs, int(main_image_index)
@@ -4480,6 +4744,16 @@ class GJJ_LazyImageStudio:
                         max_shift=1.15,
                         base_shift=0.5,
                     )
+                elif krea2_style_reference_sample:
+                    from comfy_extras.nodes_model_advanced import ModelSamplingFlux
+
+                    sample_model = ModelSamplingFlux().patch(
+                        sample_model,
+                        max_shift=1.15,
+                        base_shift=0.5,
+                        width=int(local_width),
+                        height=int(local_height),
+                    )[0]
                 if is_ltx_runtime:
                     _send_status(unique_id, f"5/6 应用 LTX NAG 引导{status_suffix}...")
                     nag_conditioning = self._encode_text_conditioning(
@@ -4530,6 +4804,19 @@ class GJJ_LazyImageStudio:
                         seed=sample_seed,
                         cfg=float(cfg),
                         sampler_name="heun",
+                    )
+                elif krea2_style_reference_sample:
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Krea2 Style Reference 工作流采样{status_suffix}"
+                        "（原生 SamplerCustomAdvanced，CFG=1）...",
+                    )
+                    sampled_latent = self._sample_krea2_style_reference_workflow(
+                        model=sample_model,
+                        positive=positive,
+                        negative=negative,
+                        latent_out=latent_out,
+                        seed=sample_seed,
                     )
                 elif krea2_reference_sample:
                     _send_status(

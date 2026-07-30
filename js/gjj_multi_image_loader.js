@@ -15,6 +15,7 @@ const THUMB_API_PATH = "/gjj/input_image_thumb";
 const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
 const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
+const GJJ_PROMPT_STYLE_IMAGE_DRAG_MIME = "application/x-gjj-prompt-preset-style-image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
@@ -830,6 +831,45 @@ function draggedImageRefsFromDropEvent(event) {
 
 function hasDraggedImageRefs(event) {
 	return Array.from(event?.dataTransfer?.types || []).includes(GJJ_MULTI_IMAGE_DRAG_MIME);
+}
+
+function draggedPromptStyleFromDropEvent(event) {
+	if (!Array.from(event?.dataTransfer?.types || []).includes(GJJ_PROMPT_STYLE_IMAGE_DRAG_MIME)) {
+		return null;
+	}
+	try {
+		const payload = JSON.parse(event.dataTransfer.getData(GJJ_PROMPT_STYLE_IMAGE_DRAG_MIME) || "null");
+		return payload?.item?.thumbnail ? payload.item : null;
+	} catch (_) {
+		return null;
+	}
+}
+
+async function promptStyleImageFile(item) {
+	const url = String(item?.thumbnail || "").trim();
+	if (!url) {
+		throw new Error("风格图片地址为空");
+	}
+	const response = await fetch(url, { credentials: "same-origin" });
+	if (!response.ok) {
+		throw new Error(`下载风格图片失败：HTTP ${response.status}`);
+	}
+	const blob = await response.blob();
+	if (!String(blob.type || "").startsWith("image/")) {
+		throw new Error("风格预览不是有效图片");
+	}
+	let extension = "";
+	try {
+		extension = new URL(url, window.location.href).pathname.match(/\.[a-z0-9]{2,5}$/i)?.[0] || "";
+	} catch (_) {}
+	if (!extension) {
+		extension = blob.type === "image/jpeg" ? ".jpg" : blob.type === "image/webp" ? ".webp" : ".png";
+	}
+	const stem = String(item?.name || item?.name_cn || "style")
+		.replace(/[^a-z0-9\u4e00-\u9fff_-]+/gi, "_")
+		.replace(/^_+|_+$/g, "")
+		.slice(0, 80) || "style";
+	return new File([blob], `gjj_prompt_preset_${stem}${extension}`, { type: blob.type || "image/png" });
 }
 
 async function uploadFilesToTemp(node, files) {
@@ -1712,6 +1752,26 @@ function moveSelectionItem(node, fromIndex, toIndex) {
 	scheduleLayout(node);
 }
 
+function replaceSelectionItem(node, index, rawItem) {
+	const state = ensureState(node);
+	if (index < 0 || index >= state.selection.length) {
+		return false;
+	}
+	const item = normalizeInputImageItem(rawItem);
+	if (!item.filename) {
+		return false;
+	}
+	state.selection[index] = item;
+	enrichSelectionWithOptions(state);
+	syncDataWidget(node);
+	ensureOutputs(node, totalImageCount(node));
+	renderBrowser(node);
+	renderPreview(node);
+	updateSummary(node);
+	scheduleLayout(node);
+	return true;
+}
+
 function applyThumbnailSize(node) {
 	const state = ensureState(node);
 	const size = Math.max(MIN_THUMB_SIZE, Math.min(MAX_THUMB_SIZE, Number(state.thumbSize || DEFAULT_THUMB_SIZE)));
@@ -1788,6 +1848,13 @@ function renderPreview(node) {
 			card.style.outline = "none";
 		});
 		card.addEventListener("dragover", (event) => {
+			if (draggedPromptStyleFromDropEvent(event)) {
+				event.preventDefault();
+				event.stopPropagation();
+				event.dataTransfer.dropEffect = "copy";
+				card.style.outline = "2px solid rgba(56, 189, 248, 0.95)";
+				return;
+			}
 			if (hasExternalPreview || state.dragIndex == null) {
 				return;
 			}
@@ -1799,6 +1866,32 @@ function renderPreview(node) {
 			card.style.outline = "none";
 		});
 		card.addEventListener("drop", (event) => {
+			const styleItem = draggedPromptStyleFromDropEvent(event);
+			if (styleItem) {
+				event.preventDefault();
+				event.stopPropagation();
+				card.style.outline = "none";
+				void (async () => {
+					setDropTargetActive(nodeRef, true, `正在替换第 ${index + 1} 张...`);
+					try {
+						const file = await promptStyleImageFile(styleItem);
+						const [uploaded] = await uploadFilesToTemp(nodeRef, [file]);
+						if (!uploaded || !replaceSelectionItem(nodeRef, index, uploaded)) {
+							throw new Error("替换图片失败");
+						}
+						if (nodeRef.__gjjMultiImageSummary) {
+							nodeRef.__gjjMultiImageSummary.textContent = `已替换第 ${index + 1} 张`;
+						}
+						setDropTargetActive(nodeRef, false);
+					} catch (error) {
+						console.warn("[GJJ_MultiImageLoader] style image replace failed", error);
+						setDropTargetActive(nodeRef, true, error?.message || "替换图片失败");
+						setTimeout(() => setDropTargetActive(nodeRef, false), 1300);
+					}
+					requestRedraw(nodeRef);
+				})();
+				return;
+			}
 			if (hasExternalPreview) {
 				return;
 			}
@@ -2237,6 +2330,7 @@ function installDropTarget(node, elements) {
 		imageFilesFromDropEvent(event).length > 0
 		|| Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"))
 		|| hasDraggedImageRefs(event)
+		|| Boolean(draggedPromptStyleFromDropEvent(event))
 	);
 	const protect = (event) => {
 		if (ensureState(node).dragIndex != null) {
@@ -2269,6 +2363,20 @@ function installDropTarget(node, elements) {
 		target.addEventListener("drop", (event) => {
 			if (!protect(event)) return;
 			dragDepth = 0;
+			const styleItem = draggedPromptStyleFromDropEvent(event);
+			if (styleItem) {
+				void (async () => {
+					try {
+						const file = await promptStyleImageFile(styleItem);
+						await importDroppedFiles(node, [file]);
+					} catch (error) {
+						console.warn("[GJJ_MultiImageLoader] style image drop failed", error);
+						setDropTargetActive(node, true, error?.message || "拖入风格图片失败");
+						setTimeout(() => setDropTargetActive(node, false), 1300);
+					}
+				})();
+				return;
+			}
 			const refs = draggedImageRefsFromDropEvent(event);
 			if (refs.length) {
 				importDraggedImageRefs(node, refs);

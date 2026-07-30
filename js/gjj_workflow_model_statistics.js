@@ -197,6 +197,30 @@ function collectWorkflowModels() {
 				});
 			}
 		}
+		if (graphNode?.type === "GJJ_ModelBundleLoader") {
+			let activeEntries = [];
+			try {
+				const provider = graphNode.__gjjHelpModelEntries
+					|| graphNode.__gjjHelpModelTreeEntries
+					|| graphNode.__gjjModelHelpEntries;
+				activeEntries = typeof provider === "function" ? provider.call(graphNode) : [];
+			} catch (error) {
+				console.warn("[GJJ WorkflowModelStatistics] 读取智能批量模型加载器当前模型失败：", error);
+			}
+			for (const entry of Array.isArray(activeEntries) ? activeEntries : []) {
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: String(entry?.kind || "").trim().toLowerCase() || "auto",
+					name: String(entry?.value || entry?.name || ""),
+					folder: String(entry?.folder || "").replace(/^models[\\/]/i, ""),
+				});
+			}
+			// 此节点会持久化模板默认值、旧选择和关闭的可选模型。只统计
+			// 帮助面板提供的当前生效清单，避免把这些备用值误判为已加载模型。
+			continue;
+		}
 		if (graphNode?.type === "GJJ_VideoUniversalModelLoader") {
 			let activeEntries = [];
 			try {
