@@ -331,6 +331,17 @@ function createPanel(node) {
 	root.append(toolbar, content);
 
 	const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+	const formatSize = (sizeBytes) => {
+		let value = Math.max(0, Number(sizeBytes) || 0);
+		const units = ["B", "KB", "MB", "GB", "TB"];
+		for (const unit of units) {
+			if (value < 1024 || unit === units.at(-1)) {
+				return unit === "B" ? `${Math.round(value)} B` : `${value.toFixed(2)} ${unit}`;
+			}
+			value /= 1024;
+		}
+		return "0 B";
+	};
 	const modelNodeKey = (model) => {
 		const usedBy = Array.isArray(model?.used_by) ? model.used_by.filter(Boolean) : [];
 		return String(usedBy[0] || model?.node_title || model?.node_type || model?.node_id || "");
@@ -455,6 +466,42 @@ function createPanel(node) {
 				: "none";
 		}
 	};
+	const saveSnapshot = (report) => {
+		const snapshot = JSON.parse(JSON.stringify(report));
+		for (const group of snapshot.groups || []) {
+			for (const model of group.models || []) delete model.path;
+		}
+		node.properties = node.properties || {};
+		node.properties[SNAPSHOT_PROPERTY] = snapshot;
+		app.graph?.setDirtyCanvas?.(true, true);
+	};
+	const removeModelFromReport = (report, targetModel, targetFolder) => {
+		const targetName = String(targetModel?.name || "").toLocaleLowerCase();
+		const folderName = String(targetFolder || targetModel?.folder || "").toLocaleLowerCase();
+		let removed = false;
+		for (const group of report?.groups || []) {
+			if (String(group?.folder || "").toLocaleLowerCase() !== folderName) continue;
+			const previousLength = group.models?.length || 0;
+			group.models = (group.models || []).filter(
+				(model) => String(model?.name || "").toLocaleLowerCase() !== targetName,
+			);
+			removed ||= group.models.length !== previousLength;
+		}
+		if (!removed) return false;
+		report.groups = (report.groups || []).filter((group) => (group.models || []).length);
+		const models = report.groups.flatMap((group) => group.models || []);
+		report.model_count = models.length;
+		report.missing_count = models.filter((model) => !model.exists).length;
+		report.total_size_bytes = models.reduce(
+			(total, model) => total + (Number(model?.size_bytes) || 0),
+			0,
+		);
+		report.total_size_text = formatSize(report.total_size_bytes);
+		report.text = currentViewText(report);
+		saveSnapshot(report);
+		render(report);
+		return true;
+	};
 
 	function render(report) {
 		node.__gjjWorkflowModelReport = report;
@@ -473,6 +520,7 @@ function createPanel(node) {
 			prefix = "　　　　└──",
 			showSizeFirst = false,
 			showFolder = false,
+			modelFolder = "",
 		} = {}) => {
 			const row = document.createElement("div");
 			const renderModelRow = () => {
@@ -509,13 +557,19 @@ function createPanel(node) {
 			const usedBy = Array.isArray(model.used_by) ? model.used_by.filter(Boolean) : [];
 			row.title = model.empty
 				? "空模型项"
-				: `${usedBy.length ? `使用节点：\n${usedBy.map((title) => `• ${title}`).join("\n")}\n\n` : ""}双击复制：${model.name}`;
+				: `${usedBy.length ? `使用节点：\n${usedBy.map((title) => `• ${title}`).join("\n")}\n\n` : ""}Ctrl + 单击：从列表删除\n双击复制：${model.name}`;
 			row.style.cssText = [
 				"white-space:nowrap", "overflow:hidden", "text-overflow:ellipsis",
 				model.exists ? "color:#e2e9ed" : "color:#ff565f;font-weight:700",
 				model.empty ? "opacity:.7" : "cursor:copy",
 			].join(";");
 			if (!model.empty) {
+				row.addEventListener("click", (event) => {
+					if (!event.ctrlKey) return;
+					event.preventDefault();
+					event.stopPropagation();
+					removeModelFromReport(report, model, modelFolder);
+				});
 				row.addEventListener("dblclick", async (event) => {
 					event.stopPropagation();
 					const ok = await copyText(model.name);
@@ -536,7 +590,7 @@ function createPanel(node) {
 				folder.textContent = `　　└──📁 ${group.folder}/`;
 				folder.style.color = "#F2E4C5";
 				content.append(folder);
-				for (const model of group.models || []) appendModelRow(model);
+				for (const model of group.models || []) appendModelRow(model, { modelFolder: group.folder });
 			}
 		} else if (sortState.field === "size") {
 			const heading = document.createElement("div");
@@ -544,7 +598,7 @@ function createPanel(node) {
 			heading.style.cssText = "color:#F2E4C5;font-weight:800;margin-bottom:3px;";
 			content.append(heading);
 			for (const model of sizeModels(report)) {
-				appendModelRow(model, { prefix: "  ", showSizeFirst: true, showFolder: true });
+				appendModelRow(model, { prefix: "  ", showSizeFirst: true, showFolder: true, modelFolder: model.folder });
 			}
 		} else {
 			const heading = document.createElement("div");
@@ -579,7 +633,7 @@ function createPanel(node) {
 				nodeHeading.append(nodeTitle, locate);
 				content.append(nodeHeading);
 				for (const model of group.models) {
-					appendModelRow(model, { prefix: "　　└──", showFolder: true });
+					appendModelRow(model, { prefix: "　　└──", showFolder: true, modelFolder: model.folder });
 				}
 			}
 		}
@@ -607,13 +661,7 @@ function createPanel(node) {
 			const report = await response.json();
 			if (!response.ok || report?.error) throw new Error(report?.error || `HTTP ${response.status}`);
 			render(report);
-			const snapshot = JSON.parse(JSON.stringify(report));
-			for (const group of snapshot.groups || []) {
-				for (const model of group.models || []) delete model.path;
-			}
-			node.properties = node.properties || {};
-			node.properties[SNAPSHOT_PROPERTY] = snapshot;
-			app.graph?.setDirtyCanvas?.(true, true);
+			saveSnapshot(report);
 		} catch (error) {
 			content.textContent = `❌ 统计失败：${error?.message || error}`;
 			content.style.color = "#ff565f";
