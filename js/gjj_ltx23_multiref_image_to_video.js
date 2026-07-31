@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const NODE_CLASS = "GJJ_LTX23ImageToVideoMultiRef";
 const CONFIG_KEY = "gjj_ltx23_config";
@@ -16,6 +17,9 @@ const MULTI_IMAGE_LOADER_CLASS = "GJJ_MultiImageLoader";
 const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
 const STATUS_WIDGET = "gjj_ltx23_preview_panel";
 const LINKED_LOADER_PROP = "__gjj_ltx23_ref_loader_id";
+const PREVIEW_LAYOUT_PROP = "__gjj_ltx23_preview_layout";
+const PREVIEW_PAGE_PROP = "__gjj_ltx23_preview_page";
+const TRANSLATE_ENABLED_PROP = "__gjj_ltx23_translate_enabled";
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const CONVROT_STATUS_API = "/gjj/ltx23/convrot_w4a4_status";
 const CONVROT_INSTALL_API = "/gjj/ltx23/install_comfy_kitchen";
@@ -83,6 +87,12 @@ const SEED_MODE_STYLES = {
   "随机": { background: "linear-gradient(135deg,#854d0e,#ca8a04)", border: "#facc15", color: "#fffbeb" },
   "递增": { background: "linear-gradient(135deg,#065f46,#059669)", border: "#34d399", color: "#ecfdf5" },
   "递减": { background: "linear-gradient(135deg,#4338ca,#6366f1)", border: "#a5b4fc", color: "#eef2ff" },
+};
+const TRANSLATE_BUTTON_STYLES = {
+  off: { background: "linear-gradient(135deg,#1f2933,#374151)", border: "#55636f", color: "#cbd5e1", title: "翻译已关闭：点击开启并立即翻译当前提示词。" },
+  on: { background: "linear-gradient(135deg,#047857,#059669)", border: "#34d399", color: "#ecfdf5", title: "翻译已开启：点击会立即翻译；提示词变化后会自动翻译。" },
+  busy: { background: "linear-gradient(135deg,#075985,#0e7490)", border: "#38bdf8", color: "#e0f2fe", title: "正在翻译提示词……" },
+  error: { background: "linear-gradient(135deg,#7f1d1d,#dc2626)", border: "#ef4444", color: "#fee2e2", title: "提示词翻译失败。" },
 };
 
 const MAIN_WIDGET_KEYS = [
@@ -207,7 +217,10 @@ function wireNativeMainWidgets(node) {
     const oldCallback = widget.callback;
     widget.callback = function (...args) {
       const ret = oldCallback?.apply(this, args);
-      try { syncNativeMainWidgets(node, true); } catch (_) {}
+      try {
+        syncNativeMainWidgets(node, true);
+        if (key === "positive_prompt" && translationEnabled(node)) schedulePromptTranslation(node);
+      } catch (_) {}
       return ret;
     };
   }
@@ -376,16 +389,12 @@ function setStatus(node, detail = {}) {
   // 运行进度由节点顶部的统一状态面板展示；此区域只在产生视频后显示预览。
 }
 
-function setVideoPreview(node, detail = {}) {
+function renderVideoPreviews(node) {
   const state = node?.__gjjLtxStatusPanel;
   if (!state) return;
-  const output = unwrapExecutedDetail(detail);
-  const item = firstPreviewItem(output);
-  const url = isVideoPreview(item, output) ? buildViewUrl(item, false) : "";
-  state.video.pause?.();
-  state.video.removeAttribute("src");
-  state.video.load?.();
-  if (!url) {
+  const items = Array.isArray(state.items) ? state.items : [];
+  state.list.replaceChildren();
+  if (!items.length) {
     state.hasPreview = false;
     state.wrap.style.display = "none";
     state.previewWrap.style.display = "none";
@@ -393,15 +402,76 @@ function setVideoPreview(node, detail = {}) {
     refreshNode(node);
     return;
   }
+  node.properties ||= {};
+  const layout = node.properties[PREVIEW_LAYOUT_PROP] === "page" ? "page" : "tile";
+  const page = Math.max(0, Math.min(items.length - 1, Math.floor(Number(node.properties[PREVIEW_PAGE_PROP] || 0) || 0)));
+  node.properties[PREVIEW_PAGE_PROP] = page;
+  const paged = layout === "page" && items.length > 1;
+  state.modeButton.textContent = paged ? "分页" : "平铺";
+  state.prevButton.disabled = !paged || page <= 0;
+  state.nextButton.disabled = !paged || page >= items.length - 1;
+  state.pageLabel.textContent = `${page + 1}/${items.length}`;
+  state.controls.style.display = items.length > 1 ? "flex" : "none";
+  state.list.classList.toggle("is-page", paged);
+  for (const [index, item] of items.entries()) {
+    const card = document.createElement("div");
+    card.className = "gjj-ltx-video-card";
+    card.style.display = !paged || index === page ? "block" : "none";
+    const video = document.createElement("video");
+    video.controls = true;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.className = "gjj-ltx-video";
+    video.src = buildViewUrl(item, false);
+    for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+      video.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    video.addEventListener("loadedmetadata", () => {
+      item.width = Number(item.width || video.videoWidth || 0);
+      item.height = Number(item.height || video.videoHeight || 0);
+      setPreviewAspect(node, item.width, item.height);
+    });
+    const filename = document.createElement("div");
+    filename.className = "gjj-ltx-video-filename";
+    filename.textContent = String(item.filename || "");
+    filename.title = String(item.filename || "");
+    card.append(video, filename);
+    state.list.appendChild(card);
+    if ((paged && index === page) || (!paged && index === items.length - 1)) {
+      const playPromise = video.play?.();
+      if (playPromise?.catch) playPromise.catch(() => {});
+    }
+  }
   state.hasPreview = true;
   state.wrap.style.display = "block";
   state.previewWrap.style.display = "block";
-  state.video.src = url;
-  state.video.load?.();
-  const playPromise = state.video.play?.();
-  if (playPromise?.catch) playPromise.catch(() => {});
   resizeNodeToFit(node);
   refreshNode(node);
+}
+
+function setVideoPreview(node, detail = {}, append = false) {
+  const state = node?.__gjjLtxStatusPanel;
+  if (!state) return;
+  const output = unwrapExecutedDetail(detail);
+  const item = firstPreviewItem(output);
+  const url = isVideoPreview(item, output) ? buildViewUrl(item, false) : "";
+  if (!url) {
+    if (!append) {
+      state.items = [];
+      renderVideoPreviews(node);
+    }
+    return;
+  }
+  const width = Number(firstArrayItem(output.preview_width) || item.width || getConfig(node).width || 0);
+  const height = Number(firstArrayItem(output.preview_height) || item.height || getConfig(node).height || 0);
+  const nextItem = { ...item, width, height };
+  state.items = append ? [...(state.items || []), nextItem] : [nextItem];
+  if (append) {
+    node.properties ||= {};
+    node.properties[PREVIEW_PAGE_PROP] = state.items.length - 1;
+  }
+  renderVideoPreviews(node);
 }
 
 function configPreviewAspect(node) {
@@ -416,7 +486,12 @@ function previewWidgetHeight(node, width) {
   if (!state?.hasPreview) return 0;
   const panelWidth = Math.max(300, Number(width || node?.size?.[0] || 360)) - 20;
   const previewWidth = Math.max(120, panelWidth - 16);
-  return Math.max(120, Math.round(previewWidth * (state.previewAspect || configPreviewAspect(node)))) + 12;
+  const count = Math.max(1, Number(state.items?.length || 1));
+  const paged = node?.properties?.[PREVIEW_LAYOUT_PROP] === "page" && count > 1;
+  const rows = paged || count === 1 ? 1 : Math.ceil(count / 2);
+  const itemWidth = paged || count === 1 ? previewWidth : Math.max(100, (previewWidth - 6) / 2);
+  const controlsHeight = count > 1 ? 30 : 0;
+  return Math.max(120, Math.round(itemWidth * (state.previewAspect || configPreviewAspect(node))) * rows + Math.max(0, rows - 1) * 6) + controlsHeight + 12;
 }
 
 function setPreviewAspect(node, width, height) {
@@ -489,8 +564,26 @@ async function queueOnlyCurrentNode(node) {
     }
     syncNativeMainWidgets(node, false);
     refreshNode(node);
-    if (typeof app.queuePrompt === "function") {
-      await app.queuePrompt(0, 1);
+    if (typeof app.graphToPrompt === "function" && typeof api?.queuePrompt === "function") {
+      const promptData = await app.graphToPrompt();
+      const output = promptData?.output || promptData?.prompt || {};
+      const nodeKey = Object.keys(output).find((key) => (
+        String(key) === String(node.id)
+        || String(output[key]?.class_type || "") === NODE_CLASS
+      ));
+      if (!nodeKey || !output[nodeKey]?.inputs) return false;
+      const configSnapshot = JSON.stringify(getConfig(node));
+      output[nodeKey].inputs.config_json = configSnapshot;
+      if (promptData?.output) promptData.output = output;
+      if (promptData?.prompt) promptData.prompt = output;
+      const workflowNode = promptData?.workflow?.nodes?.find((item) => String(item?.id) === String(node.id));
+      if (workflowNode) {
+        workflowNode.properties = {
+          ...(workflowNode.properties || {}),
+          [CONFIG_KEY]: configSnapshot,
+        };
+      }
+      await api.queuePrompt(0, promptData);
       return true;
     }
     return false;
@@ -1538,6 +1631,96 @@ function refreshToolbarState(node) {
     node.__gjjLtxRunButton.title = running ? "正在执行本节点" : "只执行当前 LTX 节点，并在节点面板预览最终视频";
     node.__gjjLtxRunButton.classList.toggle("active", running);
   }
+  applyTranslateButtonState(node);
+}
+
+function translationEnabled(node) {
+  return Boolean(node?.properties?.[TRANSLATE_ENABLED_PROP]);
+}
+
+function applyTranslateButtonState(node, override = {}) {
+  const button = node?.__gjjLtxTranslateButton;
+  if (!button) return;
+  const enabled = translationEnabled(node);
+  const mode = override.mode || (node.__gjjLtxTranslating ? "busy" : enabled ? "on" : "off");
+  const style = TRANSLATE_BUTTON_STYLES[mode] || TRANSLATE_BUTTON_STYLES.off;
+  button.textContent = "🌏";
+  button.disabled = Boolean(node.__gjjLtxTranslating);
+  button.dataset.value = enabled ? "true" : "false";
+  button.setAttribute("aria-pressed", enabled ? "true" : "false");
+  button.title = override.title || style.title;
+  button.style.background = style.background;
+  button.style.borderColor = style.border;
+  button.style.color = style.color;
+  button.style.opacity = node.__gjjLtxTranslating ? "0.72" : "1";
+}
+
+function flashTranslateButton(node, mode, title, ms = 1600) {
+  clearTimeout(node.__gjjLtxTranslateFlashTimer);
+  applyTranslateButtonState(node, { mode, title });
+  node.__gjjLtxTranslateFlashTimer = setTimeout(() => applyTranslateButtonState(node), ms);
+}
+
+async function translateLtxPrompts(node, options = {}) {
+  if (node.__gjjLtxTranslating) return { ok: false, busy: true };
+  const cfg = getConfig(node);
+  const positive = String(options.positive ?? cfg.positive_prompt ?? "");
+  const negative = String(options.negative ?? cfg.negative_prompt ?? "");
+  const signature = JSON.stringify([positive, negative]);
+  if (!positive.trim() && !negative.trim()) {
+    flashTranslateButton(node, null, "没有需要翻译的提示词", 1200);
+    return { ok: true, skipped: true };
+  }
+  node.__gjjLtxTranslating = true;
+  applyTranslateButtonState(node);
+  try {
+    const data = await requestPromptTranslation({
+      node,
+      positive,
+      negative,
+      device: "auto",
+      maxLength: 512,
+      batchSize: 8,
+      unloadAfterUse: false,
+      nodeName: "GJJ_LTX23ImageToVideoMultiRef",
+    });
+    setConfig(node, {
+      positive_prompt: String(data?.positive ?? positive),
+      negative_prompt: String(data?.negative ?? negative),
+    });
+    node.__gjjLtxLastTranslatedSignature = signature;
+    flashTranslateButton(node, null, options.successTitle || "提示词翻译完成");
+    return { ok: true };
+  } catch (error) {
+    console.error("[GJJ LTX2.3] 提示词翻译失败", error);
+    flashTranslateButton(node, "error", `翻译失败：${error?.message || error}`);
+    return { ok: false, error };
+  } finally {
+    node.__gjjLtxTranslating = false;
+    if (!node.__gjjLtxTranslateFlashTimer) applyTranslateButtonState(node);
+  }
+}
+
+function schedulePromptTranslation(node, ms = 220) {
+  if (!translationEnabled(node) || node.__gjjLtxTranslating) return;
+  clearTimeout(node.__gjjLtxTranslateTimer);
+  node.__gjjLtxTranslateTimer = setTimeout(() => {
+    const cfg = getConfig(node);
+    const signature = JSON.stringify([String(cfg.positive_prompt || ""), String(cfg.negative_prompt || "")]);
+    if (signature === node.__gjjLtxLastTranslatedSignature) return;
+    void translateLtxPrompts(node, { successTitle: "提示词已自动翻译" });
+  }, ms);
+}
+
+async function togglePromptTranslation(node) {
+  node.properties ||= {};
+  const enabled = !translationEnabled(node);
+  node.properties[TRANSLATE_ENABLED_PROP] = enabled;
+  refreshNode(node);
+  applyTranslateButtonState(node);
+  await translateLtxPrompts(node, {
+    successTitle: enabled ? "翻译已开启，当前提示词已翻译" : "翻译已关闭，当前提示词已翻译",
+  });
 }
 
 function randomizeSeed(node) {
@@ -1613,6 +1796,7 @@ function configInput(node, key, type = "text", options = {}) {
     if (type === "number") value = Number(value);
     setConfig(node, { [key]: value });
     refreshToolbarState(node);
+    if (["positive_prompt", "negative_prompt"].includes(key)) schedulePromptTranslation(node);
   };
   input.addEventListener("input", commit);
   input.addEventListener("change", commit);
@@ -1772,10 +1956,24 @@ function sortModelTestEntries(entries, sortMode = "name") {
   return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
 }
 
+function matchesModelTestQuery(name, query = "") {
+  const text = String(name || "").toLowerCase();
+  const source = String(query || "").trim().toLowerCase();
+  if (!source) return true;
+  const clauses = source
+    .split("|")
+    .map((clause) => clause.trim().split(/\s+/).filter(Boolean))
+    .filter((terms) => terms.length);
+  if (!clauses.length) return true;
+  return clauses.some((terms) => terms.every((term) => {
+    if (term.startsWith("-") && term.length > 1) return !text.includes(term.slice(1));
+    return text.includes(term);
+  }));
+}
+
 function renderModelTestChoices(listRoot, models, selected, query = "", sortMode = "name") {
-  const q = String(query || "").trim().toLowerCase();
   listRoot.replaceChildren();
-  const filtered = sortModelTestEntries(models, sortMode).filter((item) => !q || String(item.name).toLowerCase().includes(q));
+  const filtered = sortModelTestEntries(models, sortMode).filter((item) => matchesModelTestQuery(item.name, query));
   for (const item of filtered) {
     const label = document.createElement("label");
     label.className = "gjj-ltx-model-test-choice";
@@ -1817,32 +2015,51 @@ async function queueModelTestBatch(node, items, statusEl, button, mode = "model"
   const fixedSeed = Number(original.seed || DEFAULT_CONFIG.seed || 0);
   const isLoraMode = mode === "lora";
   const testPreset = isLoraMode ? "video/GJJ_LTX模型测试/{lora}_{elapsed}" : "video/GJJ_LTX模型测试/{model}_{elapsed}";
+  let queuedCount = 0;
+  const queueErrors = [];
   button.disabled = true;
   try {
+    const previewState = ensureStatusPanel(node);
+    if (previewState) {
+      previewState.items = [];
+      renderVideoPreviews(node);
+    }
+    node.__gjjLtxModelTestRemaining = items.length;
     for (let index = 0; index < items.length; index += 1) {
       const itemName = items[index];
       if (statusEl) statusEl.textContent = `正在加入队列 ${index + 1}/${items.length}：${itemName}`;
-      const nextConfig = {
-        seed: fixedSeed,
-        ltx_model_name: originalModel,
-        segment_save_preset: testPreset,
-      };
-      if (isLoraMode) {
-        nextConfig.ltx_model_name = originalModel;
-        nextConfig.test_lora_name = itemName;
-        nextConfig.test_lora_enabled = true;
-      } else {
-        nextConfig.ltx_model_name = itemName;
-        nextConfig.test_lora_name = originalTestLora;
-        nextConfig.test_lora_enabled = false;
+      try {
+        const nextConfig = {
+          seed: fixedSeed,
+          ltx_model_name: originalModel,
+          segment_save_preset: testPreset,
+        };
+        if (isLoraMode) {
+          nextConfig.ltx_model_name = originalModel;
+          nextConfig.test_lora_name = itemName;
+          nextConfig.test_lora_enabled = true;
+        } else {
+          nextConfig.ltx_model_name = itemName;
+          nextConfig.test_lora_name = originalTestLora;
+          nextConfig.test_lora_enabled = false;
+        }
+        setConfig(node, nextConfig);
+        syncNativeMainWidgets(node, false);
+        const queued = await queueOnlyCurrentNode(node);
+        if (!queued) throw new Error("当前前端未能提交此项");
+        queuedCount += 1;
+      } catch (error) {
+        queueErrors.push({ name: itemName, error: String(error?.message || error) });
+        console.error(`[GJJ LTX2.3] 跳过提交失败项：${itemName}`, error);
       }
-      setConfig(node, nextConfig);
-      syncNativeMainWidgets(node, false);
-      await queueOnlyCurrentNode(node);
     }
-    if (statusEl) statusEl.textContent = `已加入队列：${items.length} 个${isLoraMode ? " LoRA" : "模型"}。固定随机种：${fixedSeed}。`;
-    setStatus(node, { text: `已加入${isLoraMode ? "LoRA" : "模型"}测试队列：${items.length} 个`, progress: 0.04 });
+    node.__gjjLtxModelTestRemaining = queuedCount;
+    const failedText = queueErrors.length ? `，跳过失败 ${queueErrors.length} 个` : "";
+    if (statusEl) statusEl.textContent = `已加入队列：${queuedCount} 个${isLoraMode ? " LoRA" : "模型"}${failedText}。固定随机种：${fixedSeed}。`;
+    setStatus(node, { text: `已加入${isLoraMode ? "LoRA" : "模型"}测试队列：${queuedCount} 个${failedText}`, progress: 0.04 });
+    if (queuedCount > 0) closeFloatingPanel(node);
   } catch (error) {
+    node.__gjjLtxModelTestRemaining = queuedCount;
     if (statusEl) statusEl.textContent = `加入队列失败：${error?.message || error}`;
     setStatus(node, { text: `模型测试队列失败：${error?.message || error}`, progress: 0 });
   } finally {
@@ -1875,7 +2092,7 @@ function showModelTestPanel(node, anchor) {
     modeBar.append(modelModeBtn, loraModeBtn);
     const search = document.createElement("input");
     search.type = "search";
-    search.placeholder = "搜索模型";
+    search.placeholder = "过滤模型：空格=且  |=或  -=非";
     search.className = "gjj-ltx-model-test-search";
     const sortBar = document.createElement("div");
     sortBar.className = "gjj-ltx-model-test-sort";
@@ -1887,7 +2104,6 @@ function showModelTestPanel(node, anchor) {
     const sortBySize = document.createElement("button");
     sortBySize.type = "button";
     sortBySize.textContent = "大小";
-    sortBar.append(sortLabel, sortByName, sortBySize);
     const actions = document.createElement("div");
     actions.className = "gjj-ltx-model-test-actions";
     const selectVisible = document.createElement("button");
@@ -1907,7 +2123,8 @@ function showModelTestPanel(node, anchor) {
     queue.textContent = "加入队列";
     queue.disabled = true;
     actions.append(selectVisible, clear);
-    body.append(note, modeBar, search, sortBar, actions, list, queue, status);
+    sortBar.append(sortLabel, sortByName, sortBySize, actions);
+    body.append(note, modeBar, search, sortBar, list, queue, status);
 
     fetchModelFields().then((fields) => {
       const main = fields.find((field) => String(field?.name || "") === "ltx_model_name") || {};
@@ -1940,7 +2157,9 @@ function showModelTestPanel(node, anchor) {
       const refresh = () => {
         syncSortButtons();
         syncModeButtons();
-        search.placeholder = testMode === "lora" ? "搜索 LoRA" : "搜索模型";
+        search.placeholder = testMode === "lora"
+          ? "过滤 LoRA：空格=且  |=或  -=非"
+          : "过滤模型：空格=且  |=或  -=非";
         renderModelTestChoices(list, currentEntries(), currentSelected(), search.value, sortMode);
         const fixedSeed = Number(getConfig(node).seed || DEFAULT_CONFIG.seed || 0);
         status.textContent = `勾选要测试的${testMode === "lora" ? " LoRA" : "模型"}。固定随机种：${fixedSeed}`;
@@ -1974,9 +2193,8 @@ function showModelTestPanel(node, anchor) {
       selectVisible.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const q = String(search.value || "").trim().toLowerCase();
         for (const item of currentEntries()) {
-          if (!q || String(item.name).toLowerCase().includes(q)) currentSelected().add(item.name);
+          if (matchesModelTestQuery(item.name, search.value)) currentSelected().add(item.name);
         }
         refresh();
       });
@@ -1989,7 +2207,7 @@ function showModelTestPanel(node, anchor) {
       queue.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        queueModelTestBatch(node, [...currentSelected()], status, queue, testMode);
+        void queueModelTestBatch(node, [...currentSelected()], status, queue, testMode);
       });
       queue.disabled = false;
       refresh();
@@ -2066,6 +2284,9 @@ function buildPanel(node) {
       panelRow("生成后", configSegmented(node, "seed_mode", SEED_MODES, (mode) => setSeedMode(node, mode))),
     );
   }, { width: 450 }));
+  const translateBtn = makeToolButton("🌏", "翻译已关闭：点击开启并立即翻译当前提示词。", () => {
+    void togglePromptTranslation(node);
+  });
   const transitionBtn = makeToolButton("🔁", "转场设置", (button) => showFloatingPanel(node, button, "转场", (body) => {
     body.append(
       panelRow("启用", configCheckbox(node, "transition_enabled")),
@@ -2136,7 +2357,7 @@ function buildPanel(node) {
   }, { width: 480 }));
   const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, settingsBtn, runBtn);
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, translateBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, settingsBtn, runBtn);
   root.appendChild(tools);
   node.__gjjLtxTransitionButton = transitionBtn;
   node.__gjjLtxAutoPromptButton = autoPromptBtn;
@@ -2144,6 +2365,7 @@ function buildPanel(node) {
   node.__gjjLtxFileButton = fileBtn;
   node.__gjjLtxSizeButton = sizeBtn;
   node.__gjjLtxSeedButton = seedBtn;
+  node.__gjjLtxTranslateButton = translateBtn;
   node.__gjjLtxRunButton = runBtn;
   refreshToolbarState(node);
   requestAnimationFrame(() => resizeNodeToFit(node));
@@ -2175,20 +2397,43 @@ function ensureStatusPanel(node) {
   previewWrap.className = "gjj-ltx-preview";
   previewWrap.style.display = "none";
   previewWrap.style.setProperty("--gjj-ltx-preview-aspect", `${Math.max(1, Number(getConfig(node).width) || 16)} / ${Math.max(1, Number(getConfig(node).height) || 9)}`);
-  const video = document.createElement("video");
-  video.controls = true;
-  video.loop = true;
-  video.muted = true;
-  video.playsInline = true;
-  video.className = "gjj-ltx-video";
-  for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
-    video.addEventListener(eventName, (event) => event.stopPropagation());
-  }
-  video.addEventListener("loadedmetadata", () => setPreviewAspect(node, video.videoWidth, video.videoHeight));
-  previewWrap.appendChild(video);
+  const controls = document.createElement("div");
+  controls.className = "gjj-ltx-preview-controls";
+  const makePreviewButton = (text, title, action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.title = title;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      action();
+    });
+    return button;
+  };
+  const modeButton = makePreviewButton("平铺", "切换平铺 / 分页", () => {
+    node.properties ||= {};
+    node.properties[PREVIEW_LAYOUT_PROP] = node.properties[PREVIEW_LAYOUT_PROP] === "page" ? "tile" : "page";
+    renderVideoPreviews(node);
+  });
+  const prevButton = makePreviewButton("◀", "上一个视频", () => {
+    node.properties ||= {};
+    node.properties[PREVIEW_PAGE_PROP] = Math.max(0, Number(node.properties[PREVIEW_PAGE_PROP] || 0) - 1);
+    renderVideoPreviews(node);
+  });
+  const pageLabel = document.createElement("span");
+  const nextButton = makePreviewButton("▶", "下一个视频", () => {
+    node.properties ||= {};
+    node.properties[PREVIEW_PAGE_PROP] = Number(node.properties[PREVIEW_PAGE_PROP] || 0) + 1;
+    renderVideoPreviews(node);
+  });
+  controls.append(modeButton, prevButton, pageLabel, nextButton);
+  const list = document.createElement("div");
+  list.className = "gjj-ltx-video-list";
+  previewWrap.append(controls, list);
   wrap.append(previewWrap);
 
-  const state = { widget: null, wrap, previewWrap, video, hasPreview: false, previewAspect: configPreviewAspect(node) };
+  const state = { widget: null, wrap, previewWrap, controls, modeButton, prevButton, nextButton, pageLabel, list, items: [], hasPreview: false, previewAspect: configPreviewAspect(node) };
   const widget = node.addDOMWidget?.(STATUS_WIDGET, STATUS_WIDGET, wrap, {
     serialize: false,
     hideOnZoom: false,
@@ -2218,7 +2463,9 @@ function installExecutionPreviewHooks(node) {
     originalOnExecuted?.apply(this, [message, ...args]);
     this.__gjjLtxRunInFlight = false;
     setStatus(this, { text: "执行完成", progress: 1 });
-    setVideoPreview(this, message || {});
+    const modelTestActive = Number(this.__gjjLtxModelTestRemaining || 0) > 0;
+    setVideoPreview(this, message || {}, modelTestActive);
+    if (modelTestActive) this.__gjjLtxModelTestRemaining = Math.max(0, Number(this.__gjjLtxModelTestRemaining || 0) - 1);
     advanceSeedAfterExecution(this);
     refreshToolbarState(this);
   };
@@ -2226,6 +2473,9 @@ function installExecutionPreviewHooks(node) {
   node.onExecutionError = function (...args) {
     originalOnExecutionError?.apply(this, args);
     this.__gjjLtxRunInFlight = false;
+    if (Number(this.__gjjLtxModelTestRemaining || 0) > 0) {
+      this.__gjjLtxModelTestRemaining = Math.max(0, Number(this.__gjjLtxModelTestRemaining || 0) - 1);
+    }
     setStatus(this, { text: "执行失败", progress: 0 });
     refreshToolbarState(this);
   };
@@ -2289,8 +2539,16 @@ function injectStyles() {
     .gjj-ltx-status-text{height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#aebfc6;}
     .gjj-ltx-progress{height:3px;margin-top:4px;border-radius:999px;background:#26343a;overflow:hidden;}
     .gjj-ltx-progress-inner{height:100%;width:0%;background:linear-gradient(90deg,#72c1ff,#7ed6a7);transition:width 120ms ease;}
-    .gjj-ltx-preview{width:100%;aspect-ratio:var(--gjj-ltx-preview-aspect,16/9);margin-top:7px;border:1px solid #31434d;border-radius:6px;overflow:hidden;background:#05090c;}
+    .gjj-ltx-preview{width:100%;box-sizing:border-box;margin-top:7px;padding:6px;border:1px solid #31434d;border-radius:6px;overflow:hidden;background:#05090c;}
     .gjj-ltx-video{display:block;width:100%;height:100%;object-fit:contain;background:#05090c;}
+    .gjj-ltx-preview-controls{display:none;align-items:center;gap:5px;margin-bottom:6px;}
+    .gjj-ltx-preview-controls button{height:23px;min-width:26px;padding:0 7px;border:1px solid #41535b;border-radius:6px;background:#172026;color:#dce7e2;cursor:pointer;font-size:11px;}
+    .gjj-ltx-preview-controls span{min-width:44px;text-align:center;color:#9eb3b7;font-size:11px;}
+    .gjj-ltx-video-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;}
+    .gjj-ltx-video-list.is-page,.gjj-ltx-video-list:has(> :only-child){grid-template-columns:minmax(0,1fr);}
+    .gjj-ltx-video-card{position:relative;min-width:0;overflow:hidden;border:1px solid #33434a;border-radius:7px;background:#05090c;aspect-ratio:var(--gjj-ltx-preview-aspect,16/9);}
+    .gjj-ltx-video-filename{position:absolute;z-index:2;top:0;left:0;right:0;box-sizing:border-box;padding:5px 7px 13px;background:linear-gradient(180deg,rgba(0,0,0,.82),transparent);color:#fff;font:600 11px/1.25 system-ui,"Microsoft YaHei",sans-serif;text-align:center;text-shadow:0 1px 3px #000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;}
+    .gjj-ltx-video-list.is-page .gjj-ltx-video-filename,.gjj-ltx-video-list:has(> :only-child) .gjj-ltx-video-filename{white-space:normal;overflow-wrap:anywhere;}
     .gjj-ltx-model-title{display:flex;align-items:baseline;gap:8px;margin:2px 0 0;}
     .gjj-ltx-model-title div:first-child{color:#eef7f2;font-weight:700;}
     .gjj-ltx-model-title div:last-child{color:#9fb0b8;font-size:12px;}
@@ -2317,7 +2575,7 @@ function injectStyles() {
     .gjj-ltx-model-test-sort{display:flex;align-items:center;gap:7px;color:#9fb0b8;font-size:12px;}
     .gjj-ltx-model-test-sort button{height:26px;border:1px solid #40535b;border-radius:6px;background:#152229;color:#dce7e2;cursor:pointer;padding:0 9px;font-size:12px;font-weight:700;}
     .gjj-ltx-model-test-sort button.is-active{border-color:#5f91a8;background:#213743;color:#ffffff;}
-    .gjj-ltx-model-test-actions{display:flex;gap:8px;}
+    .gjj-ltx-model-test-actions{display:flex;gap:8px;margin-left:auto;}
     .gjj-ltx-model-test-actions button{height:28px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-size:12px;font-weight:700;}
     .gjj-ltx-model-test-list{display:flex;flex-direction:column;gap:4px;max-height:320px;overflow:auto;border:1px solid #2c3d45;border-radius:7px;background:#0b1115;padding:6px;}
     .gjj-ltx-model-test-choice{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:start;gap:6px;min-height:24px;padding:3px 4px;border-radius:5px;color:#e6f1ef;white-space:normal;cursor:pointer;}
@@ -2353,6 +2611,7 @@ app.registerExtension({
       const detail = event?.detail || {};
       for (const node of app.graph?._nodes || []) {
         if (!isTarget(node) || String(node.id) !== String(detail.node)) continue;
+        if (Number(node.__gjjLtxModelTestRemaining || 0) > 0) continue;
         setVideoPreview(node, {
           preview_media: detail.media ? [detail.media] : [],
           preview_main_path: detail.path || "",

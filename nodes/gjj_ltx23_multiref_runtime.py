@@ -2374,6 +2374,31 @@ def _format_elapsed_token(seconds: Any) -> str:
 	return f"{secs}s"
 
 
+def _format_model_file_size_token(size_bytes: Any) -> str:
+	try:
+		size = max(0, int(size_bytes or 0))
+	except Exception:
+		size = 0
+	if size >= 1024 ** 3:
+		return f"{size / (1024 ** 3):.1f}GB"
+	if size >= 1024 ** 2:
+		return f"{size / (1024 ** 2):.0f}MB"
+	if size >= 1024:
+		return f"{size / 1024:.0f}KB"
+	return f"{size}B" if size else "未知大小"
+
+
+def _model_file_size_token(model_name: Any, is_lora: bool = False) -> str:
+	categories = ("loras",) if is_lora else ("diffusion_models", "unet_gguf", "checkpoints")
+	try:
+		path = _get_full_path_any(categories, model_name)
+		if path:
+			return _format_model_file_size_token(Path(path).stat().st_size)
+	except Exception:
+		pass
+	return "未知大小"
+
+
 def _format_segment_save_prefix(
 	preset: Any,
 	unique_id: Any,
@@ -2557,6 +2582,24 @@ def _save_final_video_preview(
 		main_path = str(raw_path[0] or "")
 	elif isinstance(raw_path, str):
 		main_path = raw_path
+	if "GJJ_LTX模型测试" in str(save_preset or "") and main_path:
+		try:
+			source_path = Path(main_path)
+			is_lora_test = "{lora}" in str(save_preset or "")
+			test_model_name = lora_name if is_lora_test else model_name
+			test_name = (
+				f"{_safe_name_token(test_model_name, 'model')}_"
+				f"{_model_file_size_token(test_model_name, is_lora=is_lora_test)}_"
+				f"{max(0.0, float(elapsed_seconds or 0.0)):.2f}秒"
+				f"{source_path.suffix or '.mp4'}"
+			)
+			target_path = source_path.with_name(test_name)
+			if target_path != source_path:
+				source_path.replace(target_path)
+				main_path = str(target_path)
+				media_item["filename"] = target_path.name
+		except Exception:
+			pass
 	return {
 		"label": "最终视频",
 		"path": main_path,

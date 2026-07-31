@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import csv
 import json
 import os
 import re
@@ -18,6 +19,11 @@ from .common_utils.dependency_checker import (
 )
 from .common_utils.model_manager import gjjutils_model_search_state
 from .common_utils.mtv_ltx_prompt_settings import read_mtv_ltx_prompt_settings
+from .common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
+from .common_utils.prompt_translation import (
+    COMMON_PROMPT_TRANSLATE_API_PATH,
+    register_prompt_translation_api,
+)
 
 # 运行时依赖检查（零依赖导入模式，使用 importlib 安全检查）
 try:
@@ -67,6 +73,7 @@ def _torch_module():
 
 
 NODE_NAME = "GJJ_LTX23ImageToVideoMultiRef"
+register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 SCENE_PREFIX = "scene_"
 DEFAULT_PROMPT = "多张参考图连续过渡，主体动作自然，镜头语言稳定，电影感光影，细节真实。"
 DEFAULT_TEST_LORA = "LTX-2.3-Licon-MSR-V2.safetensors"
@@ -784,6 +791,40 @@ def _append_test_lora_to_chain(lora_chain_config: Any, test_lora_name: Any, stre
             items = []
     items.append({"enabled": True, "name": name, "strength": resolved_strength})
     return json.dumps(items, ensure_ascii=False)
+
+
+def _test_lora_trigger_from_presets(test_lora_name: Any) -> str:
+    name = str(test_lora_name or "").strip()
+    if not name:
+        return ""
+
+    def normalize(value: Any) -> str:
+        text = str(value or "").replace("\\", "/").split("/")[-1].lower()
+        text = re.sub(r"\.(safetensors|ckpt|pt|bin)$", "", text)
+        text = re.sub(r"^krea-2-lora-|^krea2[_-]", "", text)
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+
+    selected = normalize(name)
+    if not selected:
+        return ""
+    try:
+        preset_path = Path(__file__).resolve().parents[1] / "presets" / "gjj_lora_metadata.tsv"
+        lines = [
+            line for line in preset_path.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        fieldnames = ("id", "match", "title", "trigger", "strength", "summary", "source")
+        first_columns = lines[0].split("\t") if lines else []
+        has_header = len(first_columns) >= 4 and first_columns[0].strip().lower() == "id" and first_columns[1].strip().lower() == "match"
+        reader = csv.DictReader(lines if has_header else lines, delimiter="\t", fieldnames=None if has_header else fieldnames)
+        for item in reader:
+            for keyword in str(item.get("match") or "").split("|"):
+                token = normalize(keyword)
+                if token and (token in selected or selected in token):
+                    return str(item.get("trigger") or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _normalize_lora_slots(value: Any) -> list[dict[str, Any]]:
@@ -2204,10 +2245,25 @@ class GJJ_LTX23ImageToVideoMultiRef:
             if bool(config["transition_enabled"]) and len(scene_images) < 2:
                 _send_status(unique_id, "提示：转场控制需要至少两张有效场景图，当前已自动跳过。")
 
+        positive_prompt_for_run = resolved_payload["positive_prompt"]
+        is_lora_batch_test = (
+            bool(config.get("test_lora_enabled", False))
+            and "{lora}" in str(config.get("segment_save_preset") or "")
+            and "GJJ_LTX模型测试" in str(config.get("segment_save_preset") or "")
+        )
+        if is_lora_batch_test:
+            test_lora_trigger = _test_lora_trigger_from_presets(config.get("test_lora_name", ""))
+            positive_prompt_for_run = append_lora_triggers_to_positive_prompt(
+                positive_prompt_for_run,
+                test_lora_trigger,
+            )
+            if test_lora_trigger:
+                _send_status(unique_id, f"LoRA 测试触发词：{test_lora_trigger}")
+
         return _run_ltx23_multiref_video(
             mode=mode,
             checkpoint_name=config["ltx_model_name"],
-            positive_prompt=resolved_payload["positive_prompt"],
+            positive_prompt=positive_prompt_for_run,
             negative_prompt=resolved_payload["negative_prompt"],
             main_image=scene_images[0] if scene_images else None,
             guide_images=guide_images,

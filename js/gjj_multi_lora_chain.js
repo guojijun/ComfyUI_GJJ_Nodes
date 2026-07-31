@@ -1228,6 +1228,8 @@ function createStyleTag(container) {
 		.gjj-lora-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-lora-row { display:flex; align-items:flex-start; gap:6px; padding:6px; border:1px solid #3c4c54; border-radius:8px; background:#172026; }
 		.gjj-lora-row.off { opacity:0.65; }
+		.gjj-lora-row-thumb-box { width:64px; height:64px; flex:0 0 64px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:7px; border:1px solid #2e4149; background:#10171b; color:#72858d; font-size:22px; box-sizing:border-box; }
+		.gjj-lora-row-thumb { width:100%; height:100%; display:block; object-fit:cover; }
 		.gjj-lora-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; position:relative; }
 		.gjj-lora-search { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 6px; box-sizing:border-box; }
 		.gjj-lora-picker { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 8px; box-sizing:border-box; text-align:left; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1241,6 +1243,7 @@ function createStyleTag(container) {
 		.gjj-lora-source-btn:hover { border-color:#6aa6b8; background:#26363d; }
 		.gjj-lora-preview-card { display:none; position:absolute; left:0; top:calc(100% + 6px); width:min(360px, 100%); padding:8px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-shadow:0 8px 24px rgba(0,0,0,0.38); z-index:9998; box-sizing:border-box; }
 		.gjj-lora-preview-card.open { display:grid; grid-template-columns:92px minmax(0,1fr); gap:8px; }
+		.gjj-lora-preview-card.floating { position:fixed; width:min(560px,calc(100vw - 24px)); max-height:min(520px,calc(100vh - 24px)); overflow:auto; z-index:2147483647; box-shadow:0 18px 48px rgba(0,0,0,.72); }
 		.gjj-lora-preview-card img { width:92px; height:92px; object-fit:cover; border-radius:6px; background:#172026; border:1px solid #2e4149; }
 		.gjj-lora-preview-fallback { width:92px; height:92px; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; border-radius:6px; background:#1b252b; color:#9fb0b7; border:1px solid #2e4149; font-size:11px; }
 		.gjj-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
@@ -1270,7 +1273,11 @@ function createStyleTag(container) {
 		.gjj-lora-popup-item.with-thumb .gjj-lora-preview-card { grid-column:1 / -1; }
 		.gjj-lora-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
 		.gjj-lora-side { display:flex; align-items:center; gap:6px; padding-top:2px; flex:0 0 auto; white-space:nowrap; }
+		.gjj-lora-row.with-thumbnail .gjj-lora-side { display:grid; grid-template-columns:26px minmax(68px,auto); grid-template-rows:26px 30px; align-items:center; column-gap:6px; row-gap:2px; padding-top:0; }
 		.gjj-lora-group-hint { width:26px; min-width:26px; text-align:center; font-size:14px; line-height:1; cursor:default; user-select:none; }
+		.gjj-lora-row.with-thumbnail .gjj-lora-side .gjj-lora-group-hint { grid-column:1; grid-row:1; }
+		.gjj-lora-row.with-thumbnail .gjj-lora-side .gjj-lora-toggle-wrap { grid-column:2; grid-row:1; }
+		.gjj-lora-row.with-thumbnail .gjj-lora-side .gjj-lora-strength { grid-column:2; grid-row:2; align-self:end; }
 		.gjj-lora-toggle-wrap { display:flex; align-items:center; gap:4px; color:#dce7e2; font-size:11px; white-space:nowrap; flex:0 0 auto; }
 		.gjj-lora-strength { width:68px; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 6px; text-align:center; }
 	`;
@@ -1286,6 +1293,63 @@ function populateSelectOptions(select, options, selectedValue) {
 		select.appendChild(element);
 	}
 	select.value = options.some((option) => option.value === selectedValue) ? selectedValue : "";
+}
+
+function closeFloatingLoraPreview() {
+	const active = globalThis.__gjjFloatingLoraPreview;
+	if (!active) return;
+	globalThis.__gjjFloatingLoraPreview = null;
+	active.cleanup?.();
+	active.card?.classList.remove("open", "floating");
+	active.card?.remove?.();
+	active.button?.classList.remove("open");
+}
+
+function openFloatingLoraPreview(card, button, image) {
+	if (globalThis.__gjjFloatingLoraPreview?.card === card) {
+		closeFloatingLoraPreview();
+		return;
+	}
+	closeFloatingLoraPreview();
+	if (image?.dataset?.src && !image.src) image.src = image.dataset.src;
+	card.classList.add("open", "floating");
+	button.classList.add("open");
+	document.body.appendChild(card);
+
+	const rect = button.getBoundingClientRect();
+	const width = Math.min(560, Math.max(320, window.innerWidth - 24));
+	const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+	card.style.left = `${left}px`;
+	card.style.top = "12px";
+	const cardHeight = Math.ceil(card.getBoundingClientRect().height || 160);
+	const belowTop = rect.bottom + 8;
+	const aboveTop = rect.top - cardHeight - 8;
+	card.style.top = `${Math.max(12, belowTop + cardHeight <= window.innerHeight - 12 ? belowTop : aboveTop)}px`;
+
+	const close = () => closeFloatingLoraPreview();
+	const outside = (event) => {
+		if (card.contains(event.target) || button.contains(event.target)) return;
+		close();
+	};
+	const keydown = (event) => {
+		if (event.key === "Escape") close();
+	};
+	card.addEventListener("pointerleave", close);
+	window.addEventListener("blur", close);
+	window.addEventListener("resize", close);
+	document.addEventListener("pointerdown", outside, true);
+	document.addEventListener("keydown", keydown, true);
+	globalThis.__gjjFloatingLoraPreview = {
+		card,
+		button,
+		cleanup: () => {
+			card.removeEventListener("pointerleave", close);
+			window.removeEventListener("blur", close);
+			window.removeEventListener("resize", close);
+			document.removeEventListener("pointerdown", outside, true);
+			document.removeEventListener("keydown", keydown, true);
+		},
+	};
 }
 
 function stopCanvasPointerCapture(event) {
@@ -1535,12 +1599,7 @@ function ensureGlobalLoraPopup() {
 					previewButton.addEventListener("click", (event) => {
 						event.preventDefault();
 						event.stopPropagation();
-						const open = !previewCard.classList.contains("open");
-						if (open && image.dataset.src && !image.src) {
-							image.src = image.dataset.src;
-						}
-						previewCard.classList.toggle("open", open);
-						previewButton.classList.toggle("open", open);
+						openFloatingLoraPreview(previewCard, previewButton, image);
 						this.reposition();
 					});
 
@@ -1621,6 +1680,28 @@ function buildRow(node, row, index, rowsContainer) {
 	const metadata = getLoraMetadata(state, row.name);
 	const rowElement = document.createElement("div");
 	rowElement.className = `gjj-lora-row${row.enabled ? "" : " off"}`;
+
+	const previewUrl = loraPreviewUrl(row.name, state.previews);
+	const hasLocalPreview = Boolean(row.name && state.previews?.[String(row.name)]);
+	let thumbnailBox = null;
+	if (hasLocalPreview && previewUrl) {
+		rowElement.classList.add("with-thumbnail");
+		thumbnailBox = document.createElement("div");
+		thumbnailBox.className = "gjj-lora-row-thumb-box";
+		thumbnailBox.title = String(metadata?.title || row.name || "");
+		const rowThumbnail = document.createElement("img");
+		rowThumbnail.className = "gjj-lora-row-thumb";
+		rowThumbnail.alt = String(metadata?.title || row.name || "LoRA preview");
+		rowThumbnail.loading = "lazy";
+		rowThumbnail.decoding = "async";
+		rowThumbnail.src = previewUrl;
+		rowThumbnail.addEventListener("error", () => {
+			thumbnailBox?.remove();
+			thumbnailBox = null;
+			rowElement.classList.remove("with-thumbnail");
+		}, { once: true });
+		thumbnailBox.appendChild(rowThumbnail);
+	}
 
 	const mainColumn = document.createElement("div");
 	mainColumn.className = "gjj-lora-main";
@@ -1804,12 +1885,7 @@ function buildRow(node, row, index, rowsContainer) {
 		previewButton.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			const open = !previewCard.classList.contains("open");
-			if (open && image.dataset.src && !image.src) {
-				image.src = image.dataset.src;
-			}
-			previewCard.classList.toggle("open", open);
-			previewButton.classList.toggle("open", open);
+			openFloatingLoraPreview(previewCard, previewButton, image);
 		});
 
 		metaRow.appendChild(title);
@@ -1830,12 +1906,14 @@ function buildRow(node, row, index, rowsContainer) {
 	sideColumn.appendChild(toggleWrap);
 	sideColumn.appendChild(strength);
 
+	if (thumbnailBox) rowElement.appendChild(thumbnailBox);
 	rowElement.appendChild(mainColumn);
 	rowElement.appendChild(sideColumn);
 	rowsContainer.appendChild(rowElement);
 }
 
 function renderUi(node) {
+	closeFloatingLoraPreview();
 	const state = ensureNodeState(node);
 	const container = node.__gjjLoraContainer;
 	const rowsContainer = node.__gjjLoraRows;
