@@ -1073,7 +1073,7 @@ class GJJ_SAM2PointMaskEditor:
 		"输出被遮罩颜色覆盖后的图片或图片队列，可直接预览或继续接 GJJ_BATCH_IMAGE/IMAGE。",
 	)
 	FUNCTION = "segment"
-	CATEGORY = "GJJ/工具"
+	CATEGORY = "GJJ/🛠️ 工具"
 
 	def segment(
 		self,

@@ -242,7 +242,7 @@ def _refine_mask(mask: torch.Tensor, trimap: torch.Tensor, sensitivity: float) -
 
 
 class GJJ_SDMatteMatting:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "matting"
     DESCRIPTION = "使用 SDMatte 模型按输入遮罩执行精细抠图，输出透明图、遮罩和遮罩预览图。"
     SEARCH_ALIASES = ["SDMatte", "RMBG", "matting", "抠图", "精细抠图", "透明物体", "mask refine"]

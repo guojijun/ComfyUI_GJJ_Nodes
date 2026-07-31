@@ -2316,7 +2316,7 @@ def _hidden_multiview_param(options: dict[str, Any]) -> dict[str, Any]:
 
 
 class GJJ_CharacterMultiViewStudio:
-	CATEGORY = "GJJ/视频"
+	CATEGORY = "GJJ/🎬 视频"
 	FUNCTION = "generate"
 	OUTPUT_NODE = True
 	DESCRIPTION = (

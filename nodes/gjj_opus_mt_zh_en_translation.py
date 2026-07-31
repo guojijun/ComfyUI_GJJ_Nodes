@@ -79,7 +79,7 @@ def unload_model() -> None:
 
 
 class GJJ_OpusMTZhEnTranslation:
-    CATEGORY = "GJJ/翻译"
+    CATEGORY = "GJJ/📝 文本/翻译"
     FUNCTION = "translate"
     DESCRIPTION = (
         "使用 GJJ 单文件 Opus-MT 中英翻译模型包将中文翻译为英文。"

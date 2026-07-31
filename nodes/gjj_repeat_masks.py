@@ -4,7 +4,7 @@ import torch
 
 
 class GJJ_RepeatMasks:
-    CATEGORY = "GJJ/遮罩"
+    CATEGORY = "GJJ/🖼️ 图像/遮罩"
     FUNCTION = "duplicate_input"
     DESCRIPTION = (
         "重复遮罩批次。复刻 Video Helper Suite 的 RepeatMasks / VHS_DuplicateMasks 行为，"

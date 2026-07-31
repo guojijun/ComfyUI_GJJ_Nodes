@@ -1547,7 +1547,7 @@ def collect_template_prompt_values(prompt: Any) -> dict[str, Any]:
 
 
 class GJJ_TemplateParams:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "output_params"
     DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n提示词：《基础提示》 与 【风格】｛真实、日漫｝ 会生成 TextMerge 风格的组合提示词输出。\n是否启用：[enable,disable] # 枚举\n媒体资源优先读取当前本地文件；本地文件不存在时，自动下载设置模板中的默认 URL。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [

@@ -456,7 +456,7 @@ _register_routes()
 
 
 class GJJ_VideoSegmentQueue:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "segment_video"
     DESCRIPTION = "零依赖单视频分段队列：外接 GJJ_BATCH_IMAGE / IMAGE / VIDEO，或在节点内点击 📁 导入视频，按 8N+1 帧数输出当前分段和 1 基分段序号。"
     SEARCH_ALIASES = ["视频分段", "单视频队列", "video segment", "segment queue", "8N+1"]

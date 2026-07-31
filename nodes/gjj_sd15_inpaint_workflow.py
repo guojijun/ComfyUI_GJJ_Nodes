@@ -27,7 +27,7 @@ def _preferred_default(values: list[str], preferred: str) -> str:
 
 
 class GJJ_SD15InpaintWorkflow:
-    CATEGORY = "GJJ/图像生成/局部重绘"
+    CATEGORY = "GJJ/🖼️ 图像/生成/局部重绘"
     FUNCTION = "generate"
     DESCRIPTION = "把 sd1.5_inpaint 工作流收口成单节点，内部自动完成 checkpoint 加载、提示词编码、遮罩 VAE 编码、采样和解码。"
     SEARCH_ALIASES = [

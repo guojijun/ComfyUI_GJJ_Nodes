@@ -796,7 +796,7 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
     GJJ_HELP = {
         **SAM31_SCAIL2_HELP,
     }
-    CATEGORY = "GJJ/视频工具/遮罩"
+    CATEGORY = "GJJ/🎬 视频/工具/遮罩"
     FUNCTION = "track_and_build"
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("通道1彩色遮罩", "通道2彩色遮罩")

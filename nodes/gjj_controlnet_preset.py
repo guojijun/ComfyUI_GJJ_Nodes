@@ -51,7 +51,7 @@ def _resolve_image_size(image: Any) -> tuple[int, int] | None:
 
 
 class GJJ_ControlNetPreset:
-    CATEGORY = "GJJ/视频/控制网"
+    CATEGORY = "GJJ/🎬 视频/控制网"
     FUNCTION = "build"
     DESCRIPTION = "内部加载 checkpoint、编码正反提示词，并根据图像与遮罩生成可直接连接到 KSampler 的模型、条件和 latent。"
     SEARCH_ALIASES = [

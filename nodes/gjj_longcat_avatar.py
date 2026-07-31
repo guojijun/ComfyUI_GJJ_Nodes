@@ -678,7 +678,7 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
 
 
 class GJJ_LongCatAvatarLoader:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "load"
     RETURN_TYPES = ("WANVIDEOMODEL", "LORA_CHAIN_CONFIG", "STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("LongCat模型", "DMD LoRA配置", "Whisper模型", "T5模型", "VAE模型", "加载状态")
@@ -776,7 +776,7 @@ class GJJ_LongCatAvatarLoader:
 
 
 class GJJ_LongCatAvatarGenerator:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     RETURN_TYPES = ("VIDEO",)

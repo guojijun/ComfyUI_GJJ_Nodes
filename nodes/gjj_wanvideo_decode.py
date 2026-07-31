@@ -146,7 +146,7 @@ class GJJ_WanVideoDecode:
     RETURN_NAMES = ("图像",)
     OUTPUT_TOOLTIPS = ("解码后的视频帧序列，格式为 ComfyUI IMAGE。",)
     FUNCTION = "decode"
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     DESCRIPTION = "GJJ 零依赖复刻 WanVideoDecode：按 WanVideoWrapper 原版逻辑把 WanVideo latent 解码为 IMAGE。"
     GJJ_HELP = {
         "title": "WanVideo 解码",

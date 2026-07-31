@@ -127,7 +127,7 @@ class GJJ_MediaDuration:
     RETURN_NAMES = ("时长",)
     OUTPUT_TOOLTIPS = ("媒体时长，单位为秒。",)
     FUNCTION = "measure"
-    CATEGORY = "GJJ/媒体"
+    CATEGORY = "GJJ/🛠️ 工具/媒体"
     DESCRIPTION = "输入 VIDEO 或 AUDIO，输出时长（秒）。"
 
     def measure(self, media):

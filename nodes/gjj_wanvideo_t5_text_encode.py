@@ -102,7 +102,7 @@ def _load_wanvideo_runtime():
 
 
 class GJJ_WanVideoT5TextEncode:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "合并 WanVideo T5 Text Encoder Loader 与 WanVideo TextEncode 的 GJJ 零依赖节点。"

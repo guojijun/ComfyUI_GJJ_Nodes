@@ -107,7 +107,7 @@ class GJJ_LTXVImgToVideoConditionOnly:
     RETURN_NAMES = ("Latent",)
     OUTPUT_TOOLTIPS = ("写入图像条件和 noise_mask 后的视频 latent。",)
     FUNCTION = "generate"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "零依赖移植 LTXVImgToVideoConditionOnly：把参考图像编码进现有视频 latent 的开头帧，并生成控制强度的 noise_mask。"
     GJJ_HELP = {
         "title": "LTXV 图生视频条件写入",

@@ -59,7 +59,7 @@ def selected_template_body(template_library: Any, selected_template: Any) -> tup
 
 
 class GJJ_PromptTemplateSelector:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "select_template"
     RETURN_TYPES = ("GJJ_PROMPT",)
     RETURN_NAMES = ("模板正文",)

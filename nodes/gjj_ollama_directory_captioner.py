@@ -167,7 +167,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 
 class GJJ_OllamaDirectoryCaptioner:
-    CATEGORY = "GJJ/文本/图片打标"
+    CATEGORY = "GJJ/📝 文本/图片打标"
     FUNCTION = "get_summary"
     OUTPUT_NODE = True
     DESCRIPTION = "通过浏览器选择任意本地目录，调用本地 Ollama 多模态模型为目录中的图片生成同名 txt 打标文件。适合后续 LoRA 数据预标注。"

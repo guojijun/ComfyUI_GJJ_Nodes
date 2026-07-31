@@ -259,7 +259,7 @@ def _load_clip_vision_with_official_loader(clip_name: str):
 
 
 class GJJ_WanVideoModelLoader:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "loadmodel"
     DESCRIPTION = "加载 WanVideo 扩散模型，支持多种精度和量化选项。"
     SEARCH_ALIASES = [

@@ -109,7 +109,7 @@ def _total_status_text(total: Any, fallback: int = 1) -> str:
 
 
 class GJJ_ForLoopWhileStart:
-    CATEGORY = "GJJ/视频/循环"
+    CATEGORY = "GJJ/🎬 视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -142,7 +142,7 @@ class GJJ_ForLoopWhileStart:
 
 
 class GJJ_ForLoopWhileEnd:
-    CATEGORY = "GJJ/视频/循环"
+    CATEGORY = "GJJ/🎬 视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -265,7 +265,7 @@ class GJJ_ForLoopWhileEnd:
 
 
 class GJJ_ForLoopIntAdd:
-    CATEGORY = "GJJ/视频/循环"
+    CATEGORY = "GJJ/🎬 视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -309,7 +309,7 @@ class GJJ_ForLoopIntAdd:
 
 
 class GJJ_ForLoopIntLess:
-    CATEGORY = "GJJ/视频/循环"
+    CATEGORY = "GJJ/🎬 视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -332,7 +332,7 @@ class GJJ_ForLoopIntLess:
 
 
 class GJJ_ForLoopStart:
-    CATEGORY = "GJJ/逻辑/循环"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑/循环"
     DESCRIPTION = "For 循环开始节点。默认只显示一组初始值/值输出；值 1 连线后自动扩展值 2。"
 
     @classmethod
@@ -376,7 +376,7 @@ class GJJ_ForLoopStart:
 
 
 class GJJ_ForLoopEnd:
-    CATEGORY = "GJJ/逻辑/循环"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑/循环"
     DESCRIPTION = "For 循环结束节点。接收本轮更新后的 value，并决定是否展开下一轮。"
 
     @classmethod

@@ -311,7 +311,7 @@ def _append_context_tokens(conditioning: list[Any], tokens: torch.Tensor) -> lis
 
 
 class GJJ_LTXIdentityTransfer:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "apply"
     DESCRIPTION = "LTX 身份迁移：把参考图编码为独立参考标记，并用来源相位标记注入 LTX 模型，用于人物身份参考视频生成。"
     SEARCH_ALIASES = ["LTX Identity Transfer", "LTX Face ID", "LTX identity overlap", "Best Face ID", "身份迁移", "人物一致性"]

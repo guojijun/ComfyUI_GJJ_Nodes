@@ -533,7 +533,7 @@ def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
 
 
 class GJJ_AudioSilenceTrimmer:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "trim_silence"
     DESCRIPTION = "零依赖音频静音修剪：按音量阈值压缩长静音，并可按静音边界限制输出最长总时长。"
     SEARCH_ALIASES = [

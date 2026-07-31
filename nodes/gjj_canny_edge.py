@@ -343,7 +343,7 @@ class GJJ_CannyEdge:
     RETURN_NAMES = ("图像",)
     OUTPUT_TOOLTIPS = ("零依赖 Canny 风格边缘图，三通道 IMAGE。",)
     FUNCTION = "execute"
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     DESCRIPTION = _DESCRIPTION_INTRO
     GJJ_HELP = {
         "title": "Canny 边缘检测",

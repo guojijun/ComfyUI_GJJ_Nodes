@@ -499,7 +499,7 @@ def _maybe_translate_prompt(prompt: str, unique_id: Any = None) -> str:
 
 
 class GJJ_DoodleCanvas:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "make_image"
     OUTPUT_NODE = True
     DESCRIPTION = "内嵌涂鸦画板。可直接在 ComfyUI 节点中画草图、线稿，并内置 Scribble ControlNet 一键原地生图。"

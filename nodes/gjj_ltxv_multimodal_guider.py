@@ -415,7 +415,7 @@ class GJJ_LTXVMultimodalGuider:
     RETURN_NAMES = ("引导器",)
     OUTPUT_TOOLTIPS = ("兼容 SamplerCustomAdvanced / GJJ LTX视频采样器 的 GUIDER。",)
     FUNCTION = "get_guider"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "零依赖移植 ComfyUI-LTXVideo 的 MultimodalGuider：对 LTXV 音视频 latent 分别执行 CFG、STG、跨模态和跳步引导。"
     GJJ_HELP = {
         "title": "LTXV 多模态引导器",

@@ -74,7 +74,7 @@ def _latent_samples(latent: Any, label: str):
 
 
 class GJJ_LongCatAvatarExtendEmbeds:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "LATENT")
     RETURN_NAMES = ("数字人条件", "采样切片")

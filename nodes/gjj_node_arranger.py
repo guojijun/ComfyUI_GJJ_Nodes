@@ -9,7 +9,7 @@ NODE_NAME = "GJJ_NodeArranger"
 class GJJ_NodeArranger:
     NAME = "GJJ_NodeArranger"
     DISPLAY_NAME = "节点排列器"
-    CATEGORY = "GJJ/工作流辅助"
+    CATEGORY = "GJJ/🛠️ 工具/工作流辅助"
     FUNCTION = "arrange_nodes"
     DESCRIPTION = "自动排列和优化 ComfyUI 工作流中的节点布局，支持多种拓扑排序模式。实际排列逻辑在前端 JavaScript 中执行。"
     SEARCH_ALIASES = [

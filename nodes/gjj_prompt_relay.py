@@ -394,7 +394,7 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
 
 
 class GJJ_PromptRelayEncode:
-    CATEGORY = "GJJ/视频/时序提示词"
+    CATEGORY = "GJJ/🎬 视频/时序提示词"
     FUNCTION = "encode"
     RETURN_TYPES = ("MODEL", "CONDITIONING")
     RETURN_NAMES = ("时序控制模型", "正向条件")

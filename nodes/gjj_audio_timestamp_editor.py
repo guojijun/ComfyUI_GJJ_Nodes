@@ -649,7 +649,7 @@ def generate_auto_segments(duration: float, segment_count: int = 1, segment_dura
 
 
 class GJJ_AudioSegmentEditor:
-	CATEGORY = "GJJ/音频"
+	CATEGORY = "GJJ/🎵 音频"
 	FUNCTION = "edit_segments"
 	OUTPUT_NODE = True
 	DESCRIPTION = DESCRIPTION  # 引用模块级别的动态 DESCRIPTION

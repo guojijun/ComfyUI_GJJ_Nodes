@@ -132,7 +132,7 @@ def _batch_count(image: torch.Tensor) -> int:
 
 
 class GJJ_ImageBatchExtendWithOverlap:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "imagesfrombatch"
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "INT", "INT", "INT")
     RETURN_NAMES = ("源图像批次", "续接起始帧", "重叠扩展图像", "宽度", "高度", "批次总数量")

@@ -87,7 +87,7 @@ def _merge_batches(left: torch.Tensor | None, right: torch.Tensor) -> torch.Tens
 
 
 class GJJ_QueueLoopStart:
-    CATEGORY = "GJJ/流程控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/流程控制"
     FUNCTION = "start"
     RETURN_TYPES = ("IMAGE", STATE_TYPE, "INT", "BOOLEAN", "STRING")
     RETURN_NAMES = ("本轮输入图像", "循环状态", "当前轮次", "是否第一轮", "状态")
@@ -228,7 +228,7 @@ class GJJ_QueueLoopStart:
 
 
 class GJJ_QueueLoopEnd:
-    CATEGORY = "GJJ/流程控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/流程控制"
     FUNCTION = "finish"
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "INT", "BOOLEAN", "STRING")

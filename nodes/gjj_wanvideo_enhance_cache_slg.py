@@ -55,7 +55,7 @@ def _resolve_cache_device(cache_device: str):
 
 
 class GJJ_WanVideoEnhanceCacheSLG:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     FUNCTION = "build_args"
     DESCRIPTION = (
         "将 WanVideoEnhanceAVideo、WanVideoEasyCache 和 WanVideoSLG "

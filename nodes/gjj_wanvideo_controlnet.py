@@ -334,7 +334,7 @@ def _normalize_control_images(control_images: torch.Tensor) -> torch.Tensor:
 
 
 class GJJ_WanVideoControlNet:
-    CATEGORY = "GJJ/视频模型/万相视频"
+    CATEGORY = "GJJ/🎬 视频/模型/万相视频"
     FUNCTION = "apply"
     DESCRIPTION = (
         "GJJ 零依赖合并版万相视频控制网："

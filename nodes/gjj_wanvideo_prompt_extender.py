@@ -26,7 +26,7 @@ def _resolve_system_prompt(label, custom_system_prompt):
 
 
 class GJJ_WanVideoPromptExtenderSelect:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     DESCRIPTION = "生成 WanVideo 提示词扩展参数，可连接到 GJJ · WanVideo 文本编码（缓存版）的提示词扩展参数输入。"
     RETURN_TYPES = ("WANVIDEOPROMPTEXTENDER_ARGS",)
     RETURN_NAMES = ("提示词扩展参数",)

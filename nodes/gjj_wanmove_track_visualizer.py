@@ -183,7 +183,7 @@ class GJJWanMoveTrackVisualizer:
         "可连接 WanTrackToVideo length 的安全帧长。",
     )
     FUNCTION = "build"
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     OUTPUT_NODE = True
     DESCRIPTION = "网站式 WanMove 轨迹可视化生成器。可拖拽起点、终点和贝塞尔控制点，输出轨迹 JSON 与 TRACKS。"
 

@@ -128,7 +128,7 @@ if HAS_SERVER and PromptServer is not None and getattr(PromptServer, "instance",
 
 
 class GJJ_NodeLocator:
-    CATEGORY = "GJJ/工作流辅助"
+    CATEGORY = "GJJ/🛠️ 工具/工作流辅助"
     FUNCTION = "noop"
     OUTPUT_NODE = True
     DESCRIPTION = "通过搜索关键词快速定位当前工作流中的指定节点并框选。支持节点类型、标题、ID搜索。"

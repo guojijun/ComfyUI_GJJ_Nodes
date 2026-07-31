@@ -196,7 +196,7 @@ def _infer_image_size(image):
 
 
 class GJJ_WanCameraImageToVideo:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = "把 Wan 相机嵌入和 Wan 相机图生视频编码合并到一个 GJJ 零依赖节点。"
     SEARCH_ALIASES = [

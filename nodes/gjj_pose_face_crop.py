@@ -364,7 +364,7 @@ def _crop_resize_by_mask(
 
 
 class GJJ_PoseFaceCrop:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "crop_face"
     DESCRIPTION = "根据 POSE_KEYPOINT 的人脸关键点生成脸部遮罩，并按遮罩批量裁剪缩放图片。"
     SEARCH_ALIASES = [

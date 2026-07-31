@@ -30,7 +30,7 @@ def _tensor_to_pil_images(images: torch.Tensor) -> list[Image.Image]:
 
 
 class GJJ_ImagesToPDF:
-    CATEGORY = "GJJ/文档/PDF"
+    CATEGORY = "GJJ/📝 文本/文档/PDF"
     FUNCTION = "save"
     DESCRIPTION = "把 IMAGE 批次保存为多页 PDF。"
     SEARCH_ALIASES = ["pdf", "images to pdf", "图片转PDF"]
@@ -58,7 +58,7 @@ class GJJ_ImagesToPDF:
 
 
 class GJJ_PDFToImages:
-    CATEGORY = "GJJ/文档/PDF"
+    CATEGORY = "GJJ/📝 文本/文档/PDF"
     FUNCTION = "load"
     DESCRIPTION = "把 PDF 页面渲染为 IMAGE 批次，需要当前环境安装 PyMuPDF。"
     SEARCH_ALIASES = ["pdf", "pdf to images", "PDF转图片"]

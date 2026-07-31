@@ -164,7 +164,7 @@ class GJJ_ClownSampler:
     RETURN_NAMES = ("采样器",)
     OUTPUT_TOOLTIPS = ("输出可连接到 SamplerCustomAdvanced 以及其它兼容 SAMPLER 输入的采样器对象。",)
     FUNCTION = "main"
-    CATEGORY = "GJJ/视频/采样器"
+    CATEGORY = "GJJ/🎬 视频/采样器"
     DESCRIPTION = "零依赖 Clown 采样器：界面兼容 RES4LYF ClownSampler_Beta，内部映射到当前 ComfyUI 可用的 SAMPLER。"
     GJJ_HELP = {
         "title": "Clown 采样器",

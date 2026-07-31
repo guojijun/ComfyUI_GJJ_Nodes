@@ -1163,7 +1163,7 @@ def create_video_object(frames: torch.Tensor, fps: float, audio: dict[str, Any] 
 
 
 class GJJ_VideoSegmentEditor:
-	CATEGORY = "GJJ/视频"
+	CATEGORY = "GJJ/🎬 视频"
 	FUNCTION = "edit_segments"
 	OUTPUT_NODE = True
 	DESCRIPTION = """视频分段编辑器：加载视频后自动生成分段，可视化编辑起止帧，按帧裁剪并输出多个视频片段。

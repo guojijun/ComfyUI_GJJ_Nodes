@@ -39,7 +39,7 @@ def _latent_spatial_shape(samples: Any) -> tuple[int, int] | None:
 
 
 class GJJ_WanVideoEmptyEmbeds:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo T2V 空图像条件的 GJJ 零依赖节点。"

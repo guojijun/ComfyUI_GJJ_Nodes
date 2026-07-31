@@ -371,7 +371,7 @@ def _duration_to_frame_count(duration_seconds: Any, fps: Any) -> int:
 
 
 class GJJ_Wan22FirstLastVideo:
-    CATEGORY = "GJJ/视频生成/万相视频"
+    CATEGORY = "GJJ/🎬 视频/生成/万相视频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = NODE_DESCRIPTION

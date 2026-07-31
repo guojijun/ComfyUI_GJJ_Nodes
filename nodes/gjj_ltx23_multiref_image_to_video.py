@@ -1856,7 +1856,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
 
 原始错误：{_IMPORT_ERROR}
 """
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考；接入 MTV 人声分段列表时，按索引将每段音频与图片队列中的一张图配对生成并合并。"

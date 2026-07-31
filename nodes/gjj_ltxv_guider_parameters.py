@@ -188,7 +188,7 @@ class GJJ_LTXVGuiderParameters:
     RETURN_NAMES = ("引导参数",)
     OUTPUT_TOOLTIPS = ("输出给 GJJ LTXV 多模态引导器或兼容 MultimodalGuider 的 GUIDER_PARAMETERS。",)
     FUNCTION = "get_parameters"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "零依赖移植 ComfyUI-LTXVideo 的 GuiderParameters：为 LTXV 多模态引导器生成视频或音频引导参数。"
     GJJ_HELP = {
         "title": "LTXV 引导参数",

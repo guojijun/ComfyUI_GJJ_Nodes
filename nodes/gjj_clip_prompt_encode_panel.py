@@ -174,7 +174,7 @@ def _zero_conditioning(conditioning: Any):
 
 
 class GJJ_CLIPPromptEncodePanel:
-    CATEGORY = "GJJ/视频/条件编码"
+    CATEGORY = "GJJ/🎬 视频/条件编码"
     FUNCTION = "encode"
     DESCRIPTION = _DESCRIPTION_INTRO
     GJJ_HELP = {

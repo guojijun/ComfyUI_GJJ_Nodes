@@ -7,7 +7,7 @@ NODE_NAME = "GJJ_WanVideoTorchCompileSettings"
 
 
 class GJJ_WanVideoTorchCompileSettings:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     FUNCTION = "set_args"
     DESCRIPTION = (
         "GJJ 零依赖复刻 WanVideoTorchCompileSettings：生成 WanVideo 模型加载器可读取的 "

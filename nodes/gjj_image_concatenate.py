@@ -846,7 +846,7 @@ def _concat_square(media_items: list[torch.Tensor], match_image_size: bool) -> t
 
 
 class GJJ_ImageConcanate:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "concatenate"
     DESCRIPTION = "GJJ 零依赖媒体拼接节点：动态接收 GJJ_BATCH_IMAGE、IMAGE、MASK、VIDEO，按方向依次拼接，可选择匹配首图尺寸。"
     SEARCH_ALIASES = ["image concatenate", "image concat", "图片拼接", "图像拼接", "媒体拼接", "ImageConcanate"]

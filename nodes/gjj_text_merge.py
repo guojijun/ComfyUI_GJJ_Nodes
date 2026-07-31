@@ -175,7 +175,7 @@ def parse_selected_groups(value: Any) -> list[str]:
 
 
 class GJJ_TextMerge:
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     FUNCTION = "merge"
     OUTPUT_NODE = True
     DESCRIPTION = "把多路文本按顺序直接拼接，并在节点内提供预览，方便提示词和文案整合。"

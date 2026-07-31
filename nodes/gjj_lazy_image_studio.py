@@ -2369,7 +2369,7 @@ def _standard_queue_images(images: list[Any]) -> list[dict[str, Any]]:
 
 
 class GJJ_LazyImageStudio:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "create_image"
     DESCRIPTION = "懒人图文集成一键生图：支持文生图、图生图，以及多图参考编辑。节点会根据所选 UNET 主关键词自动推荐匹配的文本编码器、VAE、加速 LoRA、NSFW LoRA 与常用采样参数。"
     GJJ_HELP = {

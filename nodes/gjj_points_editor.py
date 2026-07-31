@@ -492,7 +492,7 @@ class GJJ_PointsEditor:
 		"在原图上绘制框选范围后的预览图像。",
 	)
 	FUNCTION = "pointdata"
-	CATEGORY = "GJJ/工具"
+	CATEGORY = "GJJ/🛠️ 工具"
 
 	def pointdata(
 		self,

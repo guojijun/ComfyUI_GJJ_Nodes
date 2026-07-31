@@ -20,7 +20,7 @@ def _load_wanvideo_runtime():
 
 
 class GJJ_WanVideoClipVisionEncode:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo CLIP Vision 图像条件编码的 GJJ 零依赖节点。"

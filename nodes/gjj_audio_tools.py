@@ -186,7 +186,7 @@ def _empty_image() -> torch.Tensor:
 
 
 class GJJ_AudioCrop:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "crop"
     DESCRIPTION = "按时间裁剪 AUDIO。"
     SEARCH_ALIASES = ["audio crop", "trim audio", "音频裁剪"]
@@ -226,7 +226,7 @@ class GJJ_AudioCrop:
 
 
 class GJJ_AudioBeatAnalyzer:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "analyze"
     DESCRIPTION = "轻量音频节拍分析，不依赖 librosa，输出 BPM 和节拍时间 JSON。"
     SEARCH_ALIASES = ["bpm", "beat", "audio analyze", "节拍", "音频分析"]
@@ -302,7 +302,7 @@ class GJJ_AudioBeatAnalyzer:
 
 
 class GJJ_AudioFrameCount8NPlus1:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "calculate"
     DESCRIPTION = "输入人声和可选背景声，已满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1；可选接入视频/画面，视频音频会从第一路音频输出对齐后输出。"
     SEARCH_ALIASES = ["audio fps frame count", "8n+1", "音频帧数", "帧率"]
@@ -436,7 +436,7 @@ class GJJ_AudioFrameCount8NPlus1:
 
 
 class GJJ_AudioVocalBackgroundMixer:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "mix"
     DESCRIPTION = "合并人声和背景声，两路自动按最长长度补齐后混合输出。"
     SEARCH_ALIASES = ["audio mix", "vocal background mix", "人声背景合并", "混音"]

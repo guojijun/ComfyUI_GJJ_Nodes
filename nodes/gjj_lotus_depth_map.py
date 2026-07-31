@@ -235,7 +235,7 @@ def _preview_item_from_image_entry(entry: dict[str, Any], index: int, image: tor
 
 class GJJ_LotusDepthMap:
     INPUT_IS_LIST = True
-    CATEGORY = "GJJ/图像/深度"
+    CATEGORY = "GJJ/🖼️ 图像/深度"
     FUNCTION = "generate_depth"
     DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = ["Lotus Depth", "depth map", "深度图", "深度无依赖", "GJJ_BATCH_IMAGE"]

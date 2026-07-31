@@ -259,7 +259,7 @@ def _make_label_image(
 
 
 class GJJ_LoraEffectTester:
-    CATEGORY = "GJJ/测试"
+    CATEGORY = "GJJ/🛠️ 工具/测试"
     FUNCTION = "build"
     DESCRIPTION = "按过滤后的 LoRA 列表和多选强度逐项输出 LoRA 串联配置、当前名称、列表状态和名称注解图。"
     SEARCH_ALIASES = ["lora test", "lora effect", "lora compare", "LoRA测试", "LoRA效果", "LoRA对比", "序列测试"]

@@ -148,7 +148,7 @@ def _advanced_ksampler(
 
 
 class GJJ_SD3SamplingAlgorithmPanel:
-    CATEGORY = "GJJ/采样"
+    CATEGORY = "GJJ/🧠 模型/采样"
     FUNCTION = "sample"
     DESCRIPTION = (
         "将“采样算法（SD3）”和“K采样器（高级）”合并到一个紧凑面板。"

@@ -45,7 +45,7 @@ def _to_int(value, default: int, minimum: int = -16384, maximum: int = 16384) ->
 
 
 class GJJ_CreateShapeMask:
-    CATEGORY = "GJJ/遮罩"
+    CATEGORY = "GJJ/🖼️ 图像/遮罩"
     FUNCTION = "create_shape_mask"
     DESCRIPTION = "零额外依赖形状遮罩生成：复刻 KJNodes CreateShapeMask，可生成圆形、方形、三角形遮罩批次，并按帧递增或递减尺寸。"
     SEARCH_ALIASES = [

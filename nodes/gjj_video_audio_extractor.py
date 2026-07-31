@@ -29,7 +29,7 @@ def _extract_audio(video: Any) -> tuple[Any, str, bool]:
 
 
 class GJJ_VideoAudioExtractor:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "extract_audio"
     DESCRIPTION = "从官方 VIDEO 对象中提取内置音频轨道，输出 AUDIO。"
     SEARCH_ALIASES = ["视频提取音频", "视频转音频", "get video audio", "extract audio", "video audio"]

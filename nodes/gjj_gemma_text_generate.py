@@ -917,7 +917,7 @@ def _strip_leading_character_table(text: str, character_table: str) -> str:
 
 
 class GJJ_GemmaTextGenerate:
-    CATEGORY = "GJJ/视频/文本生成"
+    CATEGORY = "GJJ/🎬 视频/文本生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = (

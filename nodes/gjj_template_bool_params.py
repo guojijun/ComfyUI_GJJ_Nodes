@@ -176,7 +176,7 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
 
 
 class GJJ_TemplateBoolParams:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "output_params"
     DESCRIPTION = "模板布尔参数：模板首行可写 #按钮文字，其余行用 名称（key）：真值|假值 动态生成输出口。"
     SEARCH_ALIASES = ["template bool", "模板布尔", "布尔模板", "布尔参数", "steps", "cfg", "boolean params"]

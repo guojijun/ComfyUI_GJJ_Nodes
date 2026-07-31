@@ -374,7 +374,7 @@ def _resolve_required_lora():
 
 class GJJ_Krea2EditModelPatch:
     DESCRIPTION = "零外部节点依赖的 Krea2 图像编辑模型补丁：递归拆分输入图片、内部加载固定身份编辑 LoRA，并注入多参考图编辑路径。"
-    CATEGORY = "GJJ/模型补丁"
+    CATEGORY = "GJJ/🧠 模型/补丁"
     FUNCTION = "patch"
     INPUT_IS_LIST = True
     RETURN_TYPES = ("MODEL", "VAE")

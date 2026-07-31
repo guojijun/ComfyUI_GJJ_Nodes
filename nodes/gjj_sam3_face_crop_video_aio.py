@@ -1225,7 +1225,7 @@ def _save_preview_webp(tensor: torch.Tensor, fps: float, title: str) -> dict[str
 
 
 class GJJ_SAM3FaceCropVideoAIO:
-    CATEGORY = "GJJ/视频工具/裁剪"
+    CATEGORY = "GJJ/🎬 视频/工具/裁剪"
     FUNCTION = "crop_faces"
     OUTPUT_NODE = True
     DESCRIPTION = (
@@ -1698,7 +1698,7 @@ def _video_from_combine_result(value: Any) -> Any:
 
 
 class GJJ_SAM3SpeakerSegmentFaceCrop:
-    CATEGORY = "GJJ/视频工具/裁剪"
+    CATEGORY = "GJJ/🎬 视频/工具/裁剪"
     FUNCTION = "crop_segment"
     OUTPUT_NODE = True
     DESCRIPTION = "按时间轴的第 N 个说话段裁剪单一说话人的脸和对应音频，避免 Bernini 在多人切换处生成滑动中间脸。"
@@ -2055,7 +2055,7 @@ class GJJ_SAM3SpeakerSegmentFaceCrop:
 
 
 class GJJ_BerniniSpeakerSegmentAIO:
-    CATEGORY = "GJJ/视频工具/对口型"
+    CATEGORY = "GJJ/🎬 视频/工具/对口型"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "零依赖 Bernini 对口型：输入源视频和合成音频；有时间轴时按说话人逐段生成，没有时间轴时按单人整段生成，最后贴回并输出带完整音频的视频。"
@@ -2816,7 +2816,7 @@ class GJJ_BerniniSpeakerSegmentAIO:
 
 
 class GJJ_SAM3FacePasteBackVideo:
-    CATEGORY = "GJJ/视频工具/裁剪"
+    CATEGORY = "GJJ/🎬 视频/工具/裁剪"
     FUNCTION = "paste_back"
     DESCRIPTION = "输入源视频、处理后的全长脸部裁剪视频和裁剪 JSON，按源帧号把人脸贴回源视频。"
     RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)

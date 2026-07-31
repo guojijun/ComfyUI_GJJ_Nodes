@@ -783,7 +783,7 @@ def _build_speaker_masks_from_image(
 
 
 class GJJ_WanIS2VDualSpeaker:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "build"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("正向条件", "负向条件", "视频潜空间")

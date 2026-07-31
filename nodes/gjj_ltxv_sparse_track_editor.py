@@ -130,7 +130,7 @@ class GJJ_LTXVSparseTrackEditor:
     RETURN_NAMES = ("轨迹JSON",)
     OUTPUT_TOOLTIPS = ("LTX 稀疏轨迹 JSON，格式为多条 point-list，每个点包含 x/y。",)
     FUNCTION = "execute"
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     OUTPUT_NODE = True
     DESCRIPTION = "一比一复刻 LTX Sparse Track Editor：在参考图上交互编辑稀疏运动轨迹，并输出可给 LTX 轨迹绘制/控制节点使用的 JSON。"
     GJJ_HELP = {
@@ -310,7 +310,7 @@ class GJJ_LTXVDrawTracks:
     RETURN_NAMES = ("轨迹图像",)
     OUTPUT_TOOLTIPS = ("按 LTX IC-LoRA 训练数据格式生成的稀疏轨迹图像序列。",)
     FUNCTION = "execute"
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     DESCRIPTION = "一比一复刻 LTX Draw Sparse Tracks：把稀疏轨迹 JSON 渲染成 LTX 可用的轨迹图像序列。"
     GJJ_HELP = {
         "title": "LTX轨迹绘制",

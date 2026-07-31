@@ -4,7 +4,7 @@ NODE_NAME = "GJJ_GroupBypasser"
 class GJJ_GroupBypasser:
     NAME = "GJJ_GroupBypasser"
     DISPLAY_NAME = "分组筛选路由"
-    CATEGORY = "GJJ/视频/分组筛选"
+    CATEGORY = "GJJ/🎬 视频/分组筛选"
     FUNCTION = "noop"
     DESCRIPTION = "按分组名称关键词筛选当前工作流中的分组，便于前端面板快速定位和旁路操作。"
     SEARCH_ALIASES = ["group bypasser", "group filter", "分组", "筛选", "路由", "旁路"]

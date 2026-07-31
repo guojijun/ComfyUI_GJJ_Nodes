@@ -528,7 +528,7 @@ def _summary_text(
 
 
 class GJJ_WanFunCameraControl:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     OUTPUT_NODE = True
     DESCRIPTION = (

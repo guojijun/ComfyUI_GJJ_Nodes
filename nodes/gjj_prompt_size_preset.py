@@ -59,7 +59,7 @@ def _resolve_image_size(image: Any) -> tuple[int, int] | None:
 
 
 class GJJ_PromptSizePreset:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "preset"
     DESCRIPTION = "整合提示词输入、尺寸预设、图像尺寸同步与空 Latent 生成，并直接输出可接 KSampler 的正反条件。"
     SEARCH_ALIASES = [

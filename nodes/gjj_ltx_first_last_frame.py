@@ -77,7 +77,7 @@ def _runtime_import_av():
 
 
 class GJJ_LTX_FirstLastFrame:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "execute"
     DESCRIPTION = (
         "LTX 多参考帧引导。参考图输入由前端动态扩充，num_images 不显示；"

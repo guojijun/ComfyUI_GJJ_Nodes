@@ -32,7 +32,7 @@ except Exception:
 
 
 NODE_NAME = "GJJ · 🏷️ WD图片标签器"
-CATEGORY = "GJJ/图像处理"
+CATEGORY = "GJJ/🖼️ 图像/处理"
 MODEL_CATEGORY = "wd_taggers"
 MODEL_SUBDIR = "models/wd_taggers"
 PLACEHOLDER_MODEL = "[未找到 WD Tagger 模型]"

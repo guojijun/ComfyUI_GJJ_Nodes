@@ -94,7 +94,7 @@ def _reverse_any(value: Any) -> Any:
 
 
 class GJJ_AnyQueueReverse:
-    CATEGORY = "GJJ/列表工具"
+    CATEGORY = "GJJ/🔀 逻辑与流程/列表工具"
     FUNCTION = "reverse"
     DESCRIPTION = "零依赖反转任意队列：列表 1,2,3,4 输出 4,3,2,1；IMAGE/MASK/Tensor 视频帧批次按第 0 维倒序。"
     SEARCH_ALIASES = ["reverse queue", "reverse list", "反转队列", "倒序队列", "视频倒放"]

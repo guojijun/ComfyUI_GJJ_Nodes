@@ -46,7 +46,7 @@ def _check_image(name: str, value: Any) -> torch.Tensor:
 
 
 class GJJ_ImageAddMulti:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "add"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("图像",)

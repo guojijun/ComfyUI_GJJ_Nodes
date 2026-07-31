@@ -294,7 +294,7 @@ def _resolve_format_settings(
 
 
 class GJJ_SaveRGBAAnimated:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "save"
     OUTPUT_NODE = True
     DESCRIPTION = (

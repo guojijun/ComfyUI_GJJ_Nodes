@@ -384,7 +384,7 @@ def _path_label(path: Path, category: str | None = None) -> str:
 
 
 class GJJ_LongCatVideoLoader:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "load"
     RETURN_TYPES = ("GJJ_LONGCAT_VIDEO_PIPELINE", "STRING")
     RETURN_NAMES = ("LongCat管线", "加载状态")
@@ -507,7 +507,7 @@ class GJJ_LongCatVideoLoader:
 
 
 class GJJ_LongCatVideoGenerator:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "generate"
     RETURN_TYPES = ("IMAGE", "FLOAT", "STRING")
     RETURN_NAMES = ("视频帧", "帧率", "生成状态")

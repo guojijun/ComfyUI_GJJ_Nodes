@@ -90,7 +90,7 @@ class GJJ_WorkflowEncrypt:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("result", "info")
     FUNCTION = "execute"
-    CATEGORY = "GJJ/工具"
+    CATEGORY = "GJJ/🛠️ 工具"
     DESCRIPTION = "工作流加密/解密工具\n\n加密：将工作流 JSON 加密为安全字符串\n解密：使用密钥解密工作流数据\n\n⚠️ 需要 cryptography 库支持"
 
     OUTPUT_NODE = True

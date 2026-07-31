@@ -82,7 +82,7 @@ def _load_multitalk_wav2vec(model_name: str, base_precision: str, load_device: s
 
 
 class GJJ_MultiTalkWav2VecEmbeds:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "MultiTalk / InfiniteTalk 音频条件节点：内部从 models/wav2vec2 加载本地 Wav2Vec2，"

@@ -176,7 +176,7 @@ def _tensor_image_to_base64(image: torch.Tensor | None) -> str | None:
 
 
 class GJJ_SplineEditor:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "splinedata"
     DESCRIPTION = (
         "零依赖样条曲线编辑器。可在节点面板绘制一条或多条曲线，输出采样坐标、"

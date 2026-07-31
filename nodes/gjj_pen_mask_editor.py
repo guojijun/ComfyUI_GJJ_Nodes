@@ -210,7 +210,7 @@ def _mask_to_tensor(mask: Image.Image) -> torch.Tensor:
 
 
 class GJJ_PenMaskEditor:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "make_mask"
     DESCRIPTION = "零依赖钢笔绘制遮罩。支持上游图片、面板打开图片、钢笔贝兹曲线和魔棒选区。"
     SEARCH_ALIASES = ["pen mask", "bezier mask", "magic wand", "钢笔遮罩", "贝兹遮罩", "魔棒"]

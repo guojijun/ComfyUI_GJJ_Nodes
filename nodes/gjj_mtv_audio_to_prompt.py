@@ -461,7 +461,7 @@ def _apply_reference_identity(
 
 
 class GJJ_MTVAudioToPrompt:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "convert"
     OUTPUT_NODE = True
     DESCRIPTION = "将 ACE 音乐音频与歌词 SRT 自动分段，分离人声/伴奏，并用 GJJ_GemmaTextGenerate 逐段生成 MTV 参考画面与 LTX 视频提示词；可从参考图反推并缓存人物特征。"

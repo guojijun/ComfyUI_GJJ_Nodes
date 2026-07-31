@@ -1075,7 +1075,7 @@ class GJJ_ImageResizeKJv2:
     RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "MASK", "*", "*", "*")
     RETURN_NAMES = ("图片", "遮罩", "扩展输出 1", "扩展输出 2", "扩展输出 3")
     FUNCTION = "resize"
-    CATEGORY = "GJJ/视频/图片缩放"
+    CATEGORY = "GJJ/🎬 视频/图片缩放"
     DESCRIPTION = """
 GJJ · 🔍 多功能图片缩放
 

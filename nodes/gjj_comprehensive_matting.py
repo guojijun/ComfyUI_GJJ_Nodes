@@ -1326,7 +1326,7 @@ def _run_inspyrenet(
 # 节点类定义
 # ═══════════════════════════════════════════════
 class GJJ_ComprehensiveMatting:
-    CATEGORY = "GJJ/视频/背景移除"
+    CATEGORY = "GJJ/🎬 视频/背景移除"
     FUNCTION = "remove_background"
     SEARCH_ALIASES = [
         "rmbg",

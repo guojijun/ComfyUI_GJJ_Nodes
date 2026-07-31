@@ -1100,7 +1100,7 @@ def _create_processed_video(frames: torch.Tensor, fps: float, audio: dict[str, A
 
 
 class GJJ_MultiVideoLoader:
-    CATEGORY = "GJJ/视频/加载"
+    CATEGORY = "GJJ/🎬 视频/加载"
     FUNCTION = "load_videos"
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多个 input 目录视频，按帧范围、帧率、宽高和格式参数解码为 GJJ 批量图片帧队列。"

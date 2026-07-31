@@ -4,7 +4,7 @@ import comfy.ldm.modules.attention
 import torch
 
 NODE_NAME = "GJJ_LTX2NAG"
-CATEGORY = "GJJ/视频模型/LTX2"
+CATEGORY = "GJJ/🎬 视频/模型/LTX2"
 
 
 def _compute_attention(self, query, context, attn_precision=None, transformer_options={}):

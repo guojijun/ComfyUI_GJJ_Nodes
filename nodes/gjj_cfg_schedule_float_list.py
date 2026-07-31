@@ -86,7 +86,7 @@ class GJJ_CreateCFGScheduleFloatList:
     RETURN_NAMES = ("CFG列表",)
     OUTPUT_TOOLTIPS = ("每一步使用的 CFG 浮点列表；调度范围外为 1.0。",)
     FUNCTION = "process"
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     DESCRIPTION = "GJJ 零依赖复刻 CreateCFGScheduleFloatList：生成 WanVideo Sampler 可用的逐步 CFG 浮点列表。"
     SEARCH_ALIASES = [
         "CreateCFGScheduleFloatList",

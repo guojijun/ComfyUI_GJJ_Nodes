@@ -297,7 +297,7 @@ def _resolve_or_materialize_video(video: Any, suffixes: set[str]) -> tuple[Path,
 
 
 class GJJ_VideoSubtitleOverlay:
-    CATEGORY = "GJJ/视频/字幕"
+    CATEGORY = "GJJ/🎬 视频/字幕"
     FUNCTION = "add_subtitles"
     OUTPUT_NODE = True
     DESCRIPTION = "将 SRT 按时间轴烧录到 VIDEO，生成带描边字幕的视频，并在视频旁保存完全同名的 SRT 文件。"

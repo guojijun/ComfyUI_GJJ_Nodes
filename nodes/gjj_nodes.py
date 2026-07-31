@@ -18,7 +18,7 @@ class ConditioningZeroOut:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "zero_out"
-    CATEGORY = "GJJ/条件编码"
+    CATEGORY = "GJJ/📝 文本/条件编码"
 
     def zero_out(self, conditioning):
         c = []
@@ -55,7 +55,7 @@ class InpaintModelConditioning:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "encode"
-    CATEGORY = "GJJ/条件编码/局部重绘"
+    CATEGORY = "GJJ/📝 文本/条件编码/局部重绘"
 
     def encode(self, positive, negative, pixels, vae, mask, noise_mask=True):
         x = (pixels.shape[1] // 8) * 8
@@ -111,7 +111,7 @@ class FluxGuidance:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply"
-    CATEGORY = "GJJ/条件编码/Flux"
+    CATEGORY = "GJJ/📝 文本/条件编码/Flux"
 
     def apply(self, conditioning, guidance):
         c = node_helpers.conditioning_set_values(conditioning, {"guidance": guidance})
@@ -128,7 +128,7 @@ class FluxDisableGuidance:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply"
-    CATEGORY = "GJJ/条件编码/Flux"
+    CATEGORY = "GJJ/📝 文本/条件编码/Flux"
 
     def apply(self, conditioning):
         c = node_helpers.conditioning_set_values(conditioning, {"guidance": None})
@@ -149,7 +149,7 @@ class DifferentialDiffusion:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
-    CATEGORY = "GJJ/模型补丁"
+    CATEGORY = "GJJ/🧠 模型/补丁"
 
     def patch(self, model, strength):
         # 获取模型的内部结构
@@ -195,11 +195,11 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_ConditioningZeroOut": "GJJ ConditioningZeroOut",
-    "GJJ_InpaintModelConditioning": "GJJ InpaintModelConditioning",
-    "GJJ_FluxGuidance": "GJJ FluxGuidance",
-    "GJJ_FluxDisableGuidance": "GJJ FluxDisableGuidance",
-    "GJJ_DifferentialDiffusion": "GJJ DifferentialDiffusion",
+    "GJJ_ConditioningZeroOut": "GJJ · 🧹 条件清零",
+    "GJJ_InpaintModelConditioning": "GJJ · 🎨 局部重绘条件编码",
+    "GJJ_FluxGuidance": "GJJ · 🧭 Flux引导",
+    "GJJ_FluxDisableGuidance": "GJJ · 🚫 关闭Flux引导",
+    "GJJ_DifferentialDiffusion": "GJJ · 🌫️ 差分扩散",
 }
 
 __all__ = [

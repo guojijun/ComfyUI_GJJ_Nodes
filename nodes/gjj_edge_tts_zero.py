@@ -356,7 +356,7 @@ def _synthesize_edge_tts(text: str, voice: str, speed: float, pitch: int, timeou
 
 class GJJ_EdgeTTS_ZeroDependency:
     DESCRIPTION = "Edge TTS 零依赖复刻版：不依赖 edge_tts、torchaudio 或外部 config，直接输出 ComfyUI AUDIO。"
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "tts"
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("音频",)

@@ -48,7 +48,7 @@ def _conditioning_metadata(conditioning: Any) -> dict[str, Any]:
 
 
 class GJJ_WanVideoTextEmbedBridge:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = "把 ComfyUI 原生 CONDITIONING 转成 WanVideoWrapper 采样器需要的 WANVIDEOTEXTEMBEDS。"
     SEARCH_ALIASES = [

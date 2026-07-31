@@ -27,7 +27,7 @@ def _load_wanvideo_runtime():
 
 
 class GJJ_WanVideoAnimateEmbeds:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo Animate 条件编码的 GJJ 零依赖节点。"

@@ -778,7 +778,7 @@ def apply_lora_chain_config(
 
 
 class GJJ_MultiLoraChain:
-    CATEGORY = "GJJ/模型加载/LoRA"
+    CATEGORY = "GJJ/🧠 模型/加载/LoRA"
     FUNCTION = "apply_loras"
     DESCRIPTION = """GJJ 多 LoRA 串联加载器。
 
@@ -883,7 +883,7 @@ class GJJ_MultiLoraChain:
 
 
 class GJJ_LoraChainConfig:
-    CATEGORY = "GJJ/模型加载/LoRA"
+    CATEGORY = "GJJ/🧠 模型/加载/LoRA"
     FUNCTION = "build_config"
     DESCRIPTION = """GJJ LoRA 串联配置节点。
 

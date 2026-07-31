@@ -273,7 +273,7 @@ def _load_motion_video_frames(video_file, trim_start_frames, length_frames, dire
 # --- Main Class ---
 
 class GJJLTXDirectorGuide:
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     DESCRIPTION = "LTX Director 2.0.2 Guide 引导：支持图像关键帧、IC-LoRA 运动引导、Retake 和分块 VAE 编码。"
     SEARCH_ALIASES = [
         "LTX Director Guide",
@@ -659,7 +659,7 @@ def _get_noise_mask_for_crop(latent):
 
 
 class GJJLTXDirectorCropGuides:
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     FUNCTION = "execute"
     DESCRIPTION = "移除 LTX Director Guide 为关键帧引导追加的 Latent 帧，并清理条件中的 Guide 元数据。"
     SEARCH_ALIASES = [

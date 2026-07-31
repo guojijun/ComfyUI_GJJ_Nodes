@@ -272,7 +272,7 @@ class GJJ_AddVideoICLoRAGuide:
         "添加了 IC-LoRA guide 的负向 conditioning",
         "应用了 guide 的视频 latent",
     )
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "generate"
     DESCRIPTION = "向视频 latent 添加 IC-LoRA guide 条件。引导图像/背景支持 IMAGE、GJJ_BATCH_IMAGE 和 VIDEO，会按 LiconMSR 逻辑生成参考帧序列。"
 

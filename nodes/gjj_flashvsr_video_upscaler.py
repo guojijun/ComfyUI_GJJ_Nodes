@@ -178,7 +178,7 @@ def _resolve_preset(
 
 
 class GJJ_FlashVSRVideoUpscaler:
-    CATEGORY = "GJJ/视频/超分"
+    CATEGORY = "GJJ/🎬 视频/超分"
     FUNCTION = "upscale"
     DESCRIPTION = "综合 FlashVSR 与 FlashVSR Ultra-Fast 的 GJJ 零依赖单节点；支持视频直连保留音频，或帧序列超分输出。"
     SEARCH_ALIASES = [

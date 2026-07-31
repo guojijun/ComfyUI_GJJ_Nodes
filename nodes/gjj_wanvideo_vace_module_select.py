@@ -45,7 +45,7 @@ def _scan_diffusion_models(keyword="vace"):
 
 
 class GJJ_WanVideoVACEModelSelect:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "getvacepath"
     DESCRIPTION = "选择 VACE 模型，用于不包含 VACE 的主模型。从 diffusion_models 目录加载。"
     SEARCH_ALIASES = [

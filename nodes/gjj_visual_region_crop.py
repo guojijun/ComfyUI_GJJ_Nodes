@@ -781,7 +781,7 @@ def _tensor_to_preview(frame: torch.Tensor, unique: str) -> dict[str, Any]:
 
 
 class GJJ_VisualRegionCrop:
-    CATEGORY = "GJJ/视频工具/裁切"
+    CATEGORY = "GJJ/🎬 视频/工具/裁切"
     FUNCTION = "crop"
     OUTPUT_NODE = True
     DESCRIPTION = "可视化区域裁切：节点内预览源媒体，用控制点设置最小 256 且 64 对齐的裁切框，并按关键帧插值移动裁切位置输出视频帧序列；可设置输出起止帧，尾帧按 8n+1 锁定。"

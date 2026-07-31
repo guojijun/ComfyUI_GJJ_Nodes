@@ -188,7 +188,7 @@ def _fast_left_right_combine(
 
 
 class GJJ_VideoBackgroundAudioOverlay:
-    CATEGORY = "GJJ/视频/音频"
+    CATEGORY = "GJJ/🎬 视频/音频"
     FUNCTION = "overlay"
     OUTPUT_NODE = True
     DESCRIPTION = "将另一段 AUDIO 叠加到带原音轨的视频中，在节点内预览混音结果；VIDEO 输出口可用但不要求连接。"

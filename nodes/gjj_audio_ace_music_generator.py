@@ -951,7 +951,7 @@ def _align_lyrics_to_srt(audio: dict[str, Any], lyrics: str, language: str, uniq
 
 
 class GJJ_AudioAceMusicGenerator:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "将 Audio ACE 1.5 两套工作流合并成单节点：优先使用整包 checkpoint，缺失时自动回退到 split 模型组，直接生成音乐音频。"

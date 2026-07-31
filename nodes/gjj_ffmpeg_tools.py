@@ -994,7 +994,7 @@ def _resolve_audio_source(audio: Any, audio_path: Any, tmp_path: Path) -> Path |
 
 
 class GJJ_VideoInfo:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "probe"
     DESCRIPTION = "调用 ffprobe 读取视频基本信息。"
     SEARCH_ALIASES = ["ffprobe", "video info", "视频信息"]
@@ -1042,7 +1042,7 @@ class GJJ_VideoInfo:
 
 
 class GJJ_VideoFramesLoader:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "load"
     DESCRIPTION = "用 FFmpeg 抽取视频帧为 IMAGE 批次。"
     SEARCH_ALIASES = ["video frames", "ffmpeg", "视频抽帧"]
@@ -1317,7 +1317,7 @@ def _extract_video_tail_frames(video_path: Path, frame_count: int, ffmpeg_path: 
 
 
 class GJJ_LatestVideoTailFrames:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "load_tail"
     DESCRIPTION = "按文件名前缀查找最新视频，并用 FFmpeg 返回最后若干帧；找不到或读取失败时输出空 IMAGE 批次，不打断工作流。"
     SEARCH_ALIASES = ["latest video tail frames", "last video frames", "视频尾帧", "最新视频", "文件名前缀"]
@@ -1443,7 +1443,7 @@ class GJJ_LatestVideoTailFrames:
 
 
 class GJJ_FFmpegMuxAudioVideo:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "mux"
     OUTPUT_NODE = True
     DESCRIPTION = "用 FFmpeg 把图片帧、视频路径或同前缀分段视频按序号合并，并可选封入音频。适合长视频分段保存后的最终合并。"

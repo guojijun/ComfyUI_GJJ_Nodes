@@ -1114,7 +1114,7 @@ def _build_generation_signature(
 
 
 class GJJ_QwenInstantXInpaintCanvas:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = DESCRIPTION

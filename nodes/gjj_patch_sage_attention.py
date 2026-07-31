@@ -223,7 +223,7 @@ def _ensure_transformer_options(model_clone):
 
 
 class GJJPatchSageAttentionKJ:
-    CATEGORY = "GJJ/模型优化"
+    CATEGORY = "GJJ/🧠 模型/优化"
     FUNCTION = "patch"
     RETURN_TYPES = ("MODEL", "MODEL")
     RETURN_NAMES = ("高模", "低模")

@@ -1140,7 +1140,7 @@ def _held_preview_media(extra_pnginfo: Any, unique_id: Any) -> tuple[str, list[d
 
 
 class GJJ_AnyPreview:
-    CATEGORY = "GJJ/预览"
+    CATEGORY = "GJJ/🛠️ 工具/预览"
     FUNCTION = "preview"
     OUTPUT_NODE = True
     DESCRIPTION = """动态接收任意类型输入的统一预览节点。

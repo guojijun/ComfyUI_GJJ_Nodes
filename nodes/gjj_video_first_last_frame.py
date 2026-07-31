@@ -356,7 +356,7 @@ class GJJ_VideoFirstLastFrame:
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("首帧", "尾帧")
     FUNCTION = "extract"
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
 
     def extract(self, media):
         return _extract_first_last(media)

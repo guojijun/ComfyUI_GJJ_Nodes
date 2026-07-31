@@ -896,7 +896,7 @@ class GJJ_VisualGridBoard:
     RETURN_NAMES = ("最终宫格图",)
     OUTPUT_TOOLTIPS = ("黑色 2px 分割线、宽高对齐 32 倍数后的最终宫格图。",)
     FUNCTION = "render"
-    CATEGORY = "GJJ/图像/网格"
+    CATEGORY = "GJJ/🖼️ 图像/网格"
     OUTPUT_NODE = True
     INPUT_IS_LIST = True
     GJJ_HELP = {

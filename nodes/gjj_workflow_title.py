@@ -208,7 +208,7 @@ def _default_config_json() -> str:
 
 
 class GJJ_WorkflowTitle:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "noop"
     DESCRIPTION = "仅用于画布显示的工作流标题；保留一个默认标题内容输入口，标题宽度跟随节点面板宽度，样式偏好会保存到 presets/gjj_user_settings.json。"
     SEARCH_ALIASES = ["workflow title", "title", "标题", "工作流标题", "透明标题", "文字标题"]

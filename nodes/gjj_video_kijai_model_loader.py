@@ -1548,7 +1548,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 
 class GJJ_VideoKijaiModelLoader:
-    CATEGORY = "GJJ/模型加载"
+    CATEGORY = "GJJ/🧠 模型/加载"
     FUNCTION = "load_models"
     DESCRIPTION = (
         "Kijai/WanVideoWrapper 生态模型族预设加载器。输出 WANVIDEOMODEL / WANVAE / WANTEXTENCODER / CLIP_VISION，"

@@ -270,7 +270,7 @@ def _normalize_translation_device(value):
 
 
 class GJJ_WanVideoTextEncodeCached:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = _DESCRIPTION
     SEARCH_ALIASES = [

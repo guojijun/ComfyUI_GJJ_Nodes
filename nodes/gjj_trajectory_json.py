@@ -210,7 +210,7 @@ class GJJTrajectoryJSON:
         "连接到 WanTrackToVideo 的 length。会把 121 这类官方会 reshape 报错的长度自动改为安全值。",
     )
     FUNCTION = "build"
-    CATEGORY = "GJJ/实用工具"
+    CATEGORY = "GJJ/🛠️ 工具/实用工具"
     OUTPUT_NODE = True
     DESCRIPTION = "图形化编辑二维轨迹，并输出可直接连接其它节点的 Trajectory JSON 字符串。"
 

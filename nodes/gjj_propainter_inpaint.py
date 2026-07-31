@@ -555,7 +555,7 @@ def _process_inpainting(
 
 
 class GJJ_ProPainterInpaint:
-    CATEGORY = "GJJ/视频工具"
+    CATEGORY = "GJJ/🎬 视频/工具"
     FUNCTION = "propainter_inpainting"
     DESCRIPTION = "GJJ 零原插件依赖的 ProPainter 视频遮罩修复单节点；输入 IMAGE 帧序列与 MASK，输出修复帧、光流遮罩和膨胀遮罩。"
     RETURN_TYPES = ("IMAGE", "MASK", "MASK")

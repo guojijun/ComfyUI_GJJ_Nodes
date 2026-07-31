@@ -141,7 +141,7 @@ def _select_paragraphs(paragraphs: list[str], selection_text: str) -> list[str]:
 
 
 class GJJ_TXTParagraphSplitter:
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     FUNCTION = "process_text"
     DESCRIPTION = "零依赖文本段落分割器：按空行、序号、标题、数字、地址或动态端口拆分文本，并输出段落数量与指定段落文本。"
     SEARCH_ALIASES = ["文本段落分割", "段落分割", "TXT splitter", "YUAN_TXTParagraphSplitter", "paragraph splitter"]

@@ -182,7 +182,7 @@ def _get_offload_device():
 
 
 class GJJ_WanVideoVAELoader:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "loadmodel"
     DESCRIPTION = _DESCRIPTION
     SEARCH_ALIASES = [

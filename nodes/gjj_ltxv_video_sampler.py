@@ -495,7 +495,7 @@ class GJJ_LTXVVideoSampler:
     RETURN_NAMES = ("采样Latent", "降噪Latent")
     OUTPUT_TOOLTIPS = ("SamplerCustomAdvanced 的 output。", "SamplerCustomAdvanced 的 denoised_output。")
     FUNCTION = "sample"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "把 RandomNoise、CFGGuider、KSamplerSelect、ManualSigmas、LTXVConcatAVLatent、SamplerCustomAdvanced 合并成一个 LTX 视频采样器。"
     GJJ_HELP = {
         "title": "LTX 视频采样器",

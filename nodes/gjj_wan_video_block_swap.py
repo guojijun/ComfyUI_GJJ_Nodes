@@ -25,7 +25,7 @@ def _apply_block_swap_to_model(model: Any, block_swap_args: dict[str, Any] | Non
 
 
 class GJJ_WanVideoBlockSwap:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "setargs"
     DESCRIPTION = (
         "WanVideo Block Swap 参数的 GJJ 零依赖复刻版。"
@@ -182,7 +182,7 @@ class GJJ_WanVideoBlockSwap:
 
 
 class GJJ_WanVideoSetBlockSwap:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     FUNCTION = "loadmodel"
     DESCRIPTION = "GJJ 零依赖复刻 WanVideoSetBlockSwap：把 BLOCKSWAPARGS 写入 WanVideo 模型的 transformer_options。"
     SEARCH_ALIASES = [

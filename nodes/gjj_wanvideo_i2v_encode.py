@@ -104,7 +104,7 @@ def _load_wanvideo_runtime():
 
 
 class GJJ_WanVideoImageToVideoEncode:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo 图生视频条件编码的 GJJ 零依赖节点。"

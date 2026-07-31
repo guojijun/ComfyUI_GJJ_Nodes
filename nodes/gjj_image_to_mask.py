@@ -34,7 +34,7 @@ def _tensor_to_mask(t: torch.Tensor) -> torch.Tensor:
 
 
 class GJJ_ImageToMask:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "convert"
     DESCRIPTION = "🎭 将图像转换为遮罩。支持亮度、Alpha通道及RGB单通道转换。"
     SEARCH_ALIASES = ["image to mask", "img2mask", "图片转遮罩", "alpha mask", "通道提取"]

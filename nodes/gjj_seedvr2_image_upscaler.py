@@ -1362,7 +1362,7 @@ def _run_streaming_video_upscale(
 
 
 class GJJ_SeedVR2ImageUpscaler:
-    CATEGORY = "GJJ/图像/超分放大"
+    CATEGORY = "GJJ/🖼️ 图像/超分放大"
     FUNCTION = "upscale_image"
     OUTPUT_NODE = True
     DESCRIPTION = _DESCRIPTION_INTRO if _DEPENDENCIES_AVAILABLE else _ENVIRONMENT_REPORT.get("warning_message", _DESCRIPTION_INTRO)

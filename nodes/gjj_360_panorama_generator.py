@@ -489,7 +489,7 @@ def _qwen_image_edit_encode_with_vae(clip: Any, vae: Any, image: torch.Tensor, p
 
 
 class GJJ_360PanoramaGenerator:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "generate"
     DESCRIPTION = "单节点 360 全景生成：无图时文生 360，有图时图生 360，并自动做中缝修复。"
     SEARCH_ALIASES = ["360 panorama", "360全景", "panorama generator", "全景生成", "Qwen 360"]

@@ -55,7 +55,7 @@ def _display_name_for_key(key: str, prefix: str) -> str:
 
 
 class GJJ_AdvancedPassthroughRouter:
-    CATEGORY = "GJJ/路由"
+    CATEGORY = "GJJ/🔀 逻辑与流程/路由"
     FUNCTION = "route"
     DESCRIPTION = "高级透传路由：支持任意类型输入输出。默认一组输入/输出，输入连接后输出会跟随输入类型与标签，并自动扩展下一组。"
     SEARCH_ALIASES = [

@@ -87,7 +87,7 @@ class GJJ_LTXVSetAudioRefTokens:
         "复制输入音频 latent，并把 noise_mask 设为 0，用于后续阶段冻结/保留音频。",
     )
     FUNCTION = "set_audio_ref_tokens"
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     DESCRIPTION = "为 LTXV 音频/口型流程把 audio_latent 转成 ref_audio tokens 写入 conditioning，并输出冻结音频 latent。"
     GJJ_HELP = {
         "title": "LTXV音频参考Token",

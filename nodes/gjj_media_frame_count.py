@@ -358,7 +358,7 @@ def _frame_rate(value: Any) -> float:
 
 
 class GJJ_MediaFrameCount:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "count_frames"
     DESCRIPTION = "获取图片批次、视频帧序列或 VIDEO 的帧数量，并尽量快速读取原视频帧率。"
     SEARCH_ALIASES = ["帧数量", "视频数量", "图片序列数量", "frame count", "video frame count", "video fps", "帧率"]

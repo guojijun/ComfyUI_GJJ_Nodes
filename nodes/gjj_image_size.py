@@ -101,7 +101,7 @@ def _media_size(value: Any) -> tuple[int, int]:
 
 
 class GJJ_ImageSize:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "get_size"
     DESCRIPTION = "获取图片、批量图片或官方 VIDEO 的首帧宽度和高度。"
     RETURN_TYPES = ("INT", "INT")

@@ -227,7 +227,7 @@ def _ref_optional_input(index: int):
 
 
 class GJJBerniniConditioning:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "build"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("正向条件", "负向条件", "latent")

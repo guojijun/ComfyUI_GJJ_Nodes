@@ -384,7 +384,7 @@ def _distribute_segment_lengths(num_segments, latent_frames, specified_lengths=N
 
 
 class GJJ_PromptRelayEncoder:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "encode"
     DESCRIPTION = "将全局提示词和多段时序局部提示词编码到 Wan 或 LTX 视频模型中，用于一段视频内按时间切换内容。"
     SEARCH_ALIASES = [

@@ -302,7 +302,7 @@ _register_preview_api()
 
 
 class GJJ_PanoramaBrowser:
-    CATEGORY = "GJJ/图像/全景"
+    CATEGORY = "GJJ/🖼️ 图像/全景"
     FUNCTION = "browse"
     OUTPUT_NODE = True
     DESCRIPTION = "360 度全景图片浏览与截图节点：支持路径或 IMAGE 输入，前端可拖拽视角、滚轮缩放、框选截图，并内置模型放大输出。"

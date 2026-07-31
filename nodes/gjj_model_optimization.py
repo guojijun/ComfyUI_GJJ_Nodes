@@ -306,7 +306,7 @@ class GJJ_ModelOptimizer:
         "应用当前优化设置后的低模 MODEL；未连接低模输入时输出为空。",
     )
     FUNCTION = "optimize"
-    CATEGORY = "GJJ/模型优化"
+    CATEGORY = "GJJ/🧠 模型/优化"
     DESCRIPTION = "GJJ 模型综合优化器：TorchCompile + SageAttention + FP16 累积。支持高模、低模双通道分别输入输出，第二路可不接。"
     GJJ_HELP = {
         "title": "GJJ · 🚀 模型综合优化器",
@@ -522,7 +522,7 @@ class GJJ_CFGZeroStar:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "patch"
-    CATEGORY = "GJJ/模型优化"
+    CATEGORY = "GJJ/🧠 模型/优化"
     DESCRIPTION = "CFG ZeroStar 优化：https://github.com/WeichenFan/CFG-Zero-star"
 
     def patch(
@@ -879,7 +879,7 @@ class GJJ_TeaCacheWanVideo:
         "原 WanVideo TeaCache 兼容参数；连接到 WanVideo 采样器的 cache_args 或 teacache_args。",
     )
     FUNCTION = "patch"
-    CATEGORY = "GJJ/模型优化"
+    CATEGORY = "GJJ/🧠 模型/优化"
     DESCRIPTION = "GJJ · 🍵 GJJ TeaCache (WanVideo)：支持模型直连 TeaCache，也可输出原 WanVideoWrapper 兼容的 CACHEARGS。"
     GJJ_HELP = {
         "title": "WanVideo TeaCache",

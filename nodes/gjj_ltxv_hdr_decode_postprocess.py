@@ -210,7 +210,7 @@ class GJJ_LTXVHDRDecodePostprocess:
         "LogC3 解压后的线性 HDR 图像，保留高动态范围数值。",
     )
     FUNCTION = "postprocess"
-    CATEGORY = "GJJ/视频模型/LTX"
+    CATEGORY = "GJJ/🎬 视频/模型/LTX"
     OUTPUT_NODE = True
     DESCRIPTION = "GJJ 零外部节点依赖版 LTXVHDR Decode Postprocess：解压 LogC3 HDR、生成 SDR 预览，并可尽力保存 EXR。OpenCV EXR 不可用时不会报错中断。"
     GJJ_HELP = {

@@ -3180,7 +3180,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 
 class GJJ_VideoUniversalModelLoader:
-    CATEGORY = "GJJ/模型加载"
+    CATEGORY = "GJJ/🧠 模型/加载"
     FUNCTION = "load_models"
     DESCRIPTION = (
         "视频通用模型加载器：按官方工作流配置扫描 models 子目录，动态显示模型下拉与输出槽。"

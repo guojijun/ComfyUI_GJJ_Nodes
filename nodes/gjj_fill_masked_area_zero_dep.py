@@ -87,7 +87,7 @@ def _fill_holes(mask: torch.Tensor) -> torch.Tensor:
 
 
 class GJJ_FillMaskHolesAndMaskedArea:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "fill"
     DESCRIPTION = "零依赖单节点：先填充遮罩内部闭合空洞，再按 neutral 方式填充图片中的遮罩区域。"
     SEARCH_ALIASES = [

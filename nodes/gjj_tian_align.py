@@ -12,7 +12,7 @@ class GJJ_TianAlign:
 
     RETURN_TYPES = ()
     FUNCTION = "execute"
-    CATEGORY = "GJJ/零依赖"
+    CATEGORY = "GJJ/🛠️ 工具/零依赖"
     OUTPUT_NODE = False
 
     def execute(self, 说明=""):

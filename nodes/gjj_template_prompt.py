@@ -160,7 +160,7 @@ def _field_text_value(field: dict[str, Any], values: dict[str, Any], expr: str, 
 
 
 class GJJ_TemplatePrompt:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "render_template"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("完整提示词",)

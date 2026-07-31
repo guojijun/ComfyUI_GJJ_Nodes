@@ -565,7 +565,7 @@ def _krea2_control_wrapper_call(executor, control_projection, *args, **kwargs):
 
 
 class GJJ_Krea2ControlAIO:
-    CATEGORY = "GJJ/控制网"
+    CATEGORY = "GJJ/🖼️ 图像/控制网"
     FUNCTION = "apply"
     DESCRIPTION = "把 Krea2 控制 LoRA 加载、控制图编码和模型应用合并为一个零第三方依赖 GJJ 单节点。"
     RETURN_TYPES = ("MODEL", "LATENT", "IMAGE")

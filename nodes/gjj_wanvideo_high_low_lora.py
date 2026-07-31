@@ -171,7 +171,7 @@ def _apply_wan_set_loras(model: Any, loras: list[dict[str, Any]], branch_label: 
 
 
 class GJJ_WanVideoHighLowLora:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     FUNCTION = "apply_loras"
     RETURN_TYPES = ("WANVIDEOMODEL", "WANVIDEOMODEL")
     RETURN_NAMES = ("High模型", "Low模型")

@@ -1285,7 +1285,7 @@ function isT5ClipName(value) {
 
 function fluxFixedClipName(clips, preset = null) {
 	const recommended = (preset?.clipNames || []).find((name) => lower(name).includes("clip_l")) || "clip_l.safetensors";
-	return shortMatch(recommended, clips, recommended);
+	return shortMatch(recommended, clips, "");
 }
 
 function fluxT5ExpectedName(preset = null) {
@@ -1306,7 +1306,7 @@ function fluxT5Candidates(clips, expectedName) {
 	];
 	const matchedPreferred = preferred.map((name) => shortMatch(name, clips, "")).filter(Boolean);
 	const availableT5 = (clips || []).filter(isT5ClipName);
-	return uniqueValues(matchedPreferred, availableT5, [expectedName].filter(Boolean));
+	return uniqueValues(matchedPreferred, availableT5);
 }
 
 function defaultVaeValue(vaes) {
@@ -1579,12 +1579,12 @@ function applyPreset(node, force = false) {
 	} else {
 		if (isFlux1Preset(preset)) {
 			const fixedClip = fluxFixedClipName(clipList, preset);
-			const t5Clip = shortMatch(fluxT5ExpectedName(preset), fluxT5Candidates(clipList, fluxT5ExpectedName(preset)), fluxT5ExpectedName(preset));
+			const t5Clip = shortMatch(fluxT5ExpectedName(preset), fluxT5Candidates(clipList, fluxT5ExpectedName(preset)), "");
 			setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), fixedClip);
 			setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), t5Clip);
 		} else {
-			const clipNames = (preset.clipNames || []).map((name) => shortMatch(name, clipList, name)).filter(Boolean);
-			if (clipNames.length) setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), joinClipNames(clipNames));
+			const clipNames = (preset.clipNames || []).map((name) => shortMatch(name, clipList, "")).filter(Boolean);
+			setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), joinClipNames(clipNames));
 			setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), "");
 		}
 		if (preset.vaeName) setWidgetValue(getWidget(node, VAE_NAME_WIDGET), shortMatch(preset.vaeName, vaeList, preset.vaeName));
@@ -2634,19 +2634,26 @@ function renderPanel(node) {
 	if (preset) ensureModelPatchWidgetDefault(node, preset, modelPatches);
 	if (fluxPreset) {
 		const defaultFixedClip = fluxFixedClipName(clips, preset);
-		if (!valueOf(node, FLUX_CLIP_L_WIDGET).trim()) setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), defaultFixedClip, false);
-		const t5FromSaved = fluxT5ClipNameFromValue(valueOf(node, CLIP_NAME_WIDGET));
-		if (t5FromSaved && valueOf(node, CLIP_NAME_WIDGET) !== t5FromSaved) setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), t5FromSaved, false);
-		if (!valueOf(node, CLIP_NAME_WIDGET).trim()) {
-			setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), shortMatch(fluxT5ExpectedName(preset), fluxT5Candidates(clips, fluxT5ExpectedName(preset)), fluxT5ExpectedName(preset)), false);
-		}
+		const fixedClipCurrent = valueOf(node, FLUX_CLIP_L_WIDGET).trim();
+		const fixedClipResolved = clips.includes(fixedClipCurrent) ? fixedClipCurrent : shortMatch(fixedClipCurrent || "clip_l.safetensors", clips, "");
+		if (fixedClipResolved !== fixedClipCurrent) setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), fixedClipResolved || defaultFixedClip, false);
+		const t5SavedValue = fluxT5ClipNameFromValue(valueOf(node, CLIP_NAME_WIDGET)) || valueOf(node, CLIP_NAME_WIDGET).trim();
+		const t5Candidates = fluxT5Candidates(clips, fluxT5ExpectedName(preset));
+		const t5Resolved = clips.includes(t5SavedValue)
+			? t5SavedValue
+			: shortMatch(t5SavedValue || fluxT5ExpectedName(preset), t5Candidates, "");
+		if (t5Resolved !== valueOf(node, CLIP_NAME_WIDGET)) setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), t5Resolved, false);
 		if (preset?.vaeName) setWidgetValue(getWidget(node, VAE_NAME_WIDGET), shortMatch(preset.vaeName, vaes, preset.vaeName), false);
 	}
 	const fluxFixedClip = fluxPreset ? (valueOf(node, FLUX_CLIP_L_WIDGET) || fluxFixedClipName(clips, preset)) : "";
 	const fluxT5Expected = fluxPreset ? fluxT5ExpectedName(preset) : "";
-	const fluxT5Current = fluxPreset ? (fluxT5ClipNameFromValue(valueOf(node, CLIP_NAME_WIDGET)) || valueOf(node, CLIP_NAME_WIDGET) || fluxT5Expected) : "";
+	const fluxT5Options = fluxPreset ? fluxT5Candidates(clips, fluxT5Expected) : [];
+	const fluxT5Stored = fluxPreset ? (fluxT5ClipNameFromValue(valueOf(node, CLIP_NAME_WIDGET)) || valueOf(node, CLIP_NAME_WIDGET).trim()) : "";
+	const fluxT5Current = fluxPreset
+		? (clips.includes(fluxT5Stored) ? fluxT5Stored : shortMatch(fluxT5Stored || fluxT5Expected, fluxT5Options, ""))
+		: "";
 	const clipExpected = fluxPreset ? [fluxFixedClip || "clip_l.safetensors", fluxT5Current || fluxT5Expected] : (preset?.clipNames || []);
-	const clipValues = fluxPreset ? uniqueValues([fluxT5Current].filter(Boolean), fluxT5Candidates(clips, fluxT5Expected)) : clips;
+	const clipValues = fluxPreset ? uniqueValues([fluxT5Current].filter(Boolean), fluxT5Options) : clips;
 	const clipMissing = checkpointPreset ? [] : clipExpected.map((name) => missingModel(name, clips)).filter(Boolean);
 	const vaeExpected = preset?.vaeName || "";
 	const separateVaeOn = checkpointCommon && boolOf(node, USE_SEPARATE_VAE_WIDGET, false);

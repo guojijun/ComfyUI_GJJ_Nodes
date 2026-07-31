@@ -635,7 +635,7 @@ _register_routes()
 
 
 class GJJ_ZeroDependencyFileBrowser:
-    CATEGORY = "GJJ/文件工具"
+    CATEGORY = "GJJ/🛠️ 工具/文件"
     FUNCTION = "next_file"
     DESCRIPTION = "零依赖目录浏览器：扫描任意本地目录，按过滤与排序结果逐个输出文件；可按文件类型输出 IMAGE/AUDIO/VIDEO/文本，也可只输出路径。"
     SEARCH_ALIASES = ["file browser", "directory browser", "folder queue", "目录浏览器", "文件队列", "零依赖"]

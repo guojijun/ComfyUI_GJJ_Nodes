@@ -74,7 +74,7 @@ def _slice_batch(tensor: torch.Tensor, start_index: int, num_frames: int, label:
 
 class GJJ_GetImageRangeFromBatch:
 	DESCRIPTION = "从图片或遮罩批量中截取指定范围；复刻 KJNodes 的 GetImageRangeFromBatch，零外部依赖。"
-	CATEGORY = "GJJ/图像"
+	CATEGORY = "GJJ/🖼️ 图像"
 	FUNCTION = "images_from_batch"
 	RETURN_TYPES = (IMAGE_BATCH_TYPE, "MASK")
 	RETURN_NAMES = ("图片范围", "遮罩范围")

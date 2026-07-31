@@ -216,7 +216,7 @@ def _save_segment_preview(tensor: torch.Tensor, title: str, fps: float = 8.0) ->
 
 
 class GJJ_WanSCAILInfinity:
-    CATEGORY = "GJJ/视频生成/SCAIL"
+    CATEGORY = "GJJ/🎬 视频/生成/SCAIL"
     FUNCTION = "generate"
     DESCRIPTION = DESCRIPTION
     RETURN_TYPES = ("IMAGE", "LATENT", "INT")

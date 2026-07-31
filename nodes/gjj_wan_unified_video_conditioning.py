@@ -119,7 +119,7 @@ def _combine_clip_vision(start_clip: Any = None, end_clip: Any = None) -> Any:
 
 
 class GJJ_WanUnifiedVideoConditioning:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "generate"
     DESCRIPTION = (
         "将 EmptyHunyuanLatentVideo、WanImageToVideo、WanFirstLastFrameToVideo 合并为一个 GJJ 零依赖三模式条件节点。"

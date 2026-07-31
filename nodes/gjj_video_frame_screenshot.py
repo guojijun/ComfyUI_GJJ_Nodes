@@ -372,7 +372,7 @@ def _clamp_frame_numbers(numbers: list[int], total: int) -> list[int]:
 
 
 class GJJ_VideoFrameScreenshot:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "extract"
     DESCRIPTION = "从 VIDEO / IMAGE 批次 / GJJ_BATCH_IMAGE 中按 1 基帧号截取任意帧，并按选择顺序输出为 GJJ_BATCH_IMAGE,IMAGE。"
     SEARCH_ALIASES = ["video frame screenshot", "视频截图", "截取任意帧", "抽帧截图", "frame picker"]

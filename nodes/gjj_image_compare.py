@@ -33,7 +33,7 @@ def _attach_dimensions(images, image):
 
 
 class GJJ_ImageComparer:
-    CATEGORY = "GJJ/视频/图片对比"
+    CATEGORY = "GJJ/🎬 视频/图片对比"
     FUNCTION = "compare_images"
     OUTPUT_NODE = True
     RETURN_TYPES = ()

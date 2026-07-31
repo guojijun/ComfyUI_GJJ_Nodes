@@ -402,7 +402,7 @@ class GJJ_QwenImageLayeredPSDStudio:
         "model_tree": QWEN_LAYERED_MODEL_TREE,
     }
     SEARCH_ALIASES = ["qwen image layered", "分层图像", "PSD", "图层PSD", "一键分层"]
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "generate"
     RETURN_TYPES = ("STRING", "IMAGE")
     RETURN_NAMES = ("图层PSD", "图层预览")

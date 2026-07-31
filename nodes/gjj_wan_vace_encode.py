@@ -134,7 +134,7 @@ def _as_batched_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
 
 
 class GJJ_WanVACEEncode:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo VACE 条件编码的 GJJ 零依赖复刻版。"

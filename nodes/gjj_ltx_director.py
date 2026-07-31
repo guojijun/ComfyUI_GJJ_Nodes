@@ -1036,7 +1036,7 @@ class GJJLTXDirector(io.ComfyNode):
         return io.Schema(
             node_id="GJJ_LTXDirector",
             display_name="🎬 LTX导演时间线",
-            category="GJJ/LTX",
+            category="GJJ/🎬 视频/LTX",
             description=cls.DESCRIPTION,
             search_aliases=cls.SEARCH_ALIASES,
             inputs=[

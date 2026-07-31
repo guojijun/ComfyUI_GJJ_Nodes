@@ -324,7 +324,7 @@ class GJJ_SAM3VideoTrackAIO:
 	GJJ_HELP = {
 		**SAM31_HELP,
 	}
-	CATEGORY = "GJJ/分割/SAM3"
+	CATEGORY = "GJJ/🖼️ 图像/分割/SAM3"
 	FUNCTION = "track"
 	RETURN_TYPES = tuple([TRACK_DATA_TYPE] * MAX_ROUTES)
 	RETURN_NAMES = tuple([f"跟踪数据 {index}" for index in range(1, MAX_ROUTES + 1)])

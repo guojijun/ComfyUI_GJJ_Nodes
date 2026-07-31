@@ -191,7 +191,7 @@ class LatentSyncNode:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    CATEGORY = "GJJ/🎬 音视频处理/👄 口型同步"
+    CATEGORY = "GJJ/🎵 音频/口型同步/👄 口型同步"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("📤 输出视频路径",)
     OUTPUT_TOOLTIPS = ("口型同步完成后保存的 MP4 视频绝对路径。",)

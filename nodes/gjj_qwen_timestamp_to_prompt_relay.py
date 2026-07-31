@@ -55,7 +55,7 @@ def _parse_timestamp_lines(timestamp_table: str) -> list[tuple[float, float, str
 
 
 class GJJ_QwenTimestampToPromptRelay:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "convert"
     DESCRIPTION = "把 Qwen3-ASR 的 [开始s-结束s] 时间戳表转换为 PromptRelay 可用的 | 分段局部提示词和逐段帧数。"
     SEARCH_ALIASES = ["qwen timestamp relay", "asr prompt relay", "时间戳转中继", "口型同步"]

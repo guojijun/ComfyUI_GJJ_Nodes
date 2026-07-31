@@ -36,7 +36,7 @@ class GJJ_ImgToVideoConditionOnly:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("视频 Latent",)
     OUTPUT_TOOLTIPS = ("应用了图像条件的视频 latent",)
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "generate"
     DESCRIPTION = "将图像条件应用到视频 latent 的前几帧。创建 noise mask 来控制条件强度。"
 

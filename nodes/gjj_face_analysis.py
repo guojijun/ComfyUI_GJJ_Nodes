@@ -69,7 +69,7 @@ if vendor_path not in sys.path:
 
 NODE_NAME = "GJJ_FaceAnalysis"
 NODE_DISPLAY_NAME = "GJJ · 🎭 一键批量换脸"
-CATEGORY = "GJJ/图像"
+CATEGORY = "GJJ/🖼️ 图像"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 IDENTITY_SWAP_MODEL_OPTIONS = ["inswapper_128.onnx", "inswapper_128_fp16.onnx"]
 RESTORE_MODEL_NONE = "无"
@@ -1249,7 +1249,7 @@ def _pil_to_bgr(image: Image.Image) -> np.ndarray:
 
 
 class GJJ_FaceAnalysis:
-    CATEGORY = "GJJ/视频/人脸分析"
+    CATEGORY = "GJJ/🎬 视频/人脸分析"
     FUNCTION = "swap_faces"
     INPUT_IS_LIST = True
     OUTPUT_NODE = False

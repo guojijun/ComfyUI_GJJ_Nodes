@@ -1271,7 +1271,7 @@ class GJJ_OpenPose:
     RETURN_NAMES = ("姿态骨架图",)
     OUTPUT_TOOLTIPS = ("OpenPose 姿态骨架图（RGB），黑色背景上绘制彩色骨架线条",)
     FUNCTION = "estimate_pose"
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
 
     def estimate_pose(self, images, detect_hand="启用", detect_body="启用", detect_face="启用", resolution=512, xinsr_stick_scaling="禁用", unique_id=None, extra_pnginfo=None, **kwargs):
         device = model_management.get_torch_device()

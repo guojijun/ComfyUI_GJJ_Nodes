@@ -171,7 +171,7 @@ def _calculate_route_indexes(formula: Any, values: dict[str, Any]) -> list[int]:
 
 
 class GJJ_ConditionalRouteSwitch:
-    CATEGORY = "GJJ/视频/逻辑"
+    CATEGORY = "GJJ/🎬 视频/逻辑"
     FUNCTION = "route"
     DESCRIPTION = "条件路由切换：公式或变量值等于第几路，就透传第几路输入；变量模式下未选中路会在提交前旁路下游。"
     SEARCH_ALIASES = ["conditional route switch", "route switch", "条件路由", "条件切换", "公式路由", "变量路由", "多选路由"]

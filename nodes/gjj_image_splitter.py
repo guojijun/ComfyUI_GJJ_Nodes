@@ -28,7 +28,7 @@ DEFAULT_STATE = json.dumps({
 
 
 class GJJ_ImageSplitter:
-    CATEGORY = "GJJ/视频/图片分割"
+    CATEGORY = "GJJ/🎬 视频/图片分割"
     FUNCTION = "split"
     DESCRIPTION = """宫格图片分割器 —— 在节点内实时预览并拖拽分割线，自动裁剪每个区块，支持节点内部直接加载图片。
 

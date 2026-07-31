@@ -226,7 +226,7 @@ def _pad_images(
 
 
 class GJJ_EncodeVideoComponents:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "encode"
     DESCRIPTION = "逐帧读取 VIDEO、按比例模式缩放/裁剪/填充，并直接用 VAE 编码为 LATENT，同时输出音频、帧率和帧数。"
     SEARCH_ALIASES = ["video to latent", "encode video", "vae encode video", "视频转latent", "视频编码"]

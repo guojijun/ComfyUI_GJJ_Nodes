@@ -86,7 +86,7 @@ class GJJ_SigmasEditor:
         "Sigmas值的JSON字符串表示。",
     )
     FUNCTION = "process"
-    CATEGORY = "GJJ/工具"
+    CATEGORY = "GJJ/🛠️ 工具"
 
     def process(self, sigmas_in=None, sigmas_data: str = "", curve_mode: str = "smooth", preset: str = "默认1"):
         if sigmas_in is not None:

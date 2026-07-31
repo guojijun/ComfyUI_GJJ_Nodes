@@ -268,7 +268,7 @@ class GJJ_CrossViewWarp:
     RETURN_NAMES = ("扭曲图像",)
     OUTPUT_TOOLTIPS = ("跨视角控制图；洋红色区域表示新视角中没有原始像素的部分。",)
     FUNCTION = "生成"
-    CATEGORY = "GJJ节点/图像处理"
+    CATEGORY = "GJJ/🖼️ 图像"
     DESCRIPTION = "根据单目深度把图像或视频批次重投影到新的相机视角，洋红色代表遮挡空洞。"
 
     def 生成(
@@ -370,5 +370,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_CrossViewWarp": "跨视角深度扭曲",
+    "GJJ_CrossViewWarp": "🌏 跨视角深度扭曲",
 }

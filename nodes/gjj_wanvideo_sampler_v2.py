@@ -261,7 +261,7 @@ class GJJ_WanVideoSchedulerV2:
     RETURN_NAMES = ("调度器",)
     OUTPUT_TOOLTIPS = ("WanVideo Sampler v2 使用的调度器配置。",)
     FUNCTION = "process"
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     DESCRIPTION = "GJJ WanVideo 调度器 v2：调用 GJJ 内置 vendored WanVideo runtime。"
     GJJ_HELP = {
         "title": "WanVideo 调度器 v2",
@@ -414,7 +414,7 @@ class GJJ_WanVideoSamplerV2ExtraArgs:
     RETURN_NAMES = ("扩展参数",)
     OUTPUT_TOOLTIPS = ("WanVideo Sampler v2 的可选扩展参数包。",)
     FUNCTION = "process"
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     DESCRIPTION = "GJJ WanVideo Sampler v2 扩展参数：把高级输入打包后连接到采样器。"
 
     def process(self, **kwargs):
@@ -701,7 +701,7 @@ class GJJ_WanVideoSamplerV2:
     RETURN_NAMES = ("采样 latent", "去噪 latent")
     OUTPUT_TOOLTIPS = ("采样结果 latent。", "去噪后的 latent，供预览或调试使用。")
     FUNCTION = "process"
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     DESCRIPTION = "GJJ WanVideo 视频采样器 v2：固定经典插槽版，调用 GJJ 内置 vendored WanVideoWrapper 核心 runtime。"
     GJJ_HELP = {
         "title": "WanVideo Sampler v2",

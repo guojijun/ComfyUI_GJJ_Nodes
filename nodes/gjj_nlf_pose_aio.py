@@ -28,7 +28,7 @@ from .common_utils.model_manager import (
 
 NODE_NAME = "GJJ_NLFPoseAIO"
 NODE_DISPLAY_NAME = "GJJ · 🧍 NLF姿态一体"
-CATEGORY = "GJJ/姿态"
+CATEGORY = "GJJ/🖼️ 图像/姿态"
 
 AUTO = "Auto"
 DEFAULT_NLF = "nlf_l_multi_0.3.2.torchscript"

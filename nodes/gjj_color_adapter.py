@@ -72,7 +72,7 @@ def _adapt_one(image: torch.Tensor, reference: torch.Tensor, opacity: int) -> to
 
 
 class GJJ_ColorAdapter:
-    CATEGORY = "GJJ/视频/图像处理"
+    CATEGORY = "GJJ/🎬 视频/图像处理"
     FUNCTION = "color_adapter"
     DESCRIPTION = "根据参考图自动调整输入图像的整体色调。复刻 LayerColor: ColorAdapter 的 LAB 色彩迁移逻辑，使用 GJJ 内置零依赖实现。"
     SEARCH_ALIASES = [

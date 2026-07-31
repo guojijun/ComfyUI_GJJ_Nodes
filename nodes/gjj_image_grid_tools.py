@@ -22,7 +22,7 @@ def _optional_parts(kwargs: dict) -> list[torch.Tensor | None]:
 
 
 class GJJ_ImageGridSplitter:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "split"
     DESCRIPTION = "把图片按网格切成最多 9 块，可带少量重叠，适合局部处理后重组。"
     SEARCH_ALIASES = ["split image", "grid", "切图", "九宫格", "切片"]
@@ -65,7 +65,7 @@ class GJJ_ImageGridSplitter:
 
 
 class GJJ_ImageGridReassembler:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "reassemble"
     DESCRIPTION = "把网格图片块贴回原图尺寸，支持指定替换块与自动缩放。"
     SEARCH_ALIASES = ["reassemble image", "grid", "重组", "切片还原"]
@@ -127,7 +127,7 @@ class GJJ_ImageGridReassembler:
 
 
 class GJJ_ImageStacker:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "stack"
     DESCRIPTION = "把 2-4 张图片横向或纵向拼接。"
     SEARCH_ALIASES = ["merge image", "stack image", "横向合图", "纵向合图"]

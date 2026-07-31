@@ -809,7 +809,7 @@ class _PreviewOverrideWrapper:
 
 
 class GJJ_ModelPreviewOverrideKJ:
-    CATEGORY = "GJJ/采样"
+    CATEGORY = "GJJ/🧠 模型/采样"
     FUNCTION = "apply"
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("模型",)

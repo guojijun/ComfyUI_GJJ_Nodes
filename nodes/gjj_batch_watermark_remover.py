@@ -606,7 +606,7 @@ class GJJ_BatchWatermarkRemover:
     )
     FUNCTION = "remove"
     OUTPUT_NODE = True
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     MODEL_TREE = [
         {
             "label": "4B UNET 主模型",

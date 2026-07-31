@@ -571,7 +571,7 @@ class GJJ_LTXIdentityOverlapConditioning:
         "原始参考图及绿色保留区域框。",
     )
     FUNCTION = "apply"
-    CATEGORY = "GJJ/视频/LTX身份控制"
+    CATEGORY = "GJJ/🎬 视频/LTX身份控制"
     DESCRIPTION = "为 LTX 模型注入独立的身份参考令牌，支持重叠、时空错位与分层堆叠布局；参考图不是首帧 I2V 条件，并提供实际编码图与裁剪区域预览。"
     GJJ_HELP = {
         "title": "GJJ · 🧬 LTX身份重叠条件",

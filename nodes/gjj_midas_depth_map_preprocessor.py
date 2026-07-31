@@ -403,7 +403,7 @@ def _load_hf_model_pair(model_id: str, unique_id: Any = None):
 
 
 class GJJ_MidasDepthMapPreprocessor:
-    CATEGORY = "GJJ/控制网/预处理"
+    CATEGORY = "GJJ/🖼️ 图像/控制网/预处理"
     FUNCTION = "estimate_depth"
     DESCRIPTION = DESCRIPTION
     RETURN_TYPES = (FRAME_OUTPUT_TYPE,)

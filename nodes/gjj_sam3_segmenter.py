@@ -128,7 +128,7 @@ class GJJ_SAM3PointCollector:
 		"背景点位提示，连接到 SAM3 点选分割器的背景点输入。",
 	)
 	FUNCTION = "collect"
-	CATEGORY = "GJJ/分割/SAM3"
+	CATEGORY = "GJJ/🖼️ 图像/分割/SAM3"
 
 	@classmethod
 	def IS_CHANGED(cls, image, points_store, coordinates, neg_coordinates):
@@ -202,7 +202,7 @@ class GJJ_SAM3BBoxCollector:
 		"反向框提示，连接到 SAM3 文本分割器排除区域。",
 	)
 	FUNCTION = "collect"
-	CATEGORY = "GJJ/分割/SAM3"
+	CATEGORY = "GJJ/🖼️ 图像/分割/SAM3"
 
 	@classmethod
 	def IS_CHANGED(cls, image, bboxes, neg_bboxes):
@@ -325,7 +325,7 @@ class GJJ_SAM3PointSegmenter:
 		"所有遮罩得分的 JSON 文本。",
 	)
 	FUNCTION = "segment"
-	CATEGORY = "GJJ/分割/SAM3"
+	CATEGORY = "GJJ/🖼️ 图像/分割/SAM3"
 
 	def segment(
 		self,
@@ -552,7 +552,7 @@ class GJJ_SAM3TextSegmenter:
 		"所有得分的 JSON 文本。",
 	)
 	FUNCTION = "segment"
-	CATEGORY = "GJJ/分割/SAM3"
+	CATEGORY = "GJJ/🖼️ 图像/分割/SAM3"
 
 	def segment(
 		self,

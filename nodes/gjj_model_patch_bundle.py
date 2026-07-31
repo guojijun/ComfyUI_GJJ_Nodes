@@ -487,7 +487,7 @@ def _apply_ltxv_feedforward_chunk(model_clone, chunks: int, dim_threshold: int):
 
 
 class GJJ_ModelPatchBundle:
-    CATEGORY = "GJJ/模型优化"
+    CATEGORY = "GJJ/🧠 模型/优化"
     FUNCTION = "patch"
     RETURN_TYPES = ("MODEL", "MODEL")
     RETURN_NAMES = ("高模", "低模")

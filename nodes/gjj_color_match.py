@@ -131,7 +131,7 @@ def _transfer_rgb(target_rgb: torch.Tensor, ref_rgb: torch.Tensor, method: str) 
 
 
 class GJJ_ColorMatch:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "colormatch"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("图像",)

@@ -39,7 +39,7 @@ def _background(rgb: torch.Tensor, color: str) -> torch.Tensor:
 
 
 class GJJ_LoadImageWithAlpha:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "load"
     DESCRIPTION = "加载 input 目录图片，保留 RGBA 并输出 alpha 遮罩。"
     SEARCH_ALIASES = ["alpha", "透明", "rgba", "load image alpha"]
@@ -107,7 +107,7 @@ class GJJ_LoadImageWithAlpha:
 
 
 class GJJ_AlphaTools:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "process"
     DESCRIPTION = "透明通道处理：绿幕转透明、Alpha转遮罩、移除透明背景。"
     SEARCH_ALIASES = ["alpha", "green screen", "透明", "绿幕", "remove transparency"]

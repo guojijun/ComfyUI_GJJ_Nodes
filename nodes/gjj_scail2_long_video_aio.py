@@ -685,7 +685,7 @@ async def _post_scail2_aio_upload_audio(request):
 
 
 class GJJ_SCAIL2LongVideoAIO:
-    CATEGORY = "GJJ/视频生成/SCAIL"
+    CATEGORY = "GJJ/🎬 视频/生成/SCAIL"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = (

@@ -58,7 +58,7 @@ def _display_name_for_input(name: str) -> str:
 
 
 class GJJBatchAnything:
-    CATEGORY = "GJJ/逻辑"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑"
     FUNCTION = "batch"
     DESCRIPTION = "零依赖复刻 easy batchAnything：把多路输入合成一个批量/拼接结果；IMAGE 和 LATENT 会拼 batch，普通对象按原类型逻辑合并。"
     SEARCH_ALIASES = ["easy batchAnything", "batch anything", "batch any", "任意合并", "任意批量"]

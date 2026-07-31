@@ -21,7 +21,7 @@ from .common_utils.dependency_checker import (
 
 NODE_NAME = "GJJ_WanAnimatePoseFaceAIO"
 NODE_DISPLAY_NAME = "GJJ · 🧍 WanAnimate姿态脸部一体"
-CATEGORY = "GJJ/视频模型/万相视频"
+CATEGORY = "GJJ/🎬 视频/模型/万相视频"
 MODEL_SUBDIR = "models/detection"
 PLACEHOLDER_MODEL = "未找到 models/detection 下的 ONNX 模型"
 MODEL_EXTENSIONS = {".onnx"}

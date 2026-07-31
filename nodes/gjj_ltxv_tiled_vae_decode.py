@@ -183,7 +183,7 @@ class GJJ_LTXVTiledVAEDecode:
     RETURN_NAMES = ("图像",)
     OUTPUT_TOOLTIPS = ("解码后的视频帧序列，格式为 ComfyUI IMAGE。",)
     FUNCTION = "decode"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "零依赖移植 LTXVTiledVAEDecode：对 LTXV latent 做空间分块 VAE 解码，并用重叠权重融合接缝。"
     GJJ_HELP = {
         "title": "LTXV 分块 VAE 解码",

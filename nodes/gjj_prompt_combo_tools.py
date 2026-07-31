@@ -48,7 +48,7 @@ def _embedding_names() -> list[str]:
 
 
 class GJJ_PromptCombination:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "combine"
     DESCRIPTION = "把基础提示词、主体列表和风格列表做排列组合或随机抽样，输出提示词列表。"
     SEARCH_ALIASES = ["prompt combine", "prompt matrix", "提示词组合", "排列组合", "随机提示词"]
@@ -98,7 +98,7 @@ class GJJ_PromptCombination:
 
 
 class GJJ_PromptWeight:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "weight"
     DESCRIPTION = "给提示词片段添加常见权重语法，支持单条或多行批量输出。"
     SEARCH_ALIASES = ["prompt weight", "提示词权重", "权重包装", "括号权重"]
@@ -135,7 +135,7 @@ class GJJ_PromptWeight:
 
 
 class GJJ_EmbeddingPrompt:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "make"
     DESCRIPTION = "生成 embedding 提示词片段，并可附加权重。"
     SEARCH_ALIASES = ["embedding prompt", "embedding", "嵌入提示词", "负面embedding"]
@@ -166,7 +166,7 @@ class GJJ_EmbeddingPrompt:
 
 
 class GJJ_TextJoinWithDelimiter:
-    CATEGORY = "GJJ/提示词"
+    CATEGORY = "GJJ/📝 文本/提示词"
     FUNCTION = "join"
     DESCRIPTION = "把文本列表或多路文本按指定分隔符合并，适合把批量提示词片段汇总成一段。"
     SEARCH_ALIASES = ["join delimiter", "文本分隔合并", "提示词拼接", "分隔符"]

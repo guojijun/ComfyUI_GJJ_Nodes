@@ -36,7 +36,7 @@ def extract_column(
 
 
 class GJJ_TextColumnExtractor:
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     FUNCTION = "extract"
     DESCRIPTION = "按行拆分表格式文本，提取指定列，并将该列的所有内容逐条换行输出。"
     SEARCH_ALIASES = [

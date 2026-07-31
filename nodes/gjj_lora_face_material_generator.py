@@ -584,7 +584,7 @@ def _save_dataset(
 
 
 class GJJLoraFaceMaterialGenerator:
-    CATEGORY = "GJJ/图像生成"
+    CATEGORY = "GJJ/🖼️ 图像/生成"
     FUNCTION = "generate_materials"
     DESCRIPTION = (
         "输入同一人物的多张参考图，默认使用 qwen_image_edit_2511 一致性编辑链批量生成可直接用于 LoRA 训练的单人素材。"

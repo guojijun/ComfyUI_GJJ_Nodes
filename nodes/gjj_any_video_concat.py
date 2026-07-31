@@ -193,7 +193,7 @@ def _scene_cuts_from_counts(frame_counts: list[int]) -> list[int]:
 
 
 class GJJ_AnyVideoConcat:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "concat"
     OUTPUT_NODE = True
     DESCRIPTION = "动态输入任意数量视频，按输入顺序拼合成一段视频；可删除衔接处重复锚点帧，并在节点和队列里显示预览。"

@@ -536,7 +536,7 @@ def _encode_text_conditioning(clip: Any, prompt: str):
 
 
 class GJJ_TextEncodeQwenImageEditPlus:
-    CATEGORY = "GJJ/条件编码"
+    CATEGORY = "GJJ/📝 文本/条件编码"
     FUNCTION = "encode"
     DESCRIPTION = _DESCRIPTION
     SEARCH_ALIASES = [

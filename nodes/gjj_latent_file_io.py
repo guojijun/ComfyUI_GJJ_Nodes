@@ -285,7 +285,7 @@ def _vram_cache_signature(key: str) -> str:
 
 
 class GJJ_SaveLatentAbsolute:
-    CATEGORY = "GJJ/工具/Latent"
+    CATEGORY = "GJJ/🛠️ 工具/Latent"
     FUNCTION = "save"
     OUTPUT_NODE = True
     RETURN_TYPES = ("LATENT", "STRING", "BOOLEAN")
@@ -349,7 +349,7 @@ class GJJ_SaveLatentAbsolute:
 
 
 class GJJ_LoadLatentAbsolute:
-    CATEGORY = "GJJ/工具/Latent"
+    CATEGORY = "GJJ/🛠️ 工具/Latent"
     FUNCTION = "load"
     RETURN_TYPES = ("LATENT", "STRING", "BOOLEAN")
     RETURN_NAMES = ("Latent", "绝对路径", "文件存在")
@@ -418,7 +418,7 @@ class GJJ_LoadLatentAbsolute:
 
 
 class GJJ_SaveLatentVRAM:
-    CATEGORY = "GJJ/工具/Latent"
+    CATEGORY = "GJJ/🛠️ 工具/Latent"
     FUNCTION = "save"
     OUTPUT_NODE = True
     RETURN_TYPES = ("LATENT",)
@@ -480,7 +480,7 @@ class GJJ_SaveLatentVRAM:
 
 
 class GJJ_LoadLatentVRAM:
-    CATEGORY = "GJJ/工具/Latent"
+    CATEGORY = "GJJ/🛠️ 工具/Latent"
     FUNCTION = "load"
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("Latent",)

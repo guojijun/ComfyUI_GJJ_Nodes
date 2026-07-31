@@ -726,7 +726,7 @@ _register_routes_once()
 
 
 class GJJ_MemoryManager:
-    CATEGORY = "GJJ/系统工具"
+    CATEGORY = "GJJ/🛠️ 工具/系统"
     FUNCTION = "execute"
     OUTPUT_NODE = True
     DESCRIPTION = "内存显存管理工具：顶部开关用于数据流经过节点时自动清理；下方按钮直接调用本节点后端动作，不会执行整个工作流。"

@@ -361,7 +361,7 @@ class GJJ_LTX2SamplingPreviewOverride:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("模型",)
     OUTPUT_TOOLTIPS = ("添加了采样预览覆盖的模型",)
-    CATEGORY = "GJJ/采样"
+    CATEGORY = "GJJ/🧠 模型/采样"
     FUNCTION = "generate"
     DESCRIPTION = "LTX2 采样预览覆盖。覆盖 LTX2 模型的采样预览功能，在采样过程中生成实时预览图像。"
 

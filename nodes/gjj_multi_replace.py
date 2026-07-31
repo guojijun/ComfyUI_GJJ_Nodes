@@ -231,7 +231,7 @@ def _replace_object(
 
 
 class GJJ_MultiReplace:
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     FUNCTION = "replace"
     DESCRIPTION = "对任意对象中的文本内容执行多组查找替换；字符串、列表、元组、字典会递归处理，非文本对象原样透传。"
     SEARCH_ALIASES = ["replace", "multi replace", "文本替换", "批量替换", "正则替换", "任意对象替换"]

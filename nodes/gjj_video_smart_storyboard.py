@@ -943,7 +943,7 @@ def _analyze_scenes(frames: torch.Tensor) -> dict[str, Any]:
 
 
 class GJJ_VideoSmartStoryboard:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "split_storyboard"
     DESCRIPTION = "单视频智能分镜：输入 GJJ_BATCH_IMAGE / IMAGE / VIDEO，自动识别镜头边界，用二分法细化切点，输出当前分镜帧和分镜序号。"
     SEARCH_ALIASES = ["智能分镜", "视频分镜", "镜头切分", "storyboard", "scene cut", "shot split"]

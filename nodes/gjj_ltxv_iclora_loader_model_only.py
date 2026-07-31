@@ -124,7 +124,7 @@ class GJJ_LTXVICLoRALoaderModelOnly:
         "Latent缩放因子 * 32 后的整数倍数，可直接用于参考图预处理到对应像素整倍数。",
     )
     FUNCTION = "load_lora"
-    CATEGORY = "GJJ/视频模型/LTXV"
+    CATEGORY = "GJJ/🎬 视频/模型/LTXV"
     DESCRIPTION = "零依赖移植 LTXICLoRALoaderModelOnly：只给模型加载 IC-LoRA，并输出 latent_downscale_factor 与 factor*32 像素倍数。"
     GJJ_HELP = {
         "title": "LTXV IC-LoRA 模型加载",

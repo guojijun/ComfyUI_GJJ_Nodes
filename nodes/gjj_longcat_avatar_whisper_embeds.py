@@ -193,7 +193,7 @@ def _load_whisper_model(model_name: str, base_precision: str = "fp16", load_devi
 
 
 class GJJ_LongCatAvatarWhisperEmbeds:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     RETURN_TYPES = ("MULTITALK_EMBEDS", "AUDIO", "INT")
     RETURN_NAMES = ("音频嵌入", "音频", "帧数")

@@ -464,7 +464,7 @@ def _run_rmbg14_all_masks(
 
 
 class GJJ_RemoveBgStitch:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "stitch"
     INPUT_IS_LIST = True
     OUTPUT_NODE = True

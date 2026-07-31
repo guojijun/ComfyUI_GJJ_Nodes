@@ -9,7 +9,7 @@ NODE_DISPLAY_NAME = "🔗 Wan添加TTM Latent"
 
 
 class GJJ_WanVideoAddTTMLatents:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "add_ttm"
     DESCRIPTION = (
         "WanVideo TTM (Time-To-Move) Latent 注入的 GJJ 零依赖节点。"

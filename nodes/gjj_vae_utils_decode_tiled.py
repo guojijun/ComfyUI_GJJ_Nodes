@@ -97,7 +97,7 @@ class GJJ_VAEUtils_VAEDecodeTiled:
     RETURN_NAMES = ("图像",)
     OUTPUT_TOOLTIPS = ("完成分块解码及可选像素重排放大的图像。",)
     FUNCTION = "decode"
-    CATEGORY = "GJJ/图像处理"
+    CATEGORY = "GJJ/🖼️ 图像/处理"
     DESCRIPTION = "零外部插件依赖的 VAE 分块解码节点，兼容 VAEUtils_VAEDecodeTiled 的输入和处理行为。"
     SEARCH_ALIASES = ["VAE分块解码", "VAE切片解码", "VAEDecodeTiled", "VAE Utils", "零依赖"]
     GJJ_HELP = {

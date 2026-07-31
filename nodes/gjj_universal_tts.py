@@ -3285,7 +3285,7 @@ def _coerce_optional_prompt(value: Any) -> str:
 
 
 class GJJ_UniversalTTS:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "零本地节点依赖的多功能 TTS：统一文本解析、参考音频、队列合成、时间轴输出和依赖提示。"

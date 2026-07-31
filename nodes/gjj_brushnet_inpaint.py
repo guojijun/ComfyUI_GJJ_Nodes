@@ -385,7 +385,7 @@ def _blend_inpaint(inpaint: torch.Tensor, original: torch.Tensor, mask: torch.Te
 
 
 class GJJ_BrushNetInpaint:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "run"
     DESCRIPTION = "综合迁移 BrushNet、PowerPaint、RAUNet、裁切与融合补图功能；模型会在 models 下模糊搜索。"
     SEARCH_ALIASES = ["brushnet", "powerpaint", "raunet", "inpaint", "补图", "局部重绘", "物体移除", "外扩"]

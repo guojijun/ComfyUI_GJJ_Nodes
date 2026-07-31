@@ -833,7 +833,7 @@ def generate_qwen2511_scene_fusion(
 class GJJ_TextOverlay:
     NAME = "GJJ_TextOverlay"
     DISPLAY_NAME = "GJJ · 📝 文本图片叠加"
-    CATEGORY = "GJJ/图像/文字叠加"
+    CATEGORY = "GJJ/🖼️ 图像/文字叠加"
     DESCRIPTION = "将文本或前景图叠加到背景图上，支持批量处理；前景图可使用本地 RMBG1.4 模型自动抠图，并添加阴影、描边。"
     SEARCH_ALIASES = ["text overlay", "text image overlay", "前景", "叠加", "图片", "批量", "batch"]
     GJJ_HELP = build_node_help_payload(

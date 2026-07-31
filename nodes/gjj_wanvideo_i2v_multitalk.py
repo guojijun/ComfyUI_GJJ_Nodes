@@ -33,7 +33,7 @@ def _load_multitalk_runtime():
 
 
 class GJJ_WanVideoImageToVideoMultiTalk:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "process"
     DESCRIPTION = (
         "WanVideo MultiTalk / InfiniteTalk 长视频图生视频条件节点。"

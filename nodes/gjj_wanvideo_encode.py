@@ -50,7 +50,7 @@ def _as_bool(value: Any) -> bool:
 
 
 class GJJ_WanVideoEncode:
-    CATEGORY = "GJJ/视频生成"
+    CATEGORY = "GJJ/🎬 视频/生成"
     FUNCTION = "encode"
     DESCRIPTION = (
         "把 IMAGE 帧序列编码为 WanVideo latent。"

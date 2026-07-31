@@ -738,7 +738,7 @@ class GJJ_Ideogram4PromptBuilder:
         "可视化构建 Ideogram 4 结构化 JSON 提示词。"
         "在节点画布中拖拽绘制区域，为每个区域填写类型、描述、文字和颜色，并按 Ideogram 4 提示词工程推荐的字段顺序输出 JSON 字符串。"
     )
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     RETURN_TYPES = ("STRING", "IMAGE")
     RETURN_NAMES = ("提示词JSON", "区域预览图")
     OUTPUT_TOOLTIPS = (

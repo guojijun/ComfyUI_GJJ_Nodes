@@ -492,7 +492,7 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
 
 
 class GJJ_WanSCAILToVideo:
-    CATEGORY = "GJJ/视频生成/SCAIL"
+    CATEGORY = "GJJ/🎬 视频/生成/SCAIL"
     FUNCTION = "build"
     DESCRIPTION = DESCRIPTION
     GJJ_PRESERVE_DISPLAY_NAME_KEYS = (NODE_NAME,)
@@ -889,7 +889,7 @@ class GJJ_WanSCAILToVideo:
 
 
 class GJJ_SCAIL2ColoredMask:
-    CATEGORY = "GJJ/视频生成/SCAIL"
+    CATEGORY = "GJJ/🎬 视频/生成/SCAIL"
     FUNCTION = "build"
     DESCRIPTION = (
         "零依赖复刻官方 SCAIL2ColoredMask：把 SAM3 轨迹数据渲染为 SCAIL-2 需要的彩色身份遮罩，"

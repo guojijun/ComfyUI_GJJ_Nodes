@@ -575,7 +575,7 @@ class GJJ_VideoDepthAnything:
         "Mono/Metric Large 模型提供的天空概率；不支持时返回全黑图。",
     )
     FUNCTION = "process"
-    CATEGORY = "GJJ/视频模型/深度"
+    CATEGORY = "GJJ/🎬 视频/模型/深度"
     DESCRIPTION = _DESCRIPTION
     GJJ_HELP = {
         "title": "Video Depth Anything",

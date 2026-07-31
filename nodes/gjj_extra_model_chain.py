@@ -283,7 +283,7 @@ def _load_fantasyportrait_model(model_name: str, base_precision: str):
 
 
 class GJJ_ExtraModelChainConfig:
-    CATEGORY = "GJJ/视频/额外模型"
+    CATEGORY = "GJJ/🎬 视频/额外模型"
     FUNCTION = "build_config"
     DESCRIPTION = (
         "GJJ 额外模型串联配置节点。用于把 VACE、FantasyTalking、MultiTalk/InfiniteTalk、"

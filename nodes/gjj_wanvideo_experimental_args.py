@@ -36,7 +36,7 @@ def _as_bool(value) -> bool:
 
 
 class GJJ_WanVideoExperimentalArgs:
-    CATEGORY = "GJJ/视频模型/WanVideo"
+    CATEGORY = "GJJ/🎬 视频/模型/WanVideo"
     FUNCTION = "build_args"
     EXPERIMENTAL = False
     DESCRIPTION = (

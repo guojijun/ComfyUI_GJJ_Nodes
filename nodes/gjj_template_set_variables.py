@@ -255,7 +255,7 @@ def parse_template(template_text: str) -> list[dict[str, Any]]:
 
 
 class GJJ_TemplateSetVariables:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "output_variables"
     DESCRIPTION = "根据模板设置动态生成变量输入小圆点，并作为 GJJ 全局变量供变量读取节点使用。格式：中文标签（变量Key）[接口类型]：默认值，例如：宽度（Width）[INT]：640。默认隐藏右侧输出口；需要直接连线时可在节点工具栏点击 🔌 显示输出插口。GJJ 变量读取节点会在提交前解析到真实变量来源，不依赖右侧插口显示状态。"
     SEARCH_ALIASES = ["template variables", "模板设置", "模板变量", "变量设置", "动态变量", "SampleFrames", "Width", "Height", "WANVAE", "WANVIDEOMODEL"]

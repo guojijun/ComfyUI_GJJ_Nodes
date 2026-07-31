@@ -65,7 +65,7 @@ def _as_list(value: Any, flatten: bool) -> list[Any]:
 
 
 class GJJ_AnyListMerge:
-    CATEGORY = "GJJ/列表工具"
+    CATEGORY = "GJJ/🔀 逻辑与流程/列表工具"
     FUNCTION = "merge"
     DESCRIPTION = "把多路任意输入合并成 ComfyUI 列表口输出，适合批量参数、批量提示词和批量对象整理。"
     SEARCH_ALIASES = ["any list", "merge list", "列表合并", "任意列表"]
@@ -115,7 +115,7 @@ class GJJ_AnyListMerge:
 
 
 class GuojijunAnyListRepeat:
-    CATEGORY = "GJJ/列表工具"
+    CATEGORY = "GJJ/🔀 逻辑与流程/列表工具"
     FUNCTION = "repeat"
     DEPRECATED = True
     DESCRIPTION = "把输入对象或列表重复指定次数并输出为列表。"
@@ -141,7 +141,7 @@ class GuojijunAnyListRepeat:
 
 
 class GJJ_AnyListPick:
-    CATEGORY = "GJJ/列表工具"
+    CATEGORY = "GJJ/🔀 逻辑与流程/列表工具"
     FUNCTION = "pick"
     DESCRIPTION = "从任意列表中按序号取一项，序号支持循环。"
     SEARCH_ALIASES = ["pick list", "list item", "列表取项", "按索引取值"]
@@ -173,7 +173,7 @@ class GJJ_AnyListPick:
 
 
 class GJJ_AnyListFilter:
-    CATEGORY = "GJJ/列表工具"
+    CATEGORY = "GJJ/🔀 逻辑与流程/列表工具"
     FUNCTION = "filter"
     DESCRIPTION = "按起止序号和可选布尔列表筛选任意列表。"
     SEARCH_ALIASES = ["filter list", "slice list", "列表筛选", "列表切片"]

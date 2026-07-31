@@ -1008,7 +1008,7 @@ def _patch_wan22_s2v_extra_conds_v2() -> None:
 
 
 class GJJBerniniS2VConditioning:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "build"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("正向条件", "负向条件", "latent")
@@ -1115,7 +1115,7 @@ class GJJBerniniS2VConditioning:
 
 
 class GJJBerniniS2VConditioningV2:
-    CATEGORY = "GJJ/视频"
+    CATEGORY = "GJJ/🎬 视频"
     FUNCTION = "build"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("正向条件", "负向条件", "latent")

@@ -828,7 +828,7 @@ def _save_svg_files(svg_items: list[str], combined: str, save_directory: str, pr
 
 
 class GJJ_ImageToSVGZero:
-    CATEGORY = "GJJ/图像/图片转svg"
+    CATEGORY = "GJJ/🖼️ 图像/图片转svg"
     FUNCTION = "convert"
     DESCRIPTION = "零依赖图片转 SVG 单节点：可选接入 GJJ_BATCH_IMAGE/IMAGE，也可从顶部按钮上传一个或多个文件；输出 SVG 字符串并在节点内预览。"
     SEARCH_ALIASES = ["to svg", "svg", "image to svg", "图片转svg", "零依赖svg"]

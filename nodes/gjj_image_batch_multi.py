@@ -389,7 +389,7 @@ def _make_prepend_frame(mode: str, width: int, height: int, channels: int, dtype
 
 
 class GJJ_ImageBatchMulti:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "combine"
     INPUT_IS_LIST = True
     RETURN_TYPES = (COMPAT_BATCH_IMAGE_TYPE, "INT", "INT", "INT")

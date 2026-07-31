@@ -775,7 +775,7 @@ def _sample_mmaudio(
 
 
 class GJJ_MMAudioNSFWSingle:
-    CATEGORY = "GJJ/音频"
+    CATEGORY = "GJJ/🎵 音频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "MMAudio 视频配音单节点：优先使用输入口媒体；未连接时使用 📁 打开的视频文件；本地生成音频并合成视频。"

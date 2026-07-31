@@ -204,7 +204,7 @@ def _select_any(value: Any, indices: list[int]) -> Any:
 
 
 class GJJ_AnyIndexOutput:
-    CATEGORY = "GJJ/索引"
+    CATEGORY = "GJJ/🔀 逻辑与流程/索引"
     FUNCTION = "index_output"
     DESCRIPTION = INDEX_HELP_DESCRIPTION
     SEARCH_ALIASES = ["any index", "index output", "任意索引", "对象索引", "索引输出", "列表索引"]

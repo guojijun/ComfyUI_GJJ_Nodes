@@ -1742,7 +1742,7 @@ class GJJ_BatchOutpaint:
     )
     OUTPUT_NODE = True
     FUNCTION = "generate"
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
 
     GJJ_HELP = {
         "title": "GJJ · 🖼️ 批量扩图工具",

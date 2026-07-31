@@ -207,7 +207,7 @@ def _choose_processing_device(input_numel: int, output_numel: int) -> torch.devi
 
 
 class GJJ_BatchCropResize:
-    CATEGORY = "GJJ/图像"
+    CATEGORY = "GJJ/🖼️ 图像"
     FUNCTION = "crop_resize"
     DESCRIPTION = "按批次裁剪图片或视频帧序列：多路统一目标尺寸，每一路独立按短边等比缩放，再居中裁剪长边。"
     SEARCH_ALIASES = ["批次裁剪", "视频帧裁剪", "center crop", "batch crop", "resize crop"]

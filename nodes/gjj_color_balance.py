@@ -135,7 +135,7 @@ class GJJ_ColorBalance:
     """
     NAME = NODE_NAME
     DISPLAY_NAME = "GJJ · 🎨 色彩平衡"
-    CATEGORY = "GJJ/视频/图像处理"
+    CATEGORY = "GJJ/🎬 视频/图像处理"
     DESCRIPTION = "调整图像的阴影、中间调和高光的色彩平衡。与 ComfyUI 系统 Color Balance 节点功能一致，支持批量处理。"
     SEARCH_ALIASES = ["color balance", "色彩平衡", "色调", "调色", "shadows", "midtones", "highlights", "color correction"]
     

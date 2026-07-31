@@ -200,7 +200,7 @@ def _parse_state(raw_value: Any) -> dict[str, Any]:
 
 
 class GJJ_CsvTsvRowIterator:
-    CATEGORY = "GJJ/文本"
+    CATEGORY = "GJJ/📝 文本"
     FUNCTION = "next_row"
     DESCRIPTION = "读取本地、网络或浏览器选择的 CSV/TSV/TXT 文本，按当前行数分列输出，并支持前端自动逐行执行。TXT 使用 || 分列，并按 ---、空行、换行的优先级分行。"
     SEARCH_ALIASES = ["csv", "tsv", "txt", "tab", "表格逐行", "分列文本", "逐行递进", "CSV分列", "TSV分列", "TXT分列"]
