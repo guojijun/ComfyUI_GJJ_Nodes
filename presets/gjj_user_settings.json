@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "电商",
+    "search_text": "",
     "page_size": 8,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -165,7 +165,7 @@
     "directory": "D:\\AI\\MOD\\input",
     "filter_text": "",
     "filter_mode": "包含",
-    "extensions": "mp4,mov,mkv,webm,avi,m4v,wmv,flv",
+    "extensions": "png,jpg,jpeg,webp,bmp,gif,tif,tiff,exr,hdr",
     "sort_mode": "名称 A-Z",
     "output_mode": "绝对路径",
     "file_output_mode": "按文件类型",
