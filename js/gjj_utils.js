@@ -1029,6 +1029,20 @@ export class GJJ_Utils {
             .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
     }
 
+    static _modelTreeFamilyStem(value) {
+        return String(value || "")
+            .replaceAll("\\", "/")
+            .split("/")
+            .pop()
+            .replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
+            .replace(
+                /(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed|convrot|w4a4|padded)(?=$|[_\-. ])/gi,
+                "$1",
+            )
+            .replace(/[_\-. ]+/g, "_")
+            .replace(/^_+|_+$/g, "");
+    }
+
     static _modelTreeMissingDefault(entry) {
         return Boolean(entry?.missingDefault || entry?.missing_default || entry?.missing);
     }
@@ -1113,7 +1127,11 @@ export class GJJ_Utils {
         const defaultModel = GJJ_Utils._modelTreeDefaultModel(entry);
         const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
         const isNoModel = Boolean(noModelValue && current === noModelValue);
-        const choices = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 10000);
+        const configuredStateSearchValue = typeof entry?.stateSearchValue === "function"
+            ? entry.stateSearchValue(entry, widget)
+            : entry?.stateSearchValue;
+        const stateSearchValue = String(configuredStateSearchValue || "").trim();
+        const choices = GJJ_Utils._modelTreeSearchChoices(entry, widget, stateSearchValue, 10000);
         const hasCandidates = choices.length > 0;
         const currentAvailable = Boolean(current && !isNoModel && choices.includes(current));
         const currentIsDefault = GJJ_Utils._modelTreeIsDefaultPlaceholder(entry, current)
@@ -1364,7 +1382,25 @@ export class GJJ_Utils {
         const autoSelect = entry?.autoSelect !== false;
         const initialState = GJJ_Utils._modelTreeState(entry, widget);
         if (autoSelect && widget && initialState.hasCandidates && (!initialState.current || initialState.currentMissing || initialState.missing)) {
-            GJJ_Utils._modelTreeSetWidgetValue(widget, initialState.choices[0], entry, node);
+            const configuredAutoSelectSearchValue = typeof entry?.autoSelectSearchValue === "function"
+                ? entry.autoSelectSearchValue(entry, widget, node)
+                : entry?.autoSelectSearchValue;
+            const autoSelectSearchValue = String(configuredAutoSelectSearchValue || "").trim();
+            const missingFamilyKey = initialState.currentMissing
+                ? GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(initialState.current))
+                : "";
+            const autoSelectChoices = autoSelectSearchValue
+                ? GJJ_Utils._modelTreeFilteredChoices(entry, widget, autoSelectSearchValue, 1)
+                : (missingFamilyKey
+                    ? initialState.choices.filter((choice) => (
+                        GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(choice)) === missingFamilyKey
+                    )).slice(0, 1)
+                    : (initialState.currentMissing ? [] : initialState.choices.slice(0, 1)));
+            const autoSelectedValue = autoSelectChoices[0];
+            if (autoSelectedValue != null) {
+                GJJ_Utils._modelTreeSetWidgetValue(widget, autoSelectedValue, entry, node);
+                callbacks.onApply?.(entry, autoSelectedValue, widget);
+            }
         }
         const host = document.createElement("div");
         let choicePanel = null;

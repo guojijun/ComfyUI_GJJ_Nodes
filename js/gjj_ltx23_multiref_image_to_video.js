@@ -2616,7 +2616,7 @@ app.registerExtension({
           preview_media: detail.media ? [detail.media] : [],
           preview_main_path: detail.path || "",
           preview_is_video: true,
-        });
+        }, Number(detail.index || 0) > 1);
       }
     });
   },

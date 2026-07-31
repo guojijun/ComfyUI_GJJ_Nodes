@@ -147,7 +147,7 @@ def _gjj_default_user_settings() -> dict:
 			"multiview_vae": "qwen_image_vae.safetensors",
 			"multiview_lora_1": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
 			"multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
-			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+			"annotate_clip": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
 			"sampling_sampler": "自动",
 			"sampling_scheduler": "自动",
 			"sampling_steps": 0,
@@ -160,7 +160,7 @@ def _gjj_default_user_settings() -> dict:
 			"panorama_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
 			"panorama_clip": "qwen_2.5_vl_7b_int4_convrot.safetensors",
 			"panorama_vae": "qwen_image_vae.safetensors",
-			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+			"annotate_clip": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
 			"seedvr2_dit": "seedvr2_3b_int8_convrot.safetensors",
 			"seedvr2_vae": "ema_vae_fp16.safetensors",
 		},
@@ -1961,7 +1961,7 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🧠 备注/性别推理",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'qwen3.5_4b_fp8_mixed.safetensors'}"},
+						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
 					],
 				},
 				{
@@ -2558,7 +2558,7 @@ def _register_gjj_character_library_api():
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
 			character_settings = _gjj_section_settings("character_library")
-			clip_name = str(data.get("clip_name") or character_settings.get("annotate_clip") or "qwen3.5_4b_fp8_mixed.safetensors")
+			clip_name = str(data.get("clip_name") or character_settings.get("annotate_clip") or "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors")
 			try:
 				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor
 				from .nodes.gjj_gemma_text_generate import (
@@ -3817,7 +3817,7 @@ def _register_gjj_scene_library_api():
 				{
 					"name": "🧠 自动打标",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'qwen3.5_4b_fp8_mixed.safetensors'}"},
+						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
 					],
 				},
 				{
@@ -4001,7 +4001,7 @@ def _register_gjj_scene_library_api():
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
 			scene_settings = _gjj_section_settings("scene_library")
-			clip_name = str(data.get("clip_name") or scene_settings.get("annotate_clip") or "qwen3.5_4b_fp8_mixed.safetensors")
+			clip_name = str(data.get("clip_name") or scene_settings.get("annotate_clip") or "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
 			async def send_scene_progress(current: int, total: int, text: str) -> None:
 				import asyncio
@@ -5188,7 +5188,7 @@ def _register_gjj_costume_library_api():
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
 			requested_category = clean_category_filter(data.get("category") or "all")
-			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
+			clip_name = str(data.get("clip_name") or "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
 
 			def send_costume_progress(current: int, total: int, text: str) -> None:

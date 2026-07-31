@@ -983,8 +983,20 @@ function fireredImageEditFallbackPreset(node, unetName) {
 	};
 }
 
-function appendLoraRow(rows, name, strength = 1.0) {
-	const target = String(name || "").trim();
+function resolveLoraOption(widget, preferred) {
+	const exact = resolveWidgetOption(widget, preferred, "");
+	if (exact) return exact;
+	const keywords = String(preferred || "").toLowerCase().split(/[^0-9a-z\u4e00-\u9fff]+/).filter(Boolean);
+	if (!keywords.length) return "";
+	const matches = widgetOptions(widget).filter((item) => {
+		const text = String(item || "").toLowerCase();
+		return keywords.every((keyword) => text.includes(keyword));
+	});
+	return matches.sort((left, right) => left.length - right.length || left.localeCompare(right))[0] || "";
+}
+
+function appendLoraRow(rows, name, strength = 1.0, widget = null) {
+	const target = widget ? resolveLoraOption(widget, name) : String(name || "").trim();
 	if (!target) return;
 	const targetBase = target.replace(/\\/g, "/").toLowerCase().split("/").pop();
 	const existing = rows.find((row) => {
@@ -999,24 +1011,26 @@ function appendLoraRow(rows, name, strength = 1.0) {
 	rows.push({ enabled: true, name: target, strength });
 }
 
-function presetLoraRows(preset, unetName = "") {
+function presetLoraRows(preset, unetName = "", loraWidget = null) {
 	const rows = [];
-	if (preset?.lora1 && String(preset.lora1).trim()) {
+	const lora1 = resolveLoraOption(loraWidget, preset?.lora1);
+	if (lora1) {
 		rows.push({
 			enabled: preset.lora1AutoEnabled !== false,
-			name: String(preset.lora1),
+			name: lora1,
 			strength: normalizeStrength(preset.lora1Strength, 1.0),
 		});
 	}
-	if (preset?.lora2 && String(preset.lora2).trim()) {
+	const lora2 = resolveLoraOption(loraWidget, preset?.lora2);
+	if (lora2) {
 		rows.push({
 			enabled: true,
-			name: String(preset.lora2),
+			name: lora2,
 			strength: normalizeStrength(preset.lora2Strength, 0.7),
 		});
 	}
-	if (isNextSceneImageEdit(unetName, preset)) appendLoraRow(rows, NEXT_SCENE_LORA, 1.0);
-	else if (isFluxStoryboardModel(unetName, preset)) appendLoraRow(rows, FLUX_STORYBOARD_LORA, 1.0);
+	if (isNextSceneImageEdit(unetName, preset)) appendLoraRow(rows, NEXT_SCENE_LORA, 1.0, loraWidget);
+	else if (isFluxStoryboardModel(unetName, preset)) appendLoraRow(rows, FLUX_STORYBOARD_LORA, 1.0, loraWidget);
 	if (rows.length) rows.push({ ...DEFAULT_LORA_ROW });
 	return rows;
 }
@@ -1024,7 +1038,7 @@ function presetLoraRows(preset, unetName = "") {
 function setPresetLoraData(node, preset, unetName = "") {
 	const widget = getWidget(node, "lora_data");
 	if (!widget) return;
-	const rows = presetLoraRows(preset, unetName);
+	const rows = presetLoraRows(preset, unetName, getWidget(node, STORYBOARD_LORA_NAME));
 	setWidgetValue(widget, normalizeStoryboardLoraData(JSON.stringify(rows)));
 }
 
@@ -1359,10 +1373,52 @@ function closeModelSearchPopup() {
 }
 
 function fuzzyModelOptionMatch(option, query) {
-	const keywords = String(query || "").trim().split(/\s+/).map(normalizedModelText).filter(Boolean);
-	if (!keywords.length) return true;
+	const source = String(query || "").trim();
+	if (!source) return true;
 	const normalized = normalizedModelText(option);
-	return keywords.every((keyword) => normalized.includes(keyword));
+	const tokens = [];
+	const tokenPattern = /\s*(\(|\)|&&|\|\||\||!|\bAND\b|\bOR\b|\bNOT\b|"[^"]*"|'[^']*'|[^\s()!|&]+)/giy;
+	let match;
+	while ((match = tokenPattern.exec(source))) {
+		let token = match[1];
+		if (/^and$/i.test(token) || token === "&&") token = "AND";
+		else if (/^or$/i.test(token) || token === "||" || token === "|") token = "OR";
+		else if (/^not$/i.test(token) || token === "!") token = "NOT";
+		else if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) token = token.slice(1, -1);
+		if (token.startsWith("-") && token.length > 1) tokens.push("NOT", token.slice(1));
+		else tokens.push(token);
+	}
+	const expanded = [];
+	for (const token of tokens) {
+		const previous = expanded.at(-1);
+		if (expanded.length && token !== "(" && token !== ")" && token !== "AND" && token !== "OR"
+			&& previous !== "(" && previous !== "AND" && previous !== "OR" && previous !== "NOT") expanded.push("AND");
+		if (token === "(" && previous && previous !== "(" && previous !== "AND" && previous !== "OR" && previous !== "NOT") expanded.push("AND");
+		expanded.push(token);
+	}
+	let index = 0;
+	const primary = () => {
+		if (expanded[index] === "(") {
+			index += 1;
+			const value = orExpression();
+			if (expanded[index] === ")") index += 1;
+			return value;
+		}
+		const keyword = normalizedModelText(expanded[index++] || "");
+		return keyword ? normalized.includes(keyword) : true;
+	};
+	const unary = () => expanded[index] === "NOT" ? (index += 1, !unary()) : primary();
+	const andExpression = () => {
+		let value = unary();
+		while (expanded[index] === "AND") { index += 1; value = unary() && value; }
+		return value;
+	};
+	const orExpression = () => {
+		let value = andExpression();
+		while (expanded[index] === "OR") { index += 1; value = andExpression() || value; }
+		return value;
+	};
+	return orExpression();
 }
 
 function createSearchableModelSelect(control) {
@@ -1399,7 +1455,8 @@ function createSearchableModelSelect(control) {
 		root.style.cssText = "position:fixed;z-index:100002;display:flex;flex-direction:column;gap:6px;padding:7px;border:1px solid #46606a;border-radius:8px;background:#0c1418;box-shadow:0 12px 32px rgba(0,0,0,.55);";
 		const search = document.createElement("input");
 		search.type = "text";
-		search.placeholder = "模糊关键词过滤，空格分隔多个词";
+		search.placeholder = "关键词逻辑过滤，如 qwen AND edit NOT old";
+		search.title = "支持 AND/空格、OR/|、NOT/!/-、括号和引号短语";
 		search.style.cssText = "width:100%;height:30px;box-sizing:border-box;border:1px solid #5c7079;border-radius:6px;background:#0b1114;color:#f3faf7;padding:4px 8px;font:12px sans-serif;outline:none;";
 		const list = document.createElement("div");
 		list.style.cssText = "display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto;";

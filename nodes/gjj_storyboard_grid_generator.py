@@ -2534,6 +2534,9 @@ def _character_prompt_and_reference(
     allow_storyboard_context: bool = True,
     reference_width: int = 1024,
     reference_height: int = 768,
+    reference_label_prefix: str = "image",
+    include_actor_notes_mapping: bool = False,
+    msr_asset_card_mode: bool = False,
 ) -> tuple[str, torch.Tensor | None]:
     refs = _resolved_character_refs(prompt_text, storyboard_refs or [], allow_storyboard_context=allow_storyboard_context)
     if not refs:
@@ -2542,12 +2545,65 @@ def _character_prompt_and_reference(
     images: list[Image.Image] = []
     resolved_characters: list[tuple[str, dict[str, Any]]] = []
     qwen_bindings: list[str] = []
+    actor_reference_mappings: list[str] = []
+    reference_label_prefix = _safe_text(reference_label_prefix, "image").strip() or "image"
+    reference_label = lambda index: f"{reference_label_prefix} {index}" if reference_label_prefix.casefold() == "figure" else f"{reference_label_prefix}{index}"
     image_slot = max(1, int(first_reference_image_index or 1))
     remaining_reference_images = None if max_reference_images is None else max(0, int(max_reference_images or 0))
     grouped_refs = _group_character_refs(refs)
     qwen_multi_character = bool(qwen_reference_binding and len(grouped_refs) > 1)
     reference_tensor_override: torch.Tensor | None = None
     qwen_direct_limit = 0 if remaining_reference_images is None else remaining_reference_images
+    if include_reference_images and msr_asset_card_mode and grouped_refs:
+        if len(grouped_refs) <= 2:
+            direct_boards = _make_qwen_direct_character_reference_boards(
+                prompt_text,
+                refs,
+                reference_width,
+                reference_height,
+                max_boards=len(grouped_refs),
+                single_view_only=False,
+            )
+            if direct_boards and len(direct_boards) == len(grouped_refs):
+                reference_tensor_override = _pil_list_to_reference_tensor([board for _display_name, board in direct_boards])
+                for (name, _explicit_views), (display_name, _board) in zip(grouped_refs, direct_boards):
+                    character = _find_character(name)
+                    if character:
+                        resolved_characters.append((name, character))
+                    image_ref = reference_label(image_slot)
+                    notes = _safe_text(character.get("notes") if character else "").strip()
+                    prompt_lines.append(
+                        f"{display_name}：{image_ref} 是该角色的独立人物资产卡，左侧为大头身份特写，其余为等高全身正面/侧面/背面三视图；"
+                        "只用于锁定脸型、五官、发型、服装、体型及正反侧细节，不得把资产卡排版、白底或多个视图复制到最终画面。"
+                    )
+                    actor_reference_mappings.append(f"{image_ref} = @{display_name}{f'（{notes}）' if notes else ''}")
+                    image_slot += 1
+                grouped_refs = []
+        else:
+            board, board_characters, position_lines = _make_multi_character_full_body_board(
+                prompt_text,
+                grouped_refs,
+                reference_width,
+                reference_height,
+            )
+            if board is not None and board_characters:
+                reference_tensor_override = _pil_list_to_reference_tensor([board])
+                resolved_characters.extend(board_characters)
+                image_ref = reference_label(image_slot)
+                role_names = "、".join(_character_display_name(character, name) for name, character in board_characters)
+                prompt_lines.append(
+                    f"{image_ref} 是多人正面参考拼接图，从左到右包含 {role_names}；每个角色只使用标准全身正面，"
+                    "只用于锁定各自身份、脸、服装和体型，不得混用身份或复制白底排版。"
+                )
+                if position_lines:
+                    prompt_lines.append("多人参考图顺序：" + "；".join(position_lines) + "。")
+                mapped_actors = "、".join(
+                    f"@{_character_display_name(character, name)}{f'（{_safe_text(character.get("notes")).strip()}）' if _safe_text(character.get("notes")).strip() else ''}"
+                    for name, character in board_characters
+                )
+                actor_reference_mappings.append(f"{image_ref} = {mapped_actors}")
+                image_slot += 1
+                grouped_refs = []
     if (
         include_reference_images
         and qwen_reference_binding
@@ -2567,13 +2623,17 @@ def _character_prompt_and_reference(
                 if character:
                     resolved_characters.append((name, character))
             for offset, (display_name, _board) in enumerate(direct_boards, start=image_slot):
+                image_ref = reference_label(offset)
                 prompt_lines.append(
-                    f"{display_name}：image{offset} 是“{display_name}”的角色参考拼图，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                    f"{display_name}：{image_ref} 是“{display_name}”的角色参考拼图，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
                     "可以包含大头照和多张等高全身参考；不要复制参考拼图白底、半身裁切、站姿、多视图排版或原背景。"
                 )
                 qwen_bindings.append(
-                    f"- image{offset} = character \"{display_name}\" ONLY. Use this single-character reference collage for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
+                    f"- {image_ref} = character \"{display_name}\" ONLY. Use this single-character reference collage for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
                 )
+                character = next((item for name, item in resolved_characters if _character_display_name(item, name) == display_name), None)
+                notes = _safe_text(character.get("notes") if character else "").strip()
+                actor_reference_mappings.append(f"{image_ref} = @{display_name}{f'（{notes}）' if notes else ''}")
             if remaining_reference_images is not None:
                 remaining_reference_images -= len(direct_boards)
             image_slot += len(direct_boards)
@@ -2594,7 +2654,7 @@ def _character_prompt_and_reference(
         if board is not None and board_characters:
             reference_tensor_override = _pil_list_to_reference_tensor([board])
             resolved_characters.extend(board_characters)
-            image_ref = f"image{image_slot}"
+            image_ref = reference_label(image_slot)
             role_names = "、".join(_character_display_name(character, name) for name, character in board_characters)
             prompt_lines.append(
                 f"{image_ref} 是本格所有人物的全身站位参考板，包含 {role_names}。"
@@ -2611,6 +2671,11 @@ def _character_prompt_and_reference(
                 + ", ".join(_character_display_name(character, name) for name, character in board_characters)
                 + ". Each person in this board is a different named character; preserve every identity and do not swap positions."
             )
+            mapped_actors = "、".join(
+                f"@{_character_display_name(character, name)}{f'（{_safe_text(character.get("notes")).strip()}）' if _safe_text(character.get("notes")).strip() else ''}"
+                for name, character in board_characters
+            )
+            actor_reference_mappings.append(f"{image_ref} = {mapped_actors}")
             if remaining_reference_images is not None:
                 remaining_reference_images -= 1
             image_slot += 1
@@ -2646,11 +2711,12 @@ def _character_prompt_and_reference(
             character_images.append(image)
             if remaining_reference_images is not None:
                 remaining_reference_images -= 1
-            image_ref = f"image{image_slot}"
+            image_ref = reference_label(image_slot)
             view_label = _view_label(view)
             qwen_bindings.append(
                 f"- {image_ref} = character \"{display_name}\" ONLY. Use this image to lock this exact person's identity, gender, age, hair, beard, headwear, clothing identity and facial features. Do not replace {display_name} with another person or a woman."
             )
+            actor_reference_mappings.append(f"{image_ref} = @{display_name}{f'（{notes}）' if notes else ''}")
             if role == "identity":
                 prompt_lines.append(
                     f"{display_name}：{image_ref} 是“{display_name}”的身份锁定参考，只用于锁定五官、头部轮廓、发型、胡须、帽子/头盔、年龄感和神态；"
@@ -2703,7 +2769,26 @@ def _character_prompt_and_reference(
         if reference_tensor_override is not None
         else (_make_character_reference_tensor(images, contain_images=contain_reference_images) if include_reference_images else None)
     )
-    if prompt_lines:
+    if msr_asset_card_mode and resolved_characters:
+        character_description_lines: list[str] = []
+        seen_character_names: set[str] = set()
+        for name, character in resolved_characters:
+            display_name = _character_display_name(character, name)
+            name_key = display_name.casefold()
+            if name_key in seen_character_names:
+                continue
+            seen_character_names.add(name_key)
+            notes = _safe_text(character.get("notes") or "").strip()
+            character_description_lines.append(
+                f"- @{display_name}：{notes or '外观与对应参考图保持一致。'}"
+            )
+        compact_parts = [prompt_text]
+        if character_description_lines:
+            compact_parts.append("人物说明：\n" + "\n".join(character_description_lines))
+        if actor_reference_mappings:
+            compact_parts.append("人物参考图：\n" + "\n".join(f"- {line}" for line in actor_reference_mappings))
+        prompt_text = "\n\n".join(part for part in compact_parts if str(part or "").strip())
+    elif prompt_lines:
         detail = "\n".join(prompt_lines)
         role_names = "、".join(_character_display_name(character, name) for name, character in resolved_characters)
         layout_lines = _character_layout_lines(resolved_characters, _character_position_hints(prompt_text))
@@ -2715,7 +2800,15 @@ def _character_prompt_and_reference(
                 + "\n".join(qwen_bindings)
                 + "\nOnly the listed character identities are allowed as main people in the final image. Never swap identities between images. Never invent an extra man or woman. Keep each named character's gender, age, beard, hair, headwear and face from their own bound reference image.\n\n"
             )
+        actor_mapping_text = ""
+        if include_actor_notes_mapping and actor_reference_mappings:
+            actor_mapping_text = (
+                "MSR人物参考图绑定（必须严格遵守，figure 编号按送入模型的图片顺序）：\n"
+                + "\n".join(f"- {line}" for line in actor_reference_mappings)
+                + "\n每张 figure 只属于上述指定角色；括号内是角色备注，必须用于保持外观和身份一致，禁止交换角色或混用参考图。\n\n"
+            )
         prompt_text = (
+            f"{actor_mapping_text}"
             f"{qwen_binding_text}{prompt_text}\n\n"
             f"角色库参考要求：本格涉及角色为 {role_names}。生成画面必须严格保持下列人物特色；如果原文写“两人/二人/双方”，默认指这些角色。不要把参考图的构图、背景或裁切直接照搬；忽略参考图里的透明棋盘格、灰白方格、透明背景预览、文字、标签、水印和说明字样，最终画面禁止出现这些内容。\n"
             f"最终画面只允许本格涉及的这些角色作为主要人物；参考图只用于身份、服装、姿态和朝向，不得把参考图里的头像裁切、第二个身体或多余人物复制进画面。\n"
@@ -3323,7 +3416,18 @@ def _resolve_storyboard_lora_name(preferred: str) -> str:
         key = item.replace("\\", "/").casefold()
         if wanted_base in key:
             return item
-    return wanted
+    keywords = [token for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", wanted_base) if token]
+    if keywords:
+        matches = [
+            item
+            for item in loras
+            if all(token.casefold() in item.replace("\\", "/").casefold() for token in keywords)
+        ]
+        if matches:
+            return sorted(matches, key=lambda item: (len(item), item.casefold()))[0]
+    # `preferred` may be a preset keyword rather than a filename.  Never pass it
+    # downstream unless it resolves to a model ComfyUI actually advertised.
+    return ""
 
 
 def _storyboard_lora_choices(default_unet_name: Any = "") -> tuple[list[str], str]:
@@ -3332,7 +3436,7 @@ def _storyboard_lora_choices(default_unet_name: Any = "") -> tuple[list[str], st
     except Exception:
         loras = []
     choices = [STORYBOARD_LORA_NONE]
-    choices.extend(item for item in loras if not re.search(r"(flux|f2k)", item, re.IGNORECASE))
+    choices.extend(loras)
     default = STORYBOARD_LORA_NONE
     if _is_next_scene_image_edit_unet(default_unet_name):
         default = _resolve_storyboard_lora_name("next-scene")
@@ -3393,20 +3497,22 @@ def _preset_lora_data(unet_name: Any) -> str:
     rows: list[dict[str, Any]] = []
     if preset and _safe_text(preset.get("id", "generic")) != "generic":
         lora1 = _safe_text(preset.get("lora_1_name", "")).strip()
-        if lora1:
+        resolved_lora1 = _resolve_storyboard_lora_name(lora1)
+        if resolved_lora1:
             rows.append(
                 {
                     "enabled": _parse_enabled(preset.get("lora_1_auto_enabled"), True),
-                    "name": lora1,
+                    "name": resolved_lora1,
                     "strength": _normalize_strength(preset.get("lora_1_strength"), 1.0),
                 }
             )
         lora2 = _safe_text(preset.get("lora_2_name", "")).strip()
-        if lora2:
+        resolved_lora2 = _resolve_storyboard_lora_name(lora2)
+        if resolved_lora2:
             rows.append(
                 {
                     "enabled": True,
-                    "name": lora2,
+                    "name": resolved_lora2,
                     "strength": _normalize_strength(preset.get("lora_2_strength"), 0.7),
                 }
             )
@@ -4035,4 +4141,4 @@ class GJJ_StoryboardGridGenerator:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_StoryboardGridGenerator}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎬 分镜宫格生成器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎬 分镜宫格生成器(Qwen2511)"}

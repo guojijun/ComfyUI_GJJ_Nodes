@@ -2947,7 +2947,7 @@ function lazyModelTreeEntries(node) {
 		.split("+")
 		.map((term) => term.trim())
 		.filter(Boolean)
-		.join("_");
+		.join("_") || modelFamilyStem(selectedUnet);
 	const entries = useCheckpoint
 		? [{
 			widget: CHECKPOINT_WIDGET_NAME,
@@ -3050,6 +3050,7 @@ function renderModelPanelControls(node, body) {
 		entries: lazyModelTreeEntries(node).map((entry) => ({
 			...entry,
 			floatingChoices: true,
+			stateSearchValue: entry.searchValue,
 		})),
 		refresh: () => {
 			applySettingsVisibility(node);
@@ -3377,6 +3378,34 @@ function snapshotParamValues(source, node) {
 	return found ? params : null;
 }
 
+function resolveMissingModelFamilies(params, node) {
+	if (!params || typeof params !== "object") {
+		return params;
+	}
+	const resolved = { ...params };
+	for (const name of STRICT_MODEL_WIDGETS) {
+		if (!Object.prototype.hasOwnProperty.call(resolved, name)) {
+			continue;
+		}
+		const storedValue = textValue(resolved[name]);
+		const choices = optionValues(node, name).map((value) => String(value ?? "")).filter(Boolean);
+		if (!storedValue || !choices.length || choices.includes(storedValue)) {
+			continue;
+		}
+		const storedFamilyKey = GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(storedValue));
+		if (!storedFamilyKey) {
+			continue;
+		}
+		const familyChoice = choices.find((choice) => (
+			GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(choice)) === storedFamilyKey
+		));
+		if (familyChoice) {
+			resolved[name] = familyChoice;
+		}
+	}
+	return resolved;
+}
+
 function currentParamValues(node) {
 	const params = {};
 	for (const name of SERIALIZED_PARAM_WIDGETS) {
@@ -3441,7 +3470,7 @@ function semanticParamValues(rawValues, node, serializedNode = null) {
 		node,
 	);
 	if (fromProperties) {
-		return fromProperties;
+		return resolveMissingModelFamilies(fromProperties, node);
 	}
 	const raw = Array.isArray(rawValues) ? rawValues : [];
 	let best = { score: -1, offset: 0, withSeedControl: shouldSerializeSeedControl(node) };
@@ -3454,9 +3483,9 @@ function semanticParamValues(rawValues, node, serializedNode = null) {
 		}
 	}
 	if (best.score >= 45) {
-		return buildSequentialParams(raw, best.offset, best.withSeedControl, node);
+		return resolveMissingModelFamilies(buildSequentialParams(raw, best.offset, best.withSeedControl, node), node);
 	}
-	return snapshotParamValues(currentParamValues(node), node) || {};
+	return resolveMissingModelFamilies(snapshotParamValues(currentParamValues(node), node) || {}, node);
 }
 
 function serializedParamValues(params, node) {

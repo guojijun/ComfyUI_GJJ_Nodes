@@ -2616,6 +2616,40 @@ function heldImagesFromProperties(node) {
 	return normalizeMediaPayload(node?.properties?.[HELD_IMAGES_PROPERTY]);
 }
 
+function removeFailedHeldImage(node, failedItem) {
+	if (!node || !failedItem) {
+		return false;
+	}
+	const failedUrl = imageDataToUrl(failedItem);
+	const keepItem = (item) => imageDataToUrl(item) !== failedUrl;
+	const heldImages = heldImagesFromProperties(node);
+	const nextHeldImages = heldImages.filter(keepItem);
+	const removedHeldImage = nextHeldImages.length !== heldImages.length;
+	if (removedHeldImage) {
+		node.properties = node.properties || {};
+		if (nextHeldImages.length) {
+			node.properties[HELD_IMAGES_PROPERTY] = nextHeldImages.map((item) => ({ ...item }));
+		} else {
+			delete node.properties[HELD_IMAGES_PROPERTY];
+		}
+	}
+	if (Array.isArray(node.__gjjAnyPreviewImages)) {
+		node.__gjjAnyPreviewImages = node.__gjjAnyPreviewImages.filter(keepItem);
+	}
+	if (Array.isArray(node.__gjjAnyPreviewItems)) {
+		node.__gjjAnyPreviewItems = node.__gjjAnyPreviewItems
+			.map((item) => ({
+				...item,
+				images: normalizeMediaPayload(item?.images).filter(keepItem),
+			}))
+			.filter((item) => item.images.length || item.text || item.audio || item.video || item.files);
+	}
+	if (removedHeldImage) {
+		setDirty(node);
+	}
+	return removedHeldImage;
+}
+
 function heldMediaFromProperties(node) {
 	const media = node?.properties?.[HELD_MEDIA_PROPERTY];
 	if (!media || typeof media !== "object") {
@@ -4448,8 +4482,12 @@ function applyPreviewContent(node) {
 				scheduleLayout(node);
 			};
 			image.onerror = () => {
-				if (sizeBadge) {
-					sizeBadge.textContent = "加载失败";
+				removeFailedHeldImage(node, item);
+				card.remove();
+				if (!grid.children.length) {
+					node.__gjjAnyPreviewKind = "";
+					node.__gjjAnyPreviewImages = [];
+					applyPreviewContent(node);
 				}
 				scheduleLayout(node);
 			};

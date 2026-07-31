@@ -178,38 +178,49 @@ function saveActors(node, actors) {
 	renderActorChips(node);
 }
 
-function insertActorAtCursor(node, character) {
-	const promptWidget = widget(node, PROMPT_WIDGET);
-	const input = promptWidget?.inputEl
-		|| promptWidget?.element?.querySelector?.("textarea,input")
-		|| promptWidget?.element;
-	const prompt = String(widgetValue(node, PROMPT_WIDGET, "") || "");
-	const trigger = node.__gjjGemmaActorTrigger;
-	node.__gjjGemmaActorTrigger = null;
-	let start = Number(trigger?.start);
-	let end = Number(trigger?.end);
-	if (!Number.isFinite(start) || !Number.isFinite(end) || prompt.slice(start, end) !== "@") {
-		start = Number(node.__gjjGemmaPromptCaret?.start);
-		end = Number(node.__gjjGemmaPromptCaret?.end);
-		if (!Number.isFinite(start)) start = Number(input?.selectionStart);
-		if (!Number.isFinite(end)) end = Number(input?.selectionEnd);
-		if (!Number.isFinite(start)) start = prompt.length;
-		if (!Number.isFinite(end)) end = start;
+function toggleActorSelection(node, character) {
+	const actors = selectedActors(node);
+	const existingIndex = actors.findIndex((actor) => String(actor.id) === String(character.id));
+	if (existingIndex >= 0) {
+		actors.splice(existingIndex, 1);
+	} else {
+		actors.push({
+			id: String(character.id),
+			name: characterDisplayName(character),
+			notes: String(character.notes || ""),
+			cover: String(character.cover || ""),
+		});
 	}
-	const insertion = `${actorPromptLine(character)} `;
-	const nextPrompt = `${prompt.slice(0, start)}${insertion}${prompt.slice(end)}`;
-	const caret = start + insertion.length;
-	node.__gjjGemmaPromptCaret = { start: caret, end: caret };
-	setWidgetValue(node, PROMPT_WIDGET, nextPrompt);
-	const actors = selectedActors(node).filter((actor) => String(actor.id) !== String(character.id));
-	saveActors(node, [character, ...actors]);
-	requestAnimationFrame(() => {
-		const currentInput = widget(node, PROMPT_WIDGET)?.inputEl
-			|| widget(node, PROMPT_WIDGET)?.element?.querySelector?.("textarea,input")
-			|| input;
-		currentInput?.focus?.();
-		currentInput?.setSelectionRange?.(caret, caret);
-	});
+	saveActors(node, actors);
+}
+
+function applyActorRangeSelection(node, characters, fromIndex, toIndex, additive) {
+	if (!Array.isArray(characters) || !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return;
+	const start = Math.min(fromIndex, toIndex);
+	const end = Math.max(fromIndex, toIndex) + 1;
+	const range = characters.slice(start, end);
+	if (additive) {
+		const current = selectedActors(node);
+		const existingIds = new Set(current.map((actor) => String(actor.id)));
+		for (const character of range) {
+			if (!existingIds.has(String(character.id))) {
+				current.push({
+					id: String(character.id),
+					name: characterDisplayName(character),
+					notes: String(character.notes || ""),
+					cover: String(character.cover || ""),
+				});
+			}
+		}
+		saveActors(node, current);
+	} else {
+		saveActors(node, range.map((character) => ({
+			id: String(character.id),
+			name: characterDisplayName(character),
+			notes: String(character.notes || ""),
+			cover: String(character.cover || ""),
+		})));
+	}
 }
 
 function renderActorChips(node) {
@@ -222,7 +233,7 @@ function renderActorChips(node) {
 		const chip = document.createElement("button");
 		chip.type = "button";
 		chip.className = "gjj-gemma-actor-chip";
-		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击引用，Ctrl+点击删除`);
+		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击从角色表中移除`);
 		if (actor.cover) {
 			const image = document.createElement("img");
 			image.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
@@ -238,7 +249,8 @@ function renderActorChips(node) {
 			const large = document.createElement("img");
 			large.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
 			const caption = document.createElement("div");
-			caption.textContent = actorPromptLine(actor);
+			const notes = String(actor.notes || "").replace(/\s+/g, " ").trim();
+			caption.textContent = `${actorPromptLine(actor)}${notes ? `（${notes}）` : ""}`;
 			preview.append(large, caption);
 			document.body.appendChild(preview);
 			const rect = chip.getBoundingClientRect();
@@ -252,14 +264,8 @@ function renderActorChips(node) {
 		});
 		chip.addEventListener("click", (event) => {
 			chip.__gjjActorPreview?.remove();
-			if (!event.ctrlKey) {
-				insertActorAtCursor(node, actor);
-				return;
-			}
-			const escapedName = characterDisplayName(actor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const prompt = String(widgetValue(node, PROMPT_WIDGET, "") || "");
-			const nextPrompt = prompt.replace(new RegExp(`@${escapedName}(?=\\s|$|[，。！？、,.!?])\\s?`, "gu"), "");
-			setWidgetValue(node, PROMPT_WIDGET, nextPrompt);
+			event.preventDefault();
+			event.stopPropagation();
 			saveActors(node, actors.filter((item) => String(item.id) !== String(actor.id)));
 		});
 		state.actorChips.appendChild(chip);
@@ -267,35 +273,58 @@ function renderActorChips(node) {
 }
 
 function installActorPromptTrigger(node) {
-	if (!node || node.__gjjGemmaActorTriggerHandler) return;
-	const handler = (event) => {
-		const promptWidget = widget(node, PROMPT_WIDGET);
-		const input = promptWidget?.inputEl
-			|| promptWidget?.element?.querySelector?.("textarea,input")
-			|| promptWidget?.element;
-		if (!input || (event.target !== input && !input.contains?.(event.target))) return;
-		const caret = Number(input.selectionStart);
-		const selectionEnd = Number(input.selectionEnd);
-		if (Number.isFinite(caret)) {
-			node.__gjjGemmaPromptCaret = {
-				start: caret,
-				end: Number.isFinite(selectionEnd) ? selectionEnd : caret,
-			};
-		}
-		if (event.type !== "input") return;
-		if (!Number.isFinite(caret) || caret < 1 || input.value.slice(caret - 1, caret) !== "@") return;
-		node.__gjjGemmaActorTrigger = { start: caret - 1, end: caret };
-		const state = node.__gjjGemmaPanel;
-		if (!state || state.actorPicker || state.actorPickerLoading) return;
-		state.actorPickerLoading = true;
-		toggleActorPicker(node)
-			.catch((error) => console.error("[GJJ GemmaTextGenerate] 角色选择器打开失败：", error))
-			.finally(() => { state.actorPickerLoading = false; });
-	};
-	node.__gjjGemmaActorTriggerHandler = handler;
-	for (const eventName of ["input", "click", "keyup", "select"]) {
-		document.addEventListener(eventName, handler, true);
+	// 角色信息改为隐性注入到用户指令前面，不再需要在 prompt 中输入 @名 触发角色选择器。
+	// 此函数保留为空函数，避免调用处报错；onRemoved 中仍会清理 __gjjGemmaActorTriggerHandler（始终为 null）。
+	if (!node) return;
+}
+
+function logicalKeywordMatch(value, query) {
+	const source = String(query || "").trim();
+	if (!source) return true;
+	const haystack = String(value || "").toLocaleLowerCase();
+	const tokens = [];
+	const pattern = /\s*(\(|\)|&&|\|\||\||!|\bAND\b|\bOR\b|\bNOT\b|"[^"]*"|'[^']*'|[^\s()!|&]+)/giy;
+	let match;
+	while ((match = pattern.exec(source))) {
+		let token = match[1];
+		if (/^and$/i.test(token) || token === "&&") token = "AND";
+		else if (/^or$/i.test(token) || token === "||" || token === "|") token = "OR";
+		else if (/^not$/i.test(token) || token === "!") token = "NOT";
+		else if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) token = token.slice(1, -1);
+		if (token.startsWith("-") && token.length > 1) tokens.push("NOT", token.slice(1));
+		else tokens.push(token);
 	}
+	const expression = [];
+	for (const token of tokens) {
+		const previous = expression.at(-1);
+		if (expression.length && token !== "(" && token !== ")" && token !== "AND" && token !== "OR"
+			&& previous !== "(" && previous !== "AND" && previous !== "OR" && previous !== "NOT") expression.push("AND");
+		if (token === "(" && previous && previous !== "(" && previous !== "AND" && previous !== "OR" && previous !== "NOT") expression.push("AND");
+		expression.push(token);
+	}
+	let index = 0;
+	const primary = () => {
+		if (expression[index] === "(") {
+			index += 1;
+			const value = parseOr();
+			if (expression[index] === ")") index += 1;
+			return value;
+		}
+		const keyword = String(expression[index++] || "").toLocaleLowerCase();
+		return keyword ? haystack.includes(keyword) : true;
+	};
+	const unary = () => expression[index] === "NOT" ? (index += 1, !unary()) : primary();
+	const parseAnd = () => {
+		let value = unary();
+		while (expression[index] === "AND") { index += 1; value = unary() && value; }
+		return value;
+	};
+	function parseOr() {
+		let value = parseAnd();
+		while (expression[index] === "OR") { index += 1; value = parseAnd() || value; }
+		return value;
+	}
+	return parseOr();
 }
 
 async function toggleActorPicker(node) {
@@ -319,23 +348,29 @@ async function toggleActorPicker(node) {
 	grid.className = "gjj-gemma-actor-grid";
 	let gender = "all";
 	let sort = "updated_desc";
+	let lastClickedIndex = -1;
+	let keywordQuery = "";
 	const genderButtons = [];
+
 	const render = () => {
 		const selectedIds = new Set(selectedActors(node).map((item) => String(item.id)));
 		const filtered = characters.filter((character) => {
-			if (gender === "all") return true;
 			const rawName = String(character?.name || "");
-			return gender === "female" ? rawName.includes("♀") : rawName.includes("♂");
+			const genderMatches = gender === "all" || (gender === "female" ? rawName.includes("♀") : rawName.includes("♂"));
+			if (!genderMatches) return false;
+			const searchable = [characterDisplayName(character), rawName, character?.id, character?.notes].filter(Boolean).join(" ");
+			return logicalKeywordMatch(searchable, keywordQuery);
 		});
 		filtered.sort((left, right) => {
 			if (sort === "name_asc") return characterDisplayName(left).localeCompare(characterDisplayName(right), "zh-Hans");
 			return Number(right?.updated_at || 0) - Number(left?.updated_at || 0);
 		});
 		grid.replaceChildren();
-		for (const character of filtered) {
+		filtered.forEach((character, index) => {
 			const item = document.createElement("button");
 			item.type = "button";
 			item.className = `gjj-gemma-actor-item${selectedIds.has(String(character.id)) ? " active" : ""}`;
+			item.dataset.index = String(index);
 			const image = document.createElement("img");
 			if (character.cover) image.src = api.apiURL ? api.apiURL(character.cover) : character.cover;
 			const name = document.createElement("span");
@@ -361,13 +396,26 @@ async function toggleActorPicker(node) {
 				item.__gjjActorPreview?.remove();
 				item.__gjjActorPreview = null;
 			});
-			item.addEventListener("click", () => {
-				insertActorAtCursor(node, character);
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
 				item.__gjjActorPreview?.remove();
-				closeFloatingPanels(node);
+				if (event.shiftKey && lastClickedIndex >= 0) {
+					// Shift+点击：从上次点击位置到当前做范围选择；按 Ctrl 时为追加模式
+					applyActorRangeSelection(node, filtered, lastClickedIndex, index, event.ctrlKey || event.metaKey);
+				} else if (event.ctrlKey || event.metaKey) {
+					// Ctrl/Cmd+点击：在当前选中基础上切换该角色
+					toggleActorSelection(node, character);
+				} else {
+					// 普通点击：切换该角色（保留多选语义，不关闭面板）
+					toggleActorSelection(node, character);
+					lastClickedIndex = index;
+				}
+				if (!event.shiftKey) lastClickedIndex = index;
+				render();
 			});
 			grid.appendChild(item);
-		}
+		});
 		if (!filtered.length) {
 			const empty = document.createElement("div");
 			empty.className = "gjj-gemma-actor-empty";
@@ -394,6 +442,29 @@ async function toggleActorPicker(node) {
 	});
 	sortButton.classList.add("compact");
 	tools.appendChild(sortButton);
+	const clearButton = button("清空", "清空当前已选角色", () => {
+		saveActors(node, []);
+		render();
+	});
+	clearButton.classList.add("compact");
+	tools.appendChild(clearButton);
+	const keywordFilter = document.createElement("input");
+	keywordFilter.type = "text";
+	keywordFilter.className = "gjj-gemma-actor-keyword-filter";
+	keywordFilter.placeholder = "关键词：王冬儿 OR 蒂法 NOT 黑衣";
+	keywordFilter.title = "支持空格/AND、OR/|、NOT/!/-、括号和引号短语；搜索角色名、ID 与备注";
+	keywordFilter.addEventListener("input", () => {
+		keywordQuery = keywordFilter.value;
+		lastClickedIndex = -1;
+		render();
+	});
+	keywordFilter.addEventListener("keydown", (event) => event.stopPropagation());
+	tools.appendChild(keywordFilter);
+	const confirmButton = button("确定", "保存选择并关闭角色库", () => {
+		closeFloatingPanels(node);
+	});
+	confirmButton.classList.add("compact");
+	tools.appendChild(confirmButton);
 	picker.append(tools, grid);
 	render();
 	state.root.appendChild(picker);
@@ -1416,6 +1487,17 @@ function buildModelPanel(node, controls) {
 		modelPath.textContent = `当前路径：models/text_encoders/${selected || "未选择模型"}`;
 		modelPath.title = modelPath.textContent;
 	};
+	const modelFamilyFilter = (_entry = null, widget = null) => GJJ_Utils._modelTreeFamilyStem(
+		widget?.value || widgetValue(node, "clip_name", ""),
+	);
+	const syncModelFamilyFilter = (value = widgetValue(node, "clip_name", "")) => {
+		const filterValue = GJJ_Utils._modelTreeFamilyStem(value);
+		if (filterValue) {
+			setWidgetValue(node, MODEL_FILTER_WIDGET, filterValue);
+		}
+		return filterValue;
+	};
+	syncModelFamilyFilter();
 	const modelTree = GJJ_Utils.createModelTreeView({
 		node,
 		entries: [{
@@ -1424,7 +1506,8 @@ function buildModelPanel(node, controls) {
 			folder: "models/text_encoders",
 			icon: "🧠",
 			models: choices("clip_name", node),
-			anyKeywords: ["qwen3.5", "qwen35", "gemma4", "qwen3vl"],
+			searchValue: modelFamilyFilter,
+			stateSearchValue: modelFamilyFilter,
 			fallback: String(widgetValue(node, "clip_name", "") || "未找到匹配的反推模型"),
 			description: "用于图片、视频或音频理解与文本生成；模型相对路径完整保存在工作流中。",
 		}],
@@ -1432,7 +1515,8 @@ function buildModelPanel(node, controls) {
 			updateModelPath();
 			syncPanel(node);
 		},
-		onApply: () => {
+		onApply: (_entry, value) => {
+			syncModelFamilyFilter(value);
 			updateModelPath();
 			const state = node.__gjjGemmaPanel;
 			if (state) state.modelExpanded = false;
@@ -1599,9 +1683,13 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-picker { position:absolute; z-index:1002; top:34px; left:0; width:min(420px,100%); max-height:min(430px,70vh); overflow:hidden; display:flex; flex-direction:column; gap:6px; padding:7px; border:1px solid #526a73; border-radius:8px; background:rgba(13,22,25,.98); box-shadow:0 12px 32px rgba(0,0,0,.58); }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-tools { flex:0 0 auto; display:flex; align-items:center; gap:5px; padding-bottom:5px; border-bottom:1px solid rgba(82,106,115,.45); }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-tools > :last-child { margin-left:auto; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-keyword-filter { flex:1 1 150px; min-width:90px; height:27px; box-sizing:border-box; border:1px solid #40575f; border-radius:6px; background:#0c1519; color:#edf7f4; padding:3px 7px; outline:none; font:11px/1.3 system-ui,sans-serif; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-keyword-filter:focus { border-color:#6fc696; box-shadow:0 0 0 1px rgba(111,198,150,.25); }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-grid { flex:1 1 auto; min-height:70px; overflow:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); align-content:start; gap:3px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-item { position:relative; min-width:0; height:72px; padding:0; overflow:hidden; border:0; border-radius:5px; background:#091114; color:#fff; cursor:pointer; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-item:hover,.gjj-gemma-assistant-panel .gjj-gemma-actor-item.active { outline:2px solid #6fc696; outline-offset:-2px; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item.active { box-shadow:0 0 0 1px rgba(111,198,150,.45) inset; background:rgba(31,81,49,.42); }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-item.active::after { content:"✓"; position:absolute; top:2px; right:4px; z-index:2; color:#9be0b5; font-size:11px; font-weight:900; text-shadow:0 1px 2px #000; pointer-events:none; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-item img { display:block; width:100%; height:100%; object-fit:cover; background:#091114; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-item span { position:absolute; left:0; right:0; bottom:0; display:block; padding:12px 3px 3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; background:linear-gradient(transparent,rgba(0,0,0,.88)); color:#fff; text-align:center; font-size:10px; font-weight:800; text-shadow:0 1px 2px #000; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-empty { grid-column:1/-1; padding:18px; color:#93a8ad; text-align:center; }

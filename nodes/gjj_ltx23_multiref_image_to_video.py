@@ -365,7 +365,9 @@ def _split_audio_queue(value: Any) -> list[dict[str, Any]]:
 
 def _split_mtv_prompts(value: Any) -> list[str]:
     text = str(value or "")
-    return [item.strip() for item in re.split(r"\r?\n\s*---\s*\r?\n", text) if item.strip()]
+    # 分镜生成器常把分隔符直接追加在镜头末尾（"...动作---\n[镜头2]"），
+    # 同时兼容独占一行的传统写法。不要再要求 --- 前后必须都有换行。
+    return [item.strip() for item in re.split(r"\s*---+\s*", text) if item.strip()]
 
 
 def _unwrap_main_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -2175,11 +2177,14 @@ class GJJ_LTX23ImageToVideoMultiRef:
             has_input_audio=has_input_audio,
         )
         global_prompt = str(config.get("global_prompt") or "").strip()
+        prompt_segments = _split_mtv_prompts(resolved_payload.get("positive_prompt"))
         if global_prompt:
             segment_prompt = str(resolved_payload.get("positive_prompt") or "").strip()
             resolved_payload["positive_prompt"] = ", ".join(
                 part for part in (global_prompt, segment_prompt) if part
             )
+            if len(prompt_segments) > 1:
+                prompt_segments = [", ".join(part for part in (global_prompt, item) if part) for item in prompt_segments]
             print(
                 "[GJJ LTX2.3 Clean v40][GLOBAL_PROMPT] "
                 f"seed_mode={config['seed_mode']} global_prompt={global_prompt!r} "
@@ -2232,10 +2237,6 @@ class GJJ_LTX23ImageToVideoMultiRef:
         if skipped_placeholders and unique_id:
             _send_status(unique_id, f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位场景图。")
         if unique_id:
-            _send_status(
-                unique_id,
-                f"Clean v40 分支：{route_label}（{route_key}）。来源：{scene_source_summary}；有效场景 {len(scene_images)} 张。{route_tip}",
-            )
             if len(scene_images) == 2:
                 _send_status(unique_id, "Clean v40 首尾帧链路提示：检测到 2 张有效场景，将按首帧+尾帧分支处理。")
             if transition_enabled_effective:
@@ -2257,8 +2258,53 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 positive_prompt_for_run,
                 test_lora_trigger,
             )
+            prompt_segments = [append_lora_triggers_to_positive_prompt(item, test_lora_trigger) for item in prompt_segments]
             if test_lora_trigger:
                 _send_status(unique_id, f"LoRA 测试触发词：{test_lora_trigger}")
+
+        prompt_character_references: list[Any] = []
+        if prompt_segments:
+            try:
+                from .gjj_storyboard_grid_generator import _character_prompt_and_reference
+
+                resolved_segments: list[str] = []
+                for segment_index, segment_prompt in enumerate(prompt_segments, start=1):
+                    resolved_prompt, library_reference = _character_prompt_and_reference(
+                        segment_prompt,
+                        contain_reference_images=True,
+                        include_reference_images=True,
+                        allow_storyboard_context=False,
+                        first_reference_image_index=1 + _count_split_images(character_reference_images),
+                        reference_width=target_width,
+                        reference_height=target_height,
+                        reference_label_prefix="figure",
+                        include_actor_notes_mapping=True,
+                        msr_asset_card_mode=True,
+                    )
+                    resolved_segments.append(resolved_prompt)
+                    combined_references = list(character_reference_images)
+                    if library_reference is not None:
+                        combined_references.append(library_reference)
+                        _send_status(unique_id, f"提示词分段 {segment_index}/{len(prompt_segments)}：已从角色库解析人物参考。")
+                    prompt_character_references.append(combined_references or None)
+                prompt_segments = resolved_segments
+                if len(prompt_segments) == 1:
+                    positive_prompt_for_run = prompt_segments[0]
+                    character_reference_images = list(prompt_character_references[0] or [])
+                else:
+                    _send_status(unique_id, f"检测到 ---：将按 {len(prompt_segments)} 段提示词依次生成、流式预览并合并。")
+            except Exception as exc:
+                raise RuntimeError(f"按分段提示词解析角色库人物参考失败：{exc}") from exc
+
+        has_prompt_character_assets = any(bool(item) for item in prompt_character_references) or bool(character_reference_images)
+        if has_prompt_character_assets and not source_video_detected and not has_input_audio:
+            route_key = "msr_character_multiref"
+            route_label = "MSR人物多图参考"
+            route_tip = "提示词命中 @角色名 并成功取得角色资产；优先走 LTX2.3+MSR 多图参考分支，不走 T2V 文生视频。"
+        _send_status(
+            unique_id,
+            f"Clean v40 分支：{route_label}（{route_key}）。来源：{scene_source_summary}；有效场景 {len(scene_images)} 张。{route_tip}",
+        )
 
         return _run_ltx23_multiref_video(
             mode=mode,
@@ -2328,6 +2374,9 @@ class GJJ_LTX23ImageToVideoMultiRef:
             prompt_replace_with=shared_prompts.get("vocal_ltx_prompt", ""),
             vocal_replace_find="",
             vocal_replace_with="",
+            prompt_segments=prompt_segments if len(prompt_segments) > 1 and not is_mtv_audio_queue else None,
+            prompt_character_references=prompt_character_references if len(prompt_segments) > 1 and not is_mtv_audio_queue else None,
+            prompt_segment_seconds=float(resolved_payload["segment_seconds"]),
         )
 
 
