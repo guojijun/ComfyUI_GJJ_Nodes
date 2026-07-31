@@ -13,11 +13,13 @@ const SOURCE_FPS_PROPERTY = "source_fps";
 const VIDEO_API_PATH = "/gjj/input_videos";
 const VIDEO_UPLOAD_API_PATH = "/gjj/upload_video";
 const VIDEO_META_API_PATH = "/gjj/video_meta";
+const VIDEO_NETWORK_API_PATH = "/gjj/download_network_video";
+const NETWORK_VIDEO_PROPERTY = "default_network_video_url";
 const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 260;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 15;
+const DOM_VERSION = 16;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FIRST_LAST_FRAME_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
@@ -25,8 +27,9 @@ const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
 const OPTIONAL_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 
-const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames", "filter_keyword", "filter_directory", "refresh_interval", "auto_refresh", SELECTED_WIDGET_NAME]);
-const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数", "过滤关键词", "过滤目录", "刷新时间", "定时刷新", "已选视频JSON"]);
+const OUTPUTS_WIDGET_NAME = "enabled_outputs_json";
+const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames", "filter_keyword", "filter_directory", "refresh_interval", "auto_refresh", SELECTED_WIDGET_NAME, OUTPUTS_WIDGET_NAME]);
+const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数", "过滤关键词", "过滤目录", "刷新时间", "定时刷新", "已选视频JSON", "启用输出JSON"]);
 const PARAM_WIDGET_ALIASES = new Map([
 	["帧率", "frame_rate"],
 	["宽度", "width"],
@@ -41,6 +44,7 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["刷新时间", "refresh_interval"],
 	["定时刷新", "auto_refresh"],
 	["已选视频JSON", SELECTED_WIDGET_NAME],
+	["启用输出JSON", OUTPUTS_WIDGET_NAME],
 ]);
 const PARAM_DEFS = [
 	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率；修改抽帧间隔时会同步为源帧率 ÷ 抽帧间隔。" },
@@ -55,7 +59,7 @@ const PARAM_DEFS = [
 	{ name: "filter_directory", label: "过滤目录", kind: "text", default: "", tip: "只显示 input 下相对目录包含该文本的视频；留空不过滤。" },
 	{ name: "refresh_interval", label: "刷新时间", kind: "number", step: "0.5", min: "1", max: "3600", default: 5.0, tip: "定时刷新开启时，每隔多少秒重新扫描视频列表。" },
 ];
-const SERIALIZED_PARAM_WIDGET_ORDER = [...PARAM_DEFS.map((def) => def.name), "auto_refresh", SELECTED_WIDGET_NAME];
+const SERIALIZED_PARAM_WIDGET_ORDER = [...PARAM_DEFS.map((def) => def.name), "auto_refresh", SELECTED_WIDGET_NAME, OUTPUTS_WIDGET_NAME];
 const AUTO_MEDIA_INFO_PARAM_NAMES = ["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames"];
 const AUTO_MEDIA_INFO_DEFAULTS = new Map([
 	["frame_rate", [0, 1, 24]],
@@ -263,6 +267,126 @@ function itemKey(item) {
 	return `${String(item?.type || "input")}:${String(item?.subfolder || "")}/${String(item?.filename || "")}`;
 }
 
+function parseNetworkVideoUrl(value) {
+	const match = String(value || "").match(/https?:\/\/[^\s<>"'“”‘’]+/i);
+	return String(match?.[0] || "").replace(/[,，;；。.!！?？\]\)}】」』]+$/g, "");
+}
+
+function askNetworkVideoUrl(initialText = "") {
+	return new Promise((resolve) => {
+		const overlay = document.createElement("div");
+		overlay.style.cssText = "position:fixed;inset:0;z-index:10050;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;";
+		const panel = document.createElement("div");
+		panel.style.cssText = "width:min(560px,calc(100vw - 48px));border:1px solid #41535b;border-radius:9px;background:#10181d;box-shadow:0 18px 50px rgba(0,0,0,.42);padding:12px;box-sizing:border-box;color:#dce7e2;display:flex;flex-direction:column;gap:9px;";
+		const title = document.createElement("div");
+		title.textContent = "设置默认网络视频";
+		title.style.cssText = "font:700 14px/20px sans-serif;color:#f1f7f4";
+		const hint = document.createElement("div");
+		hint.textContent = "输入一条 http/https 视频直链。当前没有视频或原视频不存在时，将下载到 ComfyUI input 并在下方显示。";
+		hint.style.cssText = "font:12px/18px sans-serif;color:#9fb0b7";
+		const input = document.createElement("textarea");
+		input.value = String(initialText || "");
+		input.placeholder = "https://example.com/video.mp4";
+		input.spellcheck = false;
+		input.style.cssText = "width:100%;min-height:92px;resize:vertical;border:1px solid #33464e;border-radius:8px;background:#0a1115;color:#edf5f2;outline:none;padding:8px;box-sizing:border-box;font:12px/1.45 Consolas,ui-monospace,monospace;";
+		const actions = document.createElement("div");
+		actions.style.cssText = "display:flex;justify-content:flex-end;gap:7px";
+		const cancel = document.createElement("button");
+		cancel.type = "button";
+		cancel.textContent = "取消";
+		const ok = document.createElement("button");
+		ok.type = "button";
+		ok.textContent = "下载并设置";
+		for (const button of [cancel, ok]) {
+			button.style.cssText = "height:28px;padding:0 12px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;font:12px/26px sans-serif";
+		}
+		ok.style.cssText += ";background:#20362f;border-color:#4f8f7a";
+		const done = (value) => {
+			overlay.remove();
+			resolve(value);
+		};
+		cancel.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			done(null);
+		});
+		ok.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			done(input.value);
+		});
+		input.addEventListener("keydown", (event) => {
+			event.stopPropagation();
+			if (event.key === "Escape") {
+				event.preventDefault();
+				done(null);
+			} else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+				event.preventDefault();
+				done(input.value);
+			}
+		});
+		for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "contextmenu"]) {
+			overlay.addEventListener(eventName, (event) => event.stopPropagation());
+		}
+		actions.append(cancel, ok);
+		panel.append(title, hint, input, actions);
+		overlay.appendChild(panel);
+		document.body.appendChild(overlay);
+		setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 0);
+	});
+}
+
+async function downloadNetworkVideo(node, url, options = {}) {
+	const state = ensureState(node);
+	if (state.networkDownloadPromise) return state.networkDownloadPromise;
+	const cleanUrl = parseNetworkVideoUrl(url);
+	if (!cleanUrl) {
+		if (!options.silent) setSummary(node, "请输入有效的 http/https 视频地址");
+		return null;
+	}
+	node.properties = node.properties || {};
+	node.properties[NETWORK_VIDEO_PROPERTY] = cleanUrl;
+	state.networkDownloadPromise = (async () => {
+		setSummary(node, "正在下载网络视频...");
+		const response = await api.fetchApi(VIDEO_NETWORK_API_PATH, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ url: cleanUrl }),
+		});
+		const payload = await response.json().catch(() => ({}));
+		if (!response.ok || !payload?.video?.filename) {
+			throw new Error(payload?.error || `网络视频下载失败：HTTP ${response.status}`);
+		}
+		await refreshOptions(node, { skipNetworkFallback: true });
+		const item = payload.video;
+		const full = (state.allOptions || []).find((option) => itemKey(option) === itemKey(item)) || item;
+		state.selection = [full];
+		state.executedFrames = [];
+		state.executedFrameCount = 0;
+		syncProperties(node);
+		syncPanelValuesFromSelection(node);
+		renderAll(node);
+		setSummary(node, "网络视频已下载并设置为当前视频");
+		return full;
+	})().catch((error) => {
+		setSummary(node, error?.message || "网络视频下载失败");
+		return null;
+	}).finally(() => {
+		state.networkDownloadPromise = null;
+	});
+	return state.networkDownloadPromise;
+}
+
+async function setDefaultNetworkVideo(node) {
+	const current = String(node?.properties?.[NETWORK_VIDEO_PROPERTY] || "");
+	const text = await askNetworkVideoUrl(current);
+	if (text == null) return;
+	await downloadNetworkVideo(node, text);
+}
+
 function selectedFromNode(node, serializedNode = null) {
 	const propertyValue = String(node?.properties?.[DATA_PROPERTY] || "");
 	if (parseSelection(propertyValue).length > 0) {
@@ -398,6 +522,7 @@ function ensureState(node) {
 		videoFormat: "",
 		activeTab: String(node.properties?.[TAB_PROPERTY] || "video"),
 		autoRefreshTimer: null,
+		networkDownloadPromise: null,
 	};
 	return node.__gjjMultiVideoState;
 }
@@ -408,6 +533,9 @@ function syncProperties(node) {
 	const serializedSelection = serializeSelection(state.selection);
 	node.properties[DATA_PROPERTY] = serializedSelection;
 	syncSelectedVideosWidget(node, serializedSelection);
+	// 把启用输出序列化为 JSON（直接写数组，后端 parse_enabled_outputs 可直接解析）
+	const serializedOutputs = JSON.stringify(state.enabledOutputs || []);
+	setWidgetValue(node, OUTPUTS_WIDGET_NAME, serializedOutputs, true);
 	node.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 	node.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 	node.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
@@ -1051,6 +1179,22 @@ function renderTabs(node) {
 			setActiveTab(node, tab.key);
 		});
 		tabs.appendChild(button);
+		if (tab.key === "params") {
+			const networkButton = document.createElement("button");
+			networkButton.type = "button";
+			networkButton.textContent = "🌐";
+			networkButton.title = "设置默认网络视频地址；当前没有视频或原视频资源不存在时自动下载并在下方显示。";
+			networkButton.style.cssText = tabButtonStyle(false);
+			networkButton.style.removeProperty("min-width");
+			networkButton.style.padding = "0 6px";
+			networkButton.style.flex = "0 0 auto";
+			networkButton.addEventListener("click", async (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				await setDefaultNetworkVideo(node);
+			});
+			tabs.appendChild(networkButton);
+		}
 	}
 	if (node.__gjjMultiVideoVideoPanel) node.__gjjMultiVideoVideoPanel.style.display = state.activeTab === "video" ? "flex" : "none";
 	if (node.__gjjMultiVideoParamPanel) node.__gjjMultiVideoParamPanel.style.display = state.activeTab === "params" ? "flex" : "none";
@@ -1884,7 +2028,7 @@ function renderAll(node) {
 	scheduleLayout(node);
 }
 
-async function refreshOptions(node) {
+async function refreshOptions(node, options = {}) {
 	const state = ensureState(node);
 	const payload = await fetchOptions();
 	state.allOptions = payload.videos;
@@ -1892,6 +2036,16 @@ async function refreshOptions(node) {
 	applyVideoFilters(node);
 	mergeSelectionWithOptions(node);
 	renderAll(node);
+	if (!options.skipNetworkFallback) {
+		const networkUrl = parseNetworkVideoUrl(node?.properties?.[NETWORK_VIDEO_PROPERTY] || "");
+		const availableKeys = new Set((state.allOptions || []).map(itemKey));
+		const hasAvailableSelection = (state.selection || []).some((item) => (
+			String(item?.type || "input") !== "input" || availableKeys.has(itemKey(item))
+		));
+		if (networkUrl && !hasAvailableSelection) {
+			await downloadNetworkVideo(node, networkUrl, { silent: true });
+		}
+	}
 	try {
 		await autoApplyMediaInfoIfDefault(node);
 	} catch (error) {
@@ -2537,6 +2691,11 @@ function patchPromptUnlinkedParamInputs(promptResult, graph = app.graph) {
 			const widgetValue = getWidgetValue(node, key);
 			if (widgetValue !== undefined) nodeInfo.inputs[key] = widgetValue;
 		}
+		// 真源注入：强制写入 selected_videos_json 和 enabled_outputs_json，
+		// 保证后端在任何 ComfyUI 版本/工作流下都能拿到前端当前的真实值和顺序。
+		const state = ensureState(node);
+		nodeInfo.inputs[SELECTED_WIDGET_NAME] = serializeSelection(state.selection);
+		nodeInfo.inputs[OUTPUTS_WIDGET_NAME] = JSON.stringify(state.enabledOutputs || []);
 	}
 	return promptResult;
 }
@@ -3045,6 +3204,7 @@ app.registerExtension({
 				serializedNode.properties[AUTO_REFRESH_PROPERTY] = getAutoRefreshEnabled(this);
 				serializedNode.properties.filter_keyword = String(getWidgetValue(this, "filter_keyword") ?? "");
 				serializedNode.properties.filter_directory = String(getWidgetValue(this, "filter_directory") ?? "");
+				serializedNode.properties[NETWORK_VIDEO_PROPERTY] = parseNetworkVideoUrl(this.properties?.[NETWORK_VIDEO_PROPERTY] || "");
 				writeSerializedInputSlots(serializedNode, inputDefs);
 				writeSerializedOutputSlots(serializedNode, defs);
 				writeSerializedWidgetValuesForActiveWidgets(this, serializedNode);

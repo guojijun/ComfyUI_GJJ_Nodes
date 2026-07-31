@@ -20,6 +20,11 @@ except Exception:
 
 import folder_paths
 from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file
+from .common_utils.network_media import (
+    gjjutils_download_network_media_to_input,
+    gjjutils_input_relative_media_path,
+    gjjutils_is_network_url,
+)
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -30,6 +35,7 @@ FIRST_LAST_FRAME_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 VIDEO_API_PATH = "/gjj/input_videos"
 VIDEO_UPLOAD_API_PATH = "/gjj/upload_video"
 VIDEO_META_API_PATH = "/gjj/video_meta"
+VIDEO_NETWORK_API_PATH = "/gjj/download_network_video"
 UPLOAD_SUBFOLDER = "gjj_multi_video_loader"
 MAX_SELECTED_VIDEOS = 20
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".gif"}
@@ -338,10 +344,45 @@ async def upload_gjj_input_video(request):
     return web.json_response({"videos": saved})
 
 
+async def download_gjj_network_video(request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    url = str(data.get("url") or "").strip()
+    if not gjjutils_is_network_url(url):
+        return web.json_response({"error": "请输入有效的 http/https 视频地址。"}, status=400)
+
+    try:
+        file_path = gjjutils_download_network_media_to_input(
+            url,
+            "VIDEO",
+            copy_subdir=UPLOAD_SUBFOLDER,
+        )
+        relative = Path(gjjutils_input_relative_media_path(file_path))
+        subfolder = relative.parent.as_posix()
+        if subfolder == ".":
+            subfolder = ""
+        path = Path(file_path)
+        item = {
+            "filename": path.name,
+            "subfolder": subfolder,
+            "label": f"{subfolder}/{path.name}" if subfolder else path.name,
+            "type": "input",
+            "size": int(path.stat().st_size),
+            "source_url": url,
+            **video_meta(path),
+        }
+        return web.json_response({"video": item})
+    except Exception as error:
+        return web.json_response({"error": f"网络视频下载失败：{error}"}, status=400)
+
+
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
     PromptServer.instance.routes.get(VIDEO_API_PATH)(get_gjj_input_videos)
     PromptServer.instance.routes.get(VIDEO_META_API_PATH)(get_gjj_video_meta)
     PromptServer.instance.routes.post(VIDEO_UPLOAD_API_PATH)(upload_gjj_input_video)
+    PromptServer.instance.routes.post(VIDEO_NETWORK_API_PATH)(download_gjj_network_video)
 
 
 def parse_selected_videos(raw_value: Any) -> list[dict[str, str]]:
@@ -502,25 +543,13 @@ def parse_enabled_outputs_from_prompt_links(prompt: Any, unique_id: Any) -> list
     if not isinstance(node, dict):
         return []
     outputs = node.get("outputs")
-    if isinstance(outputs, list):
-        parsed = parse_enabled_outputs_from_workflow_outputs(outputs)
-        if parsed:
-            return parsed
-    links = node.get("links") or node.get("output_links")
-    if not isinstance(links, dict):
-        return []
-    enabled: list[str] = []
-    for slot, value in links.items():
-        try:
-            index = int(slot)
-        except Exception:
-            continue
-        if index <= 0 or not value:
-            continue
-        key = OPTIONAL_OUTPUT_KEYS[index - 1] if index - 1 < len(OPTIONAL_OUTPUT_KEYS) else ""
-        if key and key not in enabled:
-            enabled.append(key)
-    return enabled
+    # 优先根据 prompt 中的 outputs[i].gjj_key / name 推断（顺序与前端 node.outputs 一致）
+    enabled_from_outputs = parse_enabled_outputs_from_workflow_outputs(outputs)
+    if enabled_from_outputs:
+        return enabled_from_outputs
+    # 根据 links 推断：只能知道哪些槽有连线，不知道对应哪个逻辑 key，放弃静态顺序猜测
+    # 返回空列表让外层走 workflow.properties/enabled_outputs 的真源路径
+    return []
 
 
 def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, unique_id: Any = None, prompt: Any = None) -> list[str]:
@@ -1255,6 +1284,14 @@ class GJJ_MultiVideoLoader:
                     "tooltip": "内部保存用：记录面板中选择的视频，重新打开工作流后用于恢复真实源视频。",
                 }),
             ),
+            "enabled_outputs_json": (
+                "STRING",
+                _hidden_panel_widget({
+                    "default": "[]",
+                    "display_name": "启用输出JSON",
+                    "tooltip": "内部保存用：记录前端启用的输出口顺序。重启工作流或前端注入后用于保证后端返回值顺序与右侧槽位严格对齐。",
+                }),
+            ),
         }
         return {
             "required": {},
@@ -1472,13 +1509,15 @@ class GJJ_MultiVideoLoader:
         refresh_interval=None,
         auto_refresh=False,
         selected_videos_json=None,
+        enabled_outputs_json=None,
         input_frames=None,
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
     ):
         selected = recover_selected_videos(selected_videos_json, extra_pnginfo, unique_id)
-        enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id, prompt)
+        # enabled_outputs_json 是前端通过 prompt.inputs 写入的真源（顺序与 node.outputs[] 完全一致），优先级最高
+        enabled_outputs = parse_enabled_outputs(enabled_outputs_json) or recover_enabled_outputs(None, extra_pnginfo, unique_id, prompt)
         enabled_output_set = set(enabled_outputs or [])
         audio_enabled = bool({"audio", "processed_video"} & enabled_output_set)
 
@@ -1682,6 +1721,31 @@ class GJJ_MultiVideoLoader:
         for key in enabled_outputs or []:
             if key in optional_values:
                 result.append(optional_values[key])
+            else:
+                # 兜底：前端启用了但 optional_values 里没有的 key（例如 processed_video 未构建），
+                # 按类型占位，防止长度不齐导致后续槽位错位。
+                result_type = OPTIONAL_OUTPUT_DEFS.get(key, {}).get("type", "")
+                if result_type.startswith("INT"):
+                    result.append(0)
+                elif result_type.startswith("FLOAT"):
+                    result.append(0.0)
+                elif result_type == "STRING":
+                    result.append("")
+                elif result_type == "IMAGE" or result_type == FIRST_LAST_FRAME_TYPE:
+                    result.append(empty_image_tensor())
+                elif result_type == "AUDIO":
+                    result.append(empty_audio(0.0))
+                elif result_type == "VIDEO":
+                    result.append({"frames": empty_image_tensor(), "fps": output_fps})
+                else:
+                    result.append(None)
+
+        # 保证返回长度：1（主帧队列）+ len(enabled_outputs)，与前端 outputs[] 对齐
+        expected_len = 1 + len(enabled_outputs or [])
+        while len(result) < expected_len:
+            result.append(None)
+        if len(result) > expected_len:
+            result = result[:expected_len]
 
         ui_payload = {
             "preview_images": preview_entries,
@@ -1693,6 +1757,12 @@ class GJJ_MultiVideoLoader:
             "height": [int(final_height)],
             "video_format": [output_format],
         }
+        # 诊断日志：显示实际顺序与长度，便于排查标签值错位
+        print(
+            f"[GJJ_MultiVideoLoader] enabled_outputs={enabled_outputs} "
+            f"len(enabled)={len(enabled_outputs or [])} result_len={len(result)}",
+            flush=True,
+        )
         return {
             "ui": ui_payload,
             "result": tuple(result),

@@ -2930,6 +2930,30 @@ def _check_audio_conditioned_budget(
 		)
 
 
+def _resample_sigma_text(value: Any, steps: int) -> str:
+	text = str(value or "").strip()
+	if steps <= 0:
+		return text
+	try:
+		values = [float(part.strip()) for part in text.split(",") if part.strip()]
+	except Exception as exc:
+		raise ValueError(f"Sigma 列表格式错误：{exc}") from exc
+	if len(values) < 2:
+		raise ValueError("Sigma 列表至少需要两个数值。")
+	target_count = int(steps) + 1
+	if target_count == len(values):
+		return ", ".join(f"{item:.8g}" for item in values)
+	result: list[float] = []
+	source_last = len(values) - 1
+	for index in range(target_count):
+		position = (index * source_last) / max(1, target_count - 1)
+		left = min(source_last, int(math.floor(position)))
+		right = min(source_last, left + 1)
+		fraction = position - left
+		result.append(values[left] * (1.0 - fraction) + values[right] * fraction)
+	return ", ".join(f"{item:.8g}" for item in result)
+
+
 def run_ltx23_multiref_video(
 	*,
 	mode: str,
@@ -2975,6 +2999,22 @@ def run_ltx23_multiref_video(
 	prompt_replace_with: Any = "",
 	vocal_replace_find: Any = "",
 	vocal_replace_with: Any = "",
+	stage1_sampler: Any = DEFAULT_STAGE1_SAMPLER,
+	stage2_sampler: Any = DEFAULT_STAGE2_SAMPLER,
+	stage1_steps: Any = 0,
+	stage2_steps: Any = 0,
+	stage1_sigmas: Any = "",
+	stage2_sigmas: Any = "",
+	cfg: Any = DEFAULT_CFG,
+	nag_scale: Any = -1.0,
+	nag_alpha: Any = -1.0,
+	nag_tau: Any = -1.0,
+	ff_chunks: Any = DEFAULT_FF_CHUNKS,
+	ff_dim_threshold: Any = DEFAULT_FF_DIM_THRESHOLD,
+	vae_tile_size: Any = DEFAULT_VAE_TILE_SIZE,
+	vae_overlap: Any = DEFAULT_VAE_OVERLAP,
+	vae_temporal_size: Any = DEFAULT_VAE_TEMPORAL_SIZE,
+	vae_temporal_overlap: Any = DEFAULT_VAE_TEMPORAL_OVERLAP,
 ):
 	_ensure_runtime_dependencies()
 	run_started_at = time.perf_counter()
@@ -2983,6 +3023,22 @@ def run_ltx23_multiref_video(
 	transition_prompt_model = str(transition_prompt_model or "").strip()
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
+	stage1_sampler = str(stage1_sampler or DEFAULT_STAGE1_SAMPLER).strip()
+	stage2_sampler = str(stage2_sampler or DEFAULT_STAGE2_SAMPLER).strip()
+	stage1_steps = max(0, int(stage1_steps or 0))
+	stage2_steps = max(0, int(stage2_steps or 0))
+	stage1_sigmas = str(stage1_sigmas or "").strip()
+	stage2_sigmas = str(stage2_sigmas or "").strip()
+	cfg = max(0.0, float(cfg))
+	nag_scale = float(nag_scale)
+	nag_alpha = float(nag_alpha)
+	nag_tau = float(nag_tau)
+	ff_chunks = max(1, int(ff_chunks))
+	ff_dim_threshold = max(256, int(ff_dim_threshold))
+	vae_tile_size = max(64, int(vae_tile_size))
+	vae_overlap = max(0, min(int(vae_overlap), vae_tile_size - 1))
+	vae_temporal_size = max(8, int(vae_temporal_size))
+	vae_temporal_overlap = max(0, min(int(vae_temporal_overlap), vae_temporal_size - 1))
 	try:
 		target_width = max(64, int(round(float(target_width)))) if target_width is not None else None
 	except Exception:
@@ -3120,7 +3176,7 @@ def run_ltx23_multiref_video(
 					print(f"[GJJ LTX2.3 Clean v40] no transition lora enabled for this run. switch_seq={segment_switch_text or '(default all on)'} global_lora_enabled={global_transition_lora_enabled_by_switch}", flush=True)
 				except Exception:
 					pass
-			model = _apply_ff_chunking(model, DEFAULT_FF_CHUNKS, DEFAULT_FF_DIM_THRESHOLD)
+			model = _apply_ff_chunking(model, ff_chunks, ff_dim_threshold)
 		except Exception as exc:
 			raise RuntimeError(f"LTX 多图参考节点加载模型失败：{exc}") from exc
 
@@ -3158,8 +3214,8 @@ def run_ltx23_multiref_video(
 			_send_status(unique_id, "视频重采样 4/5：解码视频与音频...")
 			try:
 				frames = VAEDecodeTiled().decode(
-					video_vae, video_result, DEFAULT_VAE_TILE_SIZE, DEFAULT_VAE_OVERLAP,
-					DEFAULT_VAE_TEMPORAL_SIZE, DEFAULT_VAE_TEMPORAL_OVERLAP,
+					video_vae, video_result, vae_tile_size, vae_overlap,
+					vae_temporal_size, vae_temporal_overlap,
 				)[0]
 				frames = frames[:max(1, int(source_frame_count))]
 				output_audio = LTXVAudioVAEDecode.execute(audio_result, audio_vae)[0]
@@ -3590,10 +3646,11 @@ def run_ltx23_multiref_video(
 
 			_send_status(unique_id, f"{prefix}5/8 第一阶段低清采样...")
 			try:
-				stage1_nag_scale = WORKFLOW_FIRST_LAST_NAG_SCALE if workflow_first_last else DEFAULT_NAG_SCALE
-				stage1_nag_alpha = WORKFLOW_FIRST_LAST_NAG_ALPHA if workflow_first_last else DEFAULT_NAG_ALPHA
-				stage1_nag_tau = WORKFLOW_FIRST_LAST_NAG_TAU if workflow_first_last else DEFAULT_NAG_TAU
-				stage1_sigmas_text = WORKFLOW_FIRST_LAST_STAGE1_SIGMAS if workflow_first_last else DEFAULT_STAGE1_SIGMAS
+				stage1_nag_scale = nag_scale if nag_scale >= 0 else (WORKFLOW_FIRST_LAST_NAG_SCALE if workflow_first_last else DEFAULT_NAG_SCALE)
+				stage1_nag_alpha = nag_alpha if nag_alpha >= 0 else (WORKFLOW_FIRST_LAST_NAG_ALPHA if workflow_first_last else DEFAULT_NAG_ALPHA)
+				stage1_nag_tau = nag_tau if nag_tau >= 0 else (WORKFLOW_FIRST_LAST_NAG_TAU if workflow_first_last else DEFAULT_NAG_TAU)
+				stage1_sigmas_text = stage1_sigmas or (WORKFLOW_FIRST_LAST_STAGE1_SIGMAS if workflow_first_last else DEFAULT_STAGE1_SIGMAS)
+				stage1_sigmas_text = _resample_sigma_text(stage1_sigmas_text, stage1_steps)
 				try:
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] workflow_first_last={workflow_first_last}; nag_scale={stage1_nag_scale}; nag_alpha={stage1_nag_alpha}; nag_tau={stage1_nag_tau}; inplace=True", flush=True)
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] source wiring: nag_cond_video=raw_positive; nag_cond_audio=raw_negative; stage1_sigmas={stage1_sigmas_text}", flush=True)
@@ -3623,12 +3680,12 @@ def run_ltx23_multiref_video(
 				#   2) 第二阶段 CFGGuider
 				# 源工作流没有额外 CFGNorm，所以这里不再包 CFGNorm。
 				stage1_model = nag_model
-				guider_stage1 = CFGGuider.execute(stage1_model, positive, negative, DEFAULT_CFG)[0]
+				guider_stage1 = CFGGuider.execute(stage1_model, positive, negative, cfg)[0]
 				try:
 					print("[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output connected to Stage1 CFGGuider directly; CFGNorm removed to match source workflow.", flush=True)
 				except Exception:
 					pass
-				sampler_stage1 = KSamplerSelect.execute(DEFAULT_STAGE1_SAMPLER)[0]
+				sampler_stage1 = KSamplerSelect.execute(stage1_sampler)[0]
 				sigmas_stage1 = _apply_denoise_to_sigmas(ManualSigmas.execute(stage1_sigmas_text)[0], resolved_denoise_strength)
 				noise_stage1 = RandomNoise.execute(int(render_seed))[0]
 				with _fp16_accumulation(True):
@@ -3685,15 +3742,16 @@ def run_ltx23_multiref_video(
 				av_latent_stage2 = LTXVConcatAVLatent.execute(upscaled_video_latent, audio_latent_stage1)[0]
 
 				stage2_model = nag_model if workflow_first_last else model
-				guider_stage2 = CFGGuider.execute(stage2_model, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
+				guider_stage2 = CFGGuider.execute(stage2_model, positive_stage2, negative_stage2, cfg)[0]
 				try:
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output connected to Stage2 CFGGuider: using_nag_model={workflow_first_last}; model_type={type(stage2_model).__name__}", flush=True)
 				except Exception:
 					pass
-				sampler_stage2 = KSamplerSelect.execute(DEFAULT_STAGE2_SAMPLER)[0]
-				stage2_sigmas_text = WORKFLOW_FIRST_LAST_STAGE2_SIGMAS if workflow_first_last else DEFAULT_STAGE2_SIGMAS
+				sampler_stage2 = KSamplerSelect.execute(stage2_sampler)[0]
+				stage2_sigmas_text = stage2_sigmas or (WORKFLOW_FIRST_LAST_STAGE2_SIGMAS if workflow_first_last else DEFAULT_STAGE2_SIGMAS)
+				stage2_sigmas_text = _resample_sigma_text(stage2_sigmas_text, stage2_steps)
 				try:
-					print(f"[GJJ LTX2.3 Clean v40][Stage2] sampler={DEFAULT_STAGE2_SAMPLER}; sigmas={stage2_sigmas_text}; cfg={DEFAULT_CFG}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][Stage2] sampler={stage2_sampler}; sigmas={stage2_sigmas_text}; cfg={cfg}", flush=True)
 				except Exception:
 					pass
 				sigmas_stage2 = _apply_denoise_to_sigmas(ManualSigmas.execute(stage2_sigmas_text)[0], resolved_denoise_strength)
@@ -3716,10 +3774,10 @@ def run_ltx23_multiref_video(
 				frames = VAEDecodeTiled().decode(
 					video_vae,
 					video_latent_stage2,
-					DEFAULT_VAE_TILE_SIZE,
-					DEFAULT_VAE_OVERLAP,
-					DEFAULT_VAE_TEMPORAL_SIZE,
-					DEFAULT_VAE_TEMPORAL_OVERLAP,
+					vae_tile_size,
+					vae_overlap,
+					vae_temporal_size,
+					vae_temporal_overlap,
 				)[0]
 				frames = _slice_output_frames(frames, render_frame_trim_start, output_frame_count)
 				frames = _crop_frames_to_size(frames, output_width, output_height)
@@ -3770,11 +3828,11 @@ def run_ltx23_multiref_video(
 						"transition_lora_name": auto_transition_lora_name,
 						"transition_lora_path": auto_transition_lora_path,
 						"transition_lora_strength": _transition_lora_strength_value(transition_lora_strength),
-						"stage1_sampler": DEFAULT_STAGE1_SAMPLER,
-						"stage1_sigmas": WORKFLOW_FIRST_LAST_STAGE1_SIGMAS if workflow_first_last else DEFAULT_STAGE1_SIGMAS,
-						"stage2_sampler": DEFAULT_STAGE2_SAMPLER,
-						"stage2_sigmas": WORKFLOW_FIRST_LAST_STAGE2_SIGMAS if workflow_first_last else DEFAULT_STAGE2_SIGMAS,
-						"cfg": DEFAULT_CFG,
+						"stage1_sampler": stage1_sampler,
+						"stage1_sigmas": stage1_sigmas_text,
+						"stage2_sampler": stage2_sampler,
+						"stage2_sigmas": stage2_sigmas_text,
+						"cfg": cfg,
 						"denoise_strength": resolved_denoise_strength,
 						"seed_stage1": int(render_seed),
 						"seed_stage2": int(render_seed) + 1,

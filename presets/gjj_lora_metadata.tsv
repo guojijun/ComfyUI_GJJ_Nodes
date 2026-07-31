@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+LTX2.3-22B_IC-LoRA-CrossView-Warp	LTX2.3-22B_IC-LoRA-CrossView-Warp	LTX相机轨迹	crossview	1.0	你给它一个视频和一个摄像机偏移（方位角/高程/） 距离），并且从新视角生成相同的场景。这是 用于LTX-Video 2.3（22B）的IC-LoRA中，包含两个参考视频：一个深度扭曲 你的视频（这里承载几何体）和原始视频本身（这个） 保持身份）。这些变形来自CrossViewWarp ComfyUI节点， 它使用了 Depth Anything输入。	https://huggingface.co/Cseti/LTX2.3-22B_IC-LoRA-CrossView-Warp
 krea2_style_reference	krea2_style_reference	Krea2风格迁移		1.0	让你以参考图像的风格推断Krea2 Turbo模型。它通过AI Toolkit和实验性的Krea2参考图像训练器和Turbo训练适配器进行训练。它是基于多年来手工挑选的成千上万对风格对的训练。它被训练为处理1-2张参考图像。	https://huggingface.co/ostris/krea2_turbo_style_reference
 Best_FaceID_v1.0_LoRA	Best_FaceID_v1.0_LoRA	人物身份参考	ref_t2v	1.0	保身份视频引用LoRA。给它一个参考 照片 + 文本提示，生成一个保持该人身份的视频。	https://huggingface.co/Alissonerdx/LTX-Best-Face-ID
 Best_FaceID_CharacterSheet	Best_FaceID_CharacterSheet	角色资产参考	ref_t2v	1.0	保身份视频引用LoRA。给它一个参考 照片 + 文本提示，生成一个保持该人身份的视频。	https://huggingface.co/Alissonerdx/LTX-Best-Face-ID

@@ -1587,6 +1587,22 @@ def _clean_config_defaults() -> dict[str, Any]:
         "seed_mode": "固定",
         "global_prompt": "",
         "lora_slots": [],
+        "stage1_sampler": "euler_ancestral_cfg_pp",
+        "stage2_sampler": "euler_cfg_pp",
+        "stage1_steps": 0,
+        "stage2_steps": 0,
+        "stage1_sigmas": "",
+        "stage2_sigmas": "",
+        "cfg": 1.0,
+        "nag_scale": -1.0,
+        "nag_alpha": -1.0,
+        "nag_tau": -1.0,
+        "ff_chunks": 4,
+        "ff_dim_threshold": 4096,
+        "vae_tile_size": 512,
+        "vae_overlap": 64,
+        "vae_temporal_size": 512,
+        "vae_temporal_overlap": 4,
     }
 
 
@@ -1686,6 +1702,22 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
     config["fps"] = _safe_float(config.get("fps"), DEFAULT_FPS, 1.0, 120.0)
     config["seed"] = int(_safe_float(config.get("seed"), DEFAULT_SEED, 0, 0xFFFFFFFFFFFFFFFF))
     config["denoise_strength"] = _safe_float(config.get("denoise_strength"), DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
+    config["stage1_sampler"] = str(config.get("stage1_sampler") or "euler_ancestral_cfg_pp").strip()
+    config["stage2_sampler"] = str(config.get("stage2_sampler") or "euler_cfg_pp").strip()
+    config["stage1_steps"] = int(_safe_float(config.get("stage1_steps"), 0, 0, 1000))
+    config["stage2_steps"] = int(_safe_float(config.get("stage2_steps"), 0, 0, 1000))
+    config["stage1_sigmas"] = str(config.get("stage1_sigmas") or "").strip()
+    config["stage2_sigmas"] = str(config.get("stage2_sigmas") or "").strip()
+    config["cfg"] = _safe_float(config.get("cfg"), 1.0, 0.0, 100.0)
+    config["nag_scale"] = _safe_float(config.get("nag_scale"), -1.0, -1.0, 100.0)
+    config["nag_alpha"] = _safe_float(config.get("nag_alpha"), -1.0, -1.0, 1.0)
+    config["nag_tau"] = _safe_float(config.get("nag_tau"), -1.0, -1.0, 100.0)
+    config["ff_chunks"] = int(_safe_float(config.get("ff_chunks"), 4, 1, 128))
+    config["ff_dim_threshold"] = int(_safe_float(config.get("ff_dim_threshold"), 4096, 256, 65536))
+    config["vae_tile_size"] = int(_safe_float(config.get("vae_tile_size"), 512, 64, 4096))
+    config["vae_overlap"] = int(_safe_float(config.get("vae_overlap"), 64, 0, 2048))
+    config["vae_temporal_size"] = int(_safe_float(config.get("vae_temporal_size"), 512, 8, 4096))
+    config["vae_temporal_overlap"] = int(_safe_float(config.get("vae_temporal_overlap"), 4, 0, 256))
     config["transition_enabled"] = _safe_bool(config.get("transition_enabled"), False)
     config["transition_curve"] = str(config.get("transition_curve") or TRANSITION_CURVES[0])
     config["transition_early_tail_ratio"] = _safe_float(config.get("transition_early_tail_ratio"), DEFAULT_TRANSITION_EARLY_TAIL_RATIO, 0.10, 0.95)
@@ -2207,6 +2239,22 @@ class GJJ_LTX23ImageToVideoMultiRef:
             auto_transition_prompt=config.get("auto_transition_prompt", False),
             transition_prompt_model=config.get("transition_prompt_model", ""),
             test_lora_name=config["test_lora_name"],
+            stage1_sampler=config["stage1_sampler"],
+            stage2_sampler=config["stage2_sampler"],
+            stage1_steps=config["stage1_steps"],
+            stage2_steps=config["stage2_steps"],
+            stage1_sigmas=config["stage1_sigmas"],
+            stage2_sigmas=config["stage2_sigmas"],
+            cfg=config["cfg"],
+            nag_scale=config["nag_scale"],
+            nag_alpha=config["nag_alpha"],
+            nag_tau=config["nag_tau"],
+            ff_chunks=config["ff_chunks"],
+            ff_dim_threshold=config["ff_dim_threshold"],
+            vae_tile_size=config["vae_tile_size"],
+            vae_overlap=config["vae_overlap"],
+            vae_temporal_size=config["vae_temporal_size"],
+            vae_temporal_overlap=config["vae_temporal_overlap"],
             branch_debug={
                 "route_key": route_key,
                 "route_label": route_label,

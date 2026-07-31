@@ -59,6 +59,22 @@ const DEFAULT_CONFIG = {
   seed_mode: "固定",
   global_prompt: "",
   lora_slots: [],
+  stage1_sampler: "euler_ancestral_cfg_pp",
+  stage2_sampler: "euler_cfg_pp",
+  stage1_steps: 0,
+  stage2_steps: 0,
+  stage1_sigmas: "",
+  stage2_sigmas: "",
+  cfg: 1.0,
+  nag_scale: -1.0,
+  nag_alpha: -1.0,
+  nag_tau: -1.0,
+  ff_chunks: 4,
+  ff_dim_threshold: 4096,
+  vae_tile_size: 512,
+  vae_overlap: 64,
+  vae_temporal_size: 512,
+  vae_temporal_overlap: 4,
 };
 
 const SEED_MODES = ["固定", "随机", "递增", "递减"];
@@ -2089,9 +2105,38 @@ function buildPanel(node) {
     );
   }, { width: 430 }));
   const testBtn = makeToolButton("🧪", "选择多个主模型加入队列测试；视频文件名包含模型名和耗时", (button) => showModelTestPanel(node, button));
+  const settingsBtn = makeToolButton("⚙️", "高级采样与运行参数", (button) => showFloatingPanel(node, button, "高级参数", (body) => {
+    const samplers = [
+      "euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp",
+      "heun", "heunpp2", "dpm_2", "dpm_2_ancestral", "dpmpp_2s_ancestral",
+      "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m_sde", "ddim", "uni_pc",
+    ];
+    body.append(
+      panelRow("一阶段采样器", configSelect(node, "stage1_sampler", samplers)),
+      panelRow("一阶段步数", configInput(node, "stage1_steps", "number", { min: 0, max: 1000, step: 1 })),
+      panelRow("一阶段 Sigmas", configInput(node, "stage1_sigmas", "textarea", { rows: 3, placeholder: "留空使用当前分支默认值；步数为 0 时原样使用" })),
+      panelRow("二阶段采样器", configSelect(node, "stage2_sampler", samplers)),
+      panelRow("二阶段步数", configInput(node, "stage2_steps", "number", { min: 0, max: 1000, step: 1 })),
+      panelRow("二阶段 Sigmas", configInput(node, "stage2_sigmas", "textarea", { rows: 3, placeholder: "留空使用当前分支默认值；步数为 0 时原样使用" })),
+      panelRow("CFG", configInput(node, "cfg", "number", { min: 0, max: 100, step: 0.05 })),
+      panelRow("NAG 强度", configInput(node, "nag_scale", "number", { min: -1, max: 100, step: 0.1 })),
+      panelRow("NAG Alpha", configInput(node, "nag_alpha", "number", { min: -1, max: 1, step: 0.01 })),
+      panelRow("NAG Tau", configInput(node, "nag_tau", "number", { min: -1, max: 100, step: 0.1 })),
+      panelRow("FF 分块数", configInput(node, "ff_chunks", "number", { min: 1, max: 128, step: 1 })),
+      panelRow("FF 分块阈值", configInput(node, "ff_dim_threshold", "number", { min: 256, max: 65536, step: 256 })),
+      panelRow("VAE Tile", configInput(node, "vae_tile_size", "number", { min: 64, max: 4096, step: 32 })),
+      panelRow("VAE 重叠", configInput(node, "vae_overlap", "number", { min: 0, max: 2048, step: 8 })),
+      panelRow("VAE 时序块", configInput(node, "vae_temporal_size", "number", { min: 8, max: 4096, step: 8 })),
+      panelRow("VAE 时序重叠", configInput(node, "vae_temporal_overlap", "number", { min: 0, max: 256, step: 1 })),
+    );
+    const note = document.createElement("div");
+    note.className = "gjj-ltx-advanced-note";
+    note.textContent = "步数为 0：保留内置 Sigma 数量；填写步数：按当前 Sigma 曲线重采样。留空 Sigma 使用分支默认曲线；NAG 三项为 -1 时使用普通/首尾帧分支默认值。";
+    body.appendChild(note);
+  }, { width: 480 }));
   const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, runBtn);
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, settingsBtn, runBtn);
   root.appendChild(tools);
   node.__gjjLtxTransitionButton = transitionBtn;
   node.__gjjLtxAutoPromptButton = autoPromptBtn;
