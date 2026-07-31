@@ -4,6 +4,8 @@ import { api } from "../../../scripts/api.js";
 const TAB_ID = "gjj-node-library";
 const DRAG_TYPE = "application/x-gjj-node-type";
 const ICON_URL = "./extensions/ComfyUI_GJJ_Nodes/gjj_sidebar_icon.png";
+const FLAT_INITIAL_BATCH_SIZE = 24;
+const FLAT_STREAM_BATCH_SIZE = 32;
 
 const DISPLAY_CATEGORY_ALIASES = {
     "采样": "模型",
@@ -63,6 +65,27 @@ const DISPLAY_CATEGORY_EMOJI = {
     "三维": "🧊 三维",
 };
 
+const NODE_ICON_RULES = [
+    [/(元数据|metadata)/i, "ℹ️"],
+    [/(对比|比较|compare)/i, "🆚"],
+    [/(遮罩|蒙版|mask|matting)/i, "🎭"],
+    [/(姿势|姿态|pose|dwpose|openpose)/i, "🕺"],
+    [/(裁切|裁剪|crop)/i, "✂️"],
+    [/(网格|grid)/i, "▦"],
+    [/(画布|canvas|绘画|painter)/i, "🎨"],
+    [/(结束|end)/i, "⏹️"],
+    [/(开始|start)/i, "▶️"],
+    [/(循环|loop|重复|repeat)/i, "🔁"],
+    [/(整数|数字|number|integer)/i, "🔢"],
+    [/(条件|condition)/i, "🔀"],
+    [/(FBX|三维|3D|mesh)/i, "🧊"],
+    [/(模型|model|lora|vae|clip)/i, "🧠"],
+    [/(视频|video|首尾帧|frame)/i, "🎬"],
+    [/(音频|语音|audio|voice|tts)/i, "🎵"],
+    [/(图像|图片|image)/i, "🖼️"],
+    [/(文本|提示词|翻译|text|prompt)/i, "📝"],
+];
+
 const DISPLAY_CATEGORY_ORDER = [
     "🧠 模型",
     "🖼️ 图像",
@@ -95,8 +118,9 @@ const state = {
     expanded: new Set(),
     help: {},
     usageLoaded: false,
+    renderRevision: 0,
     usage: {
-        sort_mode: "frequency",
+        sort_mode: "category",
         use_colors_enabled: true,
         use_colors: DEFAULT_USE_COLORS.map((item) => ({ ...item })),
         nodes: {},
@@ -106,7 +130,7 @@ const state = {
 function sanitizeUsage(value) {
     const usage = value && typeof value === "object" ? value : {};
     return {
-        sort_mode: ["frequency", "recent", "name"].includes(usage.sort_mode) ? usage.sort_mode : "frequency",
+        sort_mode: ["category", "frequency", "recent", "name"].includes(usage.sort_mode) ? usage.sort_mode : "category",
         use_colors_enabled: usage.use_colors_enabled !== false,
         use_colors: Array.isArray(usage.use_colors) && usage.use_colors.length
             ? usage.use_colors
@@ -171,11 +195,13 @@ function usageColor(count) {
 }
 
 function compareNodes(a, b) {
-    const aPriority = PRIORITY_NODE_TYPES.indexOf(a.type);
-    const bPriority = PRIORITY_NODE_TYPES.indexOf(b.type);
-    if (aPriority !== -1 || bPriority !== -1) {
-        return (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
-            - (bPriority === -1 ? Number.MAX_SAFE_INTEGER : bPriority);
+    if (state.usage.sort_mode === "category") {
+        const aPriority = PRIORITY_NODE_TYPES.indexOf(a.type);
+        const bPriority = PRIORITY_NODE_TYPES.indexOf(b.type);
+        if (aPriority !== -1 || bPriority !== -1) {
+            return (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
+                - (bPriority === -1 ? Number.MAX_SAFE_INTEGER : bPriority);
+        }
     }
     const aUsage = usageFor(a.type);
     const bUsage = usageFor(b.type);
@@ -221,6 +247,36 @@ function nodeTooltip(node) {
     return lines.join("\n");
 }
 
+function nodeCategoryIcon(node) {
+    const category = String(node?.category || "").replace(/^GJJ\/?/, "");
+    const originalTopLevel = category.split("/")[0] || "工具";
+    const normalized = DISPLAY_CATEGORY_ALIASES[originalTopLevel] || originalTopLevel;
+    return {
+        "图像": "🖼️",
+        "视频": "🎬",
+        "音频": "🎵",
+        "模型": "🧠",
+        "文本": "📝",
+        "逻辑与流程": "🔀",
+        "工具": "🛠️",
+        "三维": "🧊",
+    }[normalized] || "🧩";
+}
+
+function nodeDisplayParts(node) {
+    const title = String(node?.title || node?.type || "");
+    const existing = title.match(/\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?/u);
+    if (existing) {
+        return {
+            icon: existing[0],
+            title: title.replace(existing[0], "").replace(/\s{2,}/g, " ").trim(),
+        };
+    }
+    const searchable = `${title} ${node?.type || ""}`;
+    const matched = NODE_ICON_RULES.find(([pattern]) => pattern.test(searchable));
+    return { icon: matched?.[1] || nodeCategoryIcon(node), title };
+}
+
 function injectStyles() {
     if (document.getElementById("gjj-node-sidebar-styles")) return;
     const style = document.createElement("style");
@@ -259,6 +315,19 @@ function injectStyles() {
             color: var(--fg-color);
             background: var(--comfy-menu-bg);
             font: 13px/1.4 Arial, sans-serif;
+        }
+        .gjj-node-sidebar-host {
+            box-sizing: border-box;
+            height: 100%;
+            min-height: 0;
+            overflow: hidden !important;
+        }
+        .gjj-node-sidebar__fixed {
+            position: sticky;
+            top: 0;
+            z-index: 3;
+            flex: 0 0 auto;
+            background: var(--comfy-menu-bg);
         }
         .gjj-node-sidebar__header {
             display: flex;
@@ -321,8 +390,10 @@ function injectStyles() {
             background: var(--border-color);
         }
         .gjj-node-sidebar__list {
+            flex: 1 1 auto;
             min-height: 0;
             overflow: auto;
+            overscroll-behavior: contain;
             padding: 0 7px 12px;
         }
         .gjj-node-sidebar__folder,
@@ -345,7 +416,8 @@ function injectStyles() {
             font-weight: 600;
         }
         .gjj-node-sidebar__node {
-            padding: 6px 8px 6px 34px;
+            gap: 8px;
+            padding: 6px 8px 6px 24px;
         }
         .gjj-node-sidebar__folder:hover,
         .gjj-node-sidebar__node:hover {
@@ -358,13 +430,15 @@ function injectStyles() {
         .gjj-node-sidebar__folder-icon {
             color: #35d700;
         }
-        .gjj-node-sidebar__node::before {
-            content: "";
-            width: 6px;
-            height: 6px;
-            margin-right: 9px;
-            border: 1px solid #35d700;
-            border-radius: 50%;
+        .gjj-node-sidebar__node-icon {
+            display: inline-grid;
+            place-items: center;
+            width: 20px;
+            min-width: 20px;
+            height: 20px;
+            font-size: 14px;
+            line-height: 1;
+            filter: saturate(.9);
         }
         .gjj-node-sidebar__node-name {
             min-width: 0;
@@ -500,6 +574,7 @@ function recordNodeUse(type) {
 function renderList() {
     const list = state.root?.querySelector(".gjj-node-sidebar__list");
     if (!list) return;
+    const renderRevision = ++state.renderRevision;
 
     const query = state.query.trim().toLocaleLowerCase();
     const nodes = getGjjNodes().filter((node) => (
@@ -510,10 +585,9 @@ function renderList() {
         || node.description.toLocaleLowerCase().includes(query)
         || String(state.help?.[node.type]?.description || "").toLocaleLowerCase().includes(query)
     ));
-    const groups = groupNodes(nodes);
     list.replaceChildren();
 
-    if (!groups.length) {
+    if (!nodes.length) {
         const empty = document.createElement("div");
         empty.className = "gjj-node-sidebar__empty";
         empty.textContent = "没有找到 GJJ 节点";
@@ -521,7 +595,65 @@ function renderList() {
         return;
     }
 
-    for (const [category, categoryNodes] of groups) {
+    const appendNode = (node, target = list) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "gjj-node-sidebar__node";
+        const use = usageFor(node.type);
+        const color = usageColor(use.use_count);
+        const display = nodeDisplayParts(node);
+        item.innerHTML = `
+            <span class="gjj-node-sidebar__node-icon" aria-hidden="true"></span>
+            <span class="gjj-node-sidebar__node-name"></span>
+            ${use.use_count > 0 ? `<span class="gjj-node-sidebar__use-count">🔥 ${use.use_count}</span>` : ""}
+        `;
+        item.querySelector(".gjj-node-sidebar__node-icon").textContent = display.icon;
+        const name = item.querySelector(".gjj-node-sidebar__node-name");
+        name.textContent = display.title;
+        if (color) name.style.color = color;
+        item.title = `${nodeTooltip(node)}\n使用次数：${use.use_count}\n右键可清空该节点频率`;
+        item.draggable = true;
+        item.addEventListener("click", () => createNode(node.type));
+        item.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            if (use.use_count > 0 && confirm(`清空“${node.title}”的使用频率吗？`)) {
+                void postUsage({ action: "clear", node_type: node.type });
+            }
+        });
+        item.addEventListener("dragstart", (event) => {
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData(DRAG_TYPE, node.type);
+            event.dataTransfer.setData("text/plain", node.type);
+        });
+        target.appendChild(item);
+    };
+
+    if (state.usage.sort_mode !== "category") {
+        let nextIndex = 0;
+        const status = document.createElement("div");
+        status.className = "gjj-node-sidebar__empty";
+
+        const appendBatch = (batchSize) => {
+            if (renderRevision !== state.renderRevision || !list.isConnected) return;
+            const fragment = document.createDocumentFragment();
+            const end = Math.min(nodes.length, nextIndex + batchSize);
+            while (nextIndex < end) appendNode(nodes[nextIndex++], fragment);
+            list.insertBefore(fragment, status.isConnected ? status : null);
+
+            if (nextIndex >= nodes.length) {
+                status.remove();
+                return;
+            }
+            status.textContent = `正在加载节点… ${nextIndex}/${nodes.length}`;
+            if (!status.isConnected) list.appendChild(status);
+            requestAnimationFrame(() => appendBatch(FLAT_STREAM_BATCH_SIZE));
+        };
+
+        appendBatch(FLAT_INITIAL_BATCH_SIZE);
+        return;
+    }
+
+    for (const [category, categoryNodes] of groupNodes(nodes)) {
         const expanded = query || state.expanded.has(category);
         const folder = document.createElement("button");
         folder.type = "button";
@@ -540,35 +672,7 @@ function renderList() {
         list.appendChild(folder);
 
         if (!expanded) continue;
-        for (const node of categoryNodes) {
-            const item = document.createElement("button");
-            item.type = "button";
-            item.className = "gjj-node-sidebar__node";
-            const use = usageFor(node.type);
-            const color = usageColor(use.use_count);
-            item.innerHTML = `
-                <span class="gjj-node-sidebar__node-name"></span>
-                ${use.use_count > 0 ? `<span class="gjj-node-sidebar__use-count">🔥 ${use.use_count}</span>` : ""}
-            `;
-            const name = item.querySelector(".gjj-node-sidebar__node-name");
-            name.textContent = node.title;
-            if (color) name.style.color = color;
-            item.title = `${nodeTooltip(node)}\n使用次数：${use.use_count}\n右键可清空该节点频率`;
-            item.draggable = true;
-            item.addEventListener("click", () => createNode(node.type));
-            item.addEventListener("contextmenu", (event) => {
-                event.preventDefault();
-                if (use.use_count > 0 && confirm(`清空“${node.title}”的使用频率吗？`)) {
-                    void postUsage({ action: "clear", node_type: node.type });
-                }
-            });
-            item.addEventListener("dragstart", (event) => {
-                event.dataTransfer.effectAllowed = "copy";
-                event.dataTransfer.setData(DRAG_TYPE, node.type);
-                event.dataTransfer.setData("text/plain", node.type);
-            });
-            list.appendChild(item);
-        }
+        categoryNodes.forEach(appendNode);
     }
 }
 
@@ -637,22 +741,26 @@ function showUsageSettings() {
 
 function renderPanel(element) {
     state.root = element;
+    element.classList.add("gjj-node-sidebar-host");
     element.replaceChildren();
     element.innerHTML = `
         <section class="gjj-node-sidebar">
-            <header class="gjj-node-sidebar__header">
-                <img class="gjj-node-sidebar__logo" src="${ICON_URL}" alt="">
-                <span>GJJ 节点</span>
-            </header>
-            <nav class="gjj-node-sidebar__toolbar" aria-label="节点排序工具栏">
-                <button class="gjj-node-sidebar__tool" type="button" data-sort="frequency" title="按使用频率排序">🔥</button>
-                <button class="gjj-node-sidebar__tool" type="button" data-sort="recent" title="按最近使用排序">🕒</button>
-                <button class="gjj-node-sidebar__tool" type="button" data-sort="name" title="按名称排序">🔤</button>
-                <span class="gjj-node-sidebar__tool-separator"></span>
-                <button class="gjj-node-sidebar__tool" type="button" data-action="settings" title="频率颜色设置">⚙️</button>
-                <button class="gjj-node-sidebar__tool" type="button" data-action="clear" title="清空全部使用频率">🗑️</button>
-            </nav>
-            <input class="gjj-node-sidebar__search" type="search" placeholder="搜索 GJJ 节点…" autocomplete="off">
+            <div class="gjj-node-sidebar__fixed">
+                <header class="gjj-node-sidebar__header">
+                    <img class="gjj-node-sidebar__logo" src="${ICON_URL}" alt="">
+                    <span>GJJ 节点</span>
+                </header>
+                <nav class="gjj-node-sidebar__toolbar" aria-label="节点排序工具栏">
+                    <button class="gjj-node-sidebar__tool" type="button" data-sort="category" title="按分类显示">🗂️</button>
+                    <button class="gjj-node-sidebar__tool" type="button" data-sort="frequency" title="按使用频率排序">🔥</button>
+                    <button class="gjj-node-sidebar__tool" type="button" data-sort="recent" title="按最近使用排序">🕒</button>
+                    <button class="gjj-node-sidebar__tool" type="button" data-sort="name" title="按名称排序">🔤</button>
+                    <span class="gjj-node-sidebar__tool-separator"></span>
+                    <button class="gjj-node-sidebar__tool" type="button" data-action="settings" title="频率颜色设置">⚙️</button>
+                    <button class="gjj-node-sidebar__tool" type="button" data-action="clear" title="清空全部使用频率">🗑️</button>
+                </nav>
+                <input class="gjj-node-sidebar__search" type="search" placeholder="搜索 GJJ 节点…" autocomplete="off">
+            </div>
             <div class="gjj-node-sidebar__list"></div>
         </section>
     `;

@@ -348,7 +348,7 @@ def _gjj_node_usage_path():
 def _gjj_default_node_usage() -> dict:
 	return {
 		"version": 1,
-		"sort_mode": "frequency",
+		"sort_mode": "category",
 		"use_colors_enabled": True,
 		"use_colors": [
 			{"threshold": 10, "color": "#60ce7f"},
@@ -365,7 +365,7 @@ def _gjj_sanitize_node_usage(data) -> dict:
 	if not isinstance(data, dict):
 		data = {}
 	sort_mode = str(data.get("sort_mode") or defaults["sort_mode"])
-	if sort_mode not in {"frequency", "recent", "name"}:
+	if sort_mode not in {"category", "frequency", "recent", "name"}:
 		sort_mode = defaults["sort_mode"]
 	colors = []
 	for item in data.get("use_colors", defaults["use_colors"]):

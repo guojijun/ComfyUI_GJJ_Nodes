@@ -13,6 +13,11 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils.network_media import (
+    gjjutils_download_network_media_to_input,
+    gjjutils_input_relative_media_path,
+    gjjutils_is_network_url,
+)
 
 try:
     import folder_paths
@@ -643,6 +648,22 @@ if PromptServer is not None and web is not None:
             payload.get("align_multiple", REGION_CROP_SETTINGS_DEFAULTS["align_multiple"]) if isinstance(payload, dict) else REGION_CROP_SETTINGS_DEFAULTS["align_multiple"],
         )
         return web.json_response(settings)
+
+    @PromptServer.instance.routes.post("/gjj/region_crop/download_default_image")
+    async def gjj_region_crop_download_default_image(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        url = str(payload.get("url", "") if isinstance(payload, dict) else "").strip()
+        if not gjjutils_is_network_url(url):
+            return web.json_response({"ok": False, "error": "只支持 http/https 图片地址。"}, status=400)
+        try:
+            file_path = gjjutils_download_network_media_to_input(url, "IMAGE")
+            filename = gjjutils_input_relative_media_path(file_path)
+        except Exception as error:
+            return web.json_response({"ok": False, "error": f"下载失败：{error}"}, status=400)
+        return web.json_response({"ok": True, "filename": filename, "name": Path(file_path).name})
 
 
 NODE_CLASS_MAPPINGS = {

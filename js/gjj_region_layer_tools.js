@@ -15,6 +15,7 @@ const CROP_ALIGN_MULTIPLE_WIDGET = "align_multiple";
 const CROP_PANEL_WIDGET = "gjj_region_crop_panel";
 const CROP_STORED_LINKS_PROPERTY = "__gjjRegionCropStoredLinks";
 const CROP_EXTRA_PORTS_PROPERTY = "__gjjRegionCropExtraPorts";
+const CROP_DEFAULT_IMAGE_URL_PROPERTY = "__gjjRegionCropDefaultImageUrl";
 const CROP_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const CROP_IMAGE_OUTPUT = "裁剪图像";
 const CROP_MASK_OUTPUT = "裁剪遮罩";
@@ -323,6 +324,94 @@ async function uploadCropImageFile(file) {
 	throw lastError || new Error("图片上传失败");
 }
 
+function cropDefaultImageUrl(node) {
+	return String(node?.properties?.[CROP_DEFAULT_IMAGE_URL_PROPERTY] || "").trim();
+}
+
+async function downloadCropDefaultImage(node, button = null, force = false) {
+	const url = cropDefaultImageUrl(node);
+	if (!/^https?:\/\//i.test(url)) return false;
+	const panel = node.__gjjRegionCropPanel;
+	if (!panel || panel.defaultImageDownloadPromise) return panel?.defaultImageDownloadPromise || false;
+	if (!force && panel.defaultImageFailedUrl === url) return false;
+	const oldText = button?.textContent || "🌍";
+	panel.defaultImageDownloadPromise = (async () => {
+		try {
+			panel.defaultImageFailedUrl = "";
+			if (button) {
+				button.disabled = true;
+				button.textContent = "...";
+			}
+			if (panel.sizeLine) panel.sizeLine.textContent = "正在下载默认图片...";
+			const response = await (api?.fetchApi
+				? api.fetchApi("/gjj/region_crop/download_default_image", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ url }),
+				})
+				: fetch(uploadUrl("/gjj/region_crop/download_default_image"), {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ url }),
+				}));
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok || !data?.ok || !data?.filename) {
+				throw new Error(data?.error || `HTTP ${response.status}`);
+			}
+			setWidgetValue(node, CROP_IMAGE_FILE_WIDGET, String(data.filename));
+			clearCropNativePreview(node);
+			const fileDescriptor = getCropFileDescriptor(node);
+			if (fileDescriptor) setCropPanelImage(node, fileDescriptor.src, 0, 0, fileDescriptor.signature);
+			node.graph?.change?.();
+			return true;
+		} catch (error) {
+			panel.defaultImageFailedUrl = url;
+			if (panel.sizeLine) panel.sizeLine.textContent = `默认图片下载失败：${error?.message || error}`;
+			console.error("[GJJ RegionCrop] 默认图片下载失败：", error);
+			return false;
+		} finally {
+			panel.defaultImageDownloadPromise = null;
+			if (button) {
+				button.disabled = false;
+				button.textContent = oldText;
+			}
+			refreshNode(node);
+		}
+	})();
+	return panel.defaultImageDownloadPromise;
+}
+
+async function configureCropDefaultImage(node, button) {
+	const current = cropDefaultImageUrl(node);
+	const entered = window.prompt("设置默认图片 URL（http/https）\n当前图片缺失或不可用时会自动下载到 ComfyUI/input。", current);
+	if (entered == null) return;
+	const url = String(entered).trim();
+	if (url && !/^https?:\/\//i.test(url)) {
+		alert("默认图片地址必须以 http:// 或 https:// 开头。");
+		return;
+	}
+	node.properties ??= {};
+	node.properties[CROP_DEFAULT_IMAGE_URL_PROPERTY] = url;
+	const panel = node.__gjjRegionCropPanel;
+	if (panel) panel.defaultImageFailedUrl = "";
+	updateCropDefaultImageButton(node);
+	node.graph?.change?.();
+	if (url && (!getCropSourceDescriptor(node) || !panel?.image)) {
+		await downloadCropDefaultImage(node, button, true);
+	}
+}
+
+function updateCropDefaultImageButton(node) {
+	const button = node.__gjjRegionCropDefaultImageButton;
+	if (!button) return;
+	const url = cropDefaultImageUrl(node);
+	button.style.background = url ? "#1f3b35" : "#172429";
+	button.style.opacity = url ? "1" : "0.68";
+	button.title = url
+		? `默认图片：${url}\n图片缺失或不可用时自动下载。点击可修改。`
+		: "设置默认图片 URL；图片缺失或不可用时自动下载并显示。";
+}
+
 async function loadCropUserSettings() {
 	try {
 		const response = await (api?.fetchApi ? api.fetchApi("/gjj/region_crop/settings") : fetch(uploadUrl("/gjj/region_crop/settings")));
@@ -608,6 +697,7 @@ function setCropPanelImage(node, src, width = 0, height = 0, signature = "") {
 	const image = new Image();
 	image.onload = () => {
 		if (panel.src !== src || (signature && panel.sourceSignature !== signature)) return;
+		if (panel.failedSourceSignature === (signature || src)) panel.failedSourceSignature = "";
 		panel.image = image;
 		panel.sourceWidth = Math.round(width || image.naturalWidth || image.width || 1);
 		panel.sourceHeight = Math.round(height || image.naturalHeight || image.height || 1);
@@ -627,8 +717,11 @@ function setCropPanelImage(node, src, width = 0, height = 0, signature = "") {
 		renderCropPanel(node);
 	};
 	image.onerror = () => {
-		if (panel.src === src && panel.sizeLine) panel.sizeLine.textContent = "预览加载失败，执行后会刷新。";
+		if (panel.src !== src) return;
+		panel.failedSourceSignature = signature || src;
+		if (panel.sizeLine) panel.sizeLine.textContent = cropDefaultImageUrl(node) ? "图片不可用，正在获取默认图片..." : "预览加载失败，执行后会刷新。";
 		renderCropPanel(node);
+		downloadCropDefaultImage(node);
 	};
 	image.src = src;
 }
@@ -1144,10 +1237,20 @@ async function tryLoadCropSourceFromLink(node, force = false) {
 	const descriptor = getCropSourceDescriptor(node);
 	const panel = node.__gjjRegionCropPanel;
 	if (!panel) return;
+	if (descriptor && panel.failedSourceSignature === descriptor.signature) {
+		const fallback = getCropFileDescriptor(node);
+		if (fallback) {
+			if (panel.sourceSignature !== fallback.signature || !panel.image) setCropPanelImage(node, fallback.src, 0, 0, fallback.signature);
+			return;
+		}
+		await downloadCropDefaultImage(node);
+		return;
+	}
 	if (!descriptor) {
 		const fileDescriptor = getCropFileDescriptor(node);
 		if (!fileDescriptor) {
 			if (panel.image || panel.sourceSignature) clearCropPanelImage(node);
+			await downloadCropDefaultImage(node);
 			return;
 		}
 		if (!force && panel.sourceSignature === fileDescriptor.signature && panel.image) return;
@@ -1590,12 +1693,14 @@ function mountCropPanel(node) {
 	const toolbar = document.createElement("div");
 	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-bottom:6px;";
 	const openButton = makeCropButton("📁", "打开图片文件；会上传到 ComfyUI/input，并在没有外部图像输入时使用。", (button) => openCropImageFile(node, button));
+	const defaultImageButton = makeCropButton("🌍", "设置默认图片 URL；图片缺失或不可用时自动下载并显示。", (button) => configureCropDefaultImage(node, button));
 	const settingsButton = makeCropButton("📐", "尺寸参数：总像素、对齐倍数、固定宽高比。", () => openCropSettings(node));
 	const linkButton = makeCropButton("🔗", "断开/恢复外部链接。", () => toggleCropExternalLinks(node));
 	const portsButton = makeCropButton("🔌", "显示/隐藏区域数据输入和裁剪遮罩输出。", () => toggleCropExtraPorts(node));
 	node.__gjjRegionCropLinkButton = linkButton;
 	node.__gjjRegionCropPortsButton = portsButton;
-	toolbar.append(openButton, settingsButton, portsButton, linkButton);
+	node.__gjjRegionCropDefaultImageButton = defaultImageButton;
+	toolbar.append(openButton, defaultImageButton, settingsButton, portsButton, linkButton);
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "display:block;width:100%;height:132px;border-radius:6px;background:#0b1113;cursor:crosshair;";
 	const sizeLine = document.createElement("div");
@@ -1603,7 +1708,7 @@ function mountCropPanel(node) {
 	sizeLine.textContent = "裁剪后宽高 -- x --";
 	root.append(toolbar, canvas, sizeLine);
 	const widget = node.addDOMWidget(CROP_PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
-	node.__gjjRegionCropPanel = { root, canvas, sizeLine, widget, image: null, src: "", sourceSignature: "", sourceWidth: 0, sourceHeight: 0, dragging: false, dragMode: "new", dragAnchor: null, start: null, resizeTimer: null };
+	node.__gjjRegionCropPanel = { root, canvas, sizeLine, widget, image: null, src: "", sourceSignature: "", sourceWidth: 0, sourceHeight: 0, failedSourceSignature: "", defaultImageFailedUrl: "", defaultImageDownloadPromise: null, dragging: false, dragMode: "new", dragAnchor: null, start: null, resizeTimer: null };
 
 	canvas.addEventListener("pointerdown", (event) => {
 		const panel = node.__gjjRegionCropPanel;
@@ -1656,6 +1761,7 @@ function mountCropPanel(node) {
 	applyCropPorts(node);
 	updateCropLinkButton(node);
 	updateCropPortsButton(node);
+	updateCropDefaultImageButton(node);
 	startCropSourceWatcher(node);
 	setTimeout(() => tryLoadCropSourceFromLink(node), 0);
 }

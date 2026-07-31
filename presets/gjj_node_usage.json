@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sort_mode": "frequency",
+  "sort_mode": "recent",
   "use_colors_enabled": true,
   "use_colors": [
     {
@@ -13,7 +13,7 @@
     },
     {
       "threshold": 30,
-      "color": "#9c00ff"
+      "color": "#c870ff"
     },
     {
       "threshold": 50,
@@ -24,5 +24,30 @@
       "color": "#cda56d"
     }
   ],
-  "nodes": {}
+  "nodes": {
+    "GJJ_ModelBundleLoader": {
+      "use_count": 12,
+      "last_used": 1785486195539
+    },
+    "GJJ_VideoUniversalModelLoader": {
+      "use_count": 16,
+      "last_used": 1785486204254
+    },
+    "GJJ_WorkflowModelStatistics": {
+      "use_count": 32,
+      "last_used": 1785486220273
+    },
+    "GJJ_LazyImageStudio": {
+      "use_count": 24,
+      "last_used": 1785486425042
+    },
+    "GJJ_360PanoramaGenerator": {
+      "use_count": 1,
+      "last_used": 1785487966673
+    },
+    "guojijun_AnyListRepeat": {
+      "use_count": 2,
+      "last_used": 1785488120062
+    }
+  }
 }

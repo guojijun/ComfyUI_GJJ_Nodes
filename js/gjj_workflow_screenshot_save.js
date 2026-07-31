@@ -4398,12 +4398,11 @@ import { api } from "/scripts/api.js";
 			".comfyui-menu-right",
 			"[data-testid='topbar']",
 			"[data-testid='comfy-topbar']",
-			"nav",
-			"header",
 		];
 		for (const selector of topbarSelectors) {
 			const row = Array.from(document.querySelectorAll(selector)).find((element) => {
 				if (!isVisibleElement(element)) return false;
+				if (!preferredControl || !element.contains(preferredControl)) return false;
 				const rect = element.getBoundingClientRect();
 				const style = window.getComputedStyle?.(element);
 				return rect.top < 140
