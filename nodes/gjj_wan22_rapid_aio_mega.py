@@ -1970,7 +1970,7 @@ def _build_route_name(image_count: int) -> str:
 
 
 class GJJ_Wan22RapidAIOMega:
-    CATEGORY = "GJJ/🎬 视频/生成/万相视频"
+    CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     INPUT_IS_LIST = True

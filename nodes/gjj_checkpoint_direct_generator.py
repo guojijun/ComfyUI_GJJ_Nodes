@@ -122,7 +122,7 @@ def _unsupported_checkpoint_error(ckpt_name: str) -> RuntimeError:
 
 
 class GJJ_CheckpointDirectGenerator:
-    CATEGORY = "GJJ/🎬 视频"
+    CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True  # ✅ 标记为输出节点，允许单节点执行
     DESCRIPTION = "单节点加载底模 checkpoint 直接出图，内部自动完成提示词编码、latent 创建、采样和 VAE 解码。"

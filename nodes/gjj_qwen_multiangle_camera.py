@@ -123,7 +123,7 @@ def _distance_label_en(zoom: float) -> str:
 
 
 class GJJ_QwenMultiangleCameraNode:
-    CATEGORY = "GJJ/🎬 视频/生成"
+    CATEGORY = "GJJ/🧊 三维工具"
     FUNCTION = "generate"
     OUTPUT_NODE = True
 

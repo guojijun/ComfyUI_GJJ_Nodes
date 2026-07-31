@@ -324,7 +324,7 @@ def _video_from_frames(frames, fps: int):
 
 
 class GJJ_Mesh2MotionExplore:
-    CATEGORY = "GJJ/🧊 三维"
+    CATEGORY = "GJJ/🧊 三维工具"
     FUNCTION = "execute"
     OUTPUT_NODE = True
     DESCRIPTION = (

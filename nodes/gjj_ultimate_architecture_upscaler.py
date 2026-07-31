@@ -146,7 +146,7 @@ def _upscale_to_target(image, enable_upscale_model: bool, upscale_model_name: st
 
 
 class GJJ_UltimateArchitectureUpscaler:
-    CATEGORY = "GJJ/🖼️ 图像/超分放大"
+    CATEGORY = "GJJ/🔍 超分放大"
     FUNCTION = "upscale"
     DESCRIPTION = "将基础超分、建筑装饰细节增强提示词、Ultimate 分块重绘与接缝修复整合成单节点放大流程。"
     SEARCH_ALIASES = [

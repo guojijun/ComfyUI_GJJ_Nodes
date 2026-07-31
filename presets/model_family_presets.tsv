@@ -21,7 +21,7 @@ flux1_krea_dev	flux1-krea-dev	flux	clip_l.safetensors|t5xxl_	ae.safetensors		0.0
 flux1_dev_kontext	flux1-dev-kontext	flux	clip_l.safetensors|t5xxl_	ae.safetensors		0.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-dev-kontext	diffusion_models		
 flux1_fill_dev	flux1-fill-dev	flux	clip_l.safetensors|t5xxl_	ae.safetensors		0.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-fill-dev	diffusion_models		
 flux1_canny_dev	flux1-canny-dev	flux	clip_l.safetensors|t5xxl_	ae.safetensors		0.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-canny-dev	diffusion_models		
-flux1_dev	flux1-dev	flux	clip_l.safetensors|t5xxl_	ae.safetensors	flux1-depth-dev-lora	1.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-dev	checkpoints		
+flux1_dev	flux1_dev	flux	clip_l.safetensors|t5xxl_	ae.safetensors	flux1-depth-dev-lora	1.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-dev	diffusion_models		
 flux1_schnell	flux1-schnell	flux	clip_l.safetensors|t5xxl_	ae.safetensors		0.0		0.0	8		1.0	euler	normal	0.75			0.0	false			1024	1024	flux1-schnell	diffusion_models		
 z_image_turbo	z_image_turbo|zit|z-it|zit-turbo	lumina2	qwen_3_4b	ae.safetensors		1.0		0.0	8		1.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
 z_image	z_image	lumina2	qwen_3_4b	ae.safetensors		1.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
@@ -48,5 +48,5 @@ wan21_t2v	wan2.1-t2v|wan21_t2v	wan	umt5_xxl_	wan_2.1_vae.safetensors		0.0		0.0	2
 wan21_i2v	wan2.1-i2v|wan21_i2v	wan	umt5_xxl_	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
 ltx23_dev	ltx-2.3-22b-dev|ltx23_dev	ltx	gemma_3_12B_it_	ltx-2.3-22b-dev-fp8.safetensors	LTX\ltx-2.3-22b-distilled-lora-384-1.1.safetensors	0.5		1.0	25		1.0	euler_cfg_pp	simple	1.0			0.0	false			1280	720
 ltx23	ltx-2.3-22b|ltx23	ltx	gemma_3_12B_it_	ltx-2.3-22b-dev-fp8.safetensors	LTX\ltx-2.3-22b-distilled-lora-384-1.1.safetensors	0.5		1.0	25		1.0	euler_cfg_pp	simple	1.0			0.0	false			1280	720
-bytedance-uso	bytedance-uso|uso-flux1|uso-flux	flux	clip_l.safetensors|t5xxl_	ae.safetensors	Flux1\uso-flux1-dit-lora-v1.safetensors	1.0		0.0	20		1.0	euler	normal	1.0			0.0	false			1024	1024	flux1-dev-fp8.safetensors	checkpoints	uso-flux1-projector-v1.safetensors	sigclip_vision_patch14_384.safetensors		true
+bytedance-uso	bytedance-uso|uso-flux1|uso-flux	flux	clip_l.safetensors|t5xxl_	ae.safetensors	uso-flux1-dit-lora-v1.safetensors	1.0		0.0	20		1.0	euler	normal	1.0			0.0	false			1024	1024	flux1-dev	checkpoints	uso-flux1-projector-v1.safetensors	sigclip_vision_patch14_384.safetensors		true
 joyai-image-edit-plus	joyai_image_edit_plus|joyai-image-edit-plus	joyimage	qwen3vl_8b_joyimage_edit_plus_	Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors		0.0		0.0	30	30	4.0	euler	normal	1.0			0.0	true	1024	1024	1024	1024	joyai_image_edit_plus_int4_convrot.safetensors	diffusion_models				false

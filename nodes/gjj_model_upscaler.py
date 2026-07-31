@@ -180,7 +180,7 @@ def _load_upscale_model(model_name: str, unique_id=None, require_pth: bool = Fal
 
 
 class GJJ_ModelUpscaler:
-    CATEGORY = "GJJ/🖼️ 图像/超分放大"
+    CATEGORY = "GJJ/🔍 超分放大"
     FUNCTION = "upscale"
     DESCRIPTION = (
         NODE_DESCRIPTION

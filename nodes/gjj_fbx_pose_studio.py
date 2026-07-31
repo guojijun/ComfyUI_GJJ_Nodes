@@ -415,7 +415,7 @@ def _decode_image_data(image_data: str, width: int, height: int):
 
 
 class GJJ_FBXPoseStudio:
-    CATEGORY = "GJJ/🧊 三维"
+    CATEGORY = "GJJ/🧊 三维工具"
     FUNCTION = "execute"
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "STRING")

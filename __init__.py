@@ -342,6 +342,157 @@ def _register_gjj_user_settings_api():
 	server._gjj_user_settings_api_registered = True
 _register_gjj_user_settings_api()
 
+def _gjj_node_usage_path():
+	return _gjj_package_root() / "presets" / "gjj_node_usage.json"
+
+def _gjj_default_node_usage() -> dict:
+	return {
+		"version": 1,
+		"sort_mode": "frequency",
+		"use_colors_enabled": True,
+		"use_colors": [
+			{"threshold": 10, "color": "#60ce7f"},
+			{"threshold": 20, "color": "#3b6cdc"},
+			{"threshold": 30, "color": "#9c00ff"},
+			{"threshold": 50, "color": "#fffc00"},
+			{"threshold": 100, "color": "#cda56d"},
+		],
+		"nodes": {},
+	}
+
+def _gjj_sanitize_node_usage(data) -> dict:
+	defaults = _gjj_default_node_usage()
+	if not isinstance(data, dict):
+		data = {}
+	sort_mode = str(data.get("sort_mode") or defaults["sort_mode"])
+	if sort_mode not in {"frequency", "recent", "name"}:
+		sort_mode = defaults["sort_mode"]
+	colors = []
+	for item in data.get("use_colors", defaults["use_colors"]):
+		if not isinstance(item, dict):
+			continue
+		try:
+			threshold = max(0, int(item.get("threshold", 0)))
+		except Exception:
+			continue
+		color = str(item.get("color") or "").strip()
+		if len(color) != 7 or not color.startswith("#"):
+			continue
+		colors.append({"threshold": threshold, "color": color})
+	if not colors:
+		colors = defaults["use_colors"]
+	colors.sort(key=lambda item: item["threshold"])
+	nodes = {}
+	raw_nodes = data.get("nodes")
+	if isinstance(raw_nodes, dict):
+		for node_type, item in raw_nodes.items():
+			if not isinstance(item, dict):
+				continue
+			try:
+				use_count = max(0, int(item.get("use_count", 0)))
+				last_used = max(0, int(item.get("last_used", 0)))
+			except Exception:
+				continue
+			nodes[str(node_type)] = {
+				"use_count": use_count,
+				"last_used": last_used,
+			}
+	return {
+		"version": 1,
+		"sort_mode": sort_mode,
+		"use_colors_enabled": data.get("use_colors_enabled") is not False,
+		"use_colors": colors,
+		"nodes": nodes,
+	}
+
+def _gjj_read_node_usage() -> dict:
+	import json
+	path = _gjj_node_usage_path()
+	if path.is_file():
+		try:
+			return _gjj_sanitize_node_usage(json.loads(path.read_text(encoding="utf-8")))
+		except Exception:
+			pass
+	return _gjj_default_node_usage()
+
+def _gjj_write_node_usage(data: dict) -> dict:
+	import json
+	import os
+	usage = _gjj_sanitize_node_usage(data)
+	path = _gjj_node_usage_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	tmp = path.with_suffix(path.suffix + ".tmp")
+	tmp.write_text(json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8")
+	os.replace(str(tmp), str(path))
+	return usage
+
+def _register_gjj_node_usage_api():
+	try:
+		import threading
+		import time
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 节点使用频率接口注册失败：{exc}")
+		return
+
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_node_usage_api_registered", False):
+		return
+	lock = threading.RLock()
+
+	@server.routes.get("/gjj/node_usage")
+	async def gjj_node_usage_get(_request):
+		with lock:
+			usage = _gjj_write_node_usage(_gjj_read_node_usage())
+		return web.json_response({
+			"ok": True,
+			"path": str(_gjj_node_usage_path()),
+			"usage": usage,
+		})
+
+	@server.routes.post("/gjj/node_usage")
+	async def gjj_node_usage_post(request):
+		try:
+			data = await request.json()
+			action = str(data.get("action") or "").strip()
+			with lock:
+				usage = _gjj_read_node_usage()
+				if action == "record":
+					node_type = str(data.get("node_type") or "").strip()
+					if not node_type:
+						raise ValueError("缺少 node_type。")
+					item = usage["nodes"].setdefault(node_type, {"use_count": 0, "last_used": 0})
+					item["use_count"] = max(0, int(item.get("use_count", 0))) + 1
+					item["last_used"] = int(time.time() * 1000)
+				elif action == "settings":
+					if "sort_mode" in data:
+						usage["sort_mode"] = data.get("sort_mode")
+					if "use_colors_enabled" in data:
+						usage["use_colors_enabled"] = data.get("use_colors_enabled") is not False
+					if isinstance(data.get("use_colors"), list):
+						usage["use_colors"] = data.get("use_colors")
+				elif action == "clear":
+					node_type = str(data.get("node_type") or "").strip()
+					if node_type:
+						usage["nodes"].pop(node_type, None)
+					else:
+						usage["nodes"] = {}
+				else:
+					raise ValueError("不支持的操作。")
+				usage = _gjj_write_node_usage(usage)
+			return web.json_response({
+				"ok": True,
+				"path": str(_gjj_node_usage_path()),
+				"usage": usage,
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	server._gjj_node_usage_api_registered = True
+
+_register_gjj_node_usage_api()
+
 def _register_gjj_queue_finish_command_api():
 	try:
 		from email.message import EmailMessage

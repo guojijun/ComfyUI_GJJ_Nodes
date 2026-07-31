@@ -1,4 +1,5 @@
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 
 const TAB_ID = "gjj-node-library";
 const DRAG_TYPE = "application/x-gjj-node-type";
@@ -80,11 +81,145 @@ const PRIORITY_NODE_TYPES = [
     "GJJ_WorkflowModelStatistics",
 ];
 
+const DEFAULT_USE_COLORS = [
+    { threshold: 10, color: "#60ce7f" },
+    { threshold: 20, color: "#3b6cdc" },
+    { threshold: 30, color: "#9c00ff" },
+    { threshold: 50, color: "#fffc00" },
+    { threshold: 100, color: "#cda56d" },
+];
+
 const state = {
     root: null,
     query: "",
     expanded: new Set(),
+    help: {},
+    usageLoaded: false,
+    usage: {
+        sort_mode: "frequency",
+        use_colors_enabled: true,
+        use_colors: DEFAULT_USE_COLORS.map((item) => ({ ...item })),
+        nodes: {},
+    },
 };
+
+function sanitizeUsage(value) {
+    const usage = value && typeof value === "object" ? value : {};
+    return {
+        sort_mode: ["frequency", "recent", "name"].includes(usage.sort_mode) ? usage.sort_mode : "frequency",
+        use_colors_enabled: usage.use_colors_enabled !== false,
+        use_colors: Array.isArray(usage.use_colors) && usage.use_colors.length
+            ? usage.use_colors
+            : DEFAULT_USE_COLORS.map((item) => ({ ...item })),
+        nodes: usage.nodes && typeof usage.nodes === "object" ? usage.nodes : {},
+    };
+}
+
+async function loadUsage() {
+    try {
+        const response = await api.fetchApi("/gjj/node_usage", { cache: "no-store" });
+        const data = await response.json();
+        if (response.ok && data?.ok) state.usage = sanitizeUsage(data.usage);
+    } catch (error) {
+        console.warn("[GJJ Node Sidebar] 节点使用频率读取失败", error);
+    } finally {
+        state.usageLoaded = true;
+        renderList();
+        updateToolbar();
+    }
+}
+
+async function postUsage(payload) {
+    try {
+        const response = await api.fetchApi("/gjj/node_usage", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.ok) throw new Error(data?.error || "保存失败");
+        state.usage = sanitizeUsage(data.usage);
+        renderList();
+        updateToolbar();
+        return true;
+    } catch (error) {
+        console.warn("[GJJ Node Sidebar] 节点使用频率保存失败", error);
+        return false;
+    }
+}
+
+function usageFor(type) {
+    const item = state.usage.nodes?.[type];
+    return {
+        use_count: Math.max(0, Number(item?.use_count) || 0),
+        last_used: Math.max(0, Number(item?.last_used) || 0),
+    };
+}
+
+function usageColor(count) {
+    if (state.usage.use_colors_enabled === false) return "";
+    let color = "";
+    let bestThreshold = -1;
+    for (const item of state.usage.use_colors || DEFAULT_USE_COLORS) {
+        const threshold = Number(item?.threshold);
+        if (count > threshold && threshold > bestThreshold) {
+            bestThreshold = threshold;
+            color = String(item?.color || "");
+        }
+    }
+    return color;
+}
+
+function compareNodes(a, b) {
+    const aPriority = PRIORITY_NODE_TYPES.indexOf(a.type);
+    const bPriority = PRIORITY_NODE_TYPES.indexOf(b.type);
+    if (aPriority !== -1 || bPriority !== -1) {
+        return (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
+            - (bPriority === -1 ? Number.MAX_SAFE_INTEGER : bPriority);
+    }
+    const aUsage = usageFor(a.type);
+    const bUsage = usageFor(b.type);
+    if (state.usage.sort_mode === "recent" && bUsage.last_used !== aUsage.last_used) {
+        return bUsage.last_used - aUsage.last_used;
+    }
+    if (state.usage.sort_mode === "frequency") {
+        if (bUsage.use_count !== aUsage.use_count) return bUsage.use_count - aUsage.use_count;
+        if (bUsage.last_used !== aUsage.last_used) return bUsage.last_used - aUsage.last_used;
+    }
+    return a.title.localeCompare(b.title, "zh-CN");
+}
+
+async function loadNodeHelp() {
+    try {
+        const response = await api.fetchApi("/gjj/node_help");
+        if (!response?.ok) return;
+        const payload = await response.json();
+        state.help = payload && typeof payload === "object" ? payload : {};
+        if (state.root) renderList();
+    } catch (error) {
+        console.warn("[GJJ Node Sidebar] 节点详细介绍读取失败", error);
+    }
+}
+
+function textList(value) {
+    if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+    const text = String(value || "").trim();
+    return text ? [text] : [];
+}
+
+function nodeTooltip(node) {
+    const backend = state.help?.[node.type] || {};
+    const help = backend.help && typeof backend.help === "object" ? backend.help : {};
+    const description = String(backend.description || node.description || "").trim();
+    const notices = textList(help.notice);
+    const dependencies = textList(help.dependencies);
+    const lines = [node.title];
+    if (description) lines.push("", description);
+    if (notices.length) lines.push("", "使用提示：", ...notices.map((item) => `• ${item}`));
+    if (dependencies.length) lines.push("", "依赖：", ...dependencies.map((item) => `• ${item}`));
+    lines.push("", `分类：${node.category}`, `节点类型：${node.type}`, "", "点击添加，或拖到画布");
+    return lines.join("\n");
+}
 
 function injectStyles() {
     if (document.getElementById("gjj-node-sidebar-styles")) return;
@@ -155,6 +290,36 @@ function injectStyles() {
             border-color: #35d700;
             box-shadow: 0 0 0 1px rgba(53, 215, 0, .25);
         }
+        .gjj-node-sidebar__toolbar {
+            display: flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 5px;
+            padding: 0 12px 9px;
+        }
+        .gjj-node-sidebar__tool {
+            display: grid;
+            place-items: center;
+            width: 30px;
+            height: 28px;
+            padding: 0;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--fg-color);
+            background: var(--comfy-input-bg);
+            cursor: pointer;
+        }
+        .gjj-node-sidebar__tool:hover,
+        .gjj-node-sidebar__tool.active {
+            border-color: #35d700;
+            background: rgba(53, 215, 0, .13);
+        }
+        .gjj-node-sidebar__tool-separator {
+            width: 1px;
+            height: 20px;
+            margin: 0 2px;
+            background: var(--border-color);
+        }
         .gjj-node-sidebar__list {
             min-height: 0;
             overflow: auto;
@@ -201,10 +366,63 @@ function injectStyles() {
             border: 1px solid #35d700;
             border-radius: 50%;
         }
+        .gjj-node-sidebar__node-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .gjj-node-sidebar__use-count {
+            flex: 0 0 auto;
+            margin-left: auto;
+            padding-left: 8px;
+            color: var(--descrip-text);
+            font-size: 11px;
+        }
         .gjj-node-sidebar__empty {
             padding: 18px 12px;
             color: var(--descrip-text);
             text-align: center;
+        }
+        .gjj-usage-settings-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 10020;
+            display: grid;
+            place-items: center;
+            background: rgba(0, 0, 0, .55);
+        }
+        .gjj-usage-settings {
+            width: min(360px, calc(100vw - 32px));
+            padding: 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--fg-color);
+            background: var(--comfy-menu-bg);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+        }
+        .gjj-usage-settings h3 { margin: 0 0 14px; }
+        .gjj-usage-settings__toggle,
+        .gjj-usage-settings__row,
+        .gjj-usage-settings__actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .gjj-usage-settings__toggle { margin-bottom: 12px; }
+        .gjj-usage-settings__row { margin: 7px 0; }
+        .gjj-usage-settings__row input[type="number"] { width: 72px; }
+        .gjj-usage-settings__actions {
+            justify-content: flex-end;
+            margin-top: 15px;
+        }
+        .gjj-usage-settings button {
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--fg-color);
+            background: var(--comfy-input-bg);
+            cursor: pointer;
         }
     `;
     document.head.appendChild(style);
@@ -217,17 +435,10 @@ function getGjjNodes() {
             type,
             title: NodeClass?.title || type,
             category: String(NodeClass?.category || ""),
+            description: String(NodeClass?.description || NodeClass?.nodeData?.description || "").trim(),
         }))
         .filter((node) => node.category === "GJJ" || node.category.startsWith("GJJ/"))
-        .sort((a, b) => {
-            const aPriority = PRIORITY_NODE_TYPES.indexOf(a.type);
-            const bPriority = PRIORITY_NODE_TYPES.indexOf(b.type);
-            if (aPriority !== -1 || bPriority !== -1) {
-                return (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
-                    - (bPriority === -1 ? Number.MAX_SAFE_INTEGER : bPriority);
-            }
-            return a.title.localeCompare(b.title, "zh-CN");
-        });
+        .sort(compareNodes);
 }
 
 function groupNodes(nodes) {
@@ -272,7 +483,18 @@ function createNode(type, position) {
     app.graph.add(node);
     app.canvas?.selectNode?.(node);
     app.canvas?.setDirty?.(true, true);
+    recordNodeUse(type);
     return true;
+}
+
+function recordNodeUse(type) {
+    const current = usageFor(type);
+    state.usage.nodes[type] = {
+        use_count: current.use_count + 1,
+        last_used: Date.now(),
+    };
+    renderList();
+    void postUsage({ action: "record", node_type: type });
 }
 
 function renderList() {
@@ -285,6 +507,8 @@ function renderList() {
         || node.title.toLocaleLowerCase().includes(query)
         || node.type.toLocaleLowerCase().includes(query)
         || node.category.toLocaleLowerCase().includes(query)
+        || node.description.toLocaleLowerCase().includes(query)
+        || String(state.help?.[node.type]?.description || "").toLocaleLowerCase().includes(query)
     ));
     const groups = groupNodes(nodes);
     list.replaceChildren();
@@ -320,10 +544,24 @@ function renderList() {
             const item = document.createElement("button");
             item.type = "button";
             item.className = "gjj-node-sidebar__node";
-            item.textContent = node.title;
-            item.title = `${node.title}\n${node.category}\n点击添加，或拖到画布`;
+            const use = usageFor(node.type);
+            const color = usageColor(use.use_count);
+            item.innerHTML = `
+                <span class="gjj-node-sidebar__node-name"></span>
+                ${use.use_count > 0 ? `<span class="gjj-node-sidebar__use-count">🔥 ${use.use_count}</span>` : ""}
+            `;
+            const name = item.querySelector(".gjj-node-sidebar__node-name");
+            name.textContent = node.title;
+            if (color) name.style.color = color;
+            item.title = `${nodeTooltip(node)}\n使用次数：${use.use_count}\n右键可清空该节点频率`;
             item.draggable = true;
             item.addEventListener("click", () => createNode(node.type));
+            item.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                if (use.use_count > 0 && confirm(`清空“${node.title}”的使用频率吗？`)) {
+                    void postUsage({ action: "clear", node_type: node.type });
+                }
+            });
             item.addEventListener("dragstart", (event) => {
                 event.dataTransfer.effectAllowed = "copy";
                 event.dataTransfer.setData(DRAG_TYPE, node.type);
@@ -437,6 +675,7 @@ app.registerExtension({
     async setup() {
         injectStyles();
         installCanvasDrop();
+        loadNodeHelp();
         const waitForSidebar = () => {
             if (!app.extensionManager?.registerSidebarTab) {
                 setTimeout(waitForSidebar, 100);

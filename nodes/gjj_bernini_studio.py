@@ -1512,7 +1512,7 @@ def _send_seed_update(unique_id: Any, seed: int) -> None:
 
 
 class GJJ_BerniniStudio:
-    CATEGORY = "GJJ/🎬 视频"
+    CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     INPUT_IS_LIST = True
     OUTPUT_NODE = True

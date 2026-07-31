@@ -218,7 +218,7 @@ def _strip_echoed_prompt_text(content: str, *, system_prompt: str, system_prompt
 
 
 class GJJ_OllamaAssistant:
-    CATEGORY = "GJJ/🎬 视频/文本生成"
+    CATEGORY = "GJJ/🧠 图文推理"
     FUNCTION = "run"
     OUTPUT_NODE = True
     DESCRIPTION = "统一调用本机 Ollama 完成文本生成、提示词翻译与可选图片理解任务；通过模板按钮快速切换系统提示词。"
