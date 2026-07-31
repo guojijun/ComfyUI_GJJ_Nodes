@@ -118,12 +118,14 @@ const state = {
     expanded: new Set(),
     help: {},
     usageLoaded: false,
+    usageRequestRevision: 0,
     renderRevision: 0,
     usage: {
         sort_mode: "category",
         use_colors_enabled: true,
         use_colors: DEFAULT_USE_COLORS.map((item) => ({ ...item })),
         nodes: {},
+        sort_reverse: false,
     },
 };
 
@@ -136,14 +138,18 @@ function sanitizeUsage(value) {
             ? usage.use_colors
             : DEFAULT_USE_COLORS.map((item) => ({ ...item })),
         nodes: usage.nodes && typeof usage.nodes === "object" ? usage.nodes : {},
+        sort_reverse: usage.sort_reverse === true,
     };
 }
 
 async function loadUsage() {
+    const requestRevision = state.usageRequestRevision;
     try {
         const response = await api.fetchApi("/gjj/node_usage", { cache: "no-store" });
         const data = await response.json();
-        if (response.ok && data?.ok) state.usage = sanitizeUsage(data.usage);
+        if (response.ok && data?.ok && requestRevision === state.usageRequestRevision) {
+            state.usage = sanitizeUsage(data.usage);
+        }
     } catch (error) {
         console.warn("[GJJ Node Sidebar] 节点使用频率读取失败", error);
     } finally {
@@ -154,6 +160,9 @@ async function loadUsage() {
 }
 
 async function postUsage(payload) {
+    const requestRevision = ++state.usageRequestRevision;
+    const requestedSortMode = state.usage.sort_mode;
+    const requestedSortReverse = state.usage.sort_reverse;
     try {
         const response = await api.fetchApi("/gjj/node_usage", {
             method: "POST",
@@ -162,7 +171,12 @@ async function postUsage(payload) {
         });
         const data = await response.json();
         if (!response.ok || !data?.ok) throw new Error(data?.error || "保存失败");
+        if (requestRevision !== state.usageRequestRevision) return true;
         state.usage = sanitizeUsage(data.usage);
+        if (payload?.action === "settings") {
+            if ("sort_mode" in payload) state.usage.sort_mode = requestedSortMode;
+            if ("sort_reverse" in payload) state.usage.sort_reverse = requestedSortReverse;
+        }
         renderList();
         updateToolbar();
         return true;
@@ -195,24 +209,26 @@ function usageColor(count) {
 }
 
 function compareNodes(a, b) {
+    let result = 0;
     if (state.usage.sort_mode === "category") {
         const aPriority = PRIORITY_NODE_TYPES.indexOf(a.type);
         const bPriority = PRIORITY_NODE_TYPES.indexOf(b.type);
         if (aPriority !== -1 || bPriority !== -1) {
-            return (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
+            result = (aPriority === -1 ? Number.MAX_SAFE_INTEGER : aPriority)
                 - (bPriority === -1 ? Number.MAX_SAFE_INTEGER : bPriority);
         }
     }
     const aUsage = usageFor(a.type);
     const bUsage = usageFor(b.type);
-    if (state.usage.sort_mode === "recent" && bUsage.last_used !== aUsage.last_used) {
-        return bUsage.last_used - aUsage.last_used;
+    if (!result && state.usage.sort_mode === "recent" && aUsage.last_used !== bUsage.last_used) {
+        result = aUsage.last_used - bUsage.last_used;
     }
-    if (state.usage.sort_mode === "frequency") {
-        if (bUsage.use_count !== aUsage.use_count) return bUsage.use_count - aUsage.use_count;
-        if (bUsage.last_used !== aUsage.last_used) return bUsage.last_used - aUsage.last_used;
+    if (!result && state.usage.sort_mode === "frequency") {
+        if (aUsage.use_count !== bUsage.use_count) result = aUsage.use_count - bUsage.use_count;
+        else if (aUsage.last_used !== bUsage.last_used) result = aUsage.last_used - bUsage.last_used;
     }
-    return a.title.localeCompare(b.title, "zh-CN");
+    if (!result) result = a.title.localeCompare(b.title, "zh-CN");
+    return state.usage.sort_reverse ? -result : result;
 }
 
 async function loadNodeHelp() {
@@ -369,6 +385,7 @@ function injectStyles() {
         .gjj-node-sidebar__tool {
             display: grid;
             place-items: center;
+            position: relative;
             width: 30px;
             height: 28px;
             padding: 0;
@@ -377,6 +394,16 @@ function injectStyles() {
             color: var(--fg-color);
             background: var(--comfy-input-bg);
             cursor: pointer;
+        }
+        .gjj-node-sidebar__tool[data-direction]::after {
+            content: attr(data-direction);
+            position: absolute;
+            right: 2px;
+            bottom: -1px;
+            color: #35d700;
+            font-size: 8px;
+            font-weight: 700;
+            line-height: 1;
         }
         .gjj-node-sidebar__tool:hover,
         .gjj-node-sidebar__tool.active {
@@ -525,7 +552,7 @@ function groupNodes(nodes) {
         if (!groups.has(displayCategory)) groups.set(displayCategory, []);
         groups.get(displayCategory).push(node);
     }
-    return [...groups.entries()].sort(([a], [b]) => {
+    const sorted = [...groups.entries()].sort(([a], [b]) => {
         const aIndex = DISPLAY_CATEGORY_ORDER.indexOf(a);
         const bIndex = DISPLAY_CATEGORY_ORDER.indexOf(b);
         if (aIndex !== -1 || bIndex !== -1) {
@@ -534,6 +561,7 @@ function groupNodes(nodes) {
         }
         return a.localeCompare(b, "zh-CN");
     });
+    return state.usage.sort_mode === "category" && state.usage.sort_reverse ? sorted.reverse() : sorted;
 }
 
 function canvasPositionFromEvent(event) {
@@ -596,6 +624,7 @@ function renderList() {
     }
 
     const appendNode = (node, target = list) => {
+        const destination = target && typeof target.appendChild === "function" ? target : list;
         const item = document.createElement("button");
         item.type = "button";
         item.className = "gjj-node-sidebar__node";
@@ -625,7 +654,7 @@ function renderList() {
             event.dataTransfer.setData(DRAG_TYPE, node.type);
             event.dataTransfer.setData("text/plain", node.type);
         });
-        target.appendChild(item);
+        destination.appendChild(item);
     };
 
     if (state.usage.sort_mode !== "category") {
@@ -672,7 +701,7 @@ function renderList() {
         list.appendChild(folder);
 
         if (!expanded) continue;
-        categoryNodes.forEach(appendNode);
+        categoryNodes.forEach((node) => appendNode(node));
     }
 }
 
@@ -680,7 +709,15 @@ function updateToolbar() {
     const toolbar = state.root?.querySelector(".gjj-node-sidebar__toolbar");
     if (!toolbar) return;
     for (const button of toolbar.querySelectorAll("[data-sort]")) {
-        button.classList.toggle("active", button.dataset.sort === state.usage.sort_mode);
+        const active = button.dataset.sort === state.usage.sort_mode;
+        button.classList.toggle("active", active);
+        if (active) {
+            button.dataset.direction = state.usage.sort_reverse ? "▼" : "▲";
+            button.title = `${button.title.replace(/\n当前方向：.*$/, "")}\n当前方向：${state.usage.sort_reverse ? "反向" : "正向"}；再次点击切换。`;
+        } else {
+            delete button.dataset.direction;
+            button.title = button.title.replace(/\n当前方向：.*$/, "");
+        }
     }
 }
 
@@ -772,10 +809,16 @@ function renderPanel(element) {
     });
     for (const button of element.querySelectorAll("[data-sort]")) {
         button.addEventListener("click", () => {
+            const sameMode = state.usage.sort_mode === button.dataset.sort;
             state.usage.sort_mode = button.dataset.sort;
+            state.usage.sort_reverse = sameMode ? !state.usage.sort_reverse : true;
             renderList();
             updateToolbar();
-            void postUsage({ action: "settings", sort_mode: button.dataset.sort });
+            void postUsage({
+                action: "settings",
+                sort_mode: button.dataset.sort,
+                sort_reverse: state.usage.sort_reverse,
+            });
         });
     }
     element.querySelector("[data-action='settings']").addEventListener("click", showUsageSettings);

@@ -358,6 +358,7 @@ def _gjj_default_node_usage() -> dict:
 			{"threshold": 100, "color": "#cda56d"},
 		],
 		"nodes": {},
+		"sort_reverse": False,
 	}
 
 def _gjj_sanitize_node_usage(data) -> dict:
@@ -403,6 +404,7 @@ def _gjj_sanitize_node_usage(data) -> dict:
 		"use_colors_enabled": data.get("use_colors_enabled") is not False,
 		"use_colors": colors,
 		"nodes": nodes,
+		"sort_reverse": data.get("sort_reverse") is True,
 	}
 
 def _gjj_read_node_usage() -> dict:
@@ -472,6 +474,8 @@ def _register_gjj_node_usage_api():
 						usage["use_colors_enabled"] = data.get("use_colors_enabled") is not False
 					if isinstance(data.get("use_colors"), list):
 						usage["use_colors"] = data.get("use_colors")
+					if "sort_reverse" in data:
+						usage["sort_reverse"] = data.get("sort_reverse") is True
 				elif action == "clear":
 					node_type = str(data.get("node_type") or "").strip()
 					if node_type:

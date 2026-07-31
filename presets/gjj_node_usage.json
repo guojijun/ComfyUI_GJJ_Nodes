@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sort_mode": "recent",
+  "sort_mode": "category",
   "use_colors_enabled": true,
   "use_colors": [
     {
@@ -48,6 +48,35 @@
     "guojijun_AnyListRepeat": {
       "use_count": 2,
       "last_used": 1785488120062
+    },
+    "GJJ_Wan22RapidAIOMega": {
+      "use_count": 1,
+      "last_used": 1785488612657
+    },
+    "GJJ_LTX23ImageToVideoMultiRef": {
+      "use_count": 1,
+      "last_used": 1785488613975
+    },
+    "GJJ_FaceAnalysis": {
+      "use_count": 1,
+      "last_used": 1785488614890
+    },
+    "GJJ_CharacterMultiViewStudio": {
+      "use_count": 1,
+      "last_used": 1785488615782
+    },
+    "GJJ_OldPhotoRestorer": {
+      "use_count": 1,
+      "last_used": 1785488616430
+    },
+    "GJJ_CheckpointDirectGenerator": {
+      "use_count": 1,
+      "last_used": 1785488617162
+    },
+    "GJJ_BerniniStudio": {
+      "use_count": 3,
+      "last_used": 1785488621621
     }
-  }
+  },
+  "sort_reverse": false
 }
