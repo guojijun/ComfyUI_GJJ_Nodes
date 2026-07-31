@@ -978,7 +978,7 @@ def _preset_lora_items(
 
 
 class GJJ_ModelBundleLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/模型加载"
     FUNCTION = "load_models"
     DESCRIPTION = "按模型族模板加载扩散模型、CLIP、VAE、模型补丁、CLIP视觉模型、ControlNet，并交给 ComfyUI 按实时显存自动完整加载或部分卸载。"
     SEARCH_ALIASES = ["MMM", "简易加载器", "model loader", "easy loader", "UNET", "Checkpoint", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "CONTROL_NET", "ControlNet", "KSampler", "采样参数"]

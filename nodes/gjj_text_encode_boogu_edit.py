@@ -180,7 +180,7 @@ def _scale_samples(samples: torch.Tensor, pixel_total: int, align: int | None = 
 
 
 class GJJ_TextEncodeBooguEdit:
-    CATEGORY = "GJJ/conditioning/boogu"
+    CATEGORY = "GJJ/条件编码/博古"
     FUNCTION = "encode"
     DESCRIPTION = (
         "GJJ 零依赖 Boogu-Image Edit 条件编码节点。复刻 TextEncodeBooguEdit，图片输入兼容 "

@@ -914,7 +914,7 @@ def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
 
 
 class GJJ_MultiImageLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/图像/加载"
     FUNCTION = "load_images"
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多张 input 目录里的图片，在节点中网格预览并按选择数量同步扩展图片输出接口。可作为主图图片、输入图像、原图来源的默认加载节点。"

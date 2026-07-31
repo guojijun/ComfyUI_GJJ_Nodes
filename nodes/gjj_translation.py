@@ -100,7 +100,7 @@ def translate_once(
 
 
 class GJJ_Translation:
-    CATEGORY = "GJJ/LLM"
+    CATEGORY = "GJJ/文本/大语言模型"
     FUNCTION = "translate"
     DESCRIPTION = "调用本地 Ollama 模型进行中英提示词翻译，并尽量保持 AI 绘画术语、权重符号和原始结构不变。"
     SEARCH_ALIASES = ["translation", "prompt translation", "翻译", "提示词翻译"]

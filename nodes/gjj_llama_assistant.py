@@ -666,7 +666,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 
 class GJJ_LlamaAssistant:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/文本/大语言模型"
     FUNCTION = "run"
     OUTPUT_NODE = True
     RETURN_TYPES = ("STRING",)

@@ -178,7 +178,7 @@ def _coerce_media_to_frames(value: Any) -> tuple[torch.Tensor, Any, float | None
 
 
 class GJJ_RifeVideoInterpolator:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/插帧"
     FUNCTION = "interpolate"
     DESCRIPTION = "将 RIFE VFI 迁移为 GJJ 零依赖单节点：支持图片队列或视频插帧，推荐使用 rife47 与 rife49。"
     SEARCH_ALIASES = ["RIFE", "RIFE VFI", "视频插帧", "插帧", "补帧", "视频补帧", "rife47", "rife49"]

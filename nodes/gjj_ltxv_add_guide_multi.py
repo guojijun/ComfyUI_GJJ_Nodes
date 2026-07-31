@@ -77,7 +77,7 @@ def _check_image(index: int, value: Any) -> torch.Tensor:
 
 
 class GJJ_LTXVAddGuideMulti:
-    CATEGORY = "GJJ/LTX"
+    CATEGORY = "GJJ/视频模型/LTX"
     FUNCTION = "execute"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("正向条件", "负向条件", "视频Latent")

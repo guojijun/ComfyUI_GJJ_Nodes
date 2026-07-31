@@ -407,7 +407,7 @@ def _convert_int_float_pair(values: dict[str, Any]) -> tuple[int, float]:
 
 
 class GJJ_MultifunctionCalculator:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/工作流辅助"
     FUNCTION = "calculate"
     DESCRIPTION = "动态扩展输入，通过计算器按钮编辑公式，支持数字计算、字符串拼接、自动结果类型，以及用 {输入显示名} 引用已连接输入。"
     SEARCH_ALIASES = [

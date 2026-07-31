@@ -641,7 +641,7 @@ def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
 
 
 class GJJ_Qwen3ASRTextFormats:
-    CATEGORY = "GJJ/Audio"
+    CATEGORY = "GJJ/音频"
     FUNCTION = "transcribe_and_align"
     OUTPUT_NODE = True
     DESCRIPTION = DESCRIPTION

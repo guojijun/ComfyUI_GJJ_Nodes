@@ -530,7 +530,7 @@ def _check_wan22_s2v_environment() -> str:
 
 
 class GJJ_LocalLipSync:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/口型同步"
     FUNCTION = "generate"
 
     DESCRIPTION = (

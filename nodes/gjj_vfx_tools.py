@@ -70,7 +70,7 @@ def _halftone(image: torch.Tensor, cell_size: int) -> torch.Tensor:
 
 
 class GJJ_VFXEffects:
-    CATEGORY = "GJJ/VFX"
+    CATEGORY = "GJJ/图像/VFX"
     FUNCTION = "apply"
     DESCRIPTION = "常用本地图像 VFX：像素化、抖动、故障偏移、半调。"
     SEARCH_ALIASES = ["vfx", "pixelate", "dither", "glitch", "halftone", "像素化", "抖动", "故障"]

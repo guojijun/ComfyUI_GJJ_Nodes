@@ -528,7 +528,7 @@ class GJJ_InpaintStitch:
     RETURN_NAMES = ("拼回图片",)
     OUTPUT_TOOLTIPS = ("重绘区域按遮罩羽化后拼回原图得到的图片。",)
     FUNCTION = "inpaint_stitch"
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     SEARCH_ALIASES = ["Inpaint Stitch", "inpaint stitch", "局部重绘拼回", "拼回原图"]
 
     @classmethod

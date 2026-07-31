@@ -182,7 +182,7 @@ def _process_output_image(image: Any, width: int, height: int, rotation_mode: st
 
 
 class GJJ_SizeMath:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/图像/尺寸"
     FUNCTION = "calculate"
     DESCRIPTION = "获取一张或多张图片尺寸，执行长边缩放、短边缩放、旋转和比例预设计算，并输出尺寸统计结果。"
     SEARCH_ALIASES = [

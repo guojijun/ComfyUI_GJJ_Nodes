@@ -161,7 +161,7 @@ def _prepare_image_and_mask(clip_vision, image, mask, mode, autocrop_margin, des
 
 
 class GJJ_ReduxAdvanced:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/条件编码"
     FUNCTION = "apply_redux"
     DESCRIPTION = "内部加载 CLIP Vision 与 Redux 风格模型，将图像风格特征编码后拼接到 conditioning，并支持遮罩与自动裁切。"
     SEARCH_ALIASES = ["redux", "advanced redux", "style model", "advanced reflux control"]

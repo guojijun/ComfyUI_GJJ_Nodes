@@ -6,7 +6,7 @@ import comfy.model_management as model_management
 from comfy.sd import VAE
 
 NODE_NAME = "GJJ_VAELoader"
-CATEGORY = "GJJ/loader"
+CATEGORY = "GJJ/模型加载"
 
 
 class GJJ_VAELoader:

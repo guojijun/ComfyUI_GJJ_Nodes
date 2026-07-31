@@ -1010,7 +1010,7 @@ def _collect_person_images(kwargs: dict[str, Any]) -> list[Image.Image]:
 
 
 class GJJ_SceneFusionPrep:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "prepare"
     OUTPUT_NODE = True
     INPUT_IS_LIST = True

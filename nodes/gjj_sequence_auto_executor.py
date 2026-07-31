@@ -6,7 +6,7 @@ MAX_INT = 0xFFFFFFFFFFFFFFFF
 
 
 class GJJ_SequenceAutoExecutor:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/流程控制"
     FUNCTION = "check"
     OUTPUT_NODE = True
     DESCRIPTION = "根据当前数值和总数量，在前端执行完成后自动继续排队，直到序列结束。"

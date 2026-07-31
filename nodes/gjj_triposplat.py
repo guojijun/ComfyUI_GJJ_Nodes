@@ -587,7 +587,7 @@ def _mesh_to_glb_file3d(mesh: Any, unique_id=None):
 
 class GJJ_TripoSplatImageToSplat:
     DESCRIPTION = "单图或批量图片生成 TripoSplat 高斯泼溅，并同时输出 SPZ 文件对象和 GLB 网格。模型按去扩展名、去量化标记规则在 models 子目录中搜索。"
-    CATEGORY = "GJJ/3D"
+    CATEGORY = "GJJ/三维"
     RETURN_TYPES = ("SPLAT", "FILE_3D_SPLAT_ANY", "MESH", "FILE_3D_GLB")
     RETURN_NAMES = ("SPLAT", "3D泼溅文件", "网格", "GLB网格文件")
     OUTPUT_TOOLTIPS = (
@@ -684,7 +684,7 @@ class GJJ_TripoSplatImageToSplat:
 
 class GJJ_TripoSplatRenderSequence:
     DESCRIPTION = "为 TripoSplat 创建轨道相机并渲染图片/遮罩序列，可选输入图片作为背景板。"
-    CATEGORY = "GJJ/3D"
+    CATEGORY = "GJJ/三维"
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("图片序列", "遮罩序列")
     OUTPUT_TOOLTIPS = ("渲染出的图片序列。", "渲染出的透明遮罩序列。")

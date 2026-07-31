@@ -316,7 +316,7 @@ def _conditioning_set_values(conditioning, values):
 
 class GJJ_Krea2EditRebalance:
     DESCRIPTION = "零外部节点依赖复刻 Krea 2 Image Edit Rebalance：编码 Krea2 图像编辑提示词并重平衡多模态 CONDITIONING。"
-    CATEGORY = "GJJ/conditioning/krea"
+    CATEGORY = "GJJ/条件编码/Krea"
     FUNCTION = "main"
     RETURN_TYPES = ("CONDITIONING",)
     RETURN_NAMES = ("conditioning",)

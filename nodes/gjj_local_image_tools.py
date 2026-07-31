@@ -33,7 +33,7 @@ def _font(size: int) -> ImageFont.ImageFont:
 
 
 class GJJ_SolidColorImage:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "make"
     DESCRIPTION = "生成指定尺寸的纯色图片和全白遮罩。"
     SEARCH_ALIASES = ["solid color", "color image", "纯色图", "底色图"]
@@ -57,7 +57,7 @@ class GJJ_SolidColorImage:
 
 
 class GJJ_GradientImage:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "make"
     DESCRIPTION = "生成线性或径向渐变图，可作为背景、遮罩参考或 ControlNet 辅助图。"
     SEARCH_ALIASES = ["gradient", "渐变图", "渐变背景"]
@@ -99,7 +99,7 @@ class GJJ_GradientImage:
 
 
 class GJJ_NoiseImage:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "make"
     DESCRIPTION = "生成随机噪声图片，支持彩色、灰度、均匀和高斯噪声。"
     SEARCH_ALIASES = ["noise", "噪声图", "随机图"]
@@ -134,7 +134,7 @@ class GJJ_NoiseImage:
 
 
 class GJJ_TextImage:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "make"
     DESCRIPTION = "把文本渲染成图片，可用于标题卡、占位图、字幕图或提示词可视化。"
     SEARCH_ALIASES = ["text image", "文字图片", "文本转图", "标题图"]

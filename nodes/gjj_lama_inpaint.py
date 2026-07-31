@@ -132,7 +132,7 @@ def _run_lama_forward(
 
 
 class GJJ_LaMaInpaint:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/图像/局部重绘"
     FUNCTION = "inpaint"
     DESCRIPTION = "使用本地 big-lama.pt 对图像中被遮罩标记的区域进行修复，默认模型位置为 models/ckpts/big-lama.pt，适合去物、补边和背景补全。"
     SEARCH_ALIASES = ["lama", "inpaint", "修复", "去物", "补图", "图像修复", "局部重绘"]

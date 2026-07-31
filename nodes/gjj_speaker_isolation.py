@@ -8,14 +8,44 @@ import torch
 NODE_NAME = "GJJ_SpeakerIsolation"
 
 
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _coerce_audio_input(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value.get("waveform") is not None and value.get("sample_rate") is not None:
+            return value
+        nested_audio = value.get("audio")
+        if nested_audio is not None and nested_audio is not value:
+            return _coerce_audio_input(nested_audio)
+
+    if hasattr(value, "get_components"):
+        try:
+            components = value.get_components()
+        except Exception as exc:
+            raise RuntimeError(f"读取 VIDEO 音频组件失败：{exc}") from exc
+        nested_audio = _component_value(components, "audio")
+        if nested_audio is None:
+            raise ValueError("输入 VIDEO 不包含音频轨道。")
+        return _coerce_audio_input(nested_audio)
+
+    return value
+
+
 def _extract_audio(audio: Any) -> Tuple[torch.Tensor, int]:
+    audio = _coerce_audio_input(audio)
     if isinstance(audio, dict):
         waveform = audio.get("waveform")
         sample_rate = audio.get("sample_rate")
     elif isinstance(audio, (list, tuple)) and len(audio) >= 2:
         waveform, sample_rate = audio[0], audio[1]
     else:
-        raise TypeError("输入必须是 ComfyUI AUDIO 数据。")
+        raise TypeError("输入必须是 ComfyUI AUDIO 或包含音轨的 VIDEO 数据。")
 
     if waveform is None or sample_rate is None:
         raise ValueError("AUDIO 数据缺少 waveform 或 sample_rate。")
@@ -359,16 +389,18 @@ def _isolate_audio(
 
 
 class GJJ_SpeakerIsolation:
-    CATEGORY = "GJJ/Audio"
+    CATEGORY = "GJJ/音频"
     FUNCTION = "isolate"
     RETURN_TYPES = ("AUDIO", "AUDIO", "STRING", "STRING", "INT")
     RETURN_NAMES = ("选中说话人原位音频", "选中说话人拼接音频", "说话人文本", "说话人JSON", "片段总数")
     DESCRIPTION = (
         "零依赖说话人分段/隔离节点：不依赖 ComfyUI-Speaker-Isolation、pyannote、Whisper 或 HF Token。"
+        "输入兼容 AUDIO 和 VIDEO；VIDEO 会自动提取其内置音轨。"
         "可选接入 WHISPER_OUTPUT，将已有识别文本按时间戳对齐到估算的说话人片段。"
     )
     GJJ_HELP = {
         "功能": [
+            "输入兼容 AUDIO 和 VIDEO；接入 VIDEO 时会自动读取其音频轨道。",
             "默认使用音频能量检测和轻量特征聚类估算说话人片段。",
             "speaker_index 从 1 开始：1 表示 SPEAKER_01，2 表示 SPEAKER_02。",
             "接入 WHISPER_OUTPUT 后会输出带说话人的文本；不接入时输出时间段清单。",
@@ -383,7 +415,13 @@ class GJJ_SpeakerIsolation:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio": ("AUDIO", {"display_name": "音频"}),
+                "audio": (
+                    "AUDIO,VIDEO",
+                    {
+                        "display_name": "音频/视频",
+                        "tooltip": "支持 AUDIO 或 VIDEO；输入 VIDEO 时自动提取其内置音频轨道。",
+                    },
+                ),
                 "speaker_count": (
                     "INT",
                     {

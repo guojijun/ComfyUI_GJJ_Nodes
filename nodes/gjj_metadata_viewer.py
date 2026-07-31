@@ -31,7 +31,7 @@ def _pretty(value: Any) -> str:
 
 
 class GJJ_ImageMetadataViewer:
-    CATEGORY = "GJJ/Info"
+    CATEGORY = "GJJ/信息查看"
     FUNCTION = "read"
     DESCRIPTION = "读取图片文件的基础信息、PNG 文本元数据、ComfyUI 工作流和 EXIF 信息。"
     SEARCH_ALIASES = ["metadata", "exif", "png info", "图片元数据", "工作流查看"]
@@ -95,7 +95,7 @@ class GJJ_ImageMetadataViewer:
 
 
 class GJJ_SafetensorsMetadataViewer:
-    CATEGORY = "GJJ/Info"
+    CATEGORY = "GJJ/信息查看"
     FUNCTION = "read"
     DESCRIPTION = "直接读取 safetensors 文件头里的 metadata，不加载模型权重，适合查看 LoRA 触发词和训练信息。"
     SEARCH_ALIASES = ["safetensors", "lora info", "metadata", "LoRA信息", "模型元数据"]
@@ -150,7 +150,7 @@ class GJJ_SafetensorsMetadataViewer:
 
 
 class GJJ_SafetensorsMetadataWriter:
-    CATEGORY = "GJJ/Info"
+    CATEGORY = "GJJ/信息查看"
     FUNCTION = "write"
     DESCRIPTION = "为模型同名写入 txt 旁注和 png 封面；不改写 safetensors 本体，避免破坏模型文件。"
     SEARCH_ALIASES = ["model note", "lora note", "模型备注", "LoRA备注", "封面"]

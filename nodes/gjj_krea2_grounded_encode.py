@@ -110,7 +110,7 @@ class GJJ_Krea2EditGroundedEncode:
         "Krea2 图像编辑语义接地编码：把正面、负面提示词分别与全部参考图一起交给 "
         "Qwen3-VL 编码，输出可直接用于 CFG 的正面和负面条件。"
     )
-    CATEGORY = "GJJ/conditioning/krea"
+    CATEGORY = "GJJ/条件编码/Krea"
     FUNCTION = "encode"
     INPUT_IS_LIST = True
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING")

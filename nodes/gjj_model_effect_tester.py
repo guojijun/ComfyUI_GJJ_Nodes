@@ -221,7 +221,7 @@ def _make_label_image(
 
 
 class GJJ_ModelEffectTester:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/模型测试"
     FUNCTION = "build"
     DESCRIPTION = "按 checkpoints 或 diffusion_models 的过滤列表逐项输出当前模型、宽度、列表状态和名称注解图。"
     SEARCH_ALIASES = ["model test", "model effect", "checkpoint test", "unet test", "模型效果", "模型测试", "底模测试"]

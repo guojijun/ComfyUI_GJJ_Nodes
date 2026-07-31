@@ -359,7 +359,7 @@ def _rotated_crop_tensor(image: torch.Tensor, x: int, y: int, width: int, height
 
 
 class GJJ_RegionBox:
-    CATEGORY = "GJJ/Layer"
+    CATEGORY = "GJJ/图层与区域"
     FUNCTION = "make_region"
     DESCRIPTION = "创建一个可传递的矩形区域，并同步输出该区域遮罩。"
     SEARCH_ALIASES = ["region", "box", "区域", "矩形区域", "区域框"]
@@ -406,7 +406,7 @@ class GJJ_RegionBox:
 
 
 class GJJ_GridRegionSelector:
-    CATEGORY = "GJJ/Layer"
+    CATEGORY = "GJJ/图层与区域"
     FUNCTION = "select"
     DESCRIPTION = "把画布切成行列网格，按序号输出其中一个区域和完整区域列表 JSON。"
     SEARCH_ALIASES = ["grid region", "split grid", "网格区域", "区域选择"]
@@ -452,7 +452,7 @@ class GJJ_GridRegionSelector:
 
 
 class GJJ_RegionCrop:
-    CATEGORY = "GJJ/Layer"
+    CATEGORY = "GJJ/图层与区域"
     FUNCTION = "crop"
     DESCRIPTION = "按 GJJ 区域数据从图片中裁切局部图像。"
     SEARCH_ALIASES = ["region crop", "crop by region", "区域裁切", "局部裁切"]
@@ -571,7 +571,7 @@ class GJJ_RegionCrop:
 
 
 class GJJ_RegionComposite:
-    CATEGORY = "GJJ/Layer"
+    CATEGORY = "GJJ/图层与区域"
     FUNCTION = "composite"
     DESCRIPTION = "把前景图片按指定区域合成到底图上，支持适配方式、透明度和可选遮罩。"
     SEARCH_ALIASES = ["region composite", "layer composite", "区域合成", "图层合成"]

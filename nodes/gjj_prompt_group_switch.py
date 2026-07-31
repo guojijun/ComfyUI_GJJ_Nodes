@@ -6,7 +6,7 @@ NODE_NAME = "GJJ_PromptGroupSwitch"
 class GJJ_PromptGroupSwitch:
     NAME = "GJJ_PromptGroupSwitch"
     DISPLAY_NAME = "提示词分组切换"
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/提示词"
     DESCRIPTION = "在同一个工作流里维护多组提示词文本，并按序号切换输出当前选中的那一组。"
     SEARCH_ALIASES = ["prompt group switch", "prompt switch", "提示词", "分组", "切换"]
 

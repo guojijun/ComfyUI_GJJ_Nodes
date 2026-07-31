@@ -18,7 +18,7 @@ class ConditioningZeroOut:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "zero_out"
-    CATEGORY = "advanced/conditioning"
+    CATEGORY = "GJJ/条件编码"
 
     def zero_out(self, conditioning):
         c = []
@@ -55,7 +55,7 @@ class InpaintModelConditioning:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "encode"
-    CATEGORY = "conditioning/inpaint"
+    CATEGORY = "GJJ/条件编码/局部重绘"
 
     def encode(self, positive, negative, pixels, vae, mask, noise_mask=True):
         x = (pixels.shape[1] // 8) * 8
@@ -111,7 +111,7 @@ class FluxGuidance:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply"
-    CATEGORY = "advanced/conditioning/flux"
+    CATEGORY = "GJJ/条件编码/Flux"
 
     def apply(self, conditioning, guidance):
         c = node_helpers.conditioning_set_values(conditioning, {"guidance": guidance})
@@ -128,7 +128,7 @@ class FluxDisableGuidance:
 
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "apply"
-    CATEGORY = "advanced/conditioning/flux"
+    CATEGORY = "GJJ/条件编码/Flux"
 
     def apply(self, conditioning):
         c = node_helpers.conditioning_set_values(conditioning, {"guidance": None})
@@ -149,7 +149,7 @@ class DifferentialDiffusion:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
-    CATEGORY = "model_patches"
+    CATEGORY = "GJJ/模型补丁"
 
     def patch(self, model, strength):
         # 获取模型的内部结构

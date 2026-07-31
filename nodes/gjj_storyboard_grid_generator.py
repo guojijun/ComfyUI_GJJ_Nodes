@@ -3432,7 +3432,7 @@ def _ensure_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
 
 
 class GJJ_StoryboardGridGenerator:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "generate"
     DESCRIPTION = "分镜宫格生成器：复用懒人图文集成一键生图流程，正向提示词按场景行首标记、空行或 --- 分段生成，并智能拼接为宫格图。"
     SEARCH_ALIASES = ["分镜生成器", "智能宫格", "storyboard grid", "storyboard generator"]

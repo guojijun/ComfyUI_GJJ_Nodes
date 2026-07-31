@@ -1100,7 +1100,7 @@ def _create_processed_video(frames: torch.Tensor, fps: float, audio: dict[str, A
 
 
 class GJJ_MultiVideoLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/加载"
     FUNCTION = "load_videos"
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多个 input 目录视频，按帧范围、帧率、宽高和格式参数解码为 GJJ 批量图片帧队列。"
@@ -1611,6 +1611,44 @@ class GJJ_MultiVideoLoader:
 
             for index, entry in enumerate(selected):
                 path = resolve_input_video_path(entry)
+                source_meta = video_meta(path)
+                source_width = int(source_meta.get("width") or 0)
+                source_height = int(source_meta.get("height") or 0)
+                if source_width <= 0 or source_height <= 0:
+                    if not audio_enabled or "processed_video" in enabled_output_set:
+                        raise RuntimeError(
+                            f"文件不包含可解码的视频流：{path.name}。"
+                            "如需加载纯音频 MP4，请启用“音频”输出并关闭“处理后视频”。"
+                        )
+                    audio_segment = decode_audio_ffmpeg(path)
+                    waveform = audio_segment.get("waveform") if isinstance(audio_segment, dict) else None
+                    sample_rate = int(audio_segment.get("sample_rate") or 0) if isinstance(audio_segment, dict) else 0
+                    audio_duration = (
+                        float(waveform.shape[-1]) / float(sample_rate)
+                        if isinstance(waveform, torch.Tensor) and sample_rate > 0
+                        else float(source_meta.get("duration") or 0.0)
+                    )
+                    audio_segments.append(audio_segment)
+                    total_duration += audio_duration
+                    video_infos.append(
+                        {
+                            "filename": entry["filename"],
+                            "subfolder": entry.get("subfolder", ""),
+                            "path": str(path),
+                            "source_width": 0,
+                            "source_height": 0,
+                            "output_width": 0,
+                            "output_height": 0,
+                            "source_fps": 0.0,
+                            "output_fps": 0.0,
+                            "source_frames": 0,
+                            "duration": audio_duration,
+                            "output_frames": 0,
+                            "video_format": output_format,
+                            "audio_only": True,
+                        }
+                    )
+                    continue
                 frames, meta = decode_video_cv2(
                     path=path,
                     start_frame=start_frame_val,

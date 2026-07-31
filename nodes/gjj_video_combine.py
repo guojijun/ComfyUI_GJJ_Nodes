@@ -109,7 +109,7 @@ def _frame_rate_from_input(value: Any) -> Any:
 
 
 class GJJ_VideoCombine:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/合成"
     FUNCTION = "combine"
     OUTPUT_NODE = True
     DESCRIPTION = (

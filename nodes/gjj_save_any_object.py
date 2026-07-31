@@ -831,7 +831,7 @@ def _build_preview_payload(saved_paths: list[str]) -> tuple[list[dict[str, str |
 
 
 class GJJ_SaveAnyObject:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/工作流辅助"
     FUNCTION = "save"
     OUTPUT_NODE = True
     DESCRIPTION = "动态接收多个任意输入，根据对象类型自动保存为视频、图片、文本、JSON、Tensor、音频或对象摘要。"

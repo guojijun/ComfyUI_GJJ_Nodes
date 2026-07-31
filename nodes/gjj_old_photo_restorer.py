@@ -738,7 +738,7 @@ class GJJ_OldPhotoRestorer:
 	RETURN_NAMES = ("🕰️ 修复增强图像",)
 	OUTPUT_TOOLTIPS = ("老照片修复增强后的图像结果，兼容 GJJ_BATCH_IMAGE 和 IMAGE 连接。",)
 	FUNCTION = "restore"
-	CATEGORY = "GJJ"
+	CATEGORY = "GJJ/图像/修复"
 	INPUT_IS_LIST = True
 
 	def restore(self, image, prompt, unet_name, seed, enable_upscale, upscale_model_name, unique_id=None):

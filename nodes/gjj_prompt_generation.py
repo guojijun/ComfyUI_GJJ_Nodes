@@ -34,7 +34,7 @@ def build_messages(system_prompt: str, user_prompt: str):
 
 
 class GJJ_PromptGeneration:
-    CATEGORY = "GJJ/LLM"
+    CATEGORY = "GJJ/文本/大语言模型"
     FUNCTION = "generate"
     DESCRIPTION = "调用本地 Ollama 模型生成提示词或文本内容，适合快速草拟文生图提示词与创作方向。"
     SEARCH_ALIASES = ["prompt generation", "ollama", "提示词", "生成", "文本生成"]

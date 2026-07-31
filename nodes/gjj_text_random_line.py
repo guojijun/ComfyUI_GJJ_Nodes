@@ -44,7 +44,7 @@ def parse_text_blob(raw: str, strip_empty: bool = True) -> list[str]:
 
 
 class GJJ_TextRandomLine:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/文本"
     FUNCTION = "pick"
     DESCRIPTION = "从多行文本或 JSON 数组中按 1 基序号稳定选出一条，并输出合并后的正面提示词、总数、选中文本和当前行数。"
     SEARCH_ALIASES = ["random line", "text random", "文本", "随机", "分行", "选择器"]

@@ -409,7 +409,7 @@ def _resolve_image_file(reference: str) -> str | None:
 
 
 class GJJ_RealtimeImageProcessor:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/图像"
     FUNCTION = "process"
     DESCRIPTION = "单节点零依赖图片实时对比处理器。节点面板可打开图片、按分类复选处理项、用滑块调参，并实时显示原图/结果对比。"
     SEARCH_ALIASES = [

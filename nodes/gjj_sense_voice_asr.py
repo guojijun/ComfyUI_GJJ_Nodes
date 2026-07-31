@@ -522,7 +522,7 @@ def _clean_sensevoice_text(text: Any) -> str:
 
 
 class GJJ_SenseVoiceASR:
-    CATEGORY = "GJJ/Audio"
+    CATEGORY = "GJJ/音频"
     FUNCTION = "transcribe"
     OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")

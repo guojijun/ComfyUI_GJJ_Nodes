@@ -447,7 +447,7 @@ class GJJ_ReferenceGridGenerator:
         "执行模式、任务数和尺寸摘要。",
     )
     FUNCTION = "generate"
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/图像生成"
     INPUT_IS_LIST = True
     GJJ_HELP = {
         "title": "GJJ · 多宫格参考图生成器",

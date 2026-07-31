@@ -61,7 +61,7 @@ def _region_to_box(region: Any) -> tuple[int, int, int, int]:
 
 
 class GJJ_MaskOutline:
-    CATEGORY = "GJJ/Mask"
+    CATEGORY = "GJJ/遮罩"
     FUNCTION = "outline"
     DESCRIPTION = "从遮罩生成内外轮廓线，可用于局部重绘边缘、描边控制或可视化区域边界。"
     SEARCH_ALIASES = ["mask outline", "outline mask", "遮罩描边", "轮廓遮罩"]
@@ -94,7 +94,7 @@ class GJJ_MaskOutline:
 
 
 class GJJ_MaskGrowBlur:
-    CATEGORY = "GJJ/Mask"
+    CATEGORY = "GJJ/遮罩"
     FUNCTION = "grow_blur"
     DESCRIPTION = "对遮罩执行扩张、收缩与模糊，常用于重绘遮罩预处理。"
     SEARCH_ALIASES = ["mask grow", "mask blur", "遮罩扩张", "遮罩羽化"]
@@ -126,7 +126,7 @@ class GJJ_MaskGrowBlur:
 
 
 class GJJ_MaskMerge:
-    CATEGORY = "GJJ/Mask"
+    CATEGORY = "GJJ/遮罩"
     FUNCTION = "merge"
     DESCRIPTION = "合并最多八路遮罩，支持相加、最大值、相交和扣除。"
     SEARCH_ALIASES = ["mask merge", "mask combine", "遮罩合并", "遮罩相交"]
@@ -167,7 +167,7 @@ class GJJ_MaskMerge:
 
 
 class GJJ_AreaToMask:
-    CATEGORY = "GJJ/Mask"
+    CATEGORY = "GJJ/遮罩"
     FUNCTION = "area_to_mask"
     DESCRIPTION = "按画布尺寸和矩形区域生成遮罩，也可直接接收 GJJ 区域数据。"
     SEARCH_ALIASES = ["area mask", "region mask", "区域遮罩", "矩形遮罩"]

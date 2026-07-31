@@ -144,7 +144,7 @@ def _load_controlnet_runtime(controlnet_name: str):
 
 
 class GJJ_ScribbleControlNetGenerator:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/控制网"
     FUNCTION = "generate"
     DESCRIPTION = (
         "将官方 scribble_controlnet 工作流封装成简洁单节点。"

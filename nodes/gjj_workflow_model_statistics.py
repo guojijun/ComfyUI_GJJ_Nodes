@@ -372,7 +372,7 @@ def _build_report(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class GJJ_WorkflowModelStatistics:
-    CATEGORY = "GJJ/Workflow"
+    CATEGORY = "GJJ/工作流辅助"
     FUNCTION = "format_report"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("模型统计文本",)

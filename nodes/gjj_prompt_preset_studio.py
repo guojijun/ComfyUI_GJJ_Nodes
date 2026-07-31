@@ -1275,7 +1275,7 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 
 class GJJ_PromptPresetStudio:
-	CATEGORY = "GJJ"
+	CATEGORY = "GJJ/提示词"
 	FUNCTION = "build"
 	DESCRIPTION = "把风格、证件照、主体、环境、随机灵感与多角度提示词整合到一个 GJJ 零依赖节点中，直接输出混合正负提示词。"
 	SEARCH_ALIASES = ["提示词预设", "风格", "证件照", "主体", "环境", "随机提示词", "fooocus", "rvtools"]
