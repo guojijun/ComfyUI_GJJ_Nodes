@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sort_mode": "category",
+  "sort_mode": "frequency",
   "use_colors_enabled": true,
   "use_colors": [
     {
@@ -30,12 +30,12 @@
       "last_used": 1785486195539
     },
     "GJJ_VideoUniversalModelLoader": {
-      "use_count": 16,
-      "last_used": 1785486204254
+      "use_count": 17,
+      "last_used": 1785489813100
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 32,
-      "last_used": 1785486220273
+      "use_count": 33,
+      "last_used": 1785491821846
     },
     "GJJ_LazyImageStudio": {
       "use_count": 24,
@@ -54,8 +54,8 @@
       "last_used": 1785488612657
     },
     "GJJ_LTX23ImageToVideoMultiRef": {
-      "use_count": 1,
-      "last_used": 1785488613975
+      "use_count": 17,
+      "last_used": 1785489813198
     },
     "GJJ_FaceAnalysis": {
       "use_count": 1,
@@ -78,5 +78,5 @@
       "last_used": 1785488621621
     }
   },
-  "sort_reverse": false
+  "sort_reverse": true
 }
