@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "sort_mode": "frequency",
+  "use_colors_enabled": true,
+  "use_colors": [
+    {
+      "threshold": 10,
+      "color": "#60ce7f"
+    },
+    {
+      "threshold": 20,
+      "color": "#3b6cdc"
+    },
+    {
+      "threshold": 30,
+      "color": "#9c00ff"
+    },
+    {
+      "threshold": 50,
+      "color": "#fffc00"
+    },
+    {
+      "threshold": 100,
+      "color": "#cda56d"
+    }
+  ],
+  "nodes": {}
+}

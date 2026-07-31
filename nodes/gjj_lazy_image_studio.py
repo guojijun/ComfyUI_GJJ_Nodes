@@ -1148,7 +1148,9 @@ def _list_lazy_unet_models() -> list[str]:
 
 
 def _list_lazy_checkpoints() -> list[str]:
-    return _safe_filename_list("checkpoints") or [DEFAULT_CHECKPOINT_NAME]
+    # Keep an explicit empty choice so ComfyUI accepts serialized UNET-mode
+    # workflows whose inactive checkpoint widget has no value.
+    return _dedupe_keep_order([DEFAULT_CHECKPOINT_NAME] + _safe_filename_list("checkpoints"))
 
 
 def _list_lazy_clip_models() -> list[str]:

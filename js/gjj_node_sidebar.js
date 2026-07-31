@@ -572,6 +572,69 @@ function renderList() {
     }
 }
 
+function updateToolbar() {
+    const toolbar = state.root?.querySelector(".gjj-node-sidebar__toolbar");
+    if (!toolbar) return;
+    for (const button of toolbar.querySelectorAll("[data-sort]")) {
+        button.classList.toggle("active", button.dataset.sort === state.usage.sort_mode);
+    }
+}
+
+function showUsageSettings() {
+    if (document.querySelector(".gjj-usage-settings-overlay")) return;
+    const overlay = document.createElement("div");
+    overlay.className = "gjj-usage-settings-overlay";
+    const colors = state.usage.use_colors || DEFAULT_USE_COLORS;
+    overlay.innerHTML = `
+        <div class="gjj-usage-settings">
+            <h3>节点使用频率设置</h3>
+            <label class="gjj-usage-settings__toggle">
+                <input type="checkbox" data-role="enabled" ${state.usage.use_colors_enabled !== false ? "checked" : ""}>
+                <span>根据使用频率变色</span>
+            </label>
+            ${colors.map((item, index) => `
+                <label class="gjj-usage-settings__row">
+                    <span>${index + 1}</span>
+                    <input type="color" data-color="${index}" value="${item.color}">
+                    <span>超过</span>
+                    <input type="number" data-threshold="${index}" min="0" step="1" value="${item.threshold}">
+                    <span>次</span>
+                </label>
+            `).join("")}
+            <div class="gjj-usage-settings__actions">
+                <button type="button" data-role="reset">恢复默认</button>
+                <button type="button" data-role="cancel">取消</button>
+                <button type="button" data-role="save">保存</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (event) => {
+        if (event.target === overlay || event.target.closest("[data-role='cancel']")) overlay.remove();
+    });
+    overlay.querySelector("[data-role='reset']").addEventListener("click", () => {
+        DEFAULT_USE_COLORS.forEach((item, index) => {
+            const color = overlay.querySelector(`[data-color="${index}"]`);
+            const threshold = overlay.querySelector(`[data-threshold="${index}"]`);
+            if (color) color.value = item.color;
+            if (threshold) threshold.value = item.threshold;
+        });
+        overlay.querySelector("[data-role='enabled']").checked = true;
+    });
+    overlay.querySelector("[data-role='save']").addEventListener("click", async () => {
+        const useColors = colors.map((_, index) => ({
+            threshold: Math.max(0, Number(overlay.querySelector(`[data-threshold="${index}"]`)?.value) || 0),
+            color: overlay.querySelector(`[data-color="${index}"]`)?.value || DEFAULT_USE_COLORS[index]?.color || "#ffffff",
+        }));
+        const saved = await postUsage({
+            action: "settings",
+            use_colors_enabled: overlay.querySelector("[data-role='enabled']").checked,
+            use_colors: useColors,
+        });
+        if (saved) overlay.remove();
+    });
+}
+
 function renderPanel(element) {
     state.root = element;
     element.replaceChildren();
@@ -581,6 +644,14 @@ function renderPanel(element) {
                 <img class="gjj-node-sidebar__logo" src="${ICON_URL}" alt="">
                 <span>GJJ 节点</span>
             </header>
+            <nav class="gjj-node-sidebar__toolbar" aria-label="节点排序工具栏">
+                <button class="gjj-node-sidebar__tool" type="button" data-sort="frequency" title="按使用频率排序">🔥</button>
+                <button class="gjj-node-sidebar__tool" type="button" data-sort="recent" title="按最近使用排序">🕒</button>
+                <button class="gjj-node-sidebar__tool" type="button" data-sort="name" title="按名称排序">🔤</button>
+                <span class="gjj-node-sidebar__tool-separator"></span>
+                <button class="gjj-node-sidebar__tool" type="button" data-action="settings" title="频率颜色设置">⚙️</button>
+                <button class="gjj-node-sidebar__tool" type="button" data-action="clear" title="清空全部使用频率">🗑️</button>
+            </nav>
             <input class="gjj-node-sidebar__search" type="search" placeholder="搜索 GJJ 节点…" autocomplete="off">
             <div class="gjj-node-sidebar__list"></div>
         </section>
@@ -591,7 +662,24 @@ function renderPanel(element) {
         state.query = search.value;
         renderList();
     });
+    for (const button of element.querySelectorAll("[data-sort]")) {
+        button.addEventListener("click", () => {
+            state.usage.sort_mode = button.dataset.sort;
+            renderList();
+            updateToolbar();
+            void postUsage({ action: "settings", sort_mode: button.dataset.sort });
+        });
+    }
+    element.querySelector("[data-action='settings']").addEventListener("click", showUsageSettings);
+    element.querySelector("[data-action='clear']").addEventListener("click", () => {
+        const hasUsage = Object.values(state.usage.nodes || {}).some((item) => Number(item?.use_count) > 0);
+        if (hasUsage && confirm("确定清空全部 GJJ 节点的使用频率记录吗？")) {
+            void postUsage({ action: "clear" });
+        }
+    });
     renderList();
+    updateToolbar();
+    if (!state.usageLoaded) void loadUsage();
 }
 
 function findNativeNodesButton() {
