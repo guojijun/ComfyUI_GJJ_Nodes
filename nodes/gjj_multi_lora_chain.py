@@ -422,10 +422,16 @@ async def get_gjj_lora_metadata(request):
         for lora_name in loras
         if _find_lora_preview(lora_name) is not None
     }
-    return web.json_response({
-        "metadata": load_lora_metadata_config(),
-        "previews": previews,
-    })
+    return web.json_response(
+        {
+            "metadata": load_lora_metadata_config(),
+            "previews": previews,
+        },
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 async def get_gjj_lora_preview(request):

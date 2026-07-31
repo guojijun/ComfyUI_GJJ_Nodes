@@ -250,7 +250,9 @@ async function fetchLoraOptions() {
 
 async function fetchLoraMetadata() {
 	try {
-		const response = await fetch(LORA_METADATA_API_PATH);
+		const response = await fetch(`${LORA_METADATA_API_PATH}?_=${Date.now()}`, {
+			cache: "no-store",
+		});
 		if (!response.ok) {
 			return { metadata: [], previews: {} };
 		}
