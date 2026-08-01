@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 export const GJJ_COMMON_MEDIA_OPEN_FOLDER_API = "/gjj/common/open_media_folder";
 export const GJJ_AUDIO_PLAYER_HEIGHT = 24;
 export const GJJ_AUDIO_WAVEFORM_HEIGHT = 72;
+export const GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 
 const STYLE_ID = "gjj-common-media-preview-style";
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "avif", "tiff"]);
@@ -652,7 +653,8 @@ export function gjjOpenMediaBrowser(item) {
 	document.body.appendChild(overlay);
 }
 
-function createMediaElement(item, isSingle, onLayout) {
+function createMediaElement(item, isSingle, options = {}) {
+	const onLayout = options.onLayout;
 	const previewItem = item?.preview_filename
 		? {
 			...item,
@@ -708,7 +710,24 @@ function createMediaElement(item, isSingle, onLayout) {
 	}
 	const image = document.createElement("img");
 	image.src = url;
-	image.draggable = false;
+	image.draggable = Boolean(options.enableAnyPreviewDrag && item?.filename);
+	if (image.draggable) {
+		image.title = options.anyPreviewDragTitle || "拖到空白画布可创建 GJJ_AnyPreview；也可拖到已有 GJJ_AnyPreview。";
+		image.addEventListener("dragstart", (event) => {
+			if (!event.dataTransfer) return;
+			const remoteUrl = /^(?:https?:|blob:|data:)/i.test(String(item.url || "")) ? String(item.url) : "";
+			const payload = {
+				filename: String(item.filename),
+				subfolder: String(item.subfolder || ""),
+				type: String(item.type || "input"),
+				media_type: "image",
+				...(remoteUrl ? { preview_url: remoteUrl } : {}),
+			};
+			event.dataTransfer.effectAllowed = "copy";
+			event.dataTransfer.setData(GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
+			event.dataTransfer.setData("text/plain", String(item.filename));
+		});
+	}
 	image.addEventListener("load", () => onLayout?.());
 	image.addEventListener("error", () => onLayout?.());
 	stage.appendChild(image);
@@ -742,7 +761,7 @@ function createMediaCard(item, index, total, options) {
 		return card;
 	}
 
-	const stage = createMediaElement(item, isSingle, options.onLayout);
+	const stage = createMediaElement(item, isSingle, options);
 	card.appendChild(stage);
 	const hasAction = appendMediaAction(card, item, index, total, options);
 	if (hasAction && isSingle) {

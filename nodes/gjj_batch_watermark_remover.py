@@ -15,6 +15,7 @@ from PIL import Image, PngImagePlugin
 from nodes import ConditioningZeroOut, VAEDecode, VAEEncode
 
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 from .common_utils.model_loader import (
     DEFAULT_UNET_DTYPE,
     gjjutils_load_clip_from_names as _load_clip_from_names,
@@ -34,9 +35,8 @@ NODE_NAME = "GJJ_BatchWatermarkRemover"
 MIXED_BATCH_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 DEFAULT_UNET = "flux-2-klein-4b"
 DEFAULT_CLIP = "qwen_3_4b.safetensors"
+DEFAULT_CLIP_FAMILY = Path(DEFAULT_CLIP).stem
 DEFAULT_VAE = "flux2-vae.safetensors"
-KLEIN_9B_UNET = "flux-2-klein-9b.safetensors"
-KLEIN_9B_CLIP = "qwen_3_8b.safetensors"
 DEFAULT_PROMPT = "clean all watermark,text,logo,signature,caption,overlay"
 DEFAULT_NEGATIVE = ""
 DEFAULT_FILENAME_PREFIX = "GJJ/批量去水印"
@@ -47,12 +47,7 @@ MODEL_CONFIGS = (
         "label": "Flux2 Klein 4B",
         "unet": DEFAULT_UNET,
         "clip": DEFAULT_CLIP,
-        "vae": DEFAULT_VAE,
-    },
-    {
-        "label": "Flux2 Klein 9B",
-        "unet": KLEIN_9B_UNET,
-        "clip": KLEIN_9B_CLIP,
+        "clip_family": DEFAULT_CLIP_FAMILY,
         "vae": DEFAULT_VAE,
     },
 )
@@ -526,9 +521,9 @@ def _selected_config_for_unet(unet_name: Any) -> dict[str, str]:
 
 def _validate_model_config(unet_name: Any, clip_name: Any, vae_name: Any) -> dict[str, str]:
     config = _selected_config_for_unet(unet_name)
-    if _model_key(_strip_missing_model_label(clip_name)) != _model_key(config["clip"]):
+    if not _model_matches_required(_strip_missing_model_label(clip_name), config["clip_family"]):
         raise RuntimeError(
-            f"{config['label']} 必须搭配 CLIP：{config['clip']}；"
+            f"{config['label']} 必须搭配 {config['clip_family']} 模型族的 CLIP（量化后缀不限）；"
             f"当前选择：{_strip_missing_model_label(clip_name) or '空'}。"
         )
     if _model_key(_strip_missing_model_label(vae_name)) != _model_key(config["vae"]):
@@ -624,10 +619,10 @@ class GJJ_BatchWatermarkRemover:
             "input": "clip_name",
             "type": "CLIP",
             "kind": "Flux2",
-            "tooltip": "可放在 text_encoders 子目录下；只按文件名匹配此固定模型，默认按 flux2 文本编码器加载。",
+            "tooltip": "可放在 text_encoders 子目录下；匹配 qwen_3_4b 模型族，支持原精度与兼容量化版本，并按 flux2 文本编码器加载。",
         },
         {
-            "label": "4B/9B 共用 VAE",
+            "label": "Flux2 VAE",
             "filename": DEFAULT_VAE,
             "folder": "models/vae",
             "input": "vae_name",
@@ -635,29 +630,11 @@ class GJJ_BatchWatermarkRemover:
             "kind": "Flux2",
             "tooltip": "可放在 vae 子目录下；用于编码输入参考图并解码去水印结果。",
         },
-        {
-            "label": "9B UNET 主模型",
-            "filename": KLEIN_9B_UNET,
-            "folder": "models/diffusion_models",
-            "input": "unet_name",
-            "type": "UNET",
-            "kind": "Flux2 Klein",
-            "tooltip": "9B 配置专用主模型；必须与 qwen_3_8b.safetensors 成套使用。",
-        },
-        {
-            "label": "9B CLIP 文本编码器",
-            "filename": KLEIN_9B_CLIP,
-            "folder": "models/text_encoders",
-            "input": "clip_name",
-            "type": "CLIP",
-            "kind": "Flux2",
-            "tooltip": "9B 配置专用文本编码器；不会用 qwen_3_4b 或其它文件替代。",
-        },
     ]
     GJJ_HELP = {
         "title": "GJJ · 🧼 批量去水印",
         "description": DESCRIPTION,
-        "notice": "只支持两套固定配置：Flux2 Klein 4B + qwen_3_4b + flux2-vae，或 Flux2 Klein 9B + qwen_3_8b + flux2-vae。4B 主模型按 flux-2-klein-4b 关键词匹配，不限定 fp8；下拉显示“缺失：名称”时，请把对应文件放入模型树路径；节点不会使用其它模型替代。",
+        "notice": "仅支持 Flux2 Klein 4B + qwen_3_4b 模型族 + flux2-vae。qwen_3_4b 文本编码器可选择原精度、FP8、INT4/INT8 ConvRot 或 GGUF 版本。",
         "model_download_url": "",
         "models": [
             {
@@ -679,31 +656,13 @@ class GJJ_BatchWatermarkRemover:
                 "tooltip": "4B 配置专用 Qwen 文本编码器；节点按 flux2 类型加载。",
             },
             {
-                "label": "4B/9B 共用 VAE",
+                "label": "Flux2 VAE",
                 "filename": DEFAULT_VAE,
                 "folder": "vae",
                 "input": "vae_name",
                 "type": "VAE",
                 "kind": "Flux2",
                 "tooltip": "Flux2 VAE，用于参考图编码和结果解码。",
-            },
-            {
-                "label": "9B UNET 主模型",
-                "filename": KLEIN_9B_UNET,
-                "folder": "diffusion_models",
-                "input": "unet_name",
-                "type": "UNET",
-                "kind": "Flux2 Klein",
-                "tooltip": "9B 配置专用主模型；缺失时不会用其它 9B 变体替代。",
-            },
-            {
-                "label": "9B CLIP 文本编码器",
-                "filename": KLEIN_9B_CLIP,
-                "folder": "text_encoders",
-                "input": "clip_name",
-                "type": "CLIP",
-                "kind": "Flux2",
-                "tooltip": "9B 配置专用文本编码器；必须与 9B UNET 成套使用。",
             },
         ],
         "model_tree": MODEL_TREE,
@@ -716,7 +675,7 @@ class GJJ_BatchWatermarkRemover:
         ],
         "usage": [
             "输入兼容 GJJ_BATCH_IMAGE 与普通 IMAGE 批量；可接 GJJ 批量多图片加载预览器、批量图片包装器或普通 IMAGE 输出。",
-            "UNET 下拉会列出匹配 flux-2-klein-4b 关键词的 4B 文件和固定 9B 文件；CLIP、VAE 仍按固定文件名匹配。缺失项会显示为“缺失：名称”。",
+            "UNET 下拉只列出匹配 flux-2-klein-4b 的模型；CLIP 下拉只列出 qwen_3_4b 模型族，并支持不同量化后缀。",
             "工作像素量越大，去水印细节可能更稳，但显存和耗时也会增加。",
             "自动保存开启后，会把结果写入 ComfyUI output 下的文件名前缀目录。",
         ],
@@ -728,7 +687,8 @@ class GJJ_BatchWatermarkRemover:
         available_clips = list_clip_models() or []
         available_vaes = list_vae_models() or []
         unet_models = _required_model_choices(available_unets, _allowed_required_names("unet"))
-        clip_models = _required_model_choices(available_clips, _allowed_required_names("clip"))
+        clip_families = tuple(str(config["clip_family"]) for config in MODEL_CONFIGS)
+        clip_models = _required_model_choices(available_clips, clip_families)
         vae_models = _required_model_choices(available_vaes, _allowed_required_names("vae"))
         complete_config = next(
             (
@@ -771,6 +731,7 @@ class GJJ_BatchWatermarkRemover:
                     unet_models,
                     _hidden_widget({
                         "default": _default_required_choice(unet_models, complete_config["unet"]),
+                        "gjj_default_model": complete_config["unet"],
                         "display_name": "🟣 UNET 主模型",
                         "tooltip": "只允许文件名包含 flux-2-klein-4b 的 4B 模型，或固定的 flux-2-klein-9b.safetensors。显示“缺失：名称”表示未在 models/diffusion_models 找到，节点不会用其它文件替代。",
                     }),
@@ -779,14 +740,16 @@ class GJJ_BatchWatermarkRemover:
                     clip_models,
                     _hidden_widget({
                         "default": _default_required_choice(clip_models, complete_config["clip"]),
+                        "gjj_default_model": complete_config["clip"],
                         "display_name": "🔤 CLIP 文本编码器",
-                        "tooltip": "4B 必须搭配 qwen_3_4b.safetensors，9B 必须搭配 qwen_3_8b.safetensors。显示“缺失：文件名”表示未在 models/text_encoders 找到。",
+                        "tooltip": "仅显示 qwen_3_4b 模型族；支持原精度、FP8、INT4/INT8 ConvRot 与 GGUF 量化文件。",
                     }),
                 ),
                 "vae_name": (
                     vae_models,
                     _hidden_widget({
                         "default": _default_required_choice(vae_models, complete_config["vae"]),
+                        "gjj_default_model": complete_config["vae"],
                         "display_name": "🧩 VAE",
                         "tooltip": "两套配置都固定使用 flux2-vae.safetensors。显示“缺失：文件名”表示未在 models/vae 找到。",
                     }),
@@ -879,6 +842,16 @@ class GJJ_BatchWatermarkRemover:
                         "tooltip": "可选。上游来自批量多图片加载预览器时，对原文件名应用此正则；有捕获组则用第一个非空捕获组作为保存名后缀。",
                     }),
                 ),
+                "keep_model": (
+                    "BOOLEAN",
+                    _hidden_widget({
+                        "default": False,
+                        "display_name": "保持模型",
+                        "label_on": "保持",
+                        "label_off": "释放",
+                        "tooltip": "开启后保留已加载的 Klein、CLIP 和 VAE，连续执行更快但会继续占用显存；关闭后执行结束即释放模型。",
+                    }),
+                ),
             },
             "hidden": {
                 "workflow_prompt": "PROMPT",
@@ -904,6 +877,7 @@ class GJJ_BatchWatermarkRemover:
         auto_save=False,
         filename_prefix=DEFAULT_FILENAME_PREFIX,
         filename_regex="",
+        keep_model=False,
         workflow_prompt=None,
         extra_pnginfo=None,
         unique_id=None,
@@ -923,7 +897,7 @@ class GJJ_BatchWatermarkRemover:
             resolved_clip = _resolve_required_model(
                 clip_name,
                 list_clip_models() or [],
-                _allowed_required_names("clip"),
+                tuple(str(config["clip_family"]) for config in MODEL_CONFIGS),
                 "CLIP 文本编码器",
                 "text_encoders",
             )
@@ -982,9 +956,10 @@ class GJJ_BatchWatermarkRemover:
                 _send_status(unique_id, f"4/4 完成：{len(results)} 张，已缩放统一尺寸到 {width} x {height}")
             else:
                 _send_status(unique_id, f"4/4 完成：{len(results)} 张，尺寸 {width} x {height}")
+            preview_images = gjjutils_write_temp_tensor_images(result)
             if bool(auto_save):
                 source_filenames = _resolve_source_filenames(workflow_prompt, extra_pnginfo, unique_id)
-                preview_images, saved_paths = _save_result_images(
+                _saved_output_images, saved_paths = _save_result_images(
                     results,
                     filename_prefix,
                     filename_regex,
@@ -1006,13 +981,28 @@ class GJJ_BatchWatermarkRemover:
                     },
                     "result": (result,),
                 }
-            return {"ui": {"preview_text": [f"已完成 {len(results)} 张去水印，未自动保存。"]}, "result": (result,)}
+            return {
+                "ui": {
+                    "preview_images": preview_images,
+                    "preview_text": [f"已完成 {len(results)} 张去水印，未自动保存。"],
+                },
+                "result": (result,),
+            }
         except RuntimeError as exc:
             _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}")
             raise
         except Exception as exc:
             _send_status(unique_id, "执行失败")
             raise RuntimeError(f"批量去水印执行失败。\n详细错误：{exc}") from exc
+        finally:
+            if not bool(keep_model):
+                try:
+                    import comfy.model_management as model_management
+
+                    model_management.unload_all_models()
+                    model_management.soft_empty_cache()
+                except Exception as release_exc:
+                    print(f"[GJJ BatchWatermarkRemover] 释放模型失败: {release_exc}")
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_BatchWatermarkRemover}

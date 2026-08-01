@@ -14,33 +14,6 @@ import {
 } from "./gjj_common_media_preview.js";
 
 const MEDIA_COPY_SUBDIR = "GJJ_TemplateParams";
-const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
-
-function enableAnyPreviewImageDrag(container, items = []) {
-	if (!container) return;
-	const cards = Array.from(container.querySelectorAll?.(":scope > .gjj-common-media-card") || []);
-	for (const [index, card] of cards.entries()) {
-		const item = items[index];
-		const image = card.querySelector?.(".gjj-common-media-stage img");
-		if (!image || item?.kind !== "image" || !item?.filename) continue;
-		const remoteUrl = /^(?:https?:|blob:|data:)/i.test(String(item.url || "")) ? String(item.url) : "";
-		const payload = {
-			filename: String(item.filename),
-			subfolder: String(item.subfolder || ""),
-			type: String(item.type || "input"),
-			media_type: "image",
-			...(remoteUrl ? { preview_url: remoteUrl } : {}),
-		};
-		image.draggable = true;
-		image.title = "拖到空白画布可创建 GJJ_AnyPreview；也可拖到已有 GJJ_AnyPreview。";
-		image.addEventListener("dragstart", (event) => {
-			if (!event.dataTransfer) return;
-			event.dataTransfer.effectAllowed = "copy";
-			event.dataTransfer.setData(ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
-			event.dataTransfer.setData("text/plain", String(item.filename));
-		});
-	}
-}
 
 function detectMediaType(value) {
 	const kind = gjjDetectMediaKind(value);
@@ -58,12 +31,12 @@ function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = nu
 	});
 	if (directUrl) item.url = directUrl;
 	gjjRenderMediaPreview(preview, [item], {
+		enableAnyPreviewDrag: true,
 		singleMinHeight: kind === "audio" ? 78 : 168,
 		singleMaxHeight: kind === "video" ? 300 : 360,
 		tileMinHeight: 108,
 		onLayout: options.onLayout,
 	});
-	enableAnyPreviewImageDrag(preview, [item]);
 }
 
 function setPreviewMessage(preview, text, isError = false) {
@@ -128,6 +101,7 @@ function renderGroupedMediaPreview(node, fields = null, values = null) {
 	const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
 	const items = mediaFields.map((field) => mediaItemForField(node, field, state.values));
 	gjjRenderMediaPreview(group, items, {
+		enableAnyPreviewDrag: true,
 		forceGrid: items.length > 1,
 		singleMinHeight: 168,
 		singleMaxHeight: 360,
@@ -138,7 +112,6 @@ function renderGroupedMediaPreview(node, fields = null, values = null) {
 		renderGridAction: (item) => makeMediaReplaceButton(node, item),
 		onLayout: () => refreshNode(node),
 	});
-	enableAnyPreviewImageDrag(group, items);
 	refreshNode(node);
 	return true;
 }

@@ -1031,6 +1031,7 @@ export class GJJ_Utils {
 
     static _modelTreeFamilyStem(value) {
         return String(value || "")
+            .replace(/^\s*(?:缺失|missing|not[ _-]?found)\s*[:：]\s*/i, "")
             .replaceAll("\\", "/")
             .split("/")
             .pop()

@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 48,
-      "last_used": 1785590326146
+      "use_count": 49,
+      "last_used": 1785593050897
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -84,6 +84,14 @@
     "GJJ_VideoKijaiModelLoader": {
       "use_count": 4,
       "last_used": 1785551362276
+    },
+    "GJJ_BatchWatermarkRemover": {
+      "use_count": 11,
+      "last_used": 1785600676732
+    },
+    "GJJ_Bernini13BLongVideoWatermarkRemover": {
+      "use_count": 12,
+      "last_used": 1785600665269
     }
   },
   "sort_reverse": true
