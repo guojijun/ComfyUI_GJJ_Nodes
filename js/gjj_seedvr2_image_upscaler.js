@@ -2,6 +2,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 import { queueOnlyCurrentNode } from "./gjj_utils.js";
+import { gjjOpenMediaBrowser } from "./gjj_common_media_preview.js";
 
 const TARGET_NODES = new Set(["GJJ_SeedVR2ImageUpscaler"]);
 const STATUS_WIDGET_NAME = "gjj_seedvr2_status";
@@ -20,6 +21,7 @@ const SEED_CONTROL_WIDGET = "control_after_generate";
 const SEED_CONTROL_DEFAULT = "randomize";
 const LOCAL_MEDIA_WIDGET = "local_media_file";
 const SAVE_IN_PLACE_WIDGET = "save_in_place";
+const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 const SEED_CONTROL_VALUES = new Set(["fixed", "randomize", "increment", "decrement"]);
 const MODEL_FILE_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft|pkl)$/i;
 const BOOLEAN_WIDGETS = [
@@ -651,6 +653,24 @@ function ensureStatusWidget(node) {
 	const preview = document.createElement("img");
 	preview.className = "gjj-seedvr2-segment-preview";
 	preview.alt = "当前视频段放大后的首帧";
+	preview.draggable = true;
+	preview.title = "点击放大预览；拖到空白画布可创建 GJJ_AnyPreview，也可拖到已有 GJJ_AnyPreview。";
+	preview.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const mediaItem = preview.__gjjSeedvr2BrowserItem;
+		if (mediaItem?.url || mediaItem?.filename) gjjOpenMediaBrowser(mediaItem);
+	});
+	preview.addEventListener("dragstart", (event) => {
+		const payload = preview.__gjjAnyPreviewPayload;
+		if (!event.dataTransfer || !payload?.filename) {
+			event.preventDefault();
+			return;
+		}
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
+		event.dataTransfer.setData("text/plain", String(payload.filename));
+	});
 	preview.hidden = true;
 	const text = document.createElement("div");
 	text.className = "gjj-seedvr2-status-text";
@@ -699,6 +719,18 @@ function setSegmentPreview(node, detail) {
 		? api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`)
 		: api.apiURL(`/view?filename=${encodeURIComponent(fixedFilename)}&type=temp&subfolder=GJJ&rand=${Date.now()}`));
 	if (!state?.preview || !source) return;
+	state.preview.__gjjAnyPreviewPayload = {
+		filename: String(item?.filename || fixedFilename),
+		subfolder: String(item?.subfolder ?? "GJJ"),
+		type: String(item?.type || "temp"),
+		media_type: "image",
+	};
+	state.preview.__gjjSeedvr2BrowserItem = {
+		...state.preview.__gjjAnyPreviewPayload,
+		kind: "image",
+		title: "SeedVR2 放大预览",
+		url: String(source),
+	};
 	state.preview.onload = () => {
 		state.preview.hidden = false;
 		state.progress.hidden = false;

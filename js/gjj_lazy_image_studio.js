@@ -20,6 +20,7 @@ const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const IMAGE_TOOLTIP = "参考图片输入；有连接时会自动补出下一个图片插槽。";
 const PRIMARY_IMAGE_TOOLTIP = "可直接接入 GJJ · 多图片加载预览器 的批量图片输出；后端会按原图顺序恢复多图参考。";
 const MASK_TOOLTIP = "主图可选遮罩；存在时会走带 noise_mask 的局部编辑逻辑。";
+const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 
 const EXECUTE_BUTTON_NAME = "__gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
@@ -33,6 +34,7 @@ const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
 const DEVICE_PREFERENCE_WIDGET_NAME = "device_preference";
 const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
+const IMAGE_RESIZE_CONFIG_WIDGET_NAME = "image_resize_config";
 const MODEL_SOURCE_WIDGET_NAME = "model_source";
 const CHECKPOINT_WIDGET_NAME = "ckpt_name";
 const CHECKPOINT_MODEL_SOURCE_VALUE = "底模 checkpoint";
@@ -82,6 +84,17 @@ const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link
 const PREVIEW_LAYOUT_PROPERTY = "gjj_lazy_image_studio_preview_layout";
 const PREVIEW_PAGE_PROPERTY = "gjj_lazy_image_studio_preview_page";
 const LORA_GLOBAL_SEARCH_PROPERTY = "gjj_lazy_image_studio_lora_global_search";
+const DEFAULT_IMAGE_RESIZE_CONFIG = Object.freeze({
+	mode: "宽高",
+	fit_mode: "裁剪",
+	crop_position: "上",
+	scale_percent: 100,
+	long_side_length: 1024,
+	total_pixel_k: 260,
+});
+const IMAGE_RESIZE_MODES = ["宽高", "等比", "长边", "像素"];
+const IMAGE_FIT_MODES = ["拉伸", "补边", "留边", "裁剪"];
+const IMAGE_CROP_POSITIONS = ["上", "下", "左", "右", "中"];
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -148,7 +161,7 @@ const SIZE_SOURCE_BUTTON_STYLES = {
 		border: "#34d399",
 		color: "#ecfdf5",
 		label: "原图尺寸",
-		title: "当前使用第一个输入图的原始尺寸；宽度和高度由输入图接管。",
+		title: "当前使用输入图尺寸；多图时以面积最大的图片为尺寸基准。",
 	},
 	panel: {
 		bg: "linear-gradient(135deg, #075985, #2563eb)",
@@ -189,7 +202,7 @@ const REFERENCE_BROWSER_BUTTON_STYLES = {
 	},
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME, ...MODEL_OPTIMIZATION_WIDGETS]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME, IMAGE_RESIZE_CONFIG_WIDGET_NAME, ...MODEL_OPTIMIZATION_WIDGETS]);
 const PANEL_FORCED_VISIBLE_WIDGETS = new Set([KEEP_MODEL_WIDGET_NAME, DEVICE_PREFERENCE_WIDGET_NAME, MODEL_SOURCE_WIDGET_NAME, CHECKPOINT_WIDGET_NAME]);
 const STRICT_MODEL_WIDGETS = new Set(["unet_name", "clip_name1", "vae_name", CHECKPOINT_WIDGET_NAME]);
 const MODEL_PANEL_WIDGETS = new Set([
@@ -222,6 +235,7 @@ const SIZE_PANEL_WIDGETS = new Set([
 	"width",
 	"height",
 	"batch_size",
+	IMAGE_RESIZE_CONFIG_WIDGET_NAME,
 ]);
 const PROTECTED_WIDGET_NAMES = new Set([
 	EXECUTE_BUTTON_NAME,
@@ -234,6 +248,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
+	IMAGE_RESIZE_CONFIG_WIDGET_NAME,
 	"prompt",
 	"negative_prompt",
 	"main_image_index",
@@ -427,19 +442,9 @@ function scheduleNativePreviewClear(node) {
 	if (typeof requestAnimationFrame === "function") {
 		requestAnimationFrame(() => clearNativePreview(node));
 	}
-	for (const delay of [80, 180, 360, 720, 1400, 2400, 4200, 6500]) {
-		setTimeout(() => clearNativePreview(node), delay);
-	}
 	clearInterval(node.__gjjNativePreviewClearInterval);
-	const startedAt = Date.now();
-	node.__gjjNativePreviewClearInterval = setInterval(() => {
-		clearNativePreview(node);
-		node?.graph?.setDirtyCanvas?.(true, true);
-		if (Date.now() - startedAt > 7000) {
-			clearInterval(node.__gjjNativePreviewClearInterval);
-			node.__gjjNativePreviewClearInterval = null;
-		}
-	}, 120);
+	node.__gjjNativePreviewClearInterval = null;
+	setTimeout(() => clearNativePreview(node), 80);
 }
 
 function clearExecutedPreviewPayload(message) {
@@ -493,6 +498,7 @@ const PANEL_SYNC_WIDGETS = [
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
 	GLOBAL_PROMPT_WIDGET_NAME,
+	IMAGE_RESIZE_CONFIG_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -525,6 +531,7 @@ const RESTORE_WIDGET_TYPES = {
 	[FP16_ACCUMULATION_WIDGET_NAME]: "toggle",
 	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "combo",
 	[GLOBAL_PROMPT_WIDGET_NAME]: "text",
+	[IMAGE_RESIZE_CONFIG_WIDGET_NAME]: "text",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -574,6 +581,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	DEVICE_PREFERENCE_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
 	GLOBAL_PROMPT_WIDGET_NAME,
+	IMAGE_RESIZE_CONFIG_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -608,6 +616,7 @@ const DEFAULT_PARAM_VALUES = {
 	[FP16_ACCUMULATION_WIDGET_NAME]: true,
 	[MISSING_SAGE_ATTENTION_POLICY_WIDGET_NAME]: "自动跳过SageAttention继续运行",
 	[GLOBAL_PROMPT_WIDGET_NAME]: DEFAULT_GLOBAL_QUALITY_PROMPT,
+	[IMAGE_RESIZE_CONFIG_WIDGET_NAME]: JSON.stringify(DEFAULT_IMAGE_RESIZE_CONFIG),
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -983,12 +992,14 @@ function applyInputSizeButtonState(node) {
 	}
 	const open = sizeSettingsOpen(node);
 	const enabled = inputSizeSyncEnabled(node);
+	const resizeConfig = readImageResizeConfig(node);
 	const sourceStyle = enabled ? SIZE_SOURCE_BUTTON_STYLES.input : SIZE_SOURCE_BUTTON_STYLES.panel;
 	button.style.display = "flex";
 	button.textContent = "📐";
 	button.title = [
 		open ? "关闭尺寸浮动窗口。" : "打开尺寸浮动窗口。",
 		`尺寸来源：${sourceStyle.label}。`,
+		`尺寸模式：${resizeConfig.mode}；适配：${resizeConfig.fit_mode}${imageResizePositionRelevant(resizeConfig) ? `；位置：${resizeConfig.crop_position}` : ""}。`,
 		sourceStyle.title,
 	].join("\n");
 	button.classList.toggle("on", open);
@@ -1361,6 +1372,58 @@ function boolValue(value) {
 	if (typeof value === "boolean") return value;
 	const text = String(value ?? "").trim().toLowerCase();
 	return ["true", "1", "yes", "on", "启用", "开启"].includes(text);
+}
+
+function normalizeImageResizeConfig(value) {
+	let parsed = value;
+	if (typeof parsed === "string") {
+		try {
+			parsed = JSON.parse(parsed || "{}");
+		} catch {
+			parsed = {};
+		}
+	}
+	const config = {
+		...DEFAULT_IMAGE_RESIZE_CONFIG,
+		...(parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}),
+	};
+	if (!IMAGE_RESIZE_MODES.includes(config.mode)) config.mode = DEFAULT_IMAGE_RESIZE_CONFIG.mode;
+	if (!IMAGE_FIT_MODES.includes(config.fit_mode)) config.fit_mode = DEFAULT_IMAGE_RESIZE_CONFIG.fit_mode;
+	if (!IMAGE_CROP_POSITIONS.includes(config.crop_position)) config.crop_position = DEFAULT_IMAGE_RESIZE_CONFIG.crop_position;
+	config.scale_percent = Math.max(0.1, Math.min(10000, Number(config.scale_percent) || DEFAULT_IMAGE_RESIZE_CONFIG.scale_percent));
+	config.long_side_length = Math.max(8, Math.min(16384, Math.round(Number(config.long_side_length) || DEFAULT_IMAGE_RESIZE_CONFIG.long_side_length)));
+	config.total_pixel_k = Math.max(1, Math.min(1000000, Math.round(Number(config.total_pixel_k) || DEFAULT_IMAGE_RESIZE_CONFIG.total_pixel_k)));
+	return config;
+}
+
+function imageResizePositionRelevant(config) {
+	const normalized = normalizeImageResizeConfig(config);
+	return normalized.fit_mode !== "拉伸" && !["等比", "长边"].includes(normalized.mode);
+}
+
+function readImageResizeConfig(node) {
+	const widgetValue = getWidget(node, IMAGE_RESIZE_CONFIG_WIDGET_NAME)?.value;
+	const storedValue = node?.properties?.[PARAM_VALUES_PROPERTY]?.[IMAGE_RESIZE_CONFIG_WIDGET_NAME];
+	return normalizeImageResizeConfig(
+		widgetValue !== undefined && widgetValue !== null && String(widgetValue).trim()
+			? widgetValue
+			: storedValue,
+	);
+}
+
+function writeImageResizeConfig(node, patch = {}, rerender = true) {
+	if (!node) return;
+	const config = normalizeImageResizeConfig({ ...readImageResizeConfig(node), ...patch });
+	const serialized = JSON.stringify(config);
+	setWidgetValue(getWidget(node, IMAGE_RESIZE_CONFIG_WIDGET_NAME), serialized);
+	node.properties ||= {};
+	node.properties[PARAM_VALUES_PROPERTY] = {
+		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
+		[IMAGE_RESIZE_CONFIG_WIDGET_NAME]: serialized,
+	};
+	writeLiveParamSnapshot(node);
+	applyInputSizeButtonState(node);
+	if (rerender) syncFloatingPanels(node);
 }
 
 function inputSizeSyncEnabled(node) {
@@ -2781,7 +2844,7 @@ function createSizeSourceControl(node) {
 	wrap.dataset.widgetName = USE_INPUT_IMAGE_SIZE_WIDGET_NAME;
 	wrap.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0;width:100%";
 	const choices = [
-		{ enabled: true, label: "原图尺寸", title: "使用第一个输入图的真实宽高，宽度和高度不可手动修改。" },
+		{ enabled: true, label: "原图尺寸", title: "单图使用原图宽高；多图使用面积最大的输入图作为尺寸基准，再按下方规则统一所有图片。" },
 		{ enabled: false, label: "面板尺寸", title: "使用下面的宽度和高度滑条。" },
 	];
 	for (const choice of choices) {
@@ -2822,6 +2885,96 @@ function createSizeSourceControl(node) {
 	};
 	wrap.__gjjRefresh();
 	return wrap;
+}
+
+function createImageResizeChoiceControl(node, key, icon, values, titles = {}) {
+	const row = document.createElement("div");
+	row.dataset.widgetName = `${IMAGE_RESIZE_CONFIG_WIDGET_NAME}:${key}`;
+	row.style.cssText = "display:grid;grid-template-columns:34px minmax(0,1fr);gap:8px;align-items:center;width:100%;min-width:0";
+	const label = document.createElement("span");
+	label.textContent = icon;
+	label.style.cssText = "font-size:19px;text-align:center;color:#f2a3c2;user-select:none";
+	const group = document.createElement("div");
+	group.style.cssText = `display:grid;grid-template-columns:repeat(${values.length},minmax(0,1fr));gap:7px;min-width:0`;
+	for (const option of values) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = option;
+		button.dataset.value = option;
+		button.title = titles[option] || option;
+		button.style.cssText = [
+			"height:34px",
+			"min-width:0",
+			"border:1px solid #41535b",
+			"border-radius:8px",
+			"background:#11181c",
+			"color:#dce7e2",
+			"cursor:pointer",
+			"font-size:14px",
+			"font-weight:800",
+			"padding:0 6px",
+		].join(";");
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			writeImageResizeConfig(node, { [key]: option });
+		});
+		group.appendChild(button);
+	}
+	row.append(label, group);
+	row.__gjjRefresh = () => {
+		const selected = readImageResizeConfig(node)[key];
+		for (const button of group.querySelectorAll("button")) {
+			const active = button.dataset.value === selected;
+			button.style.background = active ? "linear-gradient(135deg,#075985,#0891b2)" : "#11181c";
+			button.style.borderColor = active ? "#22d3ee" : "#41535b";
+			button.style.color = active ? "#ecfeff" : "#dce7e2";
+			button.setAttribute("aria-pressed", active ? "true" : "false");
+		}
+	};
+	row.__gjjRefresh();
+	return row;
+}
+
+function createImageResizeConfigSlider(node, key, labelText, { min, max, step, suffix = "" }) {
+	const row = document.createElement("div");
+	row.dataset.widgetName = `${IMAGE_RESIZE_CONFIG_WIDGET_NAME}:${key}`;
+	row.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center;font-size:12px;color:#c7d5d8";
+	const label = document.createElement("label");
+	label.textContent = labelText;
+	label.style.cssText = "grid-column:1;color:#9fd4c3;font-weight:700";
+	const value = document.createElement("input");
+	value.type = "number";
+	value.min = String(min);
+	value.max = String(max);
+	value.step = String(step);
+	value.title = suffix ? `单位：${suffix}` : labelText;
+	value.style.cssText = "grid-column:2;width:82px;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:4px 6px;text-align:right;font-size:12px;font-weight:800";
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = String(min);
+	slider.max = String(max);
+	slider.step = String(step);
+	slider.style.cssText = "grid-column:1 / span 2;width:100%;accent-color:#38bdf8;cursor:pointer";
+	const commit = (raw) => {
+		const numeric = Math.min(max, Math.max(min, Number(raw) || min));
+		const rounded = step < 1 ? Math.round(numeric / step) * step : Math.round(numeric / step) * step;
+		value.value = String(rounded);
+		slider.value = String(rounded);
+		writeImageResizeConfig(node, { [key]: rounded }, false);
+	};
+	slider.addEventListener("input", (event) => {
+		commit(event.target.value);
+	});
+	value.addEventListener("change", (event) => commit(event.target.value));
+	row.append(label, value, slider);
+	row.__gjjRefresh = () => {
+		const current = readImageResizeConfig(node)[key];
+		value.value = String(current);
+		slider.value = String(current);
+	};
+	row.__gjjRefresh();
+	return row;
 }
 
 function createSliderControl(node, name, { disabledWhenInputSize = false } = {}) {
@@ -2900,7 +3053,37 @@ function renderSizePanelControls(node, body) {
 	body.replaceChildren();
 	const source = createSizeSourceControl(node);
 	body.appendChild(source);
-	for (const name of ["width", "height", "batch_size"]) {
+	body.appendChild(createImageResizeChoiceControl(node, "mode", "📐", IMAGE_RESIZE_MODES, {
+		宽高: "按宽度和高度确定统一输出画布。",
+		等比: "按尺寸基准乘以缩放百分比确定统一输出画布。",
+		长边: "保持尺寸基准比例，把长边缩放到指定长度。",
+		像素: "保持尺寸基准比例，按总像素数计算统一输出画布。",
+	}));
+	body.appendChild(createImageResizeChoiceControl(node, "fit_mode", "🧲", IMAGE_FIT_MODES, {
+		拉伸: "直接缩放到目标宽高，可能改变原图比例。",
+		补边: "不放大小图；必要时等比缩小，再补白边到统一画布。",
+		留边: "允许等比放大或缩小完整图片，再补白边到统一画布。",
+		裁剪: "短边对齐填满画布，并按保留位置裁掉超出部分。",
+	}));
+	const resizeConfig = readImageResizeConfig(node);
+	if (imageResizePositionRelevant(resizeConfig)) {
+		body.appendChild(createImageResizeChoiceControl(node, "crop_position", "📍", IMAGE_CROP_POSITIONS, {
+			上: "补边时靠上；裁剪时优先保留上方内容。",
+			下: "补边时靠下；裁剪时优先保留下方内容。",
+			左: "补边时靠左；裁剪时优先保留左侧内容。",
+			右: "补边时靠右；裁剪时优先保留右侧内容。",
+			中: "居中补边或裁剪。",
+		}));
+	}
+	if (resizeConfig.mode === "等比") {
+		body.appendChild(createImageResizeConfigSlider(node, "scale_percent", "缩放百分比", { min: 0.1, max: 400, step: 0.1, suffix: "%" }));
+	} else if (resizeConfig.mode === "长边") {
+		body.appendChild(createImageResizeConfigSlider(node, "long_side_length", "长边长度", { min: 64, max: 8192, step: 8, suffix: "px" }));
+	} else if (resizeConfig.mode === "像素") {
+		body.appendChild(createImageResizeConfigSlider(node, "total_pixel_k", "总像素/K", { min: 1, max: 8192, step: 1, suffix: "K" }));
+	}
+	const dimensionNames = resizeConfig.mode === "宽高" ? ["width", "height"] : [];
+	for (const name of [...dimensionNames, "batch_size"]) {
 		const control = createSliderControl(node, name, { disabledWhenInputSize: name === "width" || name === "height" });
 		if (control) {
 			control.__gjjRefresh?.();
@@ -3354,6 +3537,7 @@ function coerceParamValue(name, value, node) {
 	if (name === DEVICE_PREFERENCE_WIDGET_NAME) return "智能调度";
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
+	if (name === IMAGE_RESIZE_CONFIG_WIDGET_NAME) return JSON.stringify(normalizeImageResizeConfig(value));
 	if (STRICT_MODEL_WIDGETS.has(name)) return normalizeStrictModelParam(node, name, value);
 	if (name === MODEL_SOURCE_WIDGET_NAME) return comboLikeValue(name, value, node) ? textValue(value) : fallbackParamValue(node, name);
 	if (MODEL_OPTIMIZATION_BOOLEAN_WIDGETS.has(name)) return boolValue(value);
@@ -3639,6 +3823,7 @@ function patchLazySeedIntoPromptData(promptData) {
 			entry.inputs.seed = seed;
 		}
 		entry.inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
+		entry.inputs[IMAGE_RESIZE_CONFIG_WIDGET_NAME] = JSON.stringify(readImageResizeConfig(node));
 		for (const name of STRICT_MODEL_WIDGETS) {
 			if (Object.prototype.hasOwnProperty.call(entry.inputs, name)) {
 				entry.inputs[name] = normalizeStrictModelParam(node, name, entry.inputs[name]);
@@ -3650,6 +3835,7 @@ function patchLazySeedIntoPromptData(promptData) {
 				promptData.prompt[key].inputs.seed = seed;
 			}
 			promptData.prompt[key].inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
+			promptData.prompt[key].inputs[IMAGE_RESIZE_CONFIG_WIDGET_NAME] = JSON.stringify(readImageResizeConfig(node));
 			for (const name of STRICT_MODEL_WIDGETS) {
 				if (Object.prototype.hasOwnProperty.call(promptData.prompt[key].inputs, name)) {
 					promptData.prompt[key].inputs[name] = normalizeStrictModelParam(node, name, promptData.prompt[key].inputs[name]);
@@ -5380,7 +5566,7 @@ function lazyPreviewAspectRatio(item) {
 function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 	if (!src) return;
 	const sources = (Array.isArray(items) ? items : [])
-		.map((item) => imageDataToUrl(item))
+		.map((item) => imageDataToUrl(item, true))
 		.filter(Boolean);
 	if (!sources.length) sources.push(src);
 	let currentIndex = Math.max(0, Math.min(sources.length - 1, Math.floor(Number(startIndex || 0) || 0)));
@@ -5438,7 +5624,7 @@ function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 		previewImg.style.transform = `scale(${currentScale})`;
 		const counter = sources.length > 1 ? ` · ${currentIndex + 1}/${sources.length}` : "";
 		const playText = sources.length > 1 ? (playTimer ? " · 空格暂停" : " · 空格播放") : "";
-		closeHint.textContent = `滚轮缩放 · 双击重置 · 点击背景关闭${counter}${playText}`;
+		closeHint.textContent = `滚轮缩放 · 再次点击关闭${counter}${playText}`;
 	};
 
 	const stepOverlayImage = (delta = 1) => {
@@ -5471,10 +5657,6 @@ function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 		const delta = e.deltaY > 0 ? -0.1 : 0.1;
 		currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
 		previewImg.style.transform = `scale(${currentScale})`;
-	});
-
-	previewImg.addEventListener("click", (e) => {
-		e.stopPropagation();
 	});
 
 	previewImg.addEventListener("dblclick", (e) => {
@@ -5536,8 +5718,9 @@ function removeLazyPreviewItem(node, index) {
 function createLazyPreviewCard(node, item, index = 0) {
 	const card = document.createElement("button");
 	card.type = "button";
+	card.draggable = true;
 	card.__gjjLazyPreviewItem = item;
-	card.title = "点击查看大图；多图时按住 Ctrl 点击可移除这张预览。";
+	card.title = "点击查看大图；拖到空白画布可用 GJJ · 任意预览承载；多图时按住 Ctrl 点击可移除这张预览。";
 	card.style.cssText = [
 		"display:block",
 		"min-width:0",
@@ -5551,6 +5734,7 @@ function createLazyPreviewCard(node, item, index = 0) {
 		"pointer-events:auto",
 	].join(";");
 	const image = document.createElement("img");
+	image.draggable = false;
 	image.dataset.gjjCustomPreview = "true";
 	image.src = imageDataToUrl(item);
 	image.style.cssText = [
@@ -5573,9 +5757,32 @@ function createLazyPreviewCard(node, item, index = 0) {
 		updateLazyPreviewLayout(node);
 		GJJ_Utils.refreshNode(node);
 	});
+	let dragged = false;
+	card.addEventListener("dragstart", (event) => {
+		if (!event.dataTransfer || !item?.filename) {
+			event.preventDefault();
+			return;
+		}
+		dragged = true;
+		const payload = {
+			filename: String(item.filename),
+			subfolder: String(item.subfolder || ""),
+			type: String(item.type || "output"),
+			media_type: "image",
+			width: Number(item.width || image.naturalWidth || 0),
+			height: Number(item.height || image.naturalHeight || 0),
+		};
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
+		event.dataTransfer.setData("text/plain", String(item.filename));
+	});
+	card.addEventListener("dragend", () => {
+		setTimeout(() => { dragged = false; }, 0);
+	});
 	card.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		if (dragged) return;
 		if (event.ctrlKey && (node.__gjjLazyPreview?.items?.length || 0) > 1) {
 			removeLazyPreviewItem(node, index);
 			return;
@@ -5586,14 +5793,17 @@ function createLazyPreviewCard(node, item, index = 0) {
 	return card;
 }
 
-function imageDataToUrl(item) {
-	if (!item?.filename) {
+function imageDataToUrl(item, original = false) {
+	const filename = String((!original && item?.preview_filename) || item?.filename || "");
+	if (!filename) {
 		return "";
 	}
+	const type = String((!original && item?.preview_type) || item?.type || "output");
+	const subfolder = String((!original && item?.preview_subfolder) || item?.subfolder || "");
 	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
 	const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
 	return api.apiURL(
-		`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`,
+		`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${original ? "" : previewFormat}${randParam}`,
 	);
 }
 

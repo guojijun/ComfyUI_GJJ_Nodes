@@ -606,7 +606,7 @@ class GJJ_BatchWatermarkRemover:
     )
     FUNCTION = "remove"
     OUTPUT_NODE = True
-    CATEGORY = "GJJ/🖼️ 图像"
+    CATEGORY = "GJJ/💗 一键生成"
     MODEL_TREE = [
         {
             "label": "4B UNET 主模型",
@@ -1016,4 +1016,4 @@ class GJJ_BatchWatermarkRemover:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_BatchWatermarkRemover}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧼 批量去水印"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧼 一键批量去图片水印（Flux2-4b）"}

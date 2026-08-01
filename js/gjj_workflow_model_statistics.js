@@ -17,6 +17,8 @@ const MODEL_WIDGETS = new Set([
 	"geometry_estimation", "translation",
 ]);
 
+const SKIP_WIDGET_TYPES = new Set(["button"]);
+
 function collectCanvasCandidates(value, result = []) {
 	if (typeof value === "string") {
 		const clean = value.trim().replace(/[\\/]+$/, "");
@@ -272,6 +274,7 @@ function collectWorkflowModels() {
 		}
 		for (const widget of graphNode?.widgets || []) {
 			if (lazyUsesUnet && widget?.name === "ckpt_name") continue;
+			if (SKIP_WIDGET_TYPES.has(widget?.type)) continue;
 			const widgetName = inferWidgetKind(widget?.name) || "auto";
 			collectStructuredModels(widget?.value, graphNode, items);
 			const names = collectCanvasCandidates(widget?.value);

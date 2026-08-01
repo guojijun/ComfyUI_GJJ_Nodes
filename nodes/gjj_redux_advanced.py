@@ -1,349 +1,258 @@
 from __future__ import annotations
 
+import threading
 import math
-from typing import Any
+
+import torch
+import torch.nn.functional as F
 
 import comfy.clip_vision
 import comfy.sd
 import folder_paths
-import numpy as np
-import torch
+from node_helpers import conditioning_set_values
 
 
-NODE_NAME = "GJJ_ReduxAdvanced"
-DEFAULT_CLIP_VISION = "sigclip_vision_patch14_384.safetensors"
-DEFAULT_STYLE_MODEL = "flux1-redux-dev.safetensors"
-IMAGE_MODES = [
-    "center crop (square)",
-    "keep aspect ratio",
-    "autocrop with mask",
-]
-DOWN_SAMPLE_MODES = ["nearest", "bilinear", "bicubic", "area", "nearest-exact"]
+STYLE_MODEL_NAME = "fluxToolsRedux_reduxDev.safetensors"
+CLIP_VISION_NAME = "sigclip_vision_patch14_384.safetensors"
+GUIDANCE = 3.5
+TARGET_SIZE = 384
+IMAGE_MODES = ["居中裁剪（正方形）", "保持宽高比", "按遮罩自动裁剪"]
+DOWNSAMPLE_MODES = {
+    "最近邻": "nearest",
+    "双线性": "bilinear",
+    "双三次": "bicubic",
+    "区域平均": "area",
+    "精确最近邻": "nearest-exact",
+}
 
 
-def _dedupe_keep_order(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in values:
-        value = str(item or "").strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
+def _resolve_model(folder: str, preferred: str) -> str:
+    names = folder_paths.get_filename_list(folder)
+    if preferred in names:
+        return folder_paths.get_full_path_or_raise(folder, preferred)
+    preferred_lower = preferred.lower()
+    for name in names:
+        if name.lower() == preferred_lower:
+            return folder_paths.get_full_path_or_raise(folder, name)
+    raise FileNotFoundError(
+        f"GJJ ReduxAdvanced 缺少模型：models/{folder}/{preferred}"
+    )
 
 
-def _safe_filename_list(category: str) -> list[str]:
-    try:
-        return _dedupe_keep_order(list(folder_paths.get_filename_list(category)))
-    except Exception:
-        return []
+def _normalize_mask(mask: torch.Tensor, batch: int) -> torch.Tensor:
+    if not isinstance(mask, torch.Tensor):
+        raise TypeError("mask 必须是 ComfyUI MASK。")
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    elif mask.ndim == 4 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    elif mask.ndim == 4 and mask.shape[1] == 1:
+        mask = mask[:, 0]
+    if mask.ndim != 3:
+        raise ValueError(f"mask 维度应为 [B,H,W]，实际为 {tuple(mask.shape)}")
+    if mask.shape[0] == 1 and batch > 1:
+        mask = mask.repeat(batch, 1, 1)
+    elif mask.shape[0] != batch:
+        raise ValueError(f"image 与 mask 批次数不一致：{batch} != {mask.shape[0]}")
+    return mask.float().clamp_(0.0, 1.0)
 
 
-def _preferred_default(values: list[str], preferred: str) -> str:
-    preferred = str(preferred or "").strip()
-    if preferred and preferred in values:
-        return preferred
-    return values[0] if values else ""
+def _letterbox(image: torch.Tensor, mask: torch.Tensor, size: int):
+    batch, height, width, channels = image.shape
+    scale = size / max(height, width)
+    resized_h = max(1, round(height * scale))
+    resized_w = max(1, round(width * scale))
+    offset_y = (size - resized_h) // 2
+    offset_x = (size - resized_w) // 2
+
+    resized_image = F.interpolate(
+        image.movedim(-1, 1),
+        size=(resized_h, resized_w),
+        mode="bicubic",
+        antialias=True,
+    ).movedim(1, -1)
+    output_image = image.new_zeros((batch, size, size, channels))
+    output_image[:, offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized_image
+
+    resized_mask = F.interpolate(
+        mask.unsqueeze(1), size=(resized_h, resized_w), mode="bicubic", align_corners=False
+    )
+    output_mask = mask.new_zeros((batch, size, size))
+    output_mask[:, offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized_mask[:, 0]
+    return output_image.clamp_(0.0, 1.0), output_mask.clamp_(0.0, 1.0)
 
 
-def _standardize_mask(mask):
-    if mask is None:
-        return None
-    if len(mask.shape) == 2:
-        h, w = mask.shape
-        mask = mask.view(1, 1, h, w)
-    elif len(mask.shape) == 3:
-        b, h, w = mask.shape
-        mask = mask.view(b, 1, h, w)
-    return mask
-
-
-def _crop(img, mask, box, desired_size):
-    ox, oy, w, h = box
-    if mask is not None:
-        mask = torch.nn.functional.interpolate(mask, size=(h, w), mode="bicubic").view(-1, h, w, 1)
-    img = torch.nn.functional.interpolate(img.transpose(-1, 1), size=(w, h), mode="bicubic", antialias=True)
-    cropped_img = img[:, :, ox:(desired_size + ox), oy:(desired_size + oy)].transpose(1, -1)
-    cropped_mask = None if mask is None else mask[:, oy:(desired_size + oy), ox:(desired_size + ox), :]
-    return cropped_img, cropped_mask
-
-
-def _letterbox(img, mask, w, h, desired_size):
-    b, _, _, c = img.shape
-    img = torch.nn.functional.interpolate(img.transpose(-1, 1), size=(w, h), mode="bicubic", antialias=True).transpose(1, -1)
-    letterbox = torch.zeros(size=(b, desired_size, desired_size, c), device=img.device, dtype=img.dtype)
-    offsetx = (desired_size - w) // 2
-    offsety = (desired_size - h) // 2
-    letterbox[:, offsety:(offsety + h), offsetx:(offsetx + w), :] += img
-    img = letterbox
-    if mask is not None:
-        mask = torch.nn.functional.interpolate(mask, size=(h, w), mode="bicubic")
-        letterbox_mask = torch.zeros(size=(b, 1, desired_size, desired_size), device=mask.device, dtype=mask.dtype)
-        letterbox_mask[:, :, offsety:(offsety + h), offsetx:(offsetx + w)] += mask
-        mask = letterbox_mask.view(b, 1, desired_size, desired_size)
-    return img, mask
-
-
-def _get_bounding_box(mask, w, h, relative_margin, desired_size):
-    mask = mask.view(h, w)
-    margin_w = math.ceil(relative_margin * w)
-    margin_h = math.ceil(relative_margin * h)
-    indices = torch.nonzero(mask, as_tuple=False)
-    y_min, x_min = indices.min(dim=0).values
-    y_max, x_max = indices.max(dim=0).values
-    x_min = max(0, x_min.item() - margin_w)
-    y_min = max(0, y_min.item() - margin_h)
-    x_max = min(w, x_max.item() + margin_w)
-    y_max = min(h, y_max.item() + margin_h)
-
-    box_width = x_max - x_min
-    box_height = y_max - y_min
-    larger_edge = max(box_width, box_height, desired_size)
-
-    if box_width < larger_edge:
-        delta = larger_edge - box_width
-        left_space = x_min
-        right_space = w - x_max
-        expand_left = min(delta // 2, left_space)
-        expand_right = min(delta - expand_left, right_space)
-        expand_left += min(delta - (expand_left + expand_right), left_space - expand_left)
-        x_min -= expand_left
-        x_max += expand_right
-
-    if box_height < larger_edge:
-        delta = larger_edge - box_height
-        top_space = y_min
-        bottom_space = h - y_max
-        expand_top = min(delta // 2, top_space)
-        expand_bottom = min(delta - expand_top, bottom_space)
-        expand_top += min(delta - (expand_top + expand_bottom), top_space - expand_top)
-        y_min -= expand_top
-        y_max += expand_bottom
-
-    return max(0, x_min), max(0, y_min), min(w, x_max), min(h, y_max)
-
-
-def _patchify_mask(mask, patch_size=14):
-    if mask is None:
-        return None
-    b, img_size, _, _ = mask.shape
-    toks = img_size // patch_size
-    return torch.nn.MaxPool2d(kernel_size=(patch_size, patch_size), stride=patch_size)(mask.view(b, img_size, img_size)).view(b, toks, toks, 1)
-
-
-def _prepare_image_and_mask(clip_vision, image, mask, mode, autocrop_margin, desired_size=384):
-    mode_index = IMAGE_MODES.index(mode)
+def _prepare_image(image, mask, mode, margin, size):
     batch, height, width, _ = image.shape
-    if mode_index == 0:
-        img_size = min(height, width)
-        ratio = desired_size / img_size
-        resized_w, resized_h = round(width * ratio), round(height * ratio)
-        image, mask = _crop(image, _standardize_mask(mask), ((resized_w - desired_size) // 2, (resized_h - desired_size) // 2, resized_w, resized_h), desired_size)
-    elif mode_index == 1:
-        if mask is None:
-            mask = torch.ones(size=(batch, height, width), device=image.device, dtype=image.dtype)
-        img_size = max(height, width)
-        ratio = desired_size / img_size
-        resized_w, resized_h = round(width * ratio), round(height * ratio)
-        image, mask = _letterbox(image, _standardize_mask(mask), resized_w, resized_h, desired_size)
-    else:
-        if mask is None:
-            raise RuntimeError("模式为“autocrop with mask”时必须接入遮罩。")
-        bx, by, bx2, by2 = _get_bounding_box(mask, width, height, autocrop_margin, desired_size)
-        image = image[:, by:by2, bx:bx2, :]
-        mask = mask[:, by:by2, bx:bx2]
-        img_size = max(bx2 - bx, by2 - by)
-        ratio = desired_size / img_size
-        resized_w, resized_h = round((bx2 - bx) * ratio), round((by2 - by) * ratio)
-        image, mask = _letterbox(image, _standardize_mask(mask), resized_w, resized_h, desired_size)
-    return image, mask
+    if mode == "按遮罩自动裁剪":
+        active = torch.nonzero(mask.amax(dim=0) > 0, as_tuple=False)
+        if active.numel() == 0:
+            raise ValueError("按遮罩自动裁剪时，遮罩中必须包含非零区域。")
+        y1, x1 = active.amin(dim=0).tolist()
+        y2, x2 = active.amax(dim=0).tolist()
+        margin_x = math.ceil(width * margin)
+        margin_y = math.ceil(height * margin)
+        x1, x2 = max(0, x1 - margin_x), min(width, x2 + margin_x + 1)
+        y1, y2 = max(0, y1 - margin_y), min(height, y2 + margin_y + 1)
+        image, mask = image[:, y1:y2, x1:x2], mask[:, y1:y2, x1:x2]
+        return _letterbox(image, mask, size)
+    if mode == "保持宽高比":
+        return _letterbox(image, mask, size)
+
+    side = min(height, width)
+    y1 = (height - side) // 2
+    x1 = (width - side) // 2
+    image = image[:, y1:y1 + side, x1:x1 + side]
+    mask = mask[:, y1:y1 + side, x1:x1 + side]
+    output_image = F.interpolate(
+        image.movedim(-1, 1), size=(size, size), mode="bicubic", antialias=True
+    ).movedim(1, -1)
+    output_mask = F.interpolate(
+        mask.unsqueeze(1), size=(size, size), mode="bicubic", align_corners=False
+    )[:, 0]
+    return output_image.clamp_(0.0, 1.0), output_mask.clamp_(0.0, 1.0)
+
+
+def _model_choices(folder, preferred):
+    names = list(folder_paths.get_filename_list(folder))
+    if preferred in names:
+        names.remove(preferred)
+        names.insert(0, preferred)
+    return names or [preferred]
 
 
 class GJJ_ReduxAdvanced:
-    CATEGORY = "GJJ/📝 文本/条件编码"
-    FUNCTION = "apply_redux"
-    DESCRIPTION = "内部加载 CLIP Vision 与 Redux 风格模型，将图像风格特征编码后拼接到 conditioning，并支持遮罩与自动裁切。"
-    SEARCH_ALIASES = ["redux", "advanced redux", "style model", "advanced reflux control"]
-    RETURN_TYPES = ("CONDITIONING", "IMAGE", "MASK")
-    RETURN_NAMES = ("重绘条件输出", "重绘图像输出", "重绘遮罩输出")
-    OUTPUT_TOOLTIPS = (
-        "将 Redux 风格条件拼接到原 conditioning 后输出。",
-        "传出实际用于 Redux 编码的图像。",
-        "传出实际用于 Redux 编码的遮罩；如果未使用遮罩则为空。",
-    )
-
-    def __init__(self):
-        self._clip_vision_cache_name = None
-        self._clip_vision_cache = None
-        self._style_model_cache_name = None
-        self._style_model_cache = None
+    _cache_lock = threading.Lock()
+    _style_path = None
+    _style_model = None
+    _vision_path = None
+    _clip_vision = None
 
     @classmethod
     def INPUT_TYPES(cls):
-        clip_vision_models = _safe_filename_list("clip_vision") or [""]
-        style_models = _safe_filename_list("style_models") or [""]
         return {
             "required": {
-                "conditioning": ("CONDITIONING", {
-                    "display_name": "条件输入",
-                    "tooltip": "接入原始正向条件，节点会把 Redux 条件拼接到其后。",
-                }),
-                "image": ("IMAGE", {
-                    "display_name": "图像输入",
-                    "tooltip": "接入需要提取 Redux 风格特征的图像。",
-                }),
-                "clip_vision_name": (clip_vision_models, {
-                    "default": _preferred_default(clip_vision_models, DEFAULT_CLIP_VISION),
-                    "display_name": "CLIP视觉模型",
-                    "tooltip": "默认使用 sigclip_vision_patch14_384.safetensors。",
-                }),
-                "style_model_name": (style_models, {
-                    "default": _preferred_default(style_models, DEFAULT_STYLE_MODEL),
-                    "display_name": "风格模型",
-                    "tooltip": "默认使用 flux1-redux-dev.safetensors。",
-                }),
-                "downsampling_factor": ("FLOAT", {
-                    "default": 3.0,
-                    "min": 1.0,
-                    "max": 9.0,
-                    "step": 0.1,
-                    "display_name": "下采样倍率",
-                    "tooltip": "Redux 条件 token 的压缩倍率，越大越精简。",
-                }),
-                "downsampling_function": (DOWN_SAMPLE_MODES, {
-                    "default": "area",
-                    "display_name": "下采样方式",
-                    "tooltip": "Redux 条件下采样时使用的插值算法。",
-                }),
-                "mode": (IMAGE_MODES, {
-                    "default": "center crop (square)",
-                    "display_name": "图像模式",
-                    "tooltip": "控制图像如何被裁切或补边后送入 CLIP Vision。",
-                }),
-                "weight": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.01,
-                    "display_name": "权重",
-                    "tooltip": "Redux 条件整体强度。",
-                }),
+                "clip": ("CLIP", {"display_name": "文本编码器", "tooltip": "用于生成基础文本条件的 CLIP 模型。"}),
+                "image": ("IMAGE", {"display_name": "参考图像", "tooltip": "用于提取 Redux 图像特征的参考图。"}),
+                "正面提示词": ("STRING", {"default": "", "multiline": True, "dynamicPrompts": True, "tooltip": "使用输入 CLIP 编码的正面提示词；可通过控件菜单转换为外接输入。"}),
+                "引导强度": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1, "display": "hidden", "hidden": True, "tooltip": "写入 Flux conditioning 的 guidance 数值。"}),
+                "风格模型": (_model_choices("style_models", STYLE_MODEL_NAME), {"display": "hidden", "hidden": True, "tooltip": "Redux 风格模型，通常使用 fluxToolsRedux_reduxDev.safetensors。"}),
+                "视觉模型": (_model_choices("clip_vision", CLIP_VISION_NAME), {"display": "hidden", "hidden": True, "tooltip": "编码参考图的 CLIP Vision 模型。"}),
+                "下采样倍率": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 9.0, "step": 0.1, "display": "hidden", "hidden": True, "tooltip": "压缩 Redux 图像条件 token；1 表示不压缩。"}),
+                "下采样算法": (list(DOWNSAMPLE_MODES), {"default": "区域平均", "display": "hidden", "hidden": True, "tooltip": "图像条件标记下采样使用的插值算法。"}),
+                "图像处理模式": (IMAGE_MODES, {"default": "保持宽高比", "display": "hidden", "hidden": True, "tooltip": "参考图进入视觉模型前的裁剪或补边方式。"}),
+                "图像条件权重": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display": "hidden", "hidden": True, "tooltip": "Redux 图像条件的影响强度。"}),
+                "自动裁剪边距": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "display": "hidden", "hidden": True, "tooltip": "按遮罩自动裁剪时向外扩展的边距比例。"}),
             },
             "optional": {
-                "mask": ("MASK", {
-                    "display_name": "遮罩输入",
-                    "tooltip": "可选遮罩。使用 autocrop with mask 模式时必须接入。",
-                }),
-                "autocrop_margin": ("FLOAT", {
-                    "default": 0.1,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.01,
-                    "display_name": "自动裁切边距",
-                    "tooltip": "autocrop with mask 模式下，遮罩框额外向外扩张的比例。",
-                }),
+                "mask": ("MASK", {"display_name": "参考遮罩（可选）", "tooltip": "可选遮罩；未连接时自动使用覆盖整张参考图的全白遮罩。"}),
             },
         }
 
-    def _load_clip_vision(self, clip_vision_name: str):
-        if self._clip_vision_cache_name == clip_vision_name and self._clip_vision_cache is not None:
-            return self._clip_vision_cache
-        clip_path = folder_paths.get_full_path_or_raise("clip_vision", clip_vision_name)
-        clip_vision = comfy.clip_vision.load(clip_path)
-        if clip_vision is None:
-            raise RuntimeError("CLIP视觉模型无效，未能加载有效的 vision 模型。")
-        self._clip_vision_cache_name = clip_vision_name
-        self._clip_vision_cache = clip_vision
-        return clip_vision
+    RETURN_TYPES = ("CONDITIONING", "IMAGE", "MASK")
+    RETURN_NAMES = ("条件", "处理后图像", "处理后遮罩")
+    OUTPUT_TOOLTIPS = (
+        "融合文本、Flux 引导和 Redux 图像特征后的条件。",
+        "实际送入视觉模型的处理后参考图。",
+        "与处理后参考图空间一致的遮罩。",
+    )
+    FUNCTION = "apply"
+    CATEGORY = "GJJ/条件编码"
+    DESCRIPTION = (
+        "一体化 Redux 高级条件节点，默认只显示 CLIP、图像和遮罩接口；"
+        "点击“⚙️设置”可调整全部参数。"
+    )
+    GJJ_HELP = {
+        "标题": "Redux 高级条件",
+        "说明": "自动完成文本编码、Flux 引导、视觉模型编码和 Redux 风格条件拼接。",
+        "使用方法": [
+            "连接 CLIP 和参考图；遮罩可选，未连接时自动使用全白遮罩。",
+            "点击“🧠”管理模型；点击“⚙️”调整引导、下采样和图像处理参数。",
+            "将“条件”输出连接到采样流程的正向条件输入。",
+        ],
+        "模型": {
+            "风格模型": "默认使用 fluxToolsRedux_reduxDev.safetensors。",
+            "视觉模型": "默认使用 sigclip_vision_patch14_384.safetensors。",
+        },
+        "提示": "保持宽高比模式会将图像等比缩放并补黑边到视觉模型分辨率。",
+    }
 
-    def _load_style_model(self, style_model_name: str):
-        if self._style_model_cache_name == style_model_name and self._style_model_cache is not None:
-            return self._style_model_cache
-        style_model_path = folder_paths.get_full_path_or_raise("style_models", style_model_name)
-        style_model = comfy.sd.load_style_model(style_model_path)
-        self._style_model_cache_name = style_model_name
-        self._style_model_cache = style_model
-        return style_model
+    @classmethod
+    def _load_models(cls, style_name, vision_name):
+        style_path = _resolve_model("style_models", style_name)
+        vision_path = _resolve_model("clip_vision", vision_name)
+        with cls._cache_lock:
+            if cls._style_model is None or cls._style_path != style_path:
+                cls._style_model = comfy.sd.load_style_model(style_path)
+                cls._style_path = style_path
+            if cls._clip_vision is None or cls._vision_path != vision_path:
+                cls._clip_vision = comfy.clip_vision.load(vision_path)
+                cls._vision_path = vision_path
+                if cls._clip_vision is None:
+                    raise RuntimeError(f"CLIP Vision 模型无效：{vision_path}")
+            return cls._style_model, cls._clip_vision
 
-    def apply_redux(
-        self,
-        conditioning,
-        image,
-        clip_vision_name,
-        style_model_name,
-        downsampling_factor,
-        downsampling_function,
-        mode,
-        weight,
-        mask=None,
-        autocrop_margin=0.0,
-    ):
-        clip_vision = self._load_clip_vision(clip_vision_name)
-        style_model = self._load_style_model(style_model_name)
+    def apply(self, clip, image, 正面提示词="", 引导强度=3.5, 风格模型=STYLE_MODEL_NAME,
+              视觉模型=CLIP_VISION_NAME, 下采样倍率=1.0, 下采样算法="区域平均",
+              图像处理模式="保持宽高比", 图像条件权重=1.0, 自动裁剪边距=0.1,
+              mask=None):
+        if clip is None:
+            raise ValueError("clip 输入不能为空。")
+        if not isinstance(image, torch.Tensor) or image.ndim != 4:
+            raise ValueError("image 必须是形状为 [B,H,W,C] 的 ComfyUI IMAGE。")
 
-        desired_size = 384
-        patch_size = 14
-        try:
-            if clip_vision.model.vision_model.embeddings.position_embedding.weight.shape[0] == 1024:
-                desired_size = 512
-                patch_size = 16
-        except Exception:
-            pass
+        tokens = clip.tokenize(正面提示词)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        conditioning = conditioning_set_values(conditioning, {"guidance": float(引导强度)})
 
-        prepared_image, output_mask = _prepare_image_and_mask(
-            clip_vision,
-            image,
-            mask,
-            mode,
-            float(autocrop_margin),
-            desired_size,
-        )
-        clip_vision_output = clip_vision.encode_image(prepared_image)
-        patched_mask = _patchify_mask(output_mask, patch_size)
-
-        cond = style_model.get_cond(clip_vision_output).flatten(start_dim=0, end_dim=1).unsqueeze(dim=0)
-        b, t, h = cond.shape
-        m = int(np.sqrt(t))
-
-        if float(downsampling_factor) > 1:
-            cond = cond.view(b, m, m, h)
-            if patched_mask is not None:
-                cond = cond * patched_mask
-            downsampled_size = (round(m / float(downsampling_factor)), round(m / float(downsampling_factor)))
-            cond = torch.nn.functional.interpolate(
-                cond.transpose(1, -1),
-                size=downsampled_size,
-                mode=downsampling_function,
+        style_model, clip_vision = self._load_models(风格模型, 视觉模型)
+        image = image.float().clamp(0.0, 1.0)
+        if mask is None:
+            mask = torch.ones(
+                (image.shape[0], image.shape[1], image.shape[2]),
+                dtype=image.dtype,
+                device=image.device,
             )
-            cond = cond.transpose(1, -1).reshape(b, -1, h)
-            if patched_mask is not None:
-                patched_mask = torch.nn.functional.interpolate(
-                    patched_mask.view(b, m, m, 1).transpose(1, -1),
-                    size=downsampled_size,
-                    mode="area",
-                ).transpose(-1, 1)
-
-        cond = cond * (float(weight) * float(weight))
-        if patched_mask is not None:
-            keep_mask = (patched_mask > 0).reshape(b, -1)
-            max_len = keep_mask.sum(dim=1).max().item()
-            padded_embeddings = torch.zeros((b, max_len, h), dtype=cond.dtype, device=cond.device)
-            for index in range(b):
-                filtered = cond[index][keep_mask[index]]
-                padded_embeddings[index, :filtered.size(0)] = filtered
-            cond = padded_embeddings
-
-        output_conditioning = []
-        for item in conditioning:
-            output_conditioning.append([torch.cat((item[0], cond), dim=1), item[1].copy()])
-
-        return (
-            output_conditioning,
-            prepared_image,
-            output_mask.squeeze(-1) if output_mask is not None else None,
+        else:
+            mask = _normalize_mask(mask, image.shape[0]).to(image.device)
+        processed_image, processed_mask = _prepare_image(
+            image, mask, 图像处理模式, float(自动裁剪边距), TARGET_SIZE
         )
 
+        clip_vision_output = clip_vision.encode_image(processed_image)
+        redux = style_model.get_cond(clip_vision_output).flatten(0, 1).unsqueeze(0)
+        if float(下采样倍率) > 1.0:
+            batch, token_count, channels = redux.shape
+            side = math.isqrt(token_count)
+            if side * side != token_count:
+                raise ValueError(f"Redux token 数量 {token_count} 无法排列为正方形。")
+            target = max(1, round(side / float(下采样倍率)))
+            algorithm = DOWNSAMPLE_MODES[下采样算法]
+            interpolate_args = {"size": (target, target), "mode": algorithm}
+            if algorithm in {"bilinear", "bicubic"}:
+                interpolate_args["align_corners"] = False
+            redux = F.interpolate(
+                redux.reshape(batch, side, side, channels).movedim(-1, 1),
+                **interpolate_args,
+            ).movedim(1, -1).reshape(batch, -1, channels)
+        redux = redux * (float(图像条件权重) ** 2)
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ReduxAdvanced}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠 Redux高级条件器"}
+        output = []
+        for cond, metadata in conditioning:
+            batch_redux = redux.to(device=cond.device, dtype=cond.dtype)
+            if batch_redux.shape[0] == 1 and cond.shape[0] > 1:
+                batch_redux = batch_redux.repeat(cond.shape[0], 1, 1)
+            elif cond.shape[0] == 1 and batch_redux.shape[0] > 1:
+                cond = cond.repeat(batch_redux.shape[0], 1, 1)
+            elif batch_redux.shape[0] != cond.shape[0]:
+                raise ValueError(
+                    f"文本 conditioning 与 Redux 图片批次数不兼容："
+                    f"{cond.shape[0]} != {batch_redux.shape[0]}"
+                )
+            output.append([torch.cat((cond, batch_redux), dim=1), metadata.copy()])
+
+        return output, processed_image, processed_mask
+
+
+NODE_CLASS_MAPPINGS = {"GJJ_ReduxAdvanced": GJJ_ReduxAdvanced}
+NODE_DISPLAY_NAME_MAPPINGS = {"GJJ_ReduxAdvanced": "GJJ Redux高级条件"}

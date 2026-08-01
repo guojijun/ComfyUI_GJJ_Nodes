@@ -706,4 +706,4 @@ class GJJ_VideoDepthAnything:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoDepthAnything}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🕳️ 视频深度估计"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🕳️ 视频深度估计(DepthAnything)"}

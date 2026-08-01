@@ -329,13 +329,25 @@ def _build_lora_patches(state_dict, model_state_dict):
             skipped.append((down_key, up_key, "not 2D tensors"))
             continue
 
-        out_features, in_features = target_shape[0], target_shape[1]
-        if up.shape[0] == out_features and down.shape[1] == in_features and up.shape[1] == down.shape[0]:
+        out_features, stored_in_features = target_shape[0], target_shape[1]
+        logical_in_features = int(down.shape[1])
+        direct_shape = logical_in_features == stored_in_features
+        packed_int4_shape = logical_in_features == stored_in_features * 2
+        if (
+            up.shape[0] == out_features
+            and (direct_shape or packed_int4_shape)
+            and up.shape[1] == down.shape[0]
+        ):
             rank = down.shape[0]
-        elif down.shape[0] == in_features and up.shape[1] == out_features and down.shape[1] == up.shape[0]:
+        elif (
+            (down.shape[0] == stored_in_features or down.shape[0] == stored_in_features * 2)
+            and up.shape[1] == out_features
+            and down.shape[1] == up.shape[0]
+        ):
             down = down.t().contiguous()
             up = up.t().contiguous()
             rank = down.shape[0]
+            packed_int4_shape = down.shape[1] == stored_in_features * 2
         else:
             skipped.append((down_key, up_key, f"shape does not match {target_key}"))
             continue
@@ -354,6 +366,14 @@ def _build_lora_patches(state_dict, model_state_dict):
             keys.add(alpha_key)
         patches[target_key] = LoRAAdapter(keys, (up, down, alpha, None, None, None))
         loaded_keys.update(keys)
+
+        if packed_int4_shape:
+            logging.debug(
+                "GJJ Krea2 control matched logical LoRA shape %s to packed INT4 target %s (%s).",
+                tuple((out_features, down.shape[1])),
+                target_shape,
+                target_key,
+            )
 
     if skipped:
         logging.info("GJJ Krea2 control skipped %d LoRA tensor pairs with incompatible shapes.", len(skipped))

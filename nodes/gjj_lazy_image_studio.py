@@ -162,6 +162,17 @@ LTX_NAG_SCALE = 11.0
 LTX_NAG_ALPHA = 0.25
 LTX_NAG_TAU = 2.5
 REFERENCE_IMAGE_MEGAPIXELS = 1.0
+LAZY_IMAGE_RESIZE_MODES = ("宽高", "等比", "长边", "像素")
+LAZY_IMAGE_FIT_MODES = ("拉伸", "补边", "留边", "裁剪")
+LAZY_IMAGE_CROP_POSITIONS = ("上", "下", "左", "右", "中")
+DEFAULT_LAZY_IMAGE_RESIZE_CONFIG = {
+    "mode": "宽高",
+    "fit_mode": "裁剪",
+    "crop_position": "上",
+    "scale_percent": 100.0,
+    "long_side_length": 1024,
+    "total_pixel_k": 260,
+}
 
 
 def _is_checkpoint_model_source(model_source: Any, ckpt_name: Any = "") -> bool:
@@ -2151,6 +2162,223 @@ def _ceil_to_multiple(value: int, multiple: int = 8) -> int:
     )
 
 
+def _lazy_image_resize_config(value: Any) -> dict[str, Any]:
+    config = dict(DEFAULT_LAZY_IMAGE_RESIZE_CONFIG)
+    if isinstance(value, dict):
+        config.update(value)
+    else:
+        try:
+            parsed = json.loads(str(value or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                config.update(parsed)
+        except Exception:
+            pass
+    if str(config.get("mode") or "") not in LAZY_IMAGE_RESIZE_MODES:
+        config["mode"] = DEFAULT_LAZY_IMAGE_RESIZE_CONFIG["mode"]
+    if str(config.get("fit_mode") or "") not in LAZY_IMAGE_FIT_MODES:
+        config["fit_mode"] = DEFAULT_LAZY_IMAGE_RESIZE_CONFIG["fit_mode"]
+    if str(config.get("crop_position") or "") not in LAZY_IMAGE_CROP_POSITIONS:
+        config["crop_position"] = DEFAULT_LAZY_IMAGE_RESIZE_CONFIG["crop_position"]
+    try:
+        config["scale_percent"] = max(0.1, min(10000.0, float(config.get("scale_percent", 100.0))))
+    except (TypeError, ValueError):
+        config["scale_percent"] = 100.0
+    try:
+        config["long_side_length"] = max(8, min(16384, int(float(config.get("long_side_length", 1024)))))
+    except (TypeError, ValueError):
+        config["long_side_length"] = 1024
+    try:
+        config["total_pixel_k"] = max(1, min(1000000, int(float(config.get("total_pixel_k", 260)))))
+    except (TypeError, ValueError):
+        config["total_pixel_k"] = 260
+    return config
+
+
+def _largest_input_canvas_size(
+    pairs: list[dict[str, Any]], fallback_width: int, fallback_height: int
+) -> tuple[int, int]:
+    candidates = [
+        pair.get("image")
+        for pair in pairs
+        if isinstance(pair.get("image"), torch.Tensor) and pair["image"].ndim >= 3
+    ]
+    if not candidates:
+        return int(fallback_width), int(fallback_height)
+    largest = max(
+        candidates,
+        key=lambda image: int(image.shape[1]) * int(image.shape[2]),
+    )
+    return int(largest.shape[2]), int(largest.shape[1])
+
+
+def _lazy_resize_target_size(
+    base_width: int, base_height: int, config: dict[str, Any]
+) -> tuple[int, int]:
+    base_width = max(8, int(base_width))
+    base_height = max(8, int(base_height))
+    mode = str(config.get("mode") or "宽高")
+    if mode == "等比":
+        scale = float(config.get("scale_percent", 100.0)) / 100.0
+        target_width = int(round(base_width * scale))
+        target_height = int(round(base_height * scale))
+    elif mode == "长边":
+        long_side = max(8, int(config.get("long_side_length", 1024)))
+        scale = float(long_side) / float(max(base_width, base_height))
+        target_width = int(round(base_width * scale))
+        target_height = int(round(base_height * scale))
+    elif mode == "像素":
+        total_pixels = max(1, int(config.get("total_pixel_k", 260))) * 1000
+        aspect_ratio = float(base_width) / float(max(1, base_height))
+        target_width = int(round(math.sqrt(total_pixels * aspect_ratio)))
+        target_height = int(round(target_width / max(1e-8, aspect_ratio)))
+    else:
+        target_width = base_width
+        target_height = base_height
+    target_width = min(16384, max(8, int(target_width)))
+    target_height = min(16384, max(8, int(target_height)))
+    return _ceil_to_multiple(target_width, 8), _ceil_to_multiple(target_height, 8)
+
+
+def _lazy_resize_axis_offset(extra: int, position: str, axis: str) -> int:
+    extra = max(0, int(extra))
+    if axis == "x":
+        if position == "左":
+            return 0
+        if position == "右":
+            return extra
+    else:
+        if position == "上":
+            return 0
+        if position == "下":
+            return extra
+    return extra // 2
+
+
+def _lazy_resize_image_and_mask(
+    image: torch.Tensor,
+    mask: torch.Tensor | None,
+    target_width: int,
+    target_height: int,
+    fit_mode: str,
+    crop_position: str,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if image.ndim == 3:
+        image = image.unsqueeze(0)
+    source_height = int(image.shape[1])
+    source_width = int(image.shape[2])
+    target_width = max(8, int(target_width))
+    target_height = max(8, int(target_height))
+    source_mask = _ensure_mask_bhw(mask)
+
+    def resize_mask(output_width: int, output_height: int) -> torch.Tensor | None:
+        if source_mask is None:
+            return None
+        return comfy.utils.common_upscale(
+            source_mask.unsqueeze(1),
+            int(output_width),
+            int(output_height),
+            "bilinear",
+            "disabled",
+        )[:, 0, :, :].clamp(0.0, 1.0)
+
+    if source_width == target_width and source_height == target_height:
+        return image.contiguous(), source_mask
+
+    samples = image.movedim(-1, 1)
+    fit_mode = fit_mode if fit_mode in LAZY_IMAGE_FIT_MODES else "裁剪"
+    crop_position = crop_position if crop_position in LAZY_IMAGE_CROP_POSITIONS else "上"
+    if fit_mode == "拉伸":
+        resized = comfy.utils.common_upscale(
+            samples, target_width, target_height, "lanczos", "disabled"
+        ).movedim(1, -1).contiguous()
+        resized_mask = resize_mask(target_width, target_height)
+        return resized, resized_mask
+
+    if fit_mode == "裁剪":
+        scale = max(
+            float(target_width) / float(max(1, source_width)),
+            float(target_height) / float(max(1, source_height)),
+        )
+    else:
+        scale = min(
+            float(target_width) / float(max(1, source_width)),
+            float(target_height) / float(max(1, source_height)),
+        )
+        if fit_mode == "补边":
+            scale = min(1.0, scale)
+    resized_width = max(1, int(round(source_width * scale)))
+    resized_height = max(1, int(round(source_height * scale)))
+    resized = comfy.utils.common_upscale(
+        samples, resized_width, resized_height, "lanczos", "disabled"
+    ).movedim(1, -1).contiguous()
+    resized_mask = resize_mask(resized_width, resized_height)
+
+    if fit_mode == "裁剪":
+        left = _lazy_resize_axis_offset(resized_width - target_width, crop_position, "x")
+        top = _lazy_resize_axis_offset(resized_height - target_height, crop_position, "y")
+        output = resized[:, top : top + target_height, left : left + target_width, :]
+        output_mask = (
+            None
+            if resized_mask is None
+            else resized_mask[:, top : top + target_height, left : left + target_width]
+        )
+        return output.contiguous(), None if output_mask is None else output_mask.contiguous()
+
+    channels = int(resized.shape[-1])
+    output = torch.ones(
+        (int(resized.shape[0]), target_height, target_width, channels),
+        dtype=resized.dtype,
+        device=resized.device,
+    )
+    left = _lazy_resize_axis_offset(target_width - resized_width, crop_position, "x")
+    top = _lazy_resize_axis_offset(target_height - resized_height, crop_position, "y")
+    output[:, top : top + resized_height, left : left + resized_width, :] = resized
+    output_mask = None
+    if resized_mask is not None:
+        output_mask = torch.ones(
+            (int(resized_mask.shape[0]), target_height, target_width),
+            dtype=resized_mask.dtype,
+            device=resized_mask.device,
+        )
+        output_mask[:, top : top + resized_height, left : left + resized_width] = resized_mask
+    return output.contiguous(), None if output_mask is None else output_mask.contiguous()
+
+
+def _align_lazy_image_pairs(
+    pairs: list[dict[str, Any]],
+    mask: torch.Tensor | None,
+    main_image_index: int,
+    target_width: int,
+    target_height: int,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], torch.Tensor | None]:
+    if not pairs:
+        return pairs, _ensure_mask_bhw(mask)
+    main_slot = max(0, min(len(pairs) - 1, int(main_image_index) - 1))
+    aligned: list[dict[str, Any]] = []
+    aligned_main_mask = _ensure_mask_bhw(mask)
+    for index, pair in enumerate(pairs):
+        item = dict(pair)
+        image = pair.get("image")
+        if not isinstance(image, torch.Tensor):
+            aligned.append(item)
+            continue
+        image_mask = aligned_main_mask if index == main_slot else None
+        fitted_image, fitted_mask = _lazy_resize_image_and_mask(
+            image,
+            image_mask,
+            target_width,
+            target_height,
+            str(config.get("fit_mode") or "裁剪"),
+            str(config.get("crop_position") or "上"),
+        )
+        item["image"] = fitted_image
+        if index == main_slot:
+            aligned_main_mask = fitted_mask
+        aligned.append(item)
+    return aligned, aligned_main_mask
+
+
 def _largest_pair_canvas_size(
     pairs: list[dict[str, Any]], fallback_width: int = 1024, fallback_height: int = 1024
 ) -> tuple[int, int]:
@@ -2732,7 +2960,7 @@ class GJJ_LazyImageStudio:
                         {
                             "default": True,
                             "display_name": "📐 使用输入图尺寸",
-                            "tooltip": "第一个图像输入有连接时，开启后生成宽高使用输入图尺寸；关闭后使用面板宽高。",
+                            "tooltip": "有图像输入时，单图使用原图尺寸；多图使用面积最大的图片为尺寸基准，再按尺寸面板规则统一处理。关闭后使用面板宽高。",
                             "hidden": True,
                             "display": "hidden",
                             "forceInput": False,
@@ -2844,6 +3072,18 @@ class GJJ_LazyImageStudio:
                             "multiline": True,
                             "display_name": "全局提示词",
                             "tooltip": "填写后会自动添加到每一条正向提示词的最前面。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
+                    "image_resize_config": (
+                        "STRING",
+                        {
+                            "default": json.dumps(DEFAULT_LAZY_IMAGE_RESIZE_CONFIG, ensure_ascii=False),
+                            "multiline": False,
+                            "display_name": "图片尺寸修改配置",
+                            "tooltip": "📐 尺寸面板自动维护：尺寸模式、图片适配方法和保留位置。",
                             "hidden": True,
                             "display": "hidden",
                             "forceInput": False,
@@ -3726,6 +3966,13 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
+        image_resize_config_value = _unwrap_list_input(
+            kwargs.pop("image_resize_config", "")
+        )
+        image_resize_config = _lazy_image_resize_config(image_resize_config_value)
+        image_resize_config_json = json.dumps(
+            image_resize_config, ensure_ascii=False, sort_keys=True
+        )
         global_prompt = str(_unwrap_list_input(kwargs.pop("global_prompt", "")) or "").strip()
         raw_prompt_items = _prompt_batch_items(prompt)
         prompt_items = list(raw_prompt_items)
@@ -3922,8 +4169,15 @@ class GJJ_LazyImageStudio:
                 ]
             if test_entries:
                 test_started = time.time()
-                test_width = max(8, int(width))
-                test_height = max(8, int(height))
+                test_base_width = max(8, int(width))
+                test_base_height = max(8, int(height))
+                if use_input_image_size and pairs:
+                    test_base_width, test_base_height = _largest_input_canvas_size(
+                        pairs, test_base_width, test_base_height
+                    )
+                test_width, test_height = _lazy_resize_target_size(
+                    test_base_width, test_base_height, image_resize_config
+                )
                 test_seed = int(seed)
                 test_family_clip_name = str(clip_name1 or "")
                 test_family_vae_name = str(vae_name or "")
@@ -4022,6 +4276,7 @@ class GJJ_LazyImageStudio:
                             enable_fp16_accumulation_setting=enable_fp16_accumulation_setting,
                             fp16_accumulation=fp16_accumulation,
                             missing_sage_attention_policy=missing_sage_attention_policy,
+                            image_resize_config=image_resize_config_json,
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
@@ -4133,6 +4388,7 @@ class GJJ_LazyImageStudio:
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
                 "use_input_image_size": bool(use_input_image_size),
+                "image_resize_config": image_resize_config,
                 **optimization_params,
             }
             return {
@@ -4337,17 +4593,41 @@ class GJJ_LazyImageStudio:
                     "Krea2 未收到参考图：切换为文生图，并跳过身份编辑 LoRA。",
                 )
             if use_input_image_size and pairs and not is_krea2_style_reference:
-                first_image = pairs[0].get("image")
-                if isinstance(first_image, torch.Tensor) and first_image.ndim >= 3:
-                    input_width = _ceil_to_multiple(int(first_image.shape[2]), 8)
-                    input_height = _ceil_to_multiple(int(first_image.shape[1]), 8)
-                    if input_width != int(width) or input_height != int(height):
-                        print(
-                            "[GJJ] LazyImageStudio 使用第一个图像输入尺寸："
-                            f"{int(width)}x{int(height)} -> {input_width}x{input_height}"
-                        )
-                    width = input_width
-                    height = input_height
+                input_width, input_height = _largest_input_canvas_size(
+                    pairs, int(width), int(height)
+                )
+                if input_width != int(width) or input_height != int(height):
+                    print(
+                        "[GJJ] LazyImageStudio 使用最大输入图尺寸："
+                        f"{int(width)}x{int(height)} -> {input_width}x{input_height}"
+                    )
+                width = input_width
+                height = input_height
+            width, height = _lazy_resize_target_size(
+                int(width), int(height), image_resize_config
+            )
+            if pairs:
+                original_shapes = [
+                    f"{int(pair['image'].shape[2])}x{int(pair['image'].shape[1])}"
+                    for pair in pairs
+                    if isinstance(pair.get("image"), torch.Tensor)
+                    and pair["image"].ndim >= 3
+                ]
+                pairs, mask = _align_lazy_image_pairs(
+                    pairs,
+                    mask,
+                    int(main_image_index),
+                    int(width),
+                    int(height),
+                    image_resize_config,
+                )
+                print(
+                    "[GJJ] LazyImageStudio 输入图片统一尺寸："
+                    f"{', '.join(original_shapes) or '未知'} -> {int(width)}x{int(height)}；"
+                    f"模式={image_resize_config['mode']}，"
+                    f"适配={image_resize_config['fit_mode']}，"
+                    f"位置={image_resize_config['crop_position']}"
+                )
             preset = dict(preset)
             preset["resolved_unet_name"] = str(unet_name or "")
             preset["resolved_ckpt_name"] = str(ckpt_name or "")
@@ -4403,6 +4683,7 @@ class GJJ_LazyImageStudio:
                     "disable_reference_auto_mask": _as_bool(disable_reference_auto_mask),
                     "force_empty_latent_reference": _as_bool(force_empty_latent_reference),
                     "use_input_image_size": bool(use_input_image_size),
+                    "image_resize_config": image_resize_config,
                     "pairs": _pairs_signature(pairs),
                     "krea2_edit_lora_strength": float(krea2_edit_lora_strength),
                     "krea2_style_reference": bool(is_krea2_style_reference),
@@ -4944,6 +5225,7 @@ class GJJ_LazyImageStudio:
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
                 "use_input_image_size": bool(use_input_image_size),
+                "image_resize_config": image_resize_config,
                 **optimization_params,
             }
 

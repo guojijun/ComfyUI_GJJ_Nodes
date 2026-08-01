@@ -1,8 +1,10 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { gjjOpenMediaBrowser } from "./gjj_common_media_preview.js";
 
 const TARGET = "GJJ_SeedVR2ImageUpscaler";
 const PANEL_WIDGET = "gjj_seedvr2_live_preview_v2";
+const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 
 function isTarget(node) {
 	return String(node?.comfyClass || node?.type || "") === TARGET;
@@ -35,6 +37,24 @@ function ensurePanel(node) {
 	root.style.cssText = "display:none;width:100%;box-sizing:border-box;padding:4px 0;";
 	const image = document.createElement("img");
 	image.alt = "当前视频段首帧";
+	image.draggable = true;
+	image.title = "点击放大预览；拖到空白画布可创建 GJJ_AnyPreview，也可拖到已有 GJJ_AnyPreview。";
+	image.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const mediaItem = image.__gjjSeedvr2BrowserItem;
+		if (mediaItem?.url || mediaItem?.filename) gjjOpenMediaBrowser(mediaItem);
+	});
+	image.addEventListener("dragstart", (event) => {
+		const payload = image.__gjjAnyPreviewPayload;
+		if (!event.dataTransfer || !payload?.filename) {
+			event.preventDefault();
+			return;
+		}
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
+		event.dataTransfer.setData("text/plain", String(payload.filename));
+	});
 	image.style.cssText = "display:block;width:100%;height:auto;object-fit:contain;border-radius:8px;background:#05090c;";
 	const meta = document.createElement("div");
 	meta.style.cssText = "padding:5px 2px 0;color:#63d5ff;font:700 12px sans-serif;";
@@ -70,6 +90,20 @@ function showPreview(node, detail = {}) {
 	if (!isTarget(node)) return;
 	const state = ensurePanel(node);
 	const url = previewUrl(node, detail);
+	const previewItem = detail?.preview_image;
+	const fallbackFilename = String(detail.preview_filename || `seedvr2_preview_${safeNodeId(node)}.png`);
+	state.image.__gjjAnyPreviewPayload = {
+		filename: String(previewItem?.filename || fallbackFilename),
+		subfolder: String(previewItem?.subfolder ?? "GJJ"),
+		type: String(previewItem?.type || "temp"),
+		media_type: "image",
+	};
+	state.image.__gjjSeedvr2BrowserItem = {
+		...state.image.__gjjAnyPreviewPayload,
+		kind: "image",
+		title: "SeedVR2 放大预览",
+		url,
+	};
 	if (state.lastUrl === url) return;
 	const loader = new Image();
 	loader.onload = () => {

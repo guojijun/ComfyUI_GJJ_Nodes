@@ -2363,6 +2363,28 @@ function anyPreviewNodeAtClientPoint(clientX, clientY) {
 	return null;
 }
 
+function mediaCanvasDropAllowed(clientX, clientY) {
+	const canvas = app.canvas?.canvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+		return false;
+	}
+	if (anyPreviewNodeAtClientPoint(clientX, clientY)) return true;
+	const graph = app.canvas?.graph || app.graph;
+	const [canvasX, canvasY] = canvasPointFromClient(clientX, clientY);
+	if (typeof graph?.getNodeOnPos === "function") {
+		return !graph.getNodeOnPos(canvasX, canvasY, app.canvas?.visible_nodes);
+	}
+	const nodes = Array.isArray(graph?._nodes) ? graph._nodes : [];
+	return !nodes.some((node) => {
+		const x = Number(node?.pos?.[0] || 0);
+		const y = Number(node?.pos?.[1] || 0);
+		const width = Number(node?.size?.[0] || 0);
+		const height = Number(node?.size?.[1] || 0);
+		return canvasX >= x && canvasX <= x + width && canvasY >= y && canvasY <= y + height;
+	});
+}
+
 function canvasPointFromClient(clientX, clientY) {
 	const event = { clientX: Number(clientX), clientY: Number(clientY) };
 	if (app.canvas?.convertEventToCanvasOffset) {
@@ -2460,14 +2482,17 @@ function installAnyPreviewCanvasDropTarget() {
 	if (document.__gjjAnyPreviewCanvasDropTargetInstalled) return;
 	document.__gjjAnyPreviewCanvasDropTargetInstalled = true;
 	document.addEventListener("dragover", (event) => {
-		if (!hasFileBrowserDrop(event) && !Array.from(event?.dataTransfer?.types || []).includes(GJJ_MEDIA_DRAG_MIME)) return;
+		const hasMedia = Array.from(event?.dataTransfer?.types || []).includes(GJJ_MEDIA_DRAG_MIME);
+		if (!hasFileBrowserDrop(event) && !hasMedia) return;
 		if (event.target?.closest?.(".gjj-file-browser")) return;
+		if (hasMedia && !mediaCanvasDropAllowed(event.clientX, event.clientY)) return;
 		event.preventDefault();
 		if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 	});
 	document.addEventListener("drop", (event) => {
 		const mediaPayload = mediaDropPayload(event);
 		if (mediaPayload) {
+			if (!mediaCanvasDropAllowed(event.clientX, event.clientY)) return;
 			event.preventDefault();
 			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 			Promise.resolve(globalThis.__gjjAnyPreviewImportMediaAtPoint(mediaPayload, event.clientX, event.clientY)).catch((error) => {

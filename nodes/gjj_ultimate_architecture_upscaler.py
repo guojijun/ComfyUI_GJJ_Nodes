@@ -56,6 +56,7 @@ DEFAULT_NEGATIVE_PROMPT = (
     "melted furniture, duplicate objects, broken windows, deformed architecture, text, watermark, logo"
 )
 DEFAULT_UPSCALE_MODEL = "2xNomosUni_span_multijpg_ldl.pth"
+VISIBLE_SOCKET_INPUTS = {"image", "model", "clip", "vae"}
 
 
 def _normalize_text(value: Any) -> str:
@@ -163,11 +164,27 @@ class GJJ_UltimateArchitectureUpscaler:
         "先经过内部放大模型或 Lanczos 放大的基础图像，可用于检查底图放大质量。",
         "再经过 Ultimate 分块重绘和接缝修复后的最终图像。",
     )
+    GJJ_HELP = {
+        "标题": "建筑装饰终极放大器",
+        "说明": "整合基础超分、建筑细节提示、分块重绘和接缝修复。",
+        "使用方法": [
+            "连接输入图像、模型、文本编码器和 VAE。",
+            "使用主面板的一排 emoji 按钮分别打开对应类别的浮动参数窗口。",
+            "浮窗互斥，并固定显示在被点击按钮下方。",
+        ],
+        "按钮": {
+            "📝": "提示词与建筑细节预设。",
+            "🔍": "基础放大模型和目标尺寸。",
+            "🎛️": "采样与重绘参数。",
+            "🧩": "分块尺寸、批次和解码参数。",
+            "🩹": "接缝修复参数。",
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
         upscale_models = _list_upscale_models() or [""]
-        return {
+        inputs = {
             "required": {
                 "image": ("IMAGE", {
                     "display_name": "输入图像",
@@ -374,6 +391,12 @@ class GJJ_UltimateArchitectureUpscaler:
                 }),
             }
         }
+        for name, definition in inputs["required"].items():
+            if name in VISIBLE_SOCKET_INPUTS or len(definition) < 2 or not isinstance(definition[1], dict):
+                continue
+            definition[1]["display"] = "hidden"
+            definition[1]["hidden"] = True
+        return inputs
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):

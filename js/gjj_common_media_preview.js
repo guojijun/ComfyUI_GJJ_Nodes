@@ -653,7 +653,16 @@ export function gjjOpenMediaBrowser(item) {
 }
 
 function createMediaElement(item, isSingle, onLayout) {
-	const url = gjjMediaItemToUrl(item);
+	const previewItem = item?.preview_filename
+		? {
+			...item,
+			url: "",
+			filename: item.preview_filename,
+			subfolder: item.preview_subfolder || item.subfolder || "",
+			type: item.preview_type || item.type || "temp",
+		}
+		: item;
+	const url = gjjMediaItemToUrl(previewItem);
 	const stage = document.createElement("div");
 	stage.className = `gjj-common-media-stage gjj-common-media-${item.kind || "image"}-stage`;
 	if (!url) {

@@ -15,6 +15,9 @@ import folder_paths
 
 
 GJJ_TEMP_SUBFOLDER = "GJJ"
+GJJ_PREVIEW_MAX_EDGE = 512
+GJJ_PREVIEW_JPEG_QUALITY = 82
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
 
 
 def gjjutils_temp_root() -> Path:
@@ -67,7 +70,67 @@ def gjjutils_unique_temp_path(prefix: str = "gjj_", suffix: str = ".bin") -> Pat
     return gjjutils_temp_path(filename)
 
 
-def gjjutils_write_temp_bytes(content: bytes, suffix: str = ".bin") -> dict[str, Any]:
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    if path.exists():
+        return
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        try:
+            os.replace(temporary, path)
+        except FileExistsError:
+            pass
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _attach_jpeg_preview(info: dict[str, Any], image: Image.Image) -> dict[str, Any]:
+    filename = str(info.get("filename") or "").strip()
+    if not filename:
+        return info
+    preview = ImageOps.exif_transpose(image).convert("RGB")
+    preview.thumbnail(
+        (GJJ_PREVIEW_MAX_EDGE, GJJ_PREVIEW_MAX_EDGE),
+        Image.Resampling.LANCZOS,
+    )
+    original_suffix = Path(filename).suffix.lower()
+    preview_name = (
+        f"{Path(filename).stem}.jpg"
+        if original_suffix not in {".jpg", ".jpeg"}
+        else f"{Path(filename).stem}_preview.jpg"
+    )
+    preview_path = gjjutils_temp_path(preview_name)
+    if not preview_path.exists():
+        buffer = BytesIO()
+        preview.save(
+            buffer,
+            format="JPEG",
+            quality=GJJ_PREVIEW_JPEG_QUALITY,
+            optimize=True,
+        )
+        _atomic_write_bytes(preview_path, buffer.getvalue())
+    info.update(
+        {
+            "preview_filename": preview_name,
+            "preview_subfolder": str(info.get("subfolder") or GJJ_TEMP_SUBFOLDER),
+            "preview_type": str(info.get("type") or "temp"),
+            "preview_width": int(preview.width),
+            "preview_height": int(preview.height),
+            "preview_format": "image/jpeg",
+        }
+    )
+    return info
+
+
+def gjjutils_write_temp_bytes(
+    content: bytes,
+    suffix: str = ".bin",
+    *,
+    create_preview: bool = True,
+) -> dict[str, Any]:
     data = bytes(content or b"")
     clean_suffix = str(suffix or ".bin").strip()
     if not clean_suffix.startswith("."):
@@ -75,16 +138,20 @@ def gjjutils_write_temp_bytes(content: bytes, suffix: str = ".bin") -> dict[str,
     digest = gjjutils_hash_bytes(data)
     filename = f"{digest}{clean_suffix.lower()}"
     path = gjjutils_temp_path(filename)
-    if not path.exists():
-        tmp_path = path.with_name(f".{filename}.{os.getpid()}.tmp")
-        tmp_path.write_bytes(data)
-        os.replace(tmp_path, path)
-    return {
+    _atomic_write_bytes(path, data)
+    info = {
         "filename": filename,
         "subfolder": GJJ_TEMP_SUBFOLDER,
         "type": "temp",
         "hash": digest,
     }
+    if create_preview and clean_suffix.lower() in _IMAGE_SUFFIXES:
+        try:
+            with Image.open(BytesIO(data)) as image:
+                _attach_jpeg_preview(info, image.copy())
+        except Exception:
+            pass
+    return info
 
 
 def gjjutils_write_temp_file(path: str | os.PathLike[str], suffix: str | None = None) -> dict[str, Any]:
@@ -96,17 +163,27 @@ def gjjutils_write_temp_file(path: str | os.PathLike[str], suffix: str | None = 
     filename = f"{digest}{clean_suffix.lower()}"
     target = gjjutils_temp_path(filename)
     if not target.exists():
-        tmp_path = target.with_name(f".{filename}.{os.getpid()}.tmp")
+        tmp_path = target.with_name(f".{filename}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         with source.open("rb") as src, tmp_path.open("wb") as dst:
             shutil.copyfileobj(src, dst, length=1024 * 1024)
-        os.replace(tmp_path, target)
-    return {
+        try:
+            os.replace(tmp_path, target)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    info = {
         "filename": filename,
         "subfolder": GJJ_TEMP_SUBFOLDER,
         "type": "temp",
         "hash": digest,
         "source": "file",
     }
+    if clean_suffix.lower() in _IMAGE_SUFFIXES:
+        try:
+            with Image.open(source) as image:
+                _attach_jpeg_preview(info, image.copy())
+        except Exception:
+            pass
+    return info
 
 
 def gjjutils_read_temp_bytes(info_or_filename: dict[str, Any] | str) -> bytes:
@@ -135,9 +212,7 @@ def gjjutils_write_temp_pil_image(
     if not path.exists():
         buffer = BytesIO()
         normalized.save(buffer, format=normalized_format)
-        tmp_path = path.with_name(f".{filename}.{os.getpid()}.tmp")
-        tmp_path.write_bytes(buffer.getvalue())
-        os.replace(tmp_path, path)
+        _atomic_write_bytes(path, buffer.getvalue())
     info = {
         "filename": filename,
         "subfolder": GJJ_TEMP_SUBFOLDER,
@@ -153,6 +228,7 @@ def gjjutils_write_temp_pil_image(
             "height": int(normalized.height),
         }
     )
+    _attach_jpeg_preview(info, normalized)
     return info
 
 
@@ -180,7 +256,11 @@ def gjjutils_write_temp_pil_sequence(
         loop=max(0, int(loop or 0)),
         **options,
     )
-    info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=suffix)
+    info = gjjutils_write_temp_bytes(
+        buffer.getvalue(),
+        suffix=suffix,
+        create_preview=False,
+    )
     info.update({
         "source": "pixels",
         "format": f"image/{str(format or 'WEBP').lower()}",
@@ -189,6 +269,7 @@ def gjjutils_write_temp_pil_sequence(
         "height": int(frames[0].height),
         "frame_count": len(frames),
     })
+    _attach_jpeg_preview(info, frames[0])
     return info
 
 
@@ -234,6 +315,10 @@ def gjjutils_write_temp_tensor_images(
 
 
 def gjjutils_read_temp_pil_image(info_or_filename: dict[str, Any] | str) -> Image.Image:
-    data = gjjutils_read_temp_bytes(info_or_filename)
-    with Image.open(BytesIO(data)) as image:
+    filename = (
+        str(info_or_filename.get("filename") or "")
+        if isinstance(info_or_filename, dict)
+        else str(info_or_filename or "")
+    )
+    with Image.open(gjjutils_temp_path(filename)) as image:
         return ImageOps.exif_transpose(image).copy()
