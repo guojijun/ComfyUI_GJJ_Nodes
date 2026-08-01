@@ -156,6 +156,42 @@ def gjjutils_write_temp_pil_image(
     return info
 
 
+def gjjutils_write_temp_pil_sequence(
+    images: list[Image.Image],
+    *,
+    format: str = "WEBP",
+    suffix: str = ".webp",
+    duration: int = 125,
+    loop: int = 0,
+    media_type: str = "image",
+    save_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    frames = [ImageOps.exif_transpose(image).convert("RGB") for image in images or []]
+    if not frames:
+        raise ValueError("临时图片序列不能为空。")
+    buffer = BytesIO()
+    options = dict(save_options or {})
+    frames[0].save(
+        buffer,
+        format=str(format or "WEBP").upper(),
+        save_all=len(frames) > 1,
+        append_images=frames[1:],
+        duration=max(1, int(duration or 1)),
+        loop=max(0, int(loop or 0)),
+        **options,
+    )
+    info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=suffix)
+    info.update({
+        "source": "pixels",
+        "format": f"image/{str(format or 'WEBP').lower()}",
+        "media_type": media_type,
+        "width": int(frames[0].width),
+        "height": int(frames[0].height),
+        "frame_count": len(frames),
+    })
+    return info
+
+
 def gjjutils_tensor_to_pil_images(images: Any) -> list[Image.Image]:
     tensor = images
     if hasattr(tensor, "detach"):

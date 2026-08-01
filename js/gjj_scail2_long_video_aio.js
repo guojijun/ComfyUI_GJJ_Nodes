@@ -17,6 +17,7 @@ const TEMP_IMAGE_UPLOAD_API = "/gjj/multi_image_loader/upload_temp_images";
 const MEDIA_BY_HASH_API = "/gjj/media_by_hash";
 const STORYBOARD_API = "/gjj/video_smart_storyboard/analyze";
 const MODEL_LIST_API = "/gjj/scail2_long_video_aio/models";
+const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 const REF_STITCH_API = "/gjj/scail2_long_video_aio/stitch_references";
 const REF_REMOVE_BG_API = "/gjj/scail2_long_video_aio/remove_background_references";
 const AUDIO_UPLOAD_API = "/gjj/scail2_long_video_aio/upload_audio";
@@ -86,14 +87,14 @@ const RUNNING_NODE_IDS = new Set();
 const IMPORTING_NODE_IDS = new Set();
 
 const SIZE_FIELDS = [
-	["video_size_mode", "视频尺寸来源", "segmented", { options: ["面板尺寸", "原视频尺寸"], tooltip: "面板尺寸：使用下面的宽高；原视频尺寸：运行时自动使用原视频帧宽高，下面宽高只保留为备用值。" }],
-	["width", "宽度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", "原视频尺寸"], tooltip: "输出宽度。范围 320-2048，会自动对齐到 16 的倍数；视频尺寸来源为“原视频尺寸”时运行中会使用原视频宽度并限制在该范围。" }],
-	["height", "高度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", "原视频尺寸"], tooltip: "输出高度。范围 320-2048，会自动对齐到 16 的倍数；视频尺寸来源为“原视频尺寸”时运行中会使用原视频高度并限制在该范围。" }],
-	["frame_rate", "帧率", "number", { min: 1, max: 240, tooltip: "兜底输出帧率。导入原视频时优先沿用原视频帧率；没有原视频时使用这里。" }],
+	["video_size_mode", "尺寸来源", "segmented", { options: ["指定尺寸", "视频尺寸", "图片尺寸"], tooltip: "指定尺寸：使用下面的宽高；视频尺寸：使用原视频帧宽高；图片尺寸：使用参考图片宽高。" }],
+	["width", "宽度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸"]], tooltip: "指定尺寸模式下的输出宽度，范围 320-2048，并自动对齐到 16 的倍数。" }],
+	["height", "高度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸"]], tooltip: "指定尺寸模式下的输出高度，范围 320-2048，并自动对齐到 16 的倍数。" }],
+	["frame_rate", "帧率", "number", { min: 1, max: 240, disabledWhen: ["use_video_frame_rate", true], toggle: { name: "use_video_frame_rate", label: "视频帧率", default: true, tooltip: "默认开启并使用原视频帧率；关闭后可手动调整右侧帧率。" }, tooltip: "手动输出帧率。关闭“视频帧率”后才可调整；没有可读取的视频帧率时作为兜底值。" }],
 	["max_frames", "最大帧数", "number", { align: "frames4n1", min: 0, max: 100000, allowZero: true, tooltip: "最多生成多少帧。0 表示不限制；非 0 时会自动对齐到 4n+1。" }],
 	["window_length", "窗口帧数", "number", { align: "frames4n1", min: 5, max: 100000, tooltip: "每次采样窗口帧数。会自动对齐到 4n+1，例如 121。" }],
 	["previous_frame_count", "锚定帧数", "number", { align: "frames4n1", min: 1, max: 1000, tooltip: "续段时保留上一段末尾多少帧作为锚定。会自动对齐到 4n+1，例如 5。" }],
-	["reference_resize_mode", "参考图缩放", "segmented", { options: ["补边", "裁剪", "拉伸", "原图"], tooltip: "参考图送入模型前的缩放方式。补边=等比完整保留；裁剪=铺满但可能裁掉边缘；拉伸=强制变形到输出尺寸；原图=不改尺寸。" }],
+	["reference_resize_mode", "图片/视频缩放", "segmented", { options: ["补边", "裁剪", "拉伸", "原图"], tooltip: "参考图片、视频帧及对应遮罩统一使用此缩放几何。补边=等比完整保留；裁剪=短边对齐并裁掉长边；拉伸=强制变形；原图=不预处理。" }],
 	["reference_crop_keep_position", "保留位置", "segmented", { options: ["上", "下", "左", "右", "中"], disabledWhen: ["reference_resize_mode", "裁剪", true], tooltip: "参考图缩放为“裁剪”时，决定裁剪后优先保留画面的上、下、左、右或中心区域。" }],
 	["reference_pad_color", "补边底色", "segmented", { options: ["黑色", "灰色", "白色", "边缘均色"], disabledWhen: ["reference_resize_mode", "补边", true], tooltip: "参考图缩放为“补边”时的留边颜色。边缘均色会从图片边缘自动取平均色。" }],
 ];
@@ -139,6 +140,43 @@ const MODEL_FIELD_ICONS = {
 	RMBG: "🟣",
 	translation: "🧠",
 };
+
+// Explicit model categories used by workflow-wide model statistics.  The AIO
+// keeps most of these widgets hidden, so generic widget/property scanning does
+// not have enough context to classify every selected file reliably.
+const MODEL_STATISTICS_FOLDERS = {
+	model_file: "diffusion_models",
+	vae_file: "vae",
+	text_encoder_file: "text_encoders",
+	clip_vision_file: "clip_vision",
+	accel_lora_file: "loras",
+	dpo_lora_file: "loras",
+	slop_bounce_lora_file: "loras",
+	relighting_lora_file: "loras",
+	sam3_checkpoint: "checkpoints",
+	multiview_unet: "diffusion_models",
+	multiview_clip: "text_encoders",
+	multiview_vae: "vae",
+	multiview_lora_1: "loras",
+	multiview_lora_2: "loras",
+	multiview_lora_3: "loras",
+	rmbg_model: "RMBG",
+};
+
+function currentModelStatisticsEntries(node) {
+	const entries = [];
+	for (const [name, folder] of Object.entries(MODEL_STATISTICS_FOLDERS)) {
+		if (name === "accel_lora_file" && !boolValue(getWidget(node, "use_accel_lora", true))) continue;
+		const value = String(getWidget(node, name, "") || "").trim();
+		if (!value || isNoLoraValue(value)) continue;
+		entries.push({
+			kind: folder === "loras" ? "loras" : "auto",
+			folder,
+			value,
+		});
+	}
+	return entries;
+}
 
 const EXTRA_MODEL_FIELDS = [
 	{
@@ -221,13 +259,13 @@ const OTHER_FIELDS = [
 	["seed", "种子", "number"],
 	["steps", "步数", "number"],
 	["cfg", "CFG", "number"],
-	["sampler_name", "采样器", "text"],
-	["scheduler", "调度器", "text"],
+	["sampler_name", "采样器", "select", { options: ["euler", "uni_pc", "dpmpp_2m"] }],
+	["scheduler", "调度器", "select", { options: ["simple", "normal", "beta"] }],
 	["denoise", "降噪", "number"],
 	["pose_strength", "姿态强度", "number"],
 	["pose_start", "姿态开始", "number"],
 	["pose_end", "姿态结束", "number"],
-	["model_dtype", "模型dtype", "text"],
+	["model_dtype", "模型dtype", "select", { options: ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"], default: "default" }],
 	["use_accel_lora", "使用加速LoRA", "checkbox"],
 	["enable_model_sampling_sd3", "SD3采样补丁", "checkbox"],
 	["model_sampling_sd3_shift", "SD3移位", "number"],
@@ -344,10 +382,11 @@ function sanitizeWidgetValues(node) {
 	const enumDefaults = {
 		sampler_name: ["euler", ["euler", "uni_pc", "dpmpp_2m"]],
 		scheduler: ["simple", ["simple", "normal", "beta"]],
+		model_dtype: ["default", ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]],
 		sam3_sort_by: ["从左到右", ["从左到右", "面积从大到小", "保持原顺序"]],
-		reference_resize_mode: ["补边", ["补边", "裁剪", "拉伸", "原图"]],
-		reference_crop_keep_position: ["中", ["上", "下", "左", "右", "中"]],
-		video_size_mode: ["面板尺寸", ["面板尺寸", "原视频尺寸"]],
+		reference_resize_mode: ["裁剪", ["补边", "裁剪", "拉伸", "原图"]],
+		reference_crop_keep_position: ["上", ["上", "下", "左", "右", "中"]],
+		video_size_mode: ["指定尺寸", ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸"]],
 		reference_pad_color: ["黑色", ["黑色", "灰色", "白色", "边缘均色"]],
 	};
 	for (const [name, [fallback, values]] of Object.entries(enumDefaults)) {
@@ -408,6 +447,66 @@ function viewUrl(item) {
 	const filename = encodeURIComponent(item.filename);
 	const subfolder = item.subfolder ? `&subfolder=${encodeURIComponent(item.subfolder)}` : "";
 	return apiUrl(`/view?filename=${filename}&type=${type}${subfolder}`);
+}
+
+function hideToolbarMediaTooltip(node) {
+	const tooltip = node?.__gjjScail2MediaTooltip;
+	if (!tooltip) return;
+	tooltip.querySelector("video")?.pause?.();
+	tooltip.remove();
+	node.__gjjScail2MediaTooltip = null;
+}
+
+function showToolbarMediaTooltip(node, button, key) {
+	if (!node || !button || !["video", "image"].includes(key)) return;
+	const widgetName = key === "video" ? "selected_video_json" : "selected_reference_json";
+	const items = selectedItems(node, widgetName);
+	const item = items[0];
+	const url = viewUrl(item);
+	if (!item || !url) return;
+	hideToolbarMediaTooltip(node);
+
+	const tooltip = document.createElement("div");
+	tooltip.style.cssText = [
+		"position:fixed",
+		"z-index:1000002",
+		"width:220px",
+		"padding:6px",
+		"border:1px solid #4b6270",
+		"border-radius:8px",
+		"background:#0b1216",
+		"box-shadow:0 10px 32px rgba(0,0,0,.65)",
+		"color:#eaf4f7",
+		"font:12px system-ui,sans-serif",
+		"pointer-events:none",
+	].join(";");
+	const media = document.createElement(key === "video" ? "video" : "img");
+	media.src = url;
+	media.style.cssText = "display:block;width:100%;max-height:260px;object-fit:contain;border-radius:5px;background:#05090b;";
+	if (key === "video") {
+		media.muted = true;
+		media.loop = true;
+		media.autoplay = true;
+		media.playsInline = true;
+		media.preload = "metadata";
+	}
+	const caption = document.createElement("div");
+	caption.textContent = `${mediaLabel(item)}${items.length > 1 ? `（共 ${items.length} 项）` : ""}`;
+	caption.style.cssText = "margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+	tooltip.append(media, caption);
+	document.body.appendChild(tooltip);
+	node.__gjjScail2MediaTooltip = tooltip;
+
+	const rect = button.getBoundingClientRect();
+	const tooltipRect = tooltip.getBoundingClientRect();
+	const margin = 8;
+	let left = rect.left + rect.width / 2 - tooltipRect.width / 2;
+	left = clamp(left, margin, Math.max(margin, window.innerWidth - tooltipRect.width - margin));
+	let top = rect.bottom + 7;
+	if (top + tooltipRect.height > window.innerHeight - margin) top = rect.top - tooltipRect.height - 7;
+	tooltip.style.left = `${left}px`;
+	tooltip.style.top = `${Math.max(margin, top)}px`;
+	media.play?.().catch(() => {});
 }
 
 function normalizeMediaItem(item) {
@@ -565,7 +664,7 @@ function hideNativeWidgets(node) {
 
 function ensureSize(node) {
 	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
-	const hasPreview = Boolean(node.properties?.gjj_scail2_final_video?.filename);
+	const hasPreview = Boolean(currentPreviewItem(node)?.filename);
 	const height = NODE_HEIGHT + (hasPreview ? previewPanelHeight(node, width) : 0);
 	node.minWidth = MIN_WIDTH;
 	node.min_width = MIN_WIDTH;
@@ -618,7 +717,7 @@ function buttonActive(node, key) {
 	if (key === "link") return hasLinkInfo(node);
 	if (key === "video") return hasVideoResource(node);
 	if (key === "image") return hasImageResource(node);
-	if (key === "size") return getWidget(node, "video_size_mode", "面板尺寸") === "原视频尺寸";
+	if (key === "size") return ["视频尺寸", "原视频尺寸", "图片尺寸"].includes(getWidget(node, "video_size_mode", "指定尺寸"));
 	if (key === "director") return hasDirectorState(node);
 	if (key === "model") return hasModelState(node);
 	if (key === "other") return hasOtherState(node);
@@ -702,7 +801,8 @@ function buttonTitle(node, key, baseTitle) {
 	}
 	if (key === "link" && buttonDisabled(node, key)) return "没有可断开或可恢复的外链";
 	if (key === "size") {
-		return buttonActive(node, key) ? "尺寸：原视频尺寸。点击打开尺寸面板。" : "尺寸：面板尺寸。点击打开尺寸面板。";
+		const mode = getWidget(node, "video_size_mode", "指定尺寸");
+		return `尺寸：${mode === "面板尺寸" ? "指定尺寸" : mode === "原视频尺寸" ? "视频尺寸" : mode}。点击打开尺寸面板。`;
 	}
 	if (key === "director") return buttonActive(node, key) ? "导演台：已有分段/音频设置。点击打开。" : "导演台：未设置分段。点击打开。";
 	if (key === "model") {
@@ -780,6 +880,44 @@ function statusSummary(node) {
 	return `${videoText} · ${refText}`;
 }
 
+function currentPreviewItem(node) {
+	return node?.__gjjScail2RuntimePreview || node?.properties?.gjj_scail2_final_video || null;
+}
+
+function setPreviewItem(node, item, { final = false } = {}) {
+	if (!item?.filename) return false;
+	const previewUrl = String(item.preview_url || "").trim();
+	const normalized = normalizeMediaItem(item);
+	if (previewUrl) normalized.preview_url = previewUrl;
+	node.__gjjScail2RuntimePreview = normalized;
+	node.imgs = [];
+	if (node.images) node.images = [];
+	if (final) {
+		node.properties ||= {};
+		node.properties.gjj_scail2_final_video = normalized;
+	}
+	addPreviewPanel(node);
+	reorderWidgets(node);
+	ensureSize(node);
+	updatePreviewPanel(node);
+	return true;
+}
+
+function syncNativeSamplingPreview(node) {
+	if (!isNodeRunning(node)) return false;
+	const nativeImage = Array.isArray(node?.imgs) ? node.imgs.find((item) => String(item?.src || "").trim()) : null;
+	const previewUrl = String(nativeImage?.src || "").trim();
+	if (!previewUrl || previewUrl === node.__gjjScail2SamplingPreviewUrl) return false;
+	node.__gjjScail2SamplingPreviewUrl = previewUrl;
+	setPreviewItem(node, {
+		filename: "sampling_preview.png",
+		preview_url: previewUrl,
+		media_type: "image",
+		label: "SCAIL2 采样预览",
+	});
+	return true;
+}
+
 function setStatus(node, text = "", progress = null, extra = {}) {
 	node.properties ||= {};
 	node.properties.gjj_scail2_status_text = String(text || "");
@@ -788,12 +926,8 @@ function setStatus(node, text = "", progress = null, extra = {}) {
 	} else {
 		node.properties.gjj_scail2_status_progress = Math.max(0, Math.min(1, Number(progress)));
 	}
-	if (extra.final_video) {
-		node.properties.gjj_scail2_final_video = normalizeMediaItem(extra.final_video);
-		addPreviewPanel(node);
-		reorderWidgets(node);
-		ensureSize(node);
-	}
+	if (extra.preview) setPreviewItem(node, extra.preview);
+	if (extra.final_video) setPreviewItem(node, extra.final_video, { final: true });
 	updateStatusPanel(node);
 	updatePreviewPanel(node);
 	app.graph?.setDirtyCanvas?.(true, true);
@@ -870,7 +1004,7 @@ function addStatusPanel(node) {
 function updatePreviewPanel(node) {
 	const panel = node?.__gjjScail2PreviewPanel;
 	if (!panel) return;
-	const item = node.properties?.gjj_scail2_final_video;
+	const item = currentPreviewItem(node);
 	panel.replaceChildren();
 	if (!item?.filename) {
 		panel.style.display = "none";
@@ -879,24 +1013,43 @@ function updatePreviewPanel(node) {
 	panel.style.display = "block";
 	const videoHeight = previewVideoHeight(node);
 	panel.style.height = `${previewPanelHeight(node)}px`;
-	const video = document.createElement("video");
-	video.controls = true;
-	video.src = viewUrl(item);
-	video.style.cssText = `width:100%;height:${videoHeight}px;object-fit:contain;background:#05090b;border:1px solid #30434d;border-radius:6px;`;
-	video.onloadedmetadata = () => {
-		if (!video.videoWidth || !video.videoHeight) return;
+	const extension = String(item.filename || "").split(".").pop()?.toLowerCase() || "";
+	const isVideo = String(item.media_type || "").toLowerCase() === "video"
+		|| ["mp4", "webm", "mov", "mkv", "avi"].includes(extension);
+	const media = document.createElement(isVideo ? "video" : "img");
+	if (isVideo) media.controls = true;
+	media.draggable = true;
+	media.title = "拖到空白画布可创建 GJJ_AnyPreview；也可拖到已有 GJJ_AnyPreview";
+	media.addEventListener("dragstart", (event) => {
+		if (!event.dataTransfer) return;
+		globalThis.__gjjScail2DraggedPreview = { ...item };
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(item));
+		event.dataTransfer.setData("text/plain", mediaLabel(item));
+	});
+	media.addEventListener("dragend", () => {
+		setTimeout(() => { delete globalThis.__gjjScail2DraggedPreview; }, 0);
+	});
+	media.src = viewUrl(item);
+	media.style.cssText = `width:100%;height:${videoHeight}px;object-fit:contain;background:#05090b;border:1px solid #30434d;border-radius:6px;`;
+	const updateAspect = () => {
+		const mediaWidth = Number(media.videoWidth || media.naturalWidth || 0);
+		const mediaHeight = Number(media.videoHeight || media.naturalHeight || 0);
+		if (!mediaWidth || !mediaHeight) return;
 		node.properties ||= {};
-		const nextAspect = video.videoHeight / video.videoWidth;
+		const nextAspect = mediaHeight / mediaWidth;
 		if (Math.abs(Number(node.properties.gjj_scail2_preview_aspect || 0) - nextAspect) < 0.001) return;
 		node.properties.gjj_scail2_preview_aspect = nextAspect;
 		ensureSize(node);
 		updatePreviewPanel(node);
 		app.graph?.setDirtyCanvas?.(true, true);
 	};
+	if (isVideo) media.onloadedmetadata = updateAspect;
+	else media.onload = updateAspect;
 	const label = document.createElement("div");
 	label.textContent = mediaLabel(item);
 	label.style.cssText = "height:20px;line-height:20px;color:#cfe1e8;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;";
-	panel.append(video, label);
+	panel.append(media, label);
 }
 
 function addPreviewPanel(node) {
@@ -966,6 +1119,11 @@ function domButton(node, key, icon, title, action) {
 		action?.();
 		updateDomToolbarState(node);
 	});
+	if (key === "video" || key === "image") {
+		button.addEventListener("pointerenter", () => showToolbarMediaTooltip(node, button, key));
+		button.addEventListener("pointerleave", () => hideToolbarMediaTooltip(node));
+		button.addEventListener("pointerdown", () => hideToolbarMediaTooltip(node));
+	}
 	updateDomButtonState(node, button, key, title);
 	return button;
 }
@@ -1052,9 +1210,10 @@ function reorderWidgets(node) {
 
 function stabilize(node) {
 	if (!node || !isTarget(node)) return;
+	node.__gjjHelpModelEntries = () => currentModelStatisticsEntries(node);
 	addDomToolbar(node);
 	addStatusPanel(node);
-	addPreviewPanel(node);
+	if (currentPreviewItem(node)?.filename) addPreviewPanel(node);
 	hideNativeWidgets(node);
 	reorderWidgets(node);
 	sanitizeWidgetValues(node);
@@ -1476,7 +1635,24 @@ function fieldInput(node, name, type, meta = {}) {
 			notifyFieldChange();
 		};
 		input.style.cssText = baseStyle;
-	} else if (type === "segmented" || type === "select") {
+	} else if (type === "select") {
+		input = document.createElement("select");
+		const options = Array.isArray(meta.options) && meta.options.length ? meta.options : [String(current || "")];
+		const selected = options.includes(String(current)) ? String(current) : String(meta.default || options[0] || "");
+		for (const optionText of options) {
+			const option = document.createElement("option");
+			option.value = String(optionText);
+			option.textContent = String(optionText);
+			input.appendChild(option);
+		}
+		input.value = selected;
+		input.style.cssText = `${baseStyle};height:32px;cursor:pointer;`;
+		input.onchange = () => {
+			setWidget(node, name, input.value);
+			notifyFieldChange();
+		};
+		setWidget(node, name, selected);
+	} else if (type === "segmented") {
 		input = document.createElement("div");
 		const options = Array.isArray(meta.options) && meta.options.length ? meta.options : [String(current || "")];
 		const selected = options.includes(current) ? String(current) : String(meta.default || options[0] || "");
@@ -1582,7 +1758,7 @@ function booleanButtonField(node, name, label, meta = {}) {
 	wrap.__gjjFieldControls = [wrap];
 	wrap.style.cssText = "height:30px;border:1px solid #3f525d;border-radius:7px;background:#1b2429;color:#d8e5ea;padding:0 10px;cursor:pointer;white-space:nowrap;";
 	const refresh = () => {
-		const active = boolValue(getWidget(node, name, false));
+		const active = boolValue(getWidget(node, name, meta.default ?? false));
 		wrap.dataset.active = active ? "true" : "false";
 		wrap.style.background = active ? "#155e75" : "#1b2429";
 		wrap.style.borderColor = active ? "#38bdf8" : "#3f525d";
@@ -1591,7 +1767,7 @@ function booleanButtonField(node, name, label, meta = {}) {
 	};
 	wrap.onclick = () => {
 		if (wrap.__gjjDisabled) return;
-		setWidget(node, name, !boolValue(getWidget(node, name, false)));
+		setWidget(node, name, !boolValue(getWidget(node, name, meta.default ?? false)));
 		refresh();
 		wrap.dispatchEvent(new CustomEvent("gjj-field-change", { bubbles: true }));
 	};
@@ -1604,7 +1780,10 @@ function refreshFieldDisabledState(node, inputs) {
 	for (const input of inputs) {
 		const meta = input.__gjjFieldMeta || {};
 		const disabledWhen = Array.isArray(meta.disabledWhen) ? meta.disabledWhen : null;
-		const disabled = disabledWhen ? (disabledWhen[2] ? getWidget(node, disabledWhen[0], "") !== disabledWhen[1] : getWidget(node, disabledWhen[0], "") === disabledWhen[1]) : false;
+		const expected = disabledWhen?.[1];
+		const currentValue = disabledWhen ? getWidget(node, disabledWhen[0], "") : "";
+		const matched = Array.isArray(expected) ? expected.includes(currentValue) : currentValue === expected;
+		const disabled = disabledWhen ? (disabledWhen[2] ? !matched : matched) : false;
 		input.__gjjDisabled = disabled;
 		input.disabled = disabled;
 		input.style.opacity = disabled ? "0.42" : "1";
@@ -1655,7 +1834,22 @@ function openFieldPopup(node, title, fields) {
 		const input = fieldInput(node, name, type, meta);
 		input.__gjjFieldLabel = text;
 		inputs.push(input);
-		grid.append(text, input);
+		let renderedInput = input;
+		if (meta.toggle && typeof meta.toggle === "object") {
+			const toggle = booleanButtonField(
+				node,
+				String(meta.toggle.name || ""),
+				String(meta.toggle.label || "开关"),
+				meta.toggle,
+			);
+			toggle.style.minWidth = "94px";
+			input.style.flex = "1 1 auto";
+			const inline = document.createElement("div");
+			inline.style.cssText = "display:flex;align-items:center;gap:8px;width:100%;min-width:0;";
+			inline.append(toggle, input);
+			renderedInput = inline;
+		}
+		grid.append(text, renderedInput);
 	}
 	wrap.addEventListener("gjj-field-change", () => refreshFieldDisabledState(node, inputs));
 	wrap.appendChild(grid);
@@ -4086,6 +4280,7 @@ app.registerExtension({
 
 		const draw = nodeType.prototype.onDrawForeground;
 		nodeType.prototype.onDrawForeground = function (ctx, ...args) {
+			syncNativeSamplingPreview(this);
 			const result = draw?.apply(this, [ctx, ...args]);
 			drawToolbar(this, ctx);
 			return result;
@@ -4114,8 +4309,7 @@ app.registerExtension({
 			const ui = message?.ui || message || {};
 			const latestVideo = Array.isArray(ui.preview_media) && ui.preview_media.length ? ui.preview_media[ui.preview_media.length - 1] : null;
 			if (latestVideo?.filename) {
-				this.properties ||= {};
-				this.properties.gjj_scail2_final_video = normalizeMediaItem(latestVideo);
+				setPreviewItem(this, latestVideo, { final: true });
 				this.imgs = [];
 				if (this.images) this.images = [];
 				addPreviewPanel(this);
@@ -4187,8 +4381,11 @@ app.registerExtension({
 				const node = nodeFromEvent(event);
 				if (!node || !isTarget(node)) return;
 				RUNNING_NODE_IDS.add(String(node.id));
-				setStatus(node, detail.text || "正在运行...", detail.progress, { final_video: detail.final_video });
-				if (detail.done) {
+				setStatus(node, detail.text || "正在运行...", detail.progress, {
+					preview: detail.preview,
+					final_video: detail.final_video,
+				});
+				if (detail.done && detail.final_video?.filename) {
 					RUNNING_NODE_IDS.delete(String(node.id));
 					setStatus(node, detail.text || "完成", 1.0, { final_video: detail.final_video });
 				}

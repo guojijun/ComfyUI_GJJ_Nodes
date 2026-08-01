@@ -248,6 +248,28 @@ function collectWorkflowModels() {
 			// LatentSync VAE、其它预设 LoRA 等未启用资源误判为当前模型。
 			continue;
 		}
+		if (graphNode?.type === "GJJ_SCAIL2LongVideoAIO") {
+			let activeEntries = [];
+			try {
+				const provider = graphNode.__gjjHelpModelEntries;
+				activeEntries = typeof provider === "function" ? provider.call(graphNode) : [];
+			} catch (error) {
+				console.warn("[GJJ WorkflowModelStatistics] 读取 SCAIL2 超长视频 AIO 当前模型失败：", error);
+			}
+			for (const entry of Array.isArray(activeEntries) ? activeEntries : []) {
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: String(entry?.kind || "").trim().toLowerCase() || "auto",
+					name: String(entry?.value || entry?.name || ""),
+					folder: String(entry?.folder || "").replace(/^models[\\/]/i, ""),
+				});
+			}
+			// The node also persists storyboard/media state.  Only its explicit
+			// current-model provider is authoritative for model statistics.
+			continue;
+		}
 		for (const widget of graphNode?.widgets || []) {
 			if (lazyUsesUnet && widget?.name === "ckpt_name") continue;
 			const widgetName = inferWidgetKind(widget?.name) || "auto";

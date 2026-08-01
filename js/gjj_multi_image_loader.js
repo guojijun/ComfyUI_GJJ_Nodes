@@ -305,6 +305,7 @@ function ensureState(node) {
 		slideOutputSize: Math.max(1, Math.min(3, Number.parseInt(node?.properties?.slide_output_size || "2", 10) || 2)),
 		slideOutputLoop: Boolean(node?.properties?.slide_output_loop),
 		thumbSize: Number(node?.properties?.thumb_size || DEFAULT_THUMB_SIZE),
+		previewFitMode: node?.properties?.preview_fit_mode === "contain" ? "contain" : "cover",
 		rangeExpanded: Boolean(node?.properties?.sequence_range_expanded),
 		dragIndex: null,
 	};
@@ -1533,6 +1534,25 @@ function updateOutputButtonState(node) {
 	button.style.opacity = count > 0 ? "1" : "0.55";
 }
 
+function updatePreviewFitButtonState(node) {
+	const state = ensureState(node);
+	const button = node.__gjjMultiImagePreviewFitButton;
+	if (!button) return;
+	const contain = state.previewFitMode === "contain";
+	button.textContent = "🖼️";
+	button.title = contain
+		? "当前为长边缩放完整预览。点击切换为正方形裁剪预览。"
+		: "当前为正方形裁剪预览。点击切换为长边缩放完整预览。";
+	button.style.background = contain ? "#2b4250" : "#1a2328";
+	button.style.borderColor = contain ? "#5ca6d6" : "#465761";
+	button.style.boxShadow = contain ? "0 0 0 1px rgba(92,166,214,.3) inset" : "none";
+	button.__gjjStyleRefresh = () => {
+		button.style.background = contain ? "#2b4250" : "#1a2328";
+		button.style.borderColor = contain ? "#5ca6d6" : "#465761";
+		button.style.boxShadow = contain ? "0 0 0 1px rgba(92,166,214,.3) inset" : "none";
+	};
+}
+
 function updateSlideOutputButtonsState(node) {
 	const state = ensureState(node);
 	const count = slidingSourceCount(node);
@@ -1588,7 +1608,7 @@ function ensureExternalImageInput(node) {
 		input.localized_name = INPUT_IMAGES_LABEL;
 		input.type = INPUT_IMAGES_TYPE;
 		input.forceInput = true;
-		input.tooltip = "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；会与当前已选图片合并预览并一起输出。";
+		input.tooltip = "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；嵌套队列会递归解包，并与当前已选图片合并预览后一起输出。";
 		if (input.widget?.name === INPUT_IMAGES_NAME) {
 			delete input.widget;
 		}
@@ -1918,7 +1938,7 @@ function renderPreview(node) {
 		image.style.cssText = [
 			"width:100%",
 			"height:100%",
-			"object-fit:cover",
+			`object-fit:${state.previewFitMode === "contain" ? "contain" : "cover"}`,
 			"display:block",
 			"user-select:none",
 		].join(";");
@@ -2489,6 +2509,7 @@ function buildDom(node) {
 	const defaultImageButton = makeIconButton("🌐", "设置默认图片：输入一条或多条 http/https 网络图片地址，下载到 ComfyUI input 后作为当前默认已选图片。");
 	const rangeButton = makeIconButton("#️⃣", "序列范围：点击展开/收起设置栏。支持 [1,3,5] 和 [1:8]。");
 	const outputButton = makeIconButton("🔌", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
+	const previewFitButton = makeIconButton("🖼️", "切换正方形裁剪或长边缩放完整预览。");
 	const slideButton1 = makeIconButton("1️⃣", "滑动输出 1 张：点击后自动执行并推进。");
 	const slideButton2 = makeIconButton("2️⃣", "滑动输出 2 张：点击后自动执行并推进。");
 	const slideButton3 = makeIconButton("3️⃣", "滑动输出 3 张：点击后自动执行并推进。");
@@ -2551,6 +2572,16 @@ function buildDom(node) {
 		ensureOutputs(node, totalImageCount(node));
 		updateSummary(node);
 		requestRedraw(node);
+	});
+	previewFitButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.previewFitMode = state.previewFitMode === "contain" ? "cover" : "contain";
+		node.properties = node.properties || {};
+		node.properties.preview_fit_mode = state.previewFitMode;
+		updatePreviewFitButtonState(node);
+		renderPreview(node);
+		markGraphChanged(node);
 	});
 	const toggleSlideMode = (size) => {
 		const sameActive = state.slideOutputEnabled && Number(state.slideOutputSize || 1) === size;
@@ -2692,6 +2723,7 @@ function buildDom(node) {
 	toolbar.appendChild(linkButton);
 	toolbar.appendChild(rangeButton);
 	toolbar.appendChild(outputButton);
+	toolbar.appendChild(previewFitButton);
 	toolbar.appendChild(slideButton1);
 	toolbar.appendChild(slideButton2);
 	toolbar.appendChild(slideButton3);
@@ -2775,6 +2807,7 @@ function buildDom(node) {
 	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
 	node.__gjjMultiImageOutputButton = outputButton;
+	node.__gjjMultiImagePreviewFitButton = previewFitButton;
 	node.__gjjMultiImageSlideButtons = { 1: slideButton1, 2: slideButton2, 3: slideButton3 };
 	node.__gjjMultiImageSlideLoopButton = slideLoopButton;
 	node.__gjjMultiImageSlideInitButton = slideInitButton;
@@ -2791,6 +2824,7 @@ function buildDom(node) {
 	applyThumbnailSize(node);
 	updateInputLinkButtonState(node);
 	updateOutputButtonState(node);
+	updatePreviewFitButtonState(node);
 	updateToolbarCompact(node);
 	return container;
 }
@@ -2930,6 +2964,7 @@ app.registerExtension({
 			state.slideOutputSize = Math.max(1, Math.min(3, Number.parseInt(this.properties?.slide_output_size || "2", 10) || 2));
 			state.slideOutputLoop = Boolean(this.properties?.slide_output_loop);
 			state.thumbSize = Number(this.properties?.thumb_size || DEFAULT_THUMB_SIZE);
+			state.previewFitMode = this.properties?.preview_fit_mode === "contain" ? "contain" : "cover";
 			state.rangeExpanded = Boolean(this.properties?.sequence_range_expanded);
 			state.externalCount = 0;
 			state.executedImages = [];
@@ -2955,6 +2990,7 @@ app.registerExtension({
 				serializedNode.properties.slide_output_size = Math.max(1, Math.min(3, Number(ensureState(this).slideOutputSize || 1)));
 				serializedNode.properties.slide_output_loop = Boolean(ensureState(this).slideOutputLoop);
 				serializedNode.properties.thumb_size = Number(ensureState(this).thumbSize || DEFAULT_THUMB_SIZE);
+				serializedNode.properties.preview_fit_mode = ensureState(this).previewFitMode === "contain" ? "contain" : "cover";
 				serializedNode.properties.sequence_range_expanded = Boolean(ensureState(this).rangeExpanded);
 				const networkUrls = persistNetworkUrls(this, networkUrlsFromProperties(this.properties || {}), { notify: false });
 				serializedNode.properties.default_network_image_urls = networkUrls;

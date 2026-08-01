@@ -913,6 +913,55 @@ def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
     return indices
 
 
+def _iter_input_image_tensors(value: Any, seen: set[int] | None = None):
+    """Recursively flatten queue/list wrappers into individual BHWC image tensors."""
+    if value is None:
+        return
+    if seen is None:
+        seen = set()
+
+    if isinstance(value, torch.Tensor):
+        if value.ndim == 2:
+            yield value.unsqueeze(0).unsqueeze(-1).contiguous()
+        elif value.ndim == 3:
+            yield value.unsqueeze(0).contiguous()
+        elif value.ndim == 4:
+            for index in range(int(value.shape[0])):
+                yield value[index:index + 1].contiguous()
+        elif value.ndim > 4:
+            for item in value:
+                yield from _iter_input_image_tensors(item, seen)
+        return
+
+    if isinstance(value, (str, bytes, bytearray)):
+        return
+    identity = id(value)
+    if identity in seen:
+        return
+
+    if isinstance(value, dict):
+        seen.add(identity)
+        preferred_keys = (
+            "images", "image", "frames", "items", "batch", "queue",
+            "data", "value", "values", "result", "results", "output", "outputs",
+        )
+        matched = False
+        for key in preferred_keys:
+            if key not in value:
+                continue
+            matched = True
+            yield from _iter_input_image_tensors(value.get(key), seen)
+        if not matched:
+            for item in value.values():
+                yield from _iter_input_image_tensors(item, seen)
+        return
+
+    if isinstance(value, (list, tuple, set)):
+        seen.add(identity)
+        for item in value:
+            yield from _iter_input_image_tensors(item, seen)
+
+
 class GJJ_MultiImageLoader:
     CATEGORY = "GJJ/🖼️ 图像/加载"
     FUNCTION = "load_images"
@@ -1017,7 +1066,7 @@ class GJJ_MultiImageLoader:
                     INPUT_IMAGE_TYPES,
                     {
                         "display_name": "导入图片",
-                        "tooltip": "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；会与当前已选图片合并预览并一起输出。",
+                        "tooltip": "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；嵌套队列会递归解包，并与当前已选图片合并预览后一起输出。",
                         "forceInput": True,
                     },
                 ),
@@ -1047,19 +1096,14 @@ class GJJ_MultiImageLoader:
         sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
         collected: list[dict[str, Any]] = []
 
-        if isinstance(input_images, torch.Tensor):
-            batch = input_images
-            if batch.ndim == 3:
-                batch = batch.unsqueeze(0)
-            for index in range(int(batch.shape[0])):
-                image_tensor = batch[index:index + 1].contiguous()
-                collected.append(
-                    {
-                        "image": image_tensor,
-                        "preview": _preview_from_tensor(image_tensor),
-                        "source": "external",
-                    }
-                )
+        for image_tensor in _iter_input_image_tensors(input_images):
+            collected.append(
+                {
+                    "image": image_tensor,
+                    "preview": _preview_from_tensor(image_tensor),
+                    "source": "external",
+                }
+            )
 
         skipped_errors: list[str] = []
         for entry in selected:

@@ -1546,6 +1546,159 @@ def collect_template_prompt_values(prompt: Any) -> dict[str, Any]:
     return values
 
 
+def _unwrap_comfy_list_input(value: Any) -> Any:
+    """Undo INPUT_IS_LIST wrappers without collapsing a real multi-item queue."""
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    return value
+
+
+def _is_image_tensor(value: Any) -> bool:
+    return (
+        isinstance(value, torch.Tensor)
+        and value.ndim in (3, 4)
+        and int(value.shape[-1]) in (1, 3, 4)
+    )
+
+
+def _normalize_image_tensor(value: torch.Tensor) -> torch.Tensor:
+    tensor = value.unsqueeze(0) if value.ndim == 3 else value
+    tensor = tensor.detach()
+    if not tensor.is_floating_point():
+        if tensor.dtype == torch.bool:
+            tensor = tensor.float()
+        else:
+            tensor = tensor.float() / float(max(1, torch.iinfo(tensor.dtype).max))
+    else:
+        tensor = tensor.float()
+    return tensor.clamp(0.0, 1.0).contiguous()
+
+
+def _iter_image_queue_children(value: Any) -> list[Any]:
+    if value is None or isinstance(value, (str, bytes, bytearray, os.PathLike)) or torch.is_tensor(value):
+        return []
+    if isinstance(value, dict):
+        preferred = (
+            "images", "image", "imgs", "frames", "batch", "queue", "items",
+            "image_list", "image_queue", "data", "value", "values", "result",
+            "results", "output", "outputs", "selected",
+        )
+        matched = [value[key] for key in preferred if key in value]
+        return matched if matched else list(value.values())
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+
+    children: list[Any] = []
+    try:
+        if hasattr(value, "get_components"):
+            components = value.get_components()
+            if components is not None and components is not value:
+                children.append(components)
+    except Exception:
+        pass
+    for name in (
+        "images", "image", "imgs", "frames", "batch", "queue", "items",
+        "image_list", "image_queue", "data", "value", "values", "result",
+        "results", "output", "outputs", "selected",
+    ):
+        try:
+            child = getattr(value, name, None)
+            if child is not None and child is not value:
+                children.append(child)
+        except Exception:
+            pass
+    if children:
+        return children
+    try:
+        mapping = vars(value)
+        if isinstance(mapping, dict):
+            return list(mapping.values())
+    except Exception:
+        pass
+    try:
+        if hasattr(value, "__iter__"):
+            return list(value)
+    except Exception:
+        pass
+    return []
+
+
+def _flatten_image_queue(value: Any, seen: set[int] | None = None) -> list[torch.Tensor]:
+    """Recursively extract every image from GJJ/Comfy queue and wrapper objects."""
+    if value is None:
+        return []
+    if seen is None:
+        seen = set()
+
+    identity = id(value)
+    if identity in seen:
+        return []
+    seen.add(identity)
+
+    if _is_image_tensor(value):
+        tensor = _normalize_image_tensor(value)
+        return [tensor[index:index + 1] for index in range(int(tensor.shape[0]))]
+    if isinstance(value, torch.Tensor):
+        if value.ndim > 4:
+            images: list[torch.Tensor] = []
+            for item in value:
+                images.extend(_flatten_image_queue(item, seen))
+            return images
+        return []
+    if isinstance(value, Image.Image):
+        image = ImageOps.exif_transpose(value).convert("RGBA" if value.mode in {"RGBA", "LA"} else "RGB")
+        array = np.asarray(image).astype(np.float32) / 255.0
+        return [torch.from_numpy(array).unsqueeze(0).contiguous()]
+
+    images: list[torch.Tensor] = []
+    for child in _iter_image_queue_children(value):
+        images.extend(_flatten_image_queue(child, seen))
+    return images
+
+
+def _pack_flat_image_queue(images: list[torch.Tensor]) -> Any:
+    """Use a normal IMAGE batch when shapes match; otherwise keep a flat GJJ queue."""
+    if not images:
+        return None
+    if len(images) == 1:
+        return images[0]
+    shape = tuple(images[0].shape[1:])
+    if all(tuple(image.shape[1:]) == shape for image in images):
+        return torch.cat(images, dim=0).contiguous()
+    return images
+
+
+def _template_field_media_type(field: dict[str, Any], raw_value: Any, default_value: Any) -> str | None:
+    for source in (field.get("type"), field.get("socket_type")):
+        tokens = [token.strip().upper() for token in re.split(r"[,，]", str(source or "")) if token.strip()]
+        for media_type in ("IMAGE", "AUDIO", "VIDEO"):
+            if media_type in tokens or (media_type == "IMAGE" and "GJJ_BATCH_IMAGE" in tokens):
+                return media_type
+    if isinstance(raw_value, (str, os.PathLike)):
+        detected = _detect_media_type(str(raw_value))
+        if detected:
+            return detected
+    return _detect_media_type(str(default_value))
+
+
+def _prepare_image_fields(fields: list[dict[str, Any]], value_map: dict[str, Any]) -> None:
+    """Normalize image queues before any prompt/enum/media output branch consumes them."""
+    for field in fields:
+        names = _field_names(field)
+        if not names:
+            continue
+        raw_value = next((value_map[name] for name in names if name in value_map), field.get("default", ""))
+        default_value = field.get("default", "")
+        media_type = _template_field_media_type(field, raw_value, default_value)
+        if media_type != "IMAGE" or isinstance(raw_value, (str, os.PathLike)):
+            continue
+        prepared = _pack_flat_image_queue(_flatten_image_queue(raw_value))
+        if prepared is None:
+            continue
+        for name in names:
+            value_map[name] = prepared
+
+
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "output_params"
@@ -1561,6 +1714,10 @@ class GJJ_TemplateParams:
     RETURN_TYPES = tuple(any_type for _ in range(MAX_OUTPUTS))
     RETURN_NAMES = tuple(f"输出{i + 1}" for i in range(MAX_OUTPUTS))
     OUTPUT_TOOLTIPS = tuple("由模板自动解析出的参数值（媒体文件会加载为对象）。" for _ in range(MAX_OUTPUTS))
+    # Receive upstream OUTPUT_IS_LIST queues once.  Without this ComfyUI maps this
+    # node once per image, so recursive unpacking inside output_params can never see
+    # the complete GJJ_MultiImageLoader queue.
+    INPUT_IS_LIST = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1603,6 +1760,9 @@ class GJJ_TemplateParams:
 
     @classmethod
     def IS_CHANGED(cls, template_text: str = "", values_json: str = "{}", schema_json: str = "[]", **kwargs):
+        template_text = _unwrap_comfy_list_input(template_text)
+        values_json = _unwrap_comfy_list_input(values_json)
+        schema_json = _unwrap_comfy_list_input(schema_json)
         dynamic = {
             str(key): repr(value)
             for key, value in sorted(kwargs.items())
@@ -1615,7 +1775,15 @@ class GJJ_TemplateParams:
         )
 
     def output_params(self, template_text: str = "", values_json: str = "{}", schema_json: str = "[]", **kwargs):
+        # INPUT_IS_LIST is essential for receiving the whole queue, but it also wraps
+        # ordinary widgets and single external values.  Remove only singleton wrappers
+        # first, then flatten every IMAGE field before any output/media branch runs.
+        template_text = _unwrap_comfy_list_input(template_text)
+        values_json = _unwrap_comfy_list_input(values_json)
+        schema_json = _unwrap_comfy_list_input(schema_json)
+        kwargs = {str(key): _unwrap_comfy_list_input(value) for key, value in kwargs.items()}
         fields, value_map = resolve_template_values(template_text, values_json, schema_json, kwargs)
+        _prepare_image_fields(fields, value_map)
         externally_supplied: set[str] = set()
         for field in fields:
             key = str(field.get("key") or "")
@@ -1642,10 +1810,7 @@ class GJJ_TemplateParams:
                 continue
             
             # 检测是否为媒体文件
-            declared_type = str(field.get("type") or "").upper()
-            media_type = (
-                declared_type if declared_type in {"IMAGE", "AUDIO", "VIDEO"} else None
-            ) or _detect_media_type(str(raw_value)) or _detect_media_type(str(default_value))
+            media_type = _template_field_media_type(field, raw_value, default_value)
             
             if media_type:
                 if key in externally_supplied and not isinstance(raw_value, (str, os.PathLike)):

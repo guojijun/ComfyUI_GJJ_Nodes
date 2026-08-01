@@ -136,7 +136,7 @@ except Exception:  # pragma: no cover - 单文件语法检查兜底
 
 NODE_NAME = "GJJ_LazyImageStudio"
 MAX_MAIN_IMAGE_INDEX = 9999
-DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
+DEFAULT_UNET_NAME = "flux-2-klein-9b-int8-ConvRot-comfyui.safetensors"
 DEFAULT_UNET_DTYPE = "default"
 DEFAULT_MODEL_SOURCE = "UNET 主模型"
 MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]

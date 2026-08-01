@@ -11,6 +11,8 @@ const PREVIEW_FRAME_WIDGET = "preview_frame";
 const MEDIA_INPUT = "media";
 const EXTRA_OUTPUTS_PROPERTY = "gjj_visual_region_crop_show_extra_outputs";
 const SELECTED_VIDEO_PROPERTY = "selected_video";
+const CROP_DATA_PROPERTY = "gjj_visual_region_crop_data";
+const PREVIEW_FRAME_PROPERTY = "gjj_visual_region_crop_preview_frame";
 const UPLOAD_API = "/gjj/visual_region_crop/upload";
 const META_API = "/gjj/visual_region_crop/meta";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
@@ -384,13 +386,12 @@ function applyVideoElementMeta(node, state) {
 	if (!(duration > 0 && fps > 0)) return false;
 	const frames = Math.max(1, Math.round(duration * fps));
 	if (frames <= positiveNumber(state.data?.frame_count, 1)) return false;
-	const savedData = parseJson(widgetValue(node, CROP_WIDGET, ""), state.data || {});
+	const savedData = parseJson(node.properties?.[CROP_DATA_PROPERTY] || widgetValue(node, CROP_WIDGET, ""), state.data || {});
 	state.data = normalizeData(savedData, state.video.videoWidth || state.data.source_width, state.video.videoHeight || state.data.source_height, frames);
 	state.frame = clamp(state.frame, 0, state.data.frame_count - 1);
 	if (state.selectedVideo) state.selectedVideo.frames = frames;
 	if (state.videoItem) state.videoItem.frames = frames;
-	setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
-	syncPreviewFrameWidget(node, state);
+	persistEditorState(node, state);
 	return true;
 }
 
@@ -634,6 +635,22 @@ function serializeData(data) {
 	});
 }
 
+function persistEditorState(node, state, { markDirty = false } = {}) {
+	if (!node || !state?.data) return "";
+	const text = serializeData(state.data);
+	node.properties ||= {};
+	node.properties[CROP_DATA_PROPERTY] = text;
+	node.properties[PREVIEW_FRAME_PROPERTY] = Math.max(0, Math.round(Number(state.frame || 0)));
+	setWidgetValue(node, CROP_WIDGET, text);
+	syncPreviewFrameWidget(node, state);
+	if (markDirty) {
+		node.graph?.change?.();
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+	return text;
+}
+
 function showExtraOutputs(node) {
 	return node?.properties?.[EXTRA_OUTPUTS_PROPERTY] === true;
 }
@@ -813,7 +830,7 @@ function syncSelectedVideo(node, item) {
 	state.statusText = "";
 	if (item?.width && item?.height) {
 		state.data = normalizeData(state.data, item.width, item.height, item.frames || state.data.frame_count || 1);
-		setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
+		persistEditorState(node, state, { markDirty: true });
 	}
 	syncNodeWidgetValues(node);
 	syncVideoBackground(node, state);
@@ -1156,8 +1173,7 @@ function ensureWidget(node) {
 
 	const commit = ({ refreshLayout = true } = {}) => {
 		state.data = normalizeData(state.data);
-		setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
-		syncPreviewFrameWidget(node, state);
+		persistEditorState(node, state, { markDirty: true });
 		draw();
 		if (refreshLayout) GJJ_Utils.refreshNode(node, { preserveWidth: true, minWidth: 360 });
 	};
@@ -1562,12 +1578,11 @@ function applyExecutedMessage(node, message) {
 	const sourceH = Number(message?.source_height?.[0] || item?.height || backendData?.source_height || 0);
 	const frames = Number(message?.frame_count?.[0] || backendData?.frame_count || 1);
 	const previewFrame = Number(message?.preview_frame?.[0]);
-	const saved = parseJson(widgetValue(node, CROP_WIDGET, ""), {});
+	const saved = parseJson(node.properties?.[CROP_DATA_PROPERTY] || widgetValue(node, CROP_WIDGET, ""), {});
 	state.data = normalizeData(backendData || saved, sourceW, sourceH, frames);
 	state.frame = clamp(Number.isFinite(previewFrame) ? previewFrame : state.frame, 0, state.data.frame_count - 1);
 	state.upstreamVideo = sourceVideo?.filename ? sourceVideo : null;
-	setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
-	syncPreviewFrameWidget(node, state);
+	persistEditorState(node, state);
 	syncVideoBackground(node, state);
 	const url = buildViewUrl(item, "temp");
 	if (url) {
@@ -1606,15 +1621,14 @@ function stabilize(node) {
 	const state = ensureWidget(node);
 	state.selectedVideo = parseSelectedVideo(selectedVideoFromNode(node));
 	if (!hasInputLink(node, MEDIA_INPUT)) state.upstreamVideo = null;
-	const savedData = parseJson(widgetValue(node, CROP_WIDGET, ""), state.data || {});
+	const savedData = parseJson(node.properties?.[CROP_DATA_PROPERTY] || widgetValue(node, CROP_WIDGET, ""), state.data || {});
 	if (state.selectedVideo?.width && state.selectedVideo?.height) {
 		state.data = normalizeData(savedData, state.selectedVideo.width, state.selectedVideo.height, state.selectedVideo.frames || state.data.frame_count || 1);
 	} else {
 		state.data = normalizeData(savedData);
 	}
-	setWidgetValue(node, CROP_WIDGET, serializeData(state.data));
-	state.frame = clamp(widgetValue(node, PREVIEW_FRAME_WIDGET, state.frame), 0, state.data.frame_count - 1);
-	syncPreviewFrameWidget(node, state);
+	state.frame = clamp(node.properties?.[PREVIEW_FRAME_PROPERTY] ?? widgetValue(node, PREVIEW_FRAME_WIDGET, state.frame), 0, state.data.frame_count - 1);
+	persistEditorState(node, state);
 	applyOutputMeta(node);
 	state.outputButton?.classList.toggle("on", showExtraOutputs(node));
 	syncVideoBackground(node, state);
@@ -1659,6 +1673,17 @@ app.registerExtension({
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
+			this.properties ||= {};
+			const savedCropData = String(serializedNode?.properties?.[CROP_DATA_PROPERTY] || this.properties[CROP_DATA_PROPERTY] || "");
+			if (savedCropData) {
+				this.properties[CROP_DATA_PROPERTY] = savedCropData;
+				setWidgetValue(this, CROP_WIDGET, savedCropData);
+			}
+			const savedPreviewFrame = Number(serializedNode?.properties?.[PREVIEW_FRAME_PROPERTY] ?? this.properties[PREVIEW_FRAME_PROPERTY]);
+			if (Number.isFinite(savedPreviewFrame)) {
+				this.properties[PREVIEW_FRAME_PROPERTY] = Math.max(0, Math.round(savedPreviewFrame));
+				setWidgetValue(this, PREVIEW_FRAME_WIDGET, this.properties[PREVIEW_FRAME_PROPERTY]);
+			}
 			scheduleNativePreviewClear(this);
 			restoreExtraOutputState(this, serializedNode);
 			schedule(this, 0);
@@ -1667,10 +1692,14 @@ app.registerExtension({
 		};
 		const originalSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const state = this.__gjjVisualRegionCrop;
+			if (state?.data) persistEditorState(this, state);
 			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
 			serializedNode.properties = serializedNode.properties || {};
 			serializedNode.properties[EXTRA_OUTPUTS_PROPERTY] = showExtraOutputs(this);
 			serializedNode.properties[SELECTED_VIDEO_PROPERTY] = widgetValue(this, SELECTED_VIDEO_WIDGET, "") || this.properties?.[SELECTED_VIDEO_PROPERTY] || "";
+			serializedNode.properties[CROP_DATA_PROPERTY] = this.properties?.[CROP_DATA_PROPERTY] || widgetValue(this, CROP_WIDGET, "") || "";
+			serializedNode.properties[PREVIEW_FRAME_PROPERTY] = Number(this.properties?.[PREVIEW_FRAME_PROPERTY] ?? widgetValue(this, PREVIEW_FRAME_WIDGET, 0)) || 0;
 			return result;
 		};
 		nodeType.prototype.onDrawBackground = function (...args) {

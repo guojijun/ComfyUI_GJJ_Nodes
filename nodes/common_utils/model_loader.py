@@ -581,7 +581,7 @@ def gjjutils_load_model(unet_name: str, unet_dtype: str = DEFAULT_UNET_DTYPE):
         加载的 UNET 模型对象
 
     Example:
-        >>> model = gjjutils_load_model("flux-2-klein-9b-nvfp4.safetensors", "default")
+        >>> model = gjjutils_load_model("flux-2-klein-9b-int8-ConvRot-comfyui.safetensors", "default")
     """
     if _is_gguf_model(unet_name):
         return _load_unet_gguf(unet_name)
@@ -671,7 +671,7 @@ def gjjutils_load_clip_from_names(clip_names: list[str], clip_type: str):
 # 额外常量（从 gjj_lazy_Image_studio 迁移）
 # ============================================================================
 
-DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
+DEFAULT_UNET_NAME = "flux-2-klein-9b-int8-ConvRot-comfyui.safetensors"
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 

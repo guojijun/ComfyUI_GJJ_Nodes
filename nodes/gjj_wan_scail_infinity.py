@@ -1,12 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import logging
-import uuid
-from pathlib import Path
 from typing import Any
 
 import torch
-import folder_paths
 from PIL import Image
 
 import comfy.model_management as model_management
@@ -15,6 +13,7 @@ import comfy.samplers
 from nodes import common_ksampler
 
 from .common_utils.progress import send_node_progress
+from .common_utils.temp_files import gjjutils_write_temp_pil_sequence
 from .gjj_wan_scail_to_video import GJJ_WanSCAILToVideo, _max_resolution
 
 
@@ -127,7 +126,31 @@ def _decode_video_latent(vae: Any, latent_samples: torch.Tensor, tiled: bool) ->
     if bool(tiled):
         decode_tiled = getattr(vae, "decode_tiled", None)
         if callable(decode_tiled):
-            images = decode_tiled(latent_samples)
+            decode_kwargs: dict[str, Any] = {}
+            if latent_samples.ndim == 5:
+                try:
+                    parameters = inspect.signature(decode_tiled).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                accepts_overlap = "overlap" in parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+                if accepts_overlap:
+                    spatial_overlap = 8
+                    decode_tiled_3d = getattr(vae, "decode_tiled_3d", None)
+                    if callable(decode_tiled_3d):
+                        try:
+                            default_overlap = inspect.signature(decode_tiled_3d).parameters["overlap"].default
+                            if isinstance(default_overlap, (tuple, list)) and len(default_overlap) >= 3:
+                                spatial_overlap = min(int(default_overlap[-2]), int(default_overlap[-1]))
+                            elif isinstance(default_overlap, int):
+                                spatial_overlap = int(default_overlap)
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                    spatial_extent = min(int(latent_samples.shape[-2]), int(latent_samples.shape[-1]))
+                    decode_kwargs["overlap"] = max(1, min(spatial_overlap, max(1, spatial_extent - 1)))
+            images = decode_tiled(latent_samples, **decode_kwargs)
         else:
             log.warning("VAE 不支持 decode_tiled，已回退到普通解码。")
             images = vae.decode(latent_samples)
@@ -178,28 +201,17 @@ def _save_segment_preview(tensor: torch.Tensor, title: str, fps: float = 8.0) ->
         if int(preview.shape[0]) > max_frames:
             indices = torch.linspace(0, int(preview.shape[0]) - 1, steps=max_frames).round().to(torch.long)
             preview = preview.index_select(0, indices).contiguous()
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "scail2_infinity_segments"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"GJJ_SCAIL2Segment_{uuid.uuid4().hex[:12]}.webp"
         arrays = torch.round(preview[..., :3] * 255.0).to(torch.uint8).numpy()
         frames = [Image.fromarray(array, mode="RGB") for array in arrays]
-        frames[0].save(
-            target_dir / filename,
+        info = gjjutils_write_temp_pil_sequence(
+            frames,
             format="WEBP",
-            save_all=len(frames) > 1,
-            append_images=frames[1:],
+            suffix=".webp",
             duration=max(1, round(1000.0 / max(0.01, float(fps)))),
             loop=0,
-            lossless=False,
-            quality=82,
-            method=3,
+            save_options={"lossless": False, "quality": 82, "method": 3},
         )
-        return {
-            "filename": filename,
-            "subfolder": "GJJ/scail2_infinity_segments",
-            "type": "temp",
-            "format": "image/webp",
-            "media_type": "image",
+        info.update({
             "title": title,
             "is_sequence": len(frames) > 1,
             "autoplay": len(frames) > 1,
@@ -209,7 +221,8 @@ def _save_segment_preview(tensor: torch.Tensor, title: str, fps: float = 8.0) ->
             "preview_frame_count": len(frames),
             "width": int(tensor.shape[2]),
             "height": int(tensor.shape[1]),
-        }
+        })
+        return info
     except Exception as exc:
         log.warning("SCAIL-2 分段预览保存失败：%s", exc)
         return None
@@ -552,6 +565,7 @@ class GJJ_WanSCAILInfinity:
                 unique_id,
                 f"窗口 {window_index + 1}/{total_windows}：解码 {int(images.shape[0])} 帧，保留 {int(new_images.shape[0])} 帧，累计 {total_so_far} 帧",
                 window_next,
+                preview=segment_preview,
             )
 
             prev_anchor = images[-previous_frame_count:].detach().cpu()

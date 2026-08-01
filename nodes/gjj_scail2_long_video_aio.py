@@ -4,8 +4,8 @@ import json
 import logging
 import gc
 import os
+import re
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +23,14 @@ except Exception:  # pragma: no cover - ComfyUI provides this at runtime.
 
 from .common_utils.progress import send_node_progress
 from .common_utils.model_manager import gjjutils_model_stem_without_quant
-from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_file, gjjutils_write_temp_pil_image
+from .common_utils.temp_files import (
+    gjjutils_temp_path,
+    gjjutils_unique_temp_path,
+    gjjutils_write_temp_file,
+    gjjutils_write_temp_pil_image,
+)
 from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
-from .gjj_multi_image_loader import GJJ_MultiImageLoader, resolve_selected_image_path
+from .gjj_multi_image_loader import GJJ_MultiImageLoader, _iter_input_image_tensors, resolve_selected_image_path
 from .gjj_multi_lora_chain import normalize_lora_chain_data, parse_lora_data
 from .gjj_multi_video_loader import GJJ_MultiVideoLoader
 from .gjj_multi_video_loader import (
@@ -84,6 +89,13 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "是", "开", "开启"}
     return bool(value)
+
+
+def _unwrap_comfy_list_input(value: Any) -> Any:
+    """Remove the single INPUT_IS_LIST wrapper without flattening real queues."""
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return value[0]
+    return value
 
 
 def _float_value(value: Any, fallback: float, min_value: float | None = None, max_value: float | None = None) -> float:
@@ -172,7 +184,14 @@ def _pad_color_tensor(tensor: torch.Tensor, target_h: int, target_w: int, mode: 
     return tensor.new_zeros((int(tensor.shape[0]), target_h, target_w, 3))
 
 
-def _fit_pad_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, pad_color: str = "黑色") -> torch.Tensor:
+def _interpolate_bhwc(tensor: torch.Tensor, height: int, width: int, mode: str) -> torch.Tensor:
+    nchw = tensor.movedim(-1, 1)
+    if mode in {"nearest", "nearest-exact", "area"}:
+        return F.interpolate(nchw, size=(height, width), mode=mode).movedim(1, -1)
+    return F.interpolate(nchw, size=(height, width), mode=mode, align_corners=False).movedim(1, -1)
+
+
+def _fit_pad_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, pad_color: str = "黑色", interpolation: str = "bilinear") -> torch.Tensor:
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
     tensor = tensor[..., :3].float().clamp(0.0, 1.0).contiguous()
@@ -185,12 +204,7 @@ def _fit_pad_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, 
     scale = min(target_w / max(1, source_w), target_h / max(1, source_h))
     resize_w = max(1, min(target_w, int(round(source_w * scale))))
     resize_h = max(1, min(target_h, int(round(source_h * scale))))
-    resized = F.interpolate(
-        tensor.movedim(-1, 1),
-        size=(resize_h, resize_w),
-        mode="bilinear",
-        align_corners=False,
-    ).movedim(1, -1)
+    resized = _interpolate_bhwc(tensor, resize_h, resize_w, interpolation)
     padded = _pad_color_tensor(tensor, target_h, target_w, pad_color)
     top = max(0, (target_h - resize_h) // 2)
     left = max(0, (target_w - resize_w) // 2)
@@ -198,7 +212,7 @@ def _fit_pad_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, 
     return padded.clamp(0.0, 1.0).contiguous()
 
 
-def _crop_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, keep_position: str = "中") -> torch.Tensor:
+def _crop_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, keep_position: str = "中", interpolation: str = "bilinear") -> torch.Tensor:
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
     tensor = tensor[..., :3].float().clamp(0.0, 1.0).contiguous()
@@ -211,12 +225,7 @@ def _crop_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, kee
     scale = max(target_w / max(1, source_w), target_h / max(1, source_h))
     resize_w = max(target_w, int(round(source_w * scale)))
     resize_h = max(target_h, int(round(source_h * scale)))
-    resized = F.interpolate(
-        tensor.movedim(-1, 1),
-        size=(resize_h, resize_w),
-        mode="bilinear",
-        align_corners=False,
-    ).movedim(1, -1)
+    resized = _interpolate_bhwc(tensor, resize_h, resize_w, interpolation)
     extra_h = max(0, resize_h - target_h)
     extra_w = max(0, resize_w - target_w)
     keep = str(keep_position or "中").strip()
@@ -235,7 +244,7 @@ def _crop_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, kee
     return resized[:, top:top + target_h, left:left + target_w, :].clamp(0.0, 1.0).contiguous()
 
 
-def _stretch_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
+def _stretch_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int, interpolation: str = "bilinear") -> torch.Tensor:
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
     tensor = tensor[..., :3].float().clamp(0.0, 1.0).contiguous()
@@ -243,12 +252,7 @@ def _stretch_tensor_to_size(tensor: torch.Tensor, target_w: int, target_h: int) 
     target_h = max(1, int(target_h or 0))
     if int(tensor.shape[2]) == target_w and int(tensor.shape[1]) == target_h:
         return tensor
-    return F.interpolate(
-        tensor.movedim(-1, 1),
-        size=(target_h, target_w),
-        mode="bilinear",
-        align_corners=False,
-    ).movedim(1, -1).clamp(0.0, 1.0).contiguous()
+    return _interpolate_bhwc(tensor, target_h, target_w, interpolation).clamp(0.0, 1.0).contiguous()
 
 
 def _cat_image_tensors_smart(tensors: list[torch.Tensor]) -> torch.Tensor | None:
@@ -264,6 +268,31 @@ def _cat_image_tensors_smart(tensors: list[torch.Tensor]) -> torch.Tensor | None
     max_w = max(int(item.shape[2]) for item in normalized)
     fitted = [_fit_pad_tensor_to_size(item, max_w, max_h) for item in normalized]
     return torch.cat(fitted, dim=0).contiguous()
+
+
+def _reference_image_queue(value: Any) -> list[torch.Tensor]:
+    """Flatten reference queues while keeping every source image at its native size."""
+    images: list[torch.Tensor] = []
+    for image in _iter_input_image_tensors(value):
+        if not isinstance(image, torch.Tensor) or image.ndim != 4 or int(image.shape[0]) <= 0:
+            continue
+        tensor = image.detach()
+        if not tensor.is_floating_point():
+            if tensor.dtype == torch.bool:
+                tensor = tensor.float()
+            else:
+                tensor = tensor.float() / float(max(1, torch.iinfo(tensor.dtype).max))
+        else:
+            tensor = tensor.float()
+        images.append(tensor.clamp(0.0, 1.0).contiguous())
+    return images
+
+
+def _reference_queue_value(value: Any) -> Any:
+    images = _reference_image_queue(value)
+    if not images:
+        return None
+    return images[0] if len(images) == 1 else images
 
 
 def _first_image(value: Any) -> torch.Tensor | None:
@@ -295,7 +324,7 @@ def _first_image(value: Any) -> torch.Tensor | None:
     return tensor[..., :3].float().clamp(0.0, 1.0).contiguous()
 
 
-def _resize_reference_images(images: Any, width: int, height: int, mode: str = "补边", pad_color: str = "黑色", keep_position: str = "中") -> torch.Tensor | None:
+def _resize_reference_images(images: Any, width: int, height: int, mode: str = "裁剪", pad_color: str = "黑色", keep_position: str = "上", interpolation: str = "bilinear") -> torch.Tensor | None:
     tensor = _first_image(images)
     if tensor is None:
         return None
@@ -303,10 +332,10 @@ def _resize_reference_images(images: Any, width: int, height: int, mode: str = "
     if mode_text in {"原图", "none", "original", "不处理"}:
         return tensor
     if mode_text in {"拉伸", "stretch", "fill"}:
-        return _stretch_tensor_to_size(tensor, width, height)
+        return _stretch_tensor_to_size(tensor, width, height, interpolation)
     if mode_text in {"裁剪", "crop", "cover"}:
-        return _crop_tensor_to_size(tensor, width, height, keep_position)
-    return _fit_pad_tensor_to_size(tensor, width, height, pad_color)
+        return _crop_tensor_to_size(tensor, width, height, keep_position, interpolation)
+    return _fit_pad_tensor_to_size(tensor, width, height, pad_color, interpolation)
 
 
 def _reference_target_size(kwargs: dict[str, Any]) -> tuple[int, int]:
@@ -314,18 +343,45 @@ def _reference_target_size(kwargs: dict[str, Any]) -> tuple[int, int]:
 
 
 def _reference_resize_mode(kwargs: dict[str, Any]) -> str:
-    value = str(kwargs.get("reference_resize_mode") or "补边").strip()
-    return value if value in {"补边", "裁剪", "拉伸", "原图"} else "补边"
+    value = str(kwargs.get("reference_resize_mode") or "裁剪").strip()
+    return value if value in {"补边", "裁剪", "拉伸", "原图"} else "裁剪"
 
 
 def _reference_crop_keep_position(kwargs: dict[str, Any]) -> str:
-    value = str(kwargs.get("reference_crop_keep_position") or "中").strip()
-    return value if value in {"上", "下", "左", "右", "中"} else "中"
+    value = str(kwargs.get("reference_crop_keep_position") or "上").strip()
+    return value if value in {"上", "下", "左", "右", "中"} else "上"
 
 
 def _video_size_mode(kwargs: dict[str, Any]) -> str:
-    value = str(kwargs.get("video_size_mode") or "面板尺寸").strip()
-    return value if value in {"面板尺寸", "原视频尺寸"} else "面板尺寸"
+    value = str(kwargs.get("video_size_mode") or "指定尺寸").strip()
+    aliases = {"面板尺寸": "指定尺寸", "原视频尺寸": "视频尺寸"}
+    normalized = aliases.get(value, value)
+    return normalized if normalized in {"指定尺寸", "视频尺寸", "图片尺寸"} else "指定尺寸"
+
+
+def _use_video_frame_rate(kwargs: dict[str, Any]) -> bool:
+    return _bool(kwargs.get("use_video_frame_rate", True))
+
+
+def _fit_source_dimensions(width: int, height: int) -> tuple[int, int]:
+    """Keep source aspect ratio while fitting SCAIL's supported, 16-aligned size range."""
+    source_w = max(1, int(width))
+    source_h = max(1, int(height))
+    scale = max(320 / source_w, 320 / source_h, 1.0)
+    if source_w * scale > 2048 or source_h * scale > 2048:
+        scale = min(2048 / source_w, 2048 / source_h)
+    fitted_w = max(320, min(2048, int(round((source_w * scale) / 16.0)) * 16))
+    fitted_h = max(320, min(2048, int(round((source_h * scale) / 16.0)) * 16))
+    return fitted_w, fitted_h
+
+
+def _align_model_dimension(value: Any, fallback: int) -> int:
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        number = int(fallback)
+    number = max(320, min(2048, number))
+    return max(320, min(2048, int(round(number / 16.0)) * 16))
 
 
 def _keep_model_loaded(kwargs: dict[str, Any]) -> bool:
@@ -338,6 +394,29 @@ def _unwrap_result(value: Any) -> tuple[Any, dict[str, Any]]:
         result = value.get("result")
         return result, ui
     return value, {}
+
+
+def _latest_ui_preview(ui: Any) -> dict[str, Any] | None:
+    if not isinstance(ui, dict):
+        return None
+    for key in ("preview_media", "preview_images", "images"):
+        items = ui.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in reversed(items):
+            if isinstance(item, dict) and str(item.get("filename") or "").strip():
+                return dict(item)
+    return None
+
+
+def _progress_with_preview(
+    unique_id: Any,
+    message: str,
+    progress: float,
+    ui: Any,
+) -> None:
+    preview = _latest_ui_preview(ui)
+    _progress(unique_id, message, progress, preview=preview)
 
 
 def _audio_duration_for_frames(frame_count: int, fps: float) -> float:
@@ -475,6 +554,42 @@ def _resolve_relative_model_choice(selected: Any, path: str, keywords: tuple[str
     return candidates[0]
 
 
+def _is_comfy_wan_clip_name(name: Any) -> bool:
+    """Return whether a UMT5 file can produce ComfyUI CONDITIONING.
+
+    ``umt5-xxl-enc-*`` safetensors use WanVideoWrapper's ``blocks.*`` state
+    dict and output WANTEXTENCODER.  Loading one as a ComfyUI CLIP silently
+    creates an empty/meta SD1ClipModel, then fails during prompt encoding.
+    """
+    text = str(name or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return not (text.endswith(".safetensors") and re.search(r"umt5[-_]xxl[-_]enc(?:[-_.]|$)", text))
+
+
+def _resolve_scail_clip_choice(selected: Any) -> str:
+    candidates = [
+        name for name in _find_models_in_relative_dir(
+            "models/text_encoders",
+            ("umt5", "xxl"),
+            (".safetensors", ".gguf"),
+        )
+        if _is_comfy_wan_clip_name(name)
+    ]
+    if not candidates:
+        return ""
+    raw = str(selected or "").strip().replace("\\", "/").strip("/")
+    raw_base = raw.rsplit("/", 1)[-1].lower()
+    if raw and _is_comfy_wan_clip_name(raw):
+        for candidate in candidates:
+            key = candidate.replace("\\", "/").lower()
+            if key == raw.lower() or key.rsplit("/", 1)[-1] == raw_base:
+                return candidate
+    preferred = "umt5_xxl_int4_convrot.safetensors"
+    return next(
+        (name for name in candidates if name.replace("\\", "/").rsplit("/", 1)[-1].lower() == preferred),
+        candidates[0],
+    )
+
+
 def _resolve_optional_lora_choice(selected: Any, keywords: tuple[str, ...]) -> str:
     raw = str(selected or "").strip().replace("\\", "/").strip("/")
     if not raw or _is_no_lora_choice(raw):
@@ -558,7 +673,10 @@ async def _get_scail2_aio_models(request):
         "fields": [
             {
                 **field,
-                "models": _folder_models(str(field["path"]), list(field["extensions"])),
+                "models": [
+                    name for name in _folder_models(str(field["path"]), list(field["extensions"]))
+                    if field["name"] != "text_encoder_file" or _is_comfy_wan_clip_name(name)
+                ],
                 "roots": _folder_roots(str(field["path"])),
             }
             for field in fields
@@ -661,7 +779,7 @@ async def _post_scail2_aio_upload_audio(request):
             suffix = Path(source_name).suffix.lower()
             if suffix not in AUDIO_EXTENSIONS:
                 return web.json_response({"ok": False, "error": f"不支持的音频格式：{source_name}"}, status=400)
-            tmp_path = gjjutils_temp_path(f".upload_audio_{os.getpid()}_{next(tempfile._get_candidate_names())}{suffix}")
+            tmp_path = gjjutils_unique_temp_path(".upload_audio_", suffix)
             try:
                 with tmp_path.open("wb") as handle:
                     while True:
@@ -685,7 +803,7 @@ async def _post_scail2_aio_upload_audio(request):
 
 
 class GJJ_SCAIL2LongVideoAIO:
-    CATEGORY = "GJJ/🎬 视频/生成/SCAIL"
+    CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = (
@@ -695,6 +813,9 @@ class GJJ_SCAIL2LongVideoAIO:
     RETURN_TYPES = (OUTPUT_TYPE,)
     RETURN_NAMES = ("视频/图片",)
     OUTPUT_TOOLTIPS = ("官方 VIDEO 输出；端口类型同时标记 VIDEO,IMAGE 以便连接到兼容视频或图片帧队列的节点。",)
+    # GJJ_MultiImageLoader marks its queue output with OUTPUT_IS_LIST.  Receive the
+    # complete list once; otherwise ComfyUI invokes this AIO once per reference image.
+    INPUT_IS_LIST = True
     SEARCH_ALIASES = [
         "SCAIL2 AIO",
         "SCAIL2超长视频",
@@ -1000,8 +1121,8 @@ class GJJ_SCAIL2LongVideoAIO:
                     {"default": "", "hidden": True, "display": "hidden", "display_name": "SAM3模型"},
                 ),
                 "model_dtype": (
-                    "STRING",
-                    {"default": "fp8_e4m3fn", "hidden": True, "display": "hidden", "display_name": "模型dtype"},
+                    ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"],
+                    {"default": "default", "hidden": True, "display": "hidden", "display_name": "模型dtype"},
                 ),
                 "use_accel_lora": (
                     "BOOLEAN",
@@ -1073,11 +1194,11 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "reference_resize_mode": (
                     ["补边", "裁剪", "拉伸", "原图"],
-                    {"default": "补边", "hidden": True, "display": "hidden", "display_name": "参考图缩放方法"},
+                    {"default": "裁剪", "hidden": True, "display": "hidden", "display_name": "图片视频缩放方法"},
                 ),
                 "video_size_mode": (
-                    ["面板尺寸", "原视频尺寸"],
-                    {"default": "面板尺寸", "hidden": True, "display": "hidden", "display_name": "视频尺寸来源"},
+                    ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸"],
+                    {"default": "指定尺寸", "hidden": True, "display": "hidden", "display_name": "尺寸来源"},
                 ),
                 "reference_pad_color": (
                     ["黑色", "灰色", "白色", "边缘均色"],
@@ -1089,7 +1210,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 ),
                 "reference_crop_keep_position": (
                     ["上", "下", "左", "右", "中"],
-                    {"default": "中", "hidden": True, "display": "hidden", "display_name": "裁剪保留位置"},
+                    {"default": "上", "hidden": True, "display": "hidden", "display_name": "裁剪保留位置"},
                 ),
                 "multiview_unet": (
                     "STRING",
@@ -1143,6 +1264,16 @@ class GJJ_SCAIL2LongVideoAIO:
                         "forceInput": True,
                         "display_name": "LoRA串联配置",
                         "tooltip": "对齐 GJJ_LoraChainConfig 输出；会追加到 SCAIL 内置 DPO / Slop Bounce / Relighting LoRA 后继续叠加。",
+                    },
+                ),
+                "use_video_frame_rate": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "hidden": True,
+                        "display": "hidden",
+                        "display_name": "视频帧率",
+                        "tooltip": "开启时使用原视频检测到的帧率；关闭时使用面板手动帧率。",
                     },
                 ),
             },
@@ -1228,17 +1359,15 @@ class GJJ_SCAIL2LongVideoAIO:
     def _load_reference_image(self, reference_image: Any, kwargs: dict[str, Any]) -> Any:
         unique_id = kwargs.get("unique_id")
         _progress(unique_id, "2/9 检查参考图输入...", 0.065)
-        direct = _first_image(reference_image)
-        if direct is not None:
-            width, height = _reference_target_size(kwargs)
-            mode = _reference_resize_mode(kwargs)
-            pad_color = _reference_pad_color(kwargs)
-            keep_position = _reference_crop_keep_position(kwargs)
-            padded = _resize_reference_images(direct, width, height, mode, pad_color, keep_position)
-            if padded is None:
-                padded = direct
-            _progress(unique_id, f"2/9 使用外部参考图：{int(padded.shape[0])} 张，缩放方法：{mode}，补边底色：{pad_color}，保留位置：{keep_position}", 0.075)
-            return padded
+        direct_queue = _reference_image_queue(reference_image)
+        if direct_queue:
+            first = direct_queue[0]
+            _progress(
+                unique_id,
+                f"2/9 递归解包外部参考图：{len(direct_queue)} 张；首图原始尺寸 {int(first.shape[2])}x{int(first.shape[1])}",
+                0.075,
+            )
+            return direct_queue[0] if len(direct_queue) == 1 else direct_queue
 
         selected = _json_text(kwargs.get("selected_reference_json"), "[]")
         if selected == "[]":
@@ -1256,6 +1385,12 @@ class GJJ_SCAIL2LongVideoAIO:
         )
         result, _ui = _unwrap_result(loaded)
         if isinstance(result, (list, tuple)) and result:
+            raw = _reference_queue_value(result[0])
+            if raw is not None:
+                raw_images = _reference_image_queue(raw)
+                first = raw_images[0]
+                _progress(unique_id, f"2/9 使用 {len(raw_images)} 张参考图；首图原始尺寸：{int(first.shape[2])}x{int(first.shape[1])}", 0.08)
+                return raw
             width, height = _reference_target_size(kwargs)
             mode = _reference_resize_mode(kwargs)
             pad_color = _reference_pad_color(kwargs)
@@ -1284,6 +1419,9 @@ class GJJ_SCAIL2LongVideoAIO:
             unique_id=kwargs.get("unique_id"),
         )
         result, _ui = _unwrap_result(loaded)
+        raw = _reference_queue_value(result[0] if isinstance(result, (list, tuple)) and result else result)
+        if raw is not None:
+            return raw
         if isinstance(result, (list, tuple)) and result:
             width, height = _reference_target_size(kwargs)
             padded = _resize_reference_images(result[0], width, height, _reference_resize_mode(kwargs), _reference_pad_color(kwargs), _reference_crop_keep_position(kwargs))
@@ -1291,6 +1429,89 @@ class GJJ_SCAIL2LongVideoAIO:
         width, height = _reference_target_size(kwargs)
         padded = _resize_reference_images(result, width, height, _reference_resize_mode(kwargs), _reference_pad_color(kwargs), _reference_crop_keep_position(kwargs))
         return padded if padded is not None else result
+
+    @staticmethod
+    def _prepare_reference_for_mode(scene_refs: Any, replacement_mode: bool, unique_id: Any) -> Any:
+        """Mirror the minimal workflow's BoolSwitch before reference resizing/SAM/SCAIL."""
+        reference = _first_image(scene_refs)
+        if reference is None or not bool(replacement_mode):
+            return scene_refs
+
+        from .gjj_comprehensive_matting import GJJ_ComprehensiveMatting, METHOD_RMBG14
+
+        result = GJJ_ComprehensiveMatting().remove_background(
+            matting_method=METHOD_RMBG14,
+            background="黑色",
+            device="自动",
+            process_res=1024,
+            threshold=0.0,
+            mask_blur=0.0,
+            invert_output=False,
+            media=reference,
+            prompt={},
+            extra_pnginfo={},
+            unique_id=unique_id,
+        )
+        values, _ui = _unwrap_result(result)
+        prepared = _first_image(values[0] if isinstance(values, (list, tuple)) and values else values)
+        if prepared is None:
+            raise RuntimeError("人物替换模式下 RMBG1.4 未返回有效的黑底人物参考图。")
+        return prepared
+
+    @staticmethod
+    def _auto_stitch_multi_references(scene_refs: Any, unique_id: Any) -> Any:
+        references = _reference_image_queue(scene_refs)
+        if len(references) <= 1:
+            return scene_refs
+
+        from .gjj_comprehensive_matting import (
+            GJJ_ComprehensiveMatting,
+            METHOD_RMBG14,
+            _pil_list_to_tensor,
+            _tensor_to_pil_list,
+        )
+
+        matting = GJJ_ComprehensiveMatting()
+        cropped: list[Image.Image] = []
+        for reference in references:
+            result = matting.remove_background(
+                matting_method=METHOD_RMBG14,
+                background="透明",
+                device="自动",
+                process_res=1024,
+                threshold=0.0,
+                mask_blur=0.0,
+                invert_output=False,
+                media=reference,
+                prompt={},
+                extra_pnginfo={},
+                unique_id=unique_id,
+            )
+            values, _ui = _unwrap_result(result)
+            rgba_tensor = values[0] if isinstance(values, (list, tuple)) and values else values
+            for image in _tensor_to_pil_list(rgba_tensor):
+                rgba = image.convert("RGBA")
+                bbox = rgba.getchannel("A").getbbox()
+                if bbox is not None:
+                    cropped.append(rgba.crop(bbox))
+        if not cropped:
+            raise RuntimeError("多参考图自动拼接失败：RMBG1.4 没有提取到有效前景。")
+
+        common_height = max(image.height for image in cropped)
+        aligned: list[Image.Image] = []
+        for image in cropped:
+            if image.height != common_height:
+                width = max(1, int(round(image.width * common_height / max(1, image.height))))
+                image = image.resize((width, common_height), Image.Resampling.LANCZOS)
+            aligned.append(image)
+        canvas = Image.new("RGBA", (sum(image.width for image in aligned), common_height), (0, 0, 0, 0))
+        left = 0
+        for image in aligned:
+            canvas.alpha_composite(image, (left, 0))
+            left += image.width
+        black = Image.new("RGB", canvas.size, (0, 0, 0))
+        black.paste(canvas.convert("RGB"), mask=canvas.getchannel("A"))
+        return _pil_list_to_tensor([black])
 
     @staticmethod
     def _resolve_audio_path(item: dict[str, Any]) -> Path:
@@ -1484,7 +1705,18 @@ class GJJ_SCAIL2LongVideoAIO:
         path = str(result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else "")
         if not path or not os.path.isfile(path):
             raise RuntimeError(f"片段 {scene_index} 已生成，但临时视频文件不存在。")
-        return video, path, ui
+        source_path = Path(path)
+        info = gjjutils_write_temp_file(source_path, suffix=source_path.suffix or ".mp4")
+        info.update({"media_type": "video", "label": f"SCAIL2 片段 {scene_index}"})
+        deduplicated_path = gjjutils_temp_path(str(info["filename"]))
+        try:
+            if source_path.resolve() != deduplicated_path.resolve():
+                source_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        ui = dict(ui or {})
+        ui["preview_media"] = [info]
+        return video, str(deduplicated_path), ui
 
     def _concat_segment_files_fast(self, segment_paths: list[str], kwargs: dict[str, Any]) -> str:
         paths = [str(path) for path in segment_paths if path and os.path.isfile(path)]
@@ -1495,10 +1727,8 @@ class GJJ_SCAIL2LongVideoAIO:
         ffmpeg_path = get_ffmpeg_path()
         if not ffmpeg_path:
             raise RuntimeError("当前环境未找到 ffmpeg，无法快速拼接分段视频。")
-        output_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "scail2_aio_concat"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"scail2_aio_concat_{next(tempfile._get_candidate_names())}.mp4"
-        list_path = output_dir / f"scail2_aio_concat_{next(tempfile._get_candidate_names())}.txt"
+        output_path = gjjutils_unique_temp_path(".scail2_aio_concat_", ".mp4")
+        list_path = gjjutils_unique_temp_path(".scail2_aio_concat_", ".txt")
         with list_path.open("w", encoding="utf-8") as stream:
             for path in paths:
                 escaped = str(Path(path).resolve()).replace("'", "'\\''")
@@ -1527,8 +1757,16 @@ class GJJ_SCAIL2LongVideoAIO:
         except Exception:
             pass
         if proc.returncode != 0:
+            output_path.unlink(missing_ok=True)
             raise RuntimeError((proc.stderr or proc.stdout or "ffmpeg 快速拼接失败").strip())
-        return str(output_path)
+        info = gjjutils_write_temp_file(output_path, suffix=".mp4")
+        deduplicated_path = gjjutils_temp_path(str(info["filename"]))
+        try:
+            if output_path.resolve() != deduplicated_path.resolve():
+                output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return str(deduplicated_path)
 
     def _finalize_segment_files(self, segment_paths: list[str], source_audio: Any, source_fps: float, kwargs: dict[str, Any]) -> tuple[Any, dict[str, Any], int]:
         concat_path = self._concat_segment_files_fast(segment_paths, kwargs)
@@ -1585,7 +1823,8 @@ class GJJ_SCAIL2LongVideoAIO:
                 "扩展名支持 .safetensors 或 .gguf。"
             )
         selected_vae = _resolve_relative_model_choice(kwargs.get("vae_file"), "models/vae", ("wan", "2.1", "vae"), (".safetensors",))
-        selected_t5 = _resolve_relative_model_choice(kwargs.get("text_encoder_file"), "models/text_encoders", ("umt5", "xxl"), (".safetensors",))
+        raw_t5 = str(kwargs.get("text_encoder_file") or "").strip()
+        selected_t5 = _resolve_scail_clip_choice(raw_t5)
         selected_clip_vision = _resolve_relative_model_choice(kwargs.get("clip_vision_file"), "models/clip_vision", ("clip", "vision"), (".safetensors",))
         selected_accel_lora = _resolve_optional_lora_choice(kwargs.get("accel_lora_file"), ("lightx2v", "i2v", "14b"))
         dpo_lora = _resolve_optional_lora_choice(kwargs.get("dpo_lora_file"), ("scail", "dpo"))
@@ -1622,6 +1861,12 @@ class GJJ_SCAIL2LongVideoAIO:
         _progress(unique_id, f"3/9 主模型：{selected_model}", 0.09)
         _progress(unique_id, f"3/9 VAE：{selected_vae}", 0.095)
         _progress(unique_id, f"3/9 T5：{selected_t5}", 0.10)
+        if raw_t5 and selected_t5 and raw_t5.replace("\\", "/").lower() != selected_t5.replace("\\", "/").lower():
+            _progress(
+                unique_id,
+                f"3/9 原 T5 不兼容 ComfyUI CLIP 编码，已自动改用：{selected_t5}",
+                0.102,
+            )
         _progress(unique_id, f"3/9 CLIP Vision：{selected_clip_vision}", 0.105)
         if _bool(kwargs.get("use_accel_lora", True)):
             _progress(unique_id, f"3/9 加速 LoRA：{selected_accel_lora or '未找到，自动禁用'}", 0.11)
@@ -1680,22 +1925,45 @@ class GJJ_SCAIL2LongVideoAIO:
         return model, vae, clip, clip_vision
 
     def generate(self, original_video=None, reference_image=None, **kwargs):
+        # INPUT_IS_LIST lets this node see an entire GJJ image queue.  Ordinary
+        # widgets, hidden values and single connected objects arrive wrapped once.
+        original_video = _unwrap_comfy_list_input(original_video)
+        reference_image = _unwrap_comfy_list_input(reference_image)
+        kwargs = {str(key): _unwrap_comfy_list_input(value) for key, value in kwargs.items()}
         unique_id = kwargs.get("unique_id")
         replacement_mode = _bool(kwargs.get("mode_replacement", False))
 
         _progress(unique_id, "开始执行 SCAIL2 AIO...", 0.0)
         video_frames, source_fps, source_audio = self._load_video_source(original_video, kwargs)
-        if _video_size_mode(kwargs) == "原视频尺寸":
+        detected_source_fps = float(source_fps or 0.0)
+        if _use_video_frame_rate(kwargs) and detected_source_fps > 0:
+            source_fps = detected_source_fps
+            _progress(unique_id, f"1/9 使用视频帧率：{source_fps:.3g} fps", 0.061)
+        else:
+            source_fps = _float_value(kwargs.get("frame_rate"), 8.0, 1.0, 240.0)
+            _progress(unique_id, f"1/9 使用手动帧率：{source_fps:.3g} fps", 0.061)
+        if _video_size_mode(kwargs) == "视频尺寸":
             source_height = int(video_frames.shape[1]) if isinstance(video_frames, torch.Tensor) and video_frames.ndim >= 3 else int(kwargs.get("height") or 896)
             source_width = int(video_frames.shape[2]) if isinstance(video_frames, torch.Tensor) and video_frames.ndim >= 3 else int(kwargs.get("width") or 512)
-            kwargs["width"] = min(2048, max(320, source_width))
-            kwargs["height"] = min(2048, max(320, source_height))
+            kwargs["width"], kwargs["height"] = _fit_source_dimensions(source_width, source_height)
             _progress(unique_id, f"1/9 使用原视频尺寸：{kwargs['width']}x{kwargs['height']}", 0.062)
+        else:
+            kwargs["width"] = _align_model_dimension(kwargs.get("width"), 512)
+            kwargs["height"] = _align_model_dimension(kwargs.get("height"), 896)
+        external_refs = self._load_reference_image(reference_image, kwargs) if reference_image is not None else None
+        external_refs_auto_stitched = False
+        external_reference_count = len(_reference_image_queue(external_refs))
+        if external_reference_count > 1:
+            _progress(unique_id, f"检测到 {external_reference_count} 张不同尺寸参考图：逐张去背景、紧裁并横向拼接...", 0.077)
+            external_refs = self._auto_stitch_multi_references(external_refs, unique_id)
+            external_refs_auto_stitched = True
+        if external_refs is not None and replacement_mode and not external_refs_auto_stitched:
+            _progress(unique_id, "人物替换模式：使用 RMBG1.4 生成黑底人物参考图...", 0.078)
+            external_refs = self._prepare_reference_for_mode(external_refs, True, unique_id)
         source_audio = self._load_audio_track(kwargs, source_audio, int(video_frames.shape[0]), float(source_fps or kwargs.get("frame_rate") or 8.0))
         model, vae, clip, clip_vision = self._load_models(kwargs)
         plan = self._director_plan(kwargs, int(video_frames.shape[0]), float(source_fps or kwargs.get("frame_rate") or 8.0))
         scenes = list(plan.get("scenes") or [])
-        external_refs = self._load_reference_image(reference_image, kwargs) if reference_image is not None else None
         segment_paths: list[str] = []
         generated_frame_count = 0
         scene_count = max(1, len(scenes))
@@ -1707,7 +1975,64 @@ class GJJ_SCAIL2LongVideoAIO:
             _progress(unique_id, f"片段 {scene_pos}/{scene_count}：读取视频段并准备参考图...", base_progress)
             scene_frames = self._load_scene_video_frames(scene, video_frames, source_fps, kwargs)
             scene_refs = external_refs if external_refs is not None else self._load_reference_items(list(scene.get("references") or []), kwargs)
+            scene_refs_auto_stitched = external_refs_auto_stitched
+            scene_reference_count = external_reference_count if external_refs is not None else len(_reference_image_queue(scene_refs))
+            if external_refs is None and scene_reference_count > 1:
+                _progress(unique_id, f"片段 {scene_pos}/{scene_count}：检测到 {scene_reference_count} 张不同尺寸参考图，逐张去背景、紧裁并横向拼接...", base_progress + 0.004)
+                scene_refs = self._auto_stitch_multi_references(scene_refs, unique_id)
+                scene_refs_auto_stitched = True
+            if external_refs is None and scene_refs is not None and replacement_mode and not scene_refs_auto_stitched:
+                _progress(unique_id, f"片段 {scene_pos}/{scene_count}：人物替换模式，使用 RMBG1.4 生成黑底人物参考图...", base_progress + 0.005)
+                scene_refs = self._prepare_reference_for_mode(scene_refs, True, unique_id)
             ref_tensor = _first_image(scene_refs)
+            reference_resize_mode = "补边" if scene_refs_auto_stitched else _reference_resize_mode(kwargs)
+            reference_pad_color = "黑色" if scene_refs_auto_stitched else _reference_pad_color(kwargs)
+            if scene_pos == 1 and _video_size_mode(kwargs) == "图片尺寸":
+                if ref_tensor is None:
+                    _progress(unique_id, "未找到参考图片，图片尺寸模式回退到指定尺寸。", base_progress + 0.01)
+                else:
+                    kwargs["width"], kwargs["height"] = _fit_source_dimensions(
+                        int(ref_tensor.shape[2]),
+                        int(ref_tensor.shape[1]),
+                    )
+                    _progress(unique_id, f"片段 1/{scene_count}：使用参考图片尺寸 {kwargs['width']}x{kwargs['height']}。", base_progress + 0.01)
+            if ref_tensor is not None:
+                scene_refs = _resize_reference_images(
+                    scene_refs,
+                    int(kwargs.get("width") or ref_tensor.shape[2]),
+                    int(kwargs.get("height") or ref_tensor.shape[1]),
+                    reference_resize_mode,
+                    reference_pad_color,
+                    _reference_crop_keep_position(kwargs),
+                )
+                ref_tensor = _first_image(scene_refs)
+            resized_scene_frames = _resize_reference_images(
+                scene_frames,
+                int(kwargs.get("width") or scene_frames.shape[2]),
+                int(kwargs.get("height") or scene_frames.shape[1]),
+                _reference_resize_mode(kwargs),
+                _reference_pad_color(kwargs),
+                _reference_crop_keep_position(kwargs),
+            )
+            if resized_scene_frames is not None:
+                scene_frames = resized_scene_frames
+            if ref_tensor is not None and int(ref_tensor.shape[0]) > 1:
+                _progress(unique_id, f"片段 {scene_pos}/{scene_count}：SAM3.1 前检测到 {int(ref_tensor.shape[0])} 张参考图，强制合并为单张...", base_progress + 0.015)
+                scene_refs = self._auto_stitch_multi_references(ref_tensor, unique_id)
+                scene_refs_auto_stitched = True
+                reference_resize_mode = "补边"
+                reference_pad_color = "黑色"
+                scene_refs = _resize_reference_images(
+                    scene_refs,
+                    int(kwargs.get("width") or ref_tensor.shape[2]),
+                    int(kwargs.get("height") or ref_tensor.shape[1]),
+                    reference_resize_mode,
+                    reference_pad_color,
+                    _reference_crop_keep_position(kwargs),
+                )
+                ref_tensor = _first_image(scene_refs)
+            if ref_tensor is not None and int(ref_tensor.shape[0]) != 1:
+                raise RuntimeError("SAM3.1 参考图合并失败：参考输入仍不是单张图片。")
 
             _progress(unique_id, f"片段 {scene_pos}/{scene_count}：编码提示词...", base_progress + 0.02)
             positive, negative = GJJ_CLIPPromptEncodePanel().encode(
@@ -1730,7 +2055,7 @@ class GJJ_SCAIL2LongVideoAIO:
                 object_indices=str(kwargs.get("sam3_object_indices") or ""),
                 checkpoint=str(kwargs.get("sam3_checkpoint") or ""),
                 detection_threshold=_float_value(kwargs.get("sam3_detection_threshold"), 0.5, 0.0, 1.0),
-                max_objects=int(kwargs.get("sam3_max_objects") or 1),
+                max_objects=max(int(kwargs.get("sam3_max_objects") or 1), scene_reference_count if scene_refs_auto_stitched else 1),
                 detect_interval=int(kwargs.get("sam3_detect_interval") or 1),
                 sort_by=str(kwargs.get("sam3_sort_by") or "从左到右"),
                 replacement_mode=replacement_mode,
@@ -1741,6 +2066,32 @@ class GJJ_SCAIL2LongVideoAIO:
             masks, mask_ui = _unwrap_result(mask_result)
             pose_mask = masks[0] if isinstance(masks, (list, tuple)) and len(masks) > 0 else None
             ref_mask = masks[1] if isinstance(masks, (list, tuple)) and len(masks) > 1 else None
+            mask_width = int(kwargs.get("width") or scene_frames.shape[2])
+            mask_height = int(kwargs.get("height") or scene_frames.shape[1])
+            pose_mask = _resize_reference_images(
+                pose_mask,
+                mask_width,
+                mask_height,
+                _reference_resize_mode(kwargs),
+                "白色" if replacement_mode else "黑色",
+                _reference_crop_keep_position(kwargs),
+                "nearest-exact",
+            )
+            ref_mask = _resize_reference_images(
+                ref_mask,
+                mask_width,
+                mask_height,
+                reference_resize_mode,
+                "黑色" if replacement_mode else "白色",
+                _reference_crop_keep_position(kwargs),
+                "nearest-exact",
+            )
+            _progress_with_preview(
+                unique_id,
+                f"片段 {scene_pos}/{scene_count}：SAM3 跟踪完成。",
+                base_progress + 0.085,
+                mask_ui,
+            )
 
             _progress(unique_id, f"片段 {scene_pos}/{scene_count}：SCAIL2 生成...", base_progress + 0.1)
             target_frames = int(scene_frames.shape[0])
@@ -1778,9 +2129,21 @@ class GJJ_SCAIL2LongVideoAIO:
             scail_result, scail_ui = _unwrap_result(infinity_result)
             generated_frames = scail_result[0] if isinstance(scail_result, (list, tuple)) else scail_result
             generated_frame_count += int(generated_frames.shape[0]) if isinstance(generated_frames, torch.Tensor) else target_frames
+            _progress_with_preview(
+                unique_id,
+                f"片段 {scene_pos}/{scene_count}：SCAIL2 生成预览已更新。",
+                base_progress + 0.72 / scene_count,
+                scail_ui,
+            )
 
             _progress(unique_id, f"片段 {scene_pos}/{scene_count}：写入临时视频并清理资源...", base_progress + 0.74 / scene_count)
             _segment_video, segment_path, segment_ui = self._combine_segment_to_temp(generated_frames, source_fps, kwargs, scene_index)
+            _progress_with_preview(
+                unique_id,
+                f"片段 {scene_pos}/{scene_count}：临时视频预览已更新。",
+                base_progress + 0.76 / scene_count,
+                segment_ui,
+            )
             segment_paths.append(segment_path)
             self._cleanup_segment_resources(
                 scene_frames,

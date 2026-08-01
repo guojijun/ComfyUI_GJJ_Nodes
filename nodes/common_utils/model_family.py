@@ -77,7 +77,7 @@ def gjjutils_model_family_match_preset(
 
     Example:
             >>> # 基本用法
-            >>> preset = gjjutils_model_family_match_preset("flux-2-klein-9b-nvfp4.safetensors")
+            >>> preset = gjjutils_model_family_match_preset("flux-2-klein-9b-int8-ConvRot-comfyui.safetensors")
             >>> print(preset["clip_type"])  # "flux2"
 
             >>> # 使用自定义预设列表

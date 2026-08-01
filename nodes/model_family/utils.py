@@ -130,7 +130,7 @@ def gjjutils_model_family_match_preset(
             如果未匹配到任何预设，返回通用默认配置。
 
     Example:
-            >>> preset = gjjutils_model_family_match_preset("flux-2-klein-9b-nvfp4.safetensors")
+            >>> preset = gjjutils_model_family_match_preset("flux-2-klein-9b-int8-ConvRot-comfyui.safetensors")
             >>> print(preset["clip_type"])  # "flux2"
     """
     normalized_name = _normalize_text(unet_name)

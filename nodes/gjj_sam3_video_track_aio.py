@@ -31,7 +31,7 @@ from .common_utils.prompt_translation import (
 
 
 NODE_NAME = "GJJ_SAM3VideoTrackAIO"
-DISPLAY_NAME = "GJJ · 🎯 SAM3视频跟踪一体机"
+DISPLAY_NAME = "GJJ · 🎯 SAM3.1视频跟踪一体机"
 MODEL_KEYWORD = "sam3.1_multiplex"
 DEFAULT_CHECKPOINT = "sam3.1_multiplex_fp16.safetensors"
 MAX_ROUTES = 8

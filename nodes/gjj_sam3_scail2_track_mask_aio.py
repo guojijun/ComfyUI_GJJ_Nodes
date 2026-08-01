@@ -4,8 +4,6 @@ import hashlib
 import json
 import logging
 import re
-import uuid
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -35,12 +33,13 @@ from .common_utils.prompt_translation import (
     register_prompt_translation_api,
     translate_zh_to_en,
 )
+from .common_utils.temp_files import gjjutils_write_temp_pil_sequence
 
 
 log = logging.getLogger(__name__)
 
 NODE_NAME = "GJJ_SAM3SCAIL2TrackMaskAIO"
-DISPLAY_NAME = "GJJ · 🎯🧩 SAM3跟踪彩色遮罩一体机"
+DISPLAY_NAME = "GJJ · 🎯🧩 SAM3.1跟踪彩色遮罩一体机"
 MODEL_KEYWORD = "sam3.1_multiplex"
 DEFAULT_CHECKPOINT = "sam3.1_multiplex_fp16.safetensors"
 MAX_ROUTES = 2
@@ -632,7 +631,10 @@ def _repair_empty_mask_frames(mask: torch.Tensor, background: str) -> torch.Tens
 
     valid_indices = torch.nonzero(foreground, as_tuple=False).flatten().tolist()
     if not valid_indices:
-        return torch.zeros_like(mask)
+        # 没有任何有效目标时必须保留当前通道的模式背景：
+        # 动作驱动的参考图遮罩为白底，人物替换的参考图遮罩为黑底。
+        # 固定返回全黑会把动作驱动错误地退化成人物替换语义。
+        return torch.full_like(mask, bg_value)
 
     repaired = mask.clone()
     for frame_index in range(int(mask.shape[0])):
@@ -648,29 +650,17 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
         return None
     try:
         preview = tensor.detach().cpu().float().clamp(0.0, 1.0).contiguous()
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "sam3_scail2_track_mask_aio"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{prefix}_{uuid.uuid4().hex[:12]}.webp"
-        filepath = target_dir / filename
         arrays = torch.round(preview[..., :3] * 255.0).to(torch.uint8).numpy()
         pil_frames = [Image.fromarray(array, mode="RGB") for array in arrays]
-        pil_frames[0].save(
-            filepath,
+        info = gjjutils_write_temp_pil_sequence(
+            pil_frames,
             format="WEBP",
-            save_all=len(pil_frames) > 1,
-            append_images=pil_frames[1:],
+            suffix=".webp",
             duration=max(1, round(1000.0 / max(0.01, float(fps)))),
             loop=0,
-            lossless=False,
-            quality=90,
-            method=4,
+            save_options={"lossless": False, "quality": 90, "method": 4},
         )
-        return {
-            "filename": filename,
-            "subfolder": "GJJ/sam3_scail2_track_mask_aio",
-            "type": "temp",
-            "format": "image/webp",
-            "media_type": "image",
+        info.update({
             "title": title,
             "is_sequence": len(pil_frames) > 1,
             "autoplay": len(pil_frames) > 1,
@@ -679,10 +669,44 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
             "frame_count": int(preview.shape[0]),
             "width": int(preview.shape[2]),
             "height": int(preview.shape[1]),
-        }
+        })
+        return info
     except Exception as exc:
         log.warning("SAM3 跟踪彩色遮罩预览保存失败：%s", exc)
         return None
+
+
+def _combine_mask_previews(mask_results: list[torch.Tensor]) -> torch.Tensor | None:
+    """Combine driving-video and reference-image masks into one side-by-side preview."""
+    valid = [mask for mask in mask_results if isinstance(mask, torch.Tensor) and mask.ndim == 4 and mask.numel() > 0]
+    if not valid:
+        return None
+
+    target_frames = max(int(mask.shape[0]) for mask in valid)
+    target_height = max(int(mask.shape[1]) for mask in valid)
+    target_width = max(int(mask.shape[2]) for mask in valid)
+    aligned: list[torch.Tensor] = []
+    for mask in valid:
+        item = mask
+        if int(item.shape[1]) != target_height or int(item.shape[2]) != target_width:
+            source_height, source_width = int(item.shape[1]), int(item.shape[2])
+            scale = max(target_width / max(1, source_width), target_height / max(1, source_height))
+            resized_height = max(target_height, int(round(source_height * scale)))
+            resized_width = max(target_width, int(round(source_width * scale)))
+            resized = F.interpolate(
+                item[..., :3].movedim(-1, 1),
+                size=(resized_height, resized_width),
+                mode="nearest",
+            ).movedim(1, -1)
+            top = max(0, (resized_height - target_height) // 2)
+            left = max(0, (resized_width - target_width) // 2)
+            item = resized[:, top:top + target_height, left:left + target_width, :]
+        if int(item.shape[0]) < target_frames:
+            item = torch.cat([item, item[-1:].repeat(target_frames - int(item.shape[0]), 1, 1, 1)], dim=0)
+        elif int(item.shape[0]) > target_frames:
+            item = item[:target_frames]
+        aligned.append(item[..., :3])
+    return torch.cat(aligned, dim=2).contiguous()
 
 
 def _preview_fps_for_channel(channel_index: int) -> float:
@@ -994,8 +1018,6 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
                     conditioning_by_prompt[translated_prompt] = _encode_text(clip, translated_prompt)
 
         mask_results: list[torch.Tensor] = []
-        preview_images: list[dict[str, Any]] = []
-
         for index, images in enumerate(route_images, start=1):
             source_prompt = str(prompt_by_channel[index - 1] or "").strip()
             translated_prompt = translated_by_channel[index - 1] if active_indices else ""
@@ -1046,19 +1068,17 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
             mask = _fit_mask_frame_count(mask, expected_frame_count, background)
             mask_results.append(mask)
 
-            if images is not None:
-                preview = _save_mask_webp_preview(
-                    mask,
-                    f"GJJ_SAM3SCAIL2MaskCh{index:02d}",
-                    _mask_title(index),
-                    fps=_preview_fps_for_channel(index),
-                )
-                if preview is not None:
-                    preview_images.append(preview)
+        combined_preview = _combine_mask_previews(mask_results)
+        preview = _save_mask_webp_preview(
+            combined_preview,
+            "GJJ_SAM3SCAIL2MaskSideBySide",
+            "参考视频遮罩｜参考图遮罩",
+            fps=_preview_fps_for_channel(1),
+        )
 
         return {
             "ui": {
-                "images": preview_images,
+                "images": [preview] if preview is not None else [],
             },
             "result": tuple(mask_results),
         }

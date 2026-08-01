@@ -1043,6 +1043,21 @@ export class GJJ_Utils {
             .replace(/^_+|_+$/g, "");
     }
 
+    static _modelTreeSearchValue(entry, widget, node = null) {
+        const current = String(widget?.value || "").trim();
+        const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
+        if (current && current === noModelValue) return "";
+        if (current && current !== noModelValue) {
+            return GJJ_Utils._modelTreeFamilyStem(current);
+        }
+        const fallback = GJJ_Utils._modelTreeDefaultModel(entry);
+        if (fallback) return GJJ_Utils._modelTreeFamilyStem(fallback);
+        const configured = typeof entry?.searchValue === "function"
+            ? entry.searchValue(entry, widget, node)
+            : entry?.searchValue;
+        return String(configured || "").trim();
+    }
+
     static _modelTreeMissingDefault(entry) {
         return Boolean(entry?.missingDefault || entry?.missing_default || entry?.missing);
     }
@@ -1127,20 +1142,18 @@ export class GJJ_Utils {
         const defaultModel = GJJ_Utils._modelTreeDefaultModel(entry);
         const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
         const isNoModel = Boolean(noModelValue && current === noModelValue);
-        const configuredStateSearchValue = typeof entry?.stateSearchValue === "function"
-            ? entry.stateSearchValue(entry, widget)
-            : entry?.stateSearchValue;
-        const stateSearchValue = String(configuredStateSearchValue || "").trim();
+        const stateSearchValue = GJJ_Utils._modelTreeSearchValue(entry, widget);
+        const allChoices = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 10000);
         const choices = GJJ_Utils._modelTreeSearchChoices(entry, widget, stateSearchValue, 10000);
         const hasCandidates = choices.length > 0;
-        const currentAvailable = Boolean(current && !isNoModel && choices.includes(current));
-        const currentIsDefault = GJJ_Utils._modelTreeIsDefaultPlaceholder(entry, current)
-            || Boolean(current && defaultModel && GJJ_Utils._modelTreeKey(current) === GJJ_Utils._modelTreeKey(defaultModel));
+        const currentAvailable = Boolean(current && !isNoModel && allChoices.includes(current));
         const currentMissing = Boolean(current && !isNoModel && !currentAvailable);
         const missingDefault = GJJ_Utils._modelTreeMissingDefault(entry) || (!hasCandidates && !!defaultModel);
-        const missing = missingDefault || (currentMissing && currentIsDefault);
-        const value = missingDefault ? defaultModel : (currentAvailable ? current : (choices[0] || current || defaultModel));
-        return { current, fallback: defaultModel, choices, hasCandidates, missingDefault, currentMissing, missing, value };
+        const missing = missingDefault || (currentMissing && !hasCandidates);
+        const value = isNoModel
+            ? current
+            : (missingDefault ? defaultModel : (currentAvailable ? current : (choices[0] || defaultModel || current)));
+        return { current, fallback: defaultModel, choices, hasCandidates, missingDefault, currentMissing, missing, value, searchValue: stateSearchValue };
     }
 
 
@@ -1273,10 +1286,7 @@ export class GJJ_Utils {
         const search = document.createElement("input");
         search.type = "text";
         search.placeholder = "输入关键词过滤；回车使用第一个匹配模型";
-        const initialSearch = typeof entry?.searchValue === "function"
-            ? entry.searchValue(entry, widget, node)
-            : entry?.searchValue;
-        search.value = String(initialSearch || "");
+        search.value = GJJ_Utils._modelTreeSearchValue(entry, widget, node);
         search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
         const list = document.createElement("div");
         list.style.cssText = floating
@@ -1386,16 +1396,9 @@ export class GJJ_Utils {
                 ? entry.autoSelectSearchValue(entry, widget, node)
                 : entry?.autoSelectSearchValue;
             const autoSelectSearchValue = String(configuredAutoSelectSearchValue || "").trim();
-            const missingFamilyKey = initialState.currentMissing
-                ? GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(initialState.current))
-                : "";
             const autoSelectChoices = autoSelectSearchValue
                 ? GJJ_Utils._modelTreeFilteredChoices(entry, widget, autoSelectSearchValue, 1)
-                : (missingFamilyKey
-                    ? initialState.choices.filter((choice) => (
-                        GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(choice)) === missingFamilyKey
-                    )).slice(0, 1)
-                    : (initialState.currentMissing ? [] : initialState.choices.slice(0, 1)));
+                : initialState.choices.slice(0, 1);
             const autoSelectedValue = autoSelectChoices[0];
             if (autoSelectedValue != null) {
                 GJJ_Utils._modelTreeSetWidgetValue(widget, autoSelectedValue, entry, node);
@@ -1442,7 +1445,7 @@ export class GJJ_Utils {
                     return;
                 }
                 choicePanel = GJJ_Utils._modelTreeChoicePanel(node, entry, widget, (nextValue) => {
-                    if (entry?.floatingChoices === true) closeChoicePanel();
+                    closeChoicePanel();
                     GJJ_Utils._modelTreeSetWidgetValue(widget, nextValue, entry, node);
                     callbacks.onApply?.(entry, nextValue, widget);
                     callbacks.refresh?.();

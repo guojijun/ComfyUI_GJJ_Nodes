@@ -42,6 +42,7 @@ const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
 const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
 const HELD_MEDIA_PROPERTY = "gjj_any_preview_held_media";
 const GJJ_FILE_DRAG_MIME = "application/x-gjj-file-browser-item";
+const GJJ_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 const LAST_LINKS_PROPERTY = "gjj_any_preview_last_upstream_links";
 const TEXT_INPUT_SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
@@ -2252,6 +2253,20 @@ function fileBrowserDropPayload(event) {
 	}
 }
 
+function mediaDropPayload(event) {
+	const raw = event?.dataTransfer?.getData?.(GJJ_MEDIA_DRAG_MIME) || "";
+	if (!raw) {
+		const fallback = globalThis.__gjjScail2DraggedPreview;
+		return fallback?.filename ? { ...fallback } : null;
+	}
+	try {
+		const payload = JSON.parse(raw);
+		return payload?.filename ? payload : null;
+	} catch (_) {
+		return null;
+	}
+}
+
 function hasFileBrowserDrop(event) {
 	return Array.from(event?.dataTransfer?.types || []).includes(GJJ_FILE_DRAG_MIME) || Boolean(fileBrowserDropPayload(event));
 }
@@ -2335,6 +2350,16 @@ function anyPreviewNodeAtClientPoint(clientX, clientY) {
 			}
 		}
 	}
+	const [canvasX, canvasY] = canvasPointFromClient(clientX, clientY);
+	for (let index = nodes.length - 1; index >= 0; index -= 1) {
+		const node = nodes[index];
+		if (node?.comfyClass !== "GJJ_AnyPreview") continue;
+		const x = Number(node.pos?.[0] || 0);
+		const y = Number(node.pos?.[1] || 0);
+		const width = Number(node.size?.[0] || MIN_WIDTH);
+		const height = Number(node.size?.[1] || 120);
+		if (canvasX >= x && canvasX <= x + width && canvasY >= y && canvasY <= y + height) return node;
+	}
 	return null;
 }
 
@@ -2384,16 +2409,72 @@ globalThis.__gjjAnyPreviewImportLocalFileAtPoint = async function (payload, clie
 	return true;
 };
 
+async function importMediaPayloadIntoNode(node, payload) {
+	if (!node || !payload?.filename) return false;
+	setDropTargetActive(node, true, "导入预览中...");
+	let sourcePayload = payload;
+	const previewUrl = String(payload.preview_url || "").trim();
+	if (previewUrl) {
+		const response = await fetch(previewUrl);
+		if (!response.ok) throw new Error("无法读取采样预览");
+		const blob = await response.blob();
+		const uploaded = await uploadDroppedImagesToTemp([
+			new File([blob], payload.filename || "sampling_preview.png", { type: blob.type || "image/png" }),
+		]);
+		if (!uploaded.length) throw new Error("采样预览上传失败");
+		sourcePayload = uploaded[0];
+	}
+	const copied = await copyMediaToInput([sourcePayload]);
+	if (!copied.length) {
+		setDropTargetActive(node, false);
+		return false;
+	}
+	const item = copied[0];
+	const extension = String(item.filename || "").split(".").pop()?.toLowerCase() || "";
+	const mediaType = String(item.media_type || "").toLowerCase();
+	const kind = mediaType || (["mp4", "webm", "mov", "mkv", "avi"].includes(extension) ? "video" : "image");
+	node.properties ||= {};
+	disconnectLinkedInputs(node);
+	delete node.properties[HELD_TEXT_PROPERTY];
+	delete node.properties[HELD_IMAGES_PROPERTY];
+	delete node.properties[HELD_MEDIA_PROPERTY];
+	resetLivePreviewState(node);
+	if (kind === "image") {
+		node.properties[HELD_IMAGES_PROPERTY] = [{ ...item }];
+	} else {
+		node.properties[HELD_MEDIA_PROPERTY] = { kind, items: [{ ...item }], text: String(item.label || item.filename || "") };
+	}
+	applyHeldPreview(node);
+	scheduleStabilize(node, 0);
+	setDirty(node);
+	setDropTargetActive(node, false);
+	return true;
+}
+
+globalThis.__gjjAnyPreviewImportMediaAtPoint = async function (payload, clientX, clientY) {
+	const node = anyPreviewNodeAtClientPoint(Number(clientX), Number(clientY)) || createAnyPreviewAtClientPoint(clientX, clientY);
+	return importMediaPayloadIntoNode(node, payload);
+};
+
 function installAnyPreviewCanvasDropTarget() {
 	if (document.__gjjAnyPreviewCanvasDropTargetInstalled) return;
 	document.__gjjAnyPreviewCanvasDropTargetInstalled = true;
 	document.addEventListener("dragover", (event) => {
-		if (!hasFileBrowserDrop(event)) return;
+		if (!hasFileBrowserDrop(event) && !Array.from(event?.dataTransfer?.types || []).includes(GJJ_MEDIA_DRAG_MIME)) return;
 		if (event.target?.closest?.(".gjj-file-browser")) return;
 		event.preventDefault();
 		if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 	});
 	document.addEventListener("drop", (event) => {
+		const mediaPayload = mediaDropPayload(event);
+		if (mediaPayload) {
+			event.preventDefault();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+			Promise.resolve(globalThis.__gjjAnyPreviewImportMediaAtPoint(mediaPayload, event.clientX, event.clientY)).catch((error) => {
+				console.warn("[GJJ_AnyPreview] canvas media drop failed", error);
+			});
+			return;
+		}
 		const payload = fileBrowserDropPayload(event);
 		if (!payload) return;
 		if (event.target?.closest?.(".gjj-file-browser")) return;
@@ -2453,8 +2534,10 @@ function installAnyPreviewDropTarget(node, elements) {
 	let dragDepth = 0;
 	const stopIfSupported = (event) => {
 		const hasBrowserFile = hasFileBrowserDrop(event);
+		const hasMediaPayload = Array.from(event?.dataTransfer?.types || []).includes(GJJ_MEDIA_DRAG_MIME)
+			|| Boolean(mediaDropPayload(event));
 		const hasImage = imageFilesFromDropEvent(event).length > 0 || Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"));
-		if (!hasBrowserFile && !hasImage) {
+		if (!hasBrowserFile && !hasMediaPayload && !hasImage) {
 			return false;
 		}
 		event.preventDefault();
@@ -2466,7 +2549,8 @@ function installAnyPreviewDropTarget(node, elements) {
 		target.addEventListener("dragenter", (event) => {
 			if (!stopIfSupported(event)) return;
 			dragDepth += 1;
-			setDropTargetActive(node, true, hasFileBrowserDrop(event) ? "松开导入文件" : "松开导入图片");
+			const hasMediaPayload = Array.from(event?.dataTransfer?.types || []).includes(GJJ_MEDIA_DRAG_MIME);
+			setDropTargetActive(node, true, hasMediaPayload ? "松开接收预览" : (hasFileBrowserDrop(event) ? "松开导入文件" : "松开导入图片"));
 		});
 		target.addEventListener("dragover", (event) => {
 			stopIfSupported(event);
@@ -2481,6 +2565,15 @@ function installAnyPreviewDropTarget(node, elements) {
 		target.addEventListener("drop", (event) => {
 			if (!stopIfSupported(event)) return;
 			dragDepth = 0;
+			const previewPayload = mediaDropPayload(event);
+			if (previewPayload) {
+				void importMediaPayloadIntoNode(node, previewPayload).catch((error) => {
+					console.warn("[GJJ_AnyPreview] drop preview media failed", error);
+					setDropTargetActive(node, true, error?.message || "导入失败");
+					setTimeout(() => setDropTargetActive(node, false), 1400);
+				});
+				return;
+			}
 			const browserPayload = fileBrowserDropPayload(event);
 			if (browserPayload) {
 				void importLocalFileFromBrowserNode(node, browserPayload);
@@ -5676,15 +5769,6 @@ app.registerExtension({
 			});
 			return result;
 		};
-	},
-
-	onNodeOutputsUpdated() {
-		for (const node of app.graph?._nodes || []) {
-			if (isTargetNode(node)) {
-				clearNativeImagePreviewState(node);
-				scheduleNativePreviewCleanup(node);
-			}
-		}
 	},
 
 	setup() {
