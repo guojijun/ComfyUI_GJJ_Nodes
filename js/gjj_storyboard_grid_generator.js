@@ -2842,6 +2842,11 @@ async function resolvePromptCharacters(node, promptText, attempt = 0) {
 }
 
 function currentPromptText(node) {
+	const persistedCellPrompt = () => {
+		const cells = parseGridCells(node?.properties?.[GRID_CELLS_PROPERTY]);
+		if (!cells.length || !cells.some((cell) => String(cell?.prompt || "").trim())) return "";
+		return serializePromptParts(cells.map((cell) => String(cell?.prompt || "")));
+	};
 	const linkedSource = linkedPromptSource(node);
 	if (linkedSource) {
 		const linkedText = String(linkedSource.text || "");
@@ -2851,12 +2856,15 @@ function currentPromptText(node) {
 		}
 		const snapshot = String(node?.properties?.[SYNCED_PROMPT_PROPERTY] || "");
 		if (snapshot) return snapshot;
+		const persisted = persistedCellPrompt();
+		if (persisted) return persisted;
 		const actualParts = node?.__gjjStoryboardActualPromptParts || [];
 		if (actualParts.some((part) => typeof part === "string" && part.trim())) {
 			return serializePromptParts(actualParts.map((part) => String(part || "")));
 		}
 	}
-	return String(getWidget(node, "prompt")?.value || "");
+	const widgetText = String(getWidget(node, "prompt")?.value || "");
+	return widgetText || persistedCellPrompt();
 }
 
 function syncPromptSnapshot(node, promptText) {
@@ -4359,6 +4367,9 @@ function patchNode(node) {
 	node.onConfigure = function (serializedNode, ...args) {
 		const values = serializedNode?.properties?.[PARAM_VALUES_PROPERTY];
 		const serializedCells = parseGridCells(serializedNode?.properties?.[GRID_CELLS_PROPERTY]);
+		const serializedCellPrompt = serializedCells.length
+			? serializePromptParts(serializedCells.map((cell) => String(cell?.prompt || "")))
+			: "";
 		const tableCachedImages = serializedCells.filter((cell) => cell.image?.filename).map((cell) => ({ index: cell.index, ...cell.image }));
 		const propertyCachedImages = tableCachedImages.length ? tableCachedImages : parseStoryboardPreviewImageItems(serializedNode?.properties?.[CACHED_PREVIEW_IMAGES_PROPERTY]);
 		const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
@@ -4366,6 +4377,10 @@ function patchNode(node) {
 			if (serializedCells.length) {
 				this.properties ||= {};
 				this.properties[GRID_CELLS_PROPERTY] = serializedCells;
+				// The upstream node/link can still be unavailable during workflow load.
+				// Use the persisted per-cell prompt table as the cache comparison baseline
+				// so that a transient empty prompt cannot invalidate every stored image.
+				this.__gjjStoryboardLastEffectivePromptText = serializedCellPrompt;
 			}
 			this.__gjjStoryboardRestoringParams = true;
 			try {

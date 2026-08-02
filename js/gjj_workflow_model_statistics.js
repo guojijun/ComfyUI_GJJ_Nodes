@@ -272,6 +272,45 @@ function collectWorkflowModels() {
 			// current-model provider is authoritative for model statistics.
 			continue;
 		}
+		if (graphNode?.type === "GJJ_StoryboardGridGenerator") {
+			const currentWidgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
+			for (const [name, kind] of [
+				["unet_name", "diffusion"],
+				["clip_name1", "clip"],
+				["vae_name", "vae"],
+				["storyboard_lora_name", "loras"],
+			]) {
+				const modelName = String(currentWidgetValue(name) || "").trim();
+				if (!modelName) continue;
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: kind,
+					name: modelName,
+				});
+			}
+			let loraRows = [];
+			try {
+				const parsed = JSON.parse(String(currentWidgetValue("lora_data") || "[]"));
+				if (Array.isArray(parsed)) loraRows = parsed;
+			} catch (_) {}
+			for (const row of loraRows) {
+				if (!row || row.enabled === false) continue;
+				const modelName = String(row.name || "").trim();
+				if (!modelName) continue;
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: "loras",
+					name: modelName,
+				});
+			}
+			// Storyboard properties contain model-family presets and old saved
+			// snapshots. Only the live widgets above represent execution inputs.
+			continue;
+		}
 		for (const widget of graphNode?.widgets || []) {
 			if (lazyUsesUnet && widget?.name === "ckpt_name") continue;
 			if (SKIP_WIDGET_TYPES.has(widget?.type)) continue;

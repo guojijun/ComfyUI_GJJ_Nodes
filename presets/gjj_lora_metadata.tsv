@@ -1,4 +1,18 @@
 ﻿id	match	title	trigger	strength	summary	source
+detail-slider-krea-2-loraholic	detail-slider-krea-2-loraholic	细节滑块		-6~6	短提示或详细场景：-4.0至4.0 肖像或简单场景等：-6.0至6.0	https://civitai.com/models/2772451/detail-slider-krea-2-loraholic
+krea-2-breast-slider	krea-2-breast-slider	胸部滑块		2	乳房滑板	https://civitai.com/models/2732158/krea-2-breast-slider
+krea-2-realism-slider	krea-2-realism-slider	真实感滑块		-1~1	从动漫般的眼睛和绘画纹理，到皮肤毛孔和相机般的真实感。每当模型的想法和你的想法不完全一致时，就用它。	https://civitai.com/models/2781697/krea-2-realism-slider
+krea-2-amateur-slider	krea-2-amateur-slider	业余滑块		-2~2	负值产生干净、专业质量的图像，影响最强，约在-2左右。正值会逐渐增加业余摄影特征，如噪点、压缩伪影和图像真实度降低。+2通常是个不错的平衡点，但最佳设置因图像而异。更高的数值会增加劣化，最终可能导致噪点过大和细节丢失。	https://civitai.com/models/2773343/krea-2-amateur-slider
+krea-2-weight-slider	krea-2-weight-slider	体重滑块		-3~3	使用-3到3的数值，但通常2个就足够了	https://civitai.com/models/2751675/krea-2-weight-slider
+monolid-slider-krea-2	monolid-slider-krea-2	混血滑块		-4~4	我知道这有点具体，某种程度上它属于高加索/东亚混血的滑块。但它专注于制作合适的单眼皮。如果你不想让所有人都得单眼皮，它不适合多人图片，但通过一些帮助LoRA的提示和完美的强度，它可能只影响图片中的亚洲人。	https://civitai.com/models/2729907/monolid-slider-krea-2
+krea-2-warm-light-slider	krea-2-warm-light-slider	暖光滑块		-6~3	生成从冷暗图像到温暖金色光线的负值，可能比正值稍大一些。从-6到3，但每张图片都会变化	https://civitai.com/models/2764310/krea-2-warm-light-slider
+waist-slider-or-krea-2	waist-slider-or-krea-2	腰围滑块		-14~7	通过调整强度控制腰围	https://civitai.com/models/2777139/waist-slider-or-krea-2
+the-age-slider-zit-krea-2	the-age-slider-zit-krea-2	年龄滑块		-3~8	强制模型朝一个方向移动，在这里是年龄方向。所以请负责任地使用它，把它当作一个可以设定价值的PRMOPT。	https://civitai.com/models/2533032/the-age-slider-zit-krea-2
+caucasian-asian-slider-ethnicity-krea-2	caucasian-asian-slider-ethnicity-krea-2	种族滑块		-5~4	白人/亚洲人滑块	https://civitai.com/models/2729984/caucasian-asian-slider-ethnicity-krea-2
+skin-tone-slider-krea-2	skin-tone-slider-krea-2	肤色滑块		-4~4	可用范围为-4到4。它们的浅白化色是-4，深黑檀色4。	https://civitai.com/models/2743912/skin-tone-slider-krea-2
+fatskinny-weight-slider-krea-2-zit	fatskinny-weight-slider-krea-2-zit	体重滑块		-10~10	解决了胖女人化妆更多、瘦女人化妆更多的问题。但在极端端还是个小问题。整体上稍微稳定一些，但升级不算大	https://civitai.com/models/2554553/fatskinny-weight-slider-krea-2-zit
+elusarcas-krea-2-smartphone-photography-slider-lora	elusarcas-krea-2-smartphone-photography-slider-lora	业余摄影		1.5	推动Krea 2走向更具说服力的业余摄影、自然的皮肤质感和更不精致的图像生成。	https://civitai.com/models/2796343/elusarcas-krea-2-smartphone-photography-slider-lora
+krea-2-flat-illustrationanime-style	krea-2-flat-illustrationanime-style	平面插画		1	平面动漫/平面插画风格	https://civitai.com/models/2744176/krea-2-flat-illustrationanime-style
 booguimage01loravtnz4	booguimage01loravtnz4	特定人像	vtn	1	特定人像lora	https://civitai.com/models/2750370/booguimage01loravtnz4
 boogu edit_9500	boogu edit_9500	三宫格	根据图一生成三宫格叙事连贯的镜头，原图是…。后续镜头为…，随后…	1	啦啦啦的小黄瓜的三宫格分镜头
 Qwen-Image-Edit-2511-Object-Adder	Qwen-Image-Edit-2511-Object-Adder	添加对象	Add the specified objects to the image while preserving the background lighting and surrounding elements maintaining realism and original details	1	兼容2509和2511版本	https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Object-Adder

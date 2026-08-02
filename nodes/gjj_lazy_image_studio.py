@@ -2786,7 +2786,7 @@ class GJJ_LazyImageStudio:
                         "max": 8192,
                         "step": 8,
                         "display_name": "📐 宽度",
-                        "tooltip": "默认会在第一个图像输入有连接时同步为输入图宽度；关闭 📐 后按面板宽度生成。",
+                        "tooltip": "默认会在第一个图像输入有连接时同步为输入图宽度；关闭 📐 后按画板宽度生成。",
                     },
                 ),
                 "height": (
@@ -2987,7 +2987,7 @@ class GJJ_LazyImageStudio:
                         {
                             "default": True,
                             "display_name": "📐 使用输入图尺寸",
-                            "tooltip": "有图像输入时，单图使用原图尺寸；多图使用面积最大的图片为尺寸基准，再按尺寸面板规则统一处理。关闭后使用面板宽高。",
+                            "tooltip": "有图像输入时，单图使用原图尺寸；多图使用面积最大的图片为尺寸基准，再按尺寸面板规则统一处理。关闭后使用画板宽高。",
                             "hidden": True,
                             "display": "hidden",
                             "forceInput": False,

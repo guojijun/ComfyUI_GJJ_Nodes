@@ -168,8 +168,8 @@ const SIZE_SOURCE_BUTTON_STYLES = {
 		hover: "linear-gradient(135deg, #2563eb, #38bdf8)",
 		border: "#38bdf8",
 		color: "#e0f2fe",
-		label: "面板尺寸",
-		title: "当前使用面板宽度和高度。",
+		label: "画板尺寸",
+		title: "当前使用画板宽度和高度。",
 	},
 	open: {
 		bg: "linear-gradient(135deg, #4b5563, #64748b)",
@@ -2845,7 +2845,7 @@ function createSizeSourceControl(node) {
 	wrap.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0;width:100%";
 	const choices = [
 		{ enabled: true, label: "原图尺寸", title: "单图使用原图宽高；多图使用面积最大的输入图作为尺寸基准，再按下方规则统一所有图片。" },
-		{ enabled: false, label: "面板尺寸", title: "使用下面的宽度和高度滑条。" },
+		{ enabled: false, label: "画板尺寸", title: "使用下面的宽度和高度滑条。" },
 	];
 	for (const choice of choices) {
 		const button = document.createElement("button");
