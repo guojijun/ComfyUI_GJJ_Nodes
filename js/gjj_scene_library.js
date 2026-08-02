@@ -322,10 +322,10 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 .gjj-sl-name-pop{position:fixed;z-index:100003;width:min(260px,calc(100vw - 16px));display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;align-items:center;border:1px solid #49636d;border-radius:8px;background:#101a1f;box-shadow:0 14px 36px rgba(0,0,0,.5);padding:8px;}
 .gjj-sl-name-pop input{height:30px;min-width:0;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#e7f2f4;padding:0 8px;font-size:12px;outline:none;}
 .gjj-sl-model-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.46);display:flex;align-items:center;justify-content:center;padding:18px;z-index:4;}
-.gjj-sl-model-dialog{width:min(680px,100%);max-height:100%;overflow:auto;border:1px solid #40535b;border-radius:8px;background:#101a1f;color:#dce7e2;box-shadow:0 18px 48px rgba(0,0,0,.56);}
-.gjj-sl-model-head{display:flex;align-items:center;gap:8px;min-height:38px;padding:8px 10px;border-bottom:1px solid #263842;}
+.gjj-sl-model-dialog{width:min(680px,100%);max-height:100%;overflow:hidden;display:flex;flex-direction:column;border:1px solid #40535b;border-radius:8px;background:#101a1f;color:#dce7e2;box-shadow:0 18px 48px rgba(0,0,0,.56);}
+.gjj-sl-model-head{position:relative;z-index:2;display:flex;align-items:center;gap:8px;min-height:38px;flex:0 0 auto;padding:8px 10px;border-bottom:1px solid #263842;background:#101a1f;box-shadow:0 5px 12px rgba(0,0,0,.2);}
 .gjj-sl-model-title{font-size:14px;font-weight:800;color:#f3fbf8;}
-.gjj-sl-model-body{display:flex;flex-direction:column;gap:10px;padding:10px;}
+.gjj-sl-model-body{display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding:10px;overscroll-behavior:contain;}
 .gjj-sl-model-group{border:1px solid #2d4149;border-radius:8px;background:#131d22;padding:8px;}
 .gjj-sl-model-group-title{font-size:13px;font-weight:800;margin-bottom:6px;color:#f0faf4;}
 .gjj-sl-model-tree{display:flex;flex-direction:column;gap:1px;margin:0;padding:7px;border:1px solid #33454c;border-radius:8px;background:#0f171b;color:#dce7e2;font-family:Consolas,"Microsoft YaHei",monospace;font-size:12px;line-height:1.55;overflow:auto;}
@@ -702,6 +702,12 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		backdrop.className = "gjj-sl-model-backdrop";
 		const dialog = document.createElement("div");
 		dialog.className = "gjj-sl-model-dialog";
+		let outsidePointerHandler = null;
+		const closeDialog = () => {
+			if (outsidePointerHandler) document.removeEventListener("pointerdown", outsidePointerHandler, true);
+			outsidePointerHandler = null;
+			backdrop.remove();
+		};
 		const head = document.createElement("div");
 		head.className = "gjj-sl-model-head";
 		const title = document.createElement("div");
@@ -717,11 +723,11 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 				body: JSON.stringify({ section: data.settings_section, values }),
 			});
 			setStatus("场景库模型设置已保存");
-			await showModelTree();
+			closeDialog();
 		}) : null;
 		head.append(title, spacer);
 		if (save) head.appendChild(save);
-		head.appendChild(button("❌关闭", "关闭", "gjj-sl-btn", () => backdrop.remove()));
+		head.appendChild(button("❌关闭", "关闭", "gjj-sl-btn", closeDialog));
 		const body = document.createElement("div");
 		body.className = "gjj-sl-model-body";
 		const controls = Array.isArray(data.controls) ? data.controls : [];
@@ -746,9 +752,13 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		backdrop.appendChild(dialog);
 		backdrop.addEventListener("click", (event) => {
 			stop(event);
-			if (event.target === backdrop) backdrop.remove();
+			if (event.target === backdrop) closeDialog();
 		});
 		panel.appendChild(backdrop);
+		outsidePointerHandler = (event) => {
+			if (!dialog.contains(event.target)) closeDialog();
+		};
+		document.addEventListener("pointerdown", outsidePointerHandler, true);
 	}
 
 	async function showGenerationSettings() {
