@@ -89,8 +89,6 @@ from .common_utils.model_family import (
     gjjutils_model_family_pick_model_name as _pick_available_name,
     MODEL_FAMILY_PRESETS,
     CLIP_TYPE_KEYWORDS,
-    DEFAULT_CLIP_NAME,
-    DEFAULT_VAE_NAME,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.mage_flow_runtime import (
@@ -136,7 +134,9 @@ except Exception:  # pragma: no cover - 单文件语法检查兜底
 
 NODE_NAME = "GJJ_LazyImageStudio"
 MAX_MAIN_IMAGE_INDEX = 9999
-DEFAULT_UNET_NAME = "flux-2-klein-9b-int8-ConvRot-comfyui.safetensors"
+DEFAULT_UNET_NAME = "krea2_turbo_int4_convrot.safetensors"
+DEFAULT_LAZY_CLIP_NAME = "qwen3vl_4b_bf16.safetensors"
+DEFAULT_LAZY_VAE_NAME = "qwen_image_vae.safetensors"
 DEFAULT_UNET_DTYPE = "default"
 DEFAULT_MODEL_SOURCE = "UNET 主模型"
 MODEL_SOURCE_OPTIONS = [DEFAULT_MODEL_SOURCE, "底模 checkpoint"]
@@ -1011,8 +1011,8 @@ def _resolve_lazy_test_model_pair(unet_name: str) -> tuple[dict[str, Any], str, 
         raise RuntimeError(
             f"主模型 {unet_name} 未匹配任何模型族预设，不能执行合法配套测试。"
         )
-    clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
-    vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+    clip_models = _list_lazy_clip_models() or [DEFAULT_LAZY_CLIP_NAME]
+    vae_models = list_vae_models() or [DEFAULT_LAZY_VAE_NAME]
     clip_names = resolve_clip_names_for_preset(
         preset,
         clip_models,
@@ -2710,8 +2710,8 @@ class GJJ_LazyImageStudio:
             if any(k in str(m).lower() for k in _diffusion_keywords)
         ]
         diffusion_models = _filtered if _filtered else _raw_diffusion_models
-        clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
-        vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+        clip_models = _list_lazy_clip_models() or [DEFAULT_LAZY_CLIP_NAME]
+        vae_models = list_vae_models() or [DEFAULT_LAZY_VAE_NAME]
         checkpoint_models = _list_lazy_checkpoints()
         # 确保 loras 目录存在并获取文件列表
         try:
@@ -2804,7 +2804,7 @@ class GJJ_LazyImageStudio:
                 "clip_name1": (
                     clip_models,
                     {
-                        "default": _preferred_default(clip_models, DEFAULT_CLIP_NAME),
+                        "default": _preferred_default(clip_models, DEFAULT_LAZY_CLIP_NAME),
                         "display_name": "🟡 CLIP 编码器",
                         "tooltip": "仅在需要手动选择可变文本编码器的模型族中显示，例如 Flux1 的 T5 编码器；支持 text_encoders / clip_gguf 中的 safetensors 与 GGUF。",
                     },
@@ -2812,7 +2812,7 @@ class GJJ_LazyImageStudio:
                 "vae_name": (
                     vae_models,
                     {
-                        "default": _preferred_default(vae_models, DEFAULT_VAE_NAME),
+                        "default": _preferred_default(vae_models, DEFAULT_LAZY_VAE_NAME),
                         "display_name": "🔴 VAE 解码器",
                         "tooltip": "自动推荐与当前底模同体系的 VAE，可按需手动覆盖。",
                     },
@@ -4412,8 +4412,8 @@ class GJJ_LazyImageStudio:
                 preset = _apply_f2k_fallback_preset(preset, unet_name)
                 preset = _apply_zit_fallback_preset(preset, unet_name)
                 preset = _apply_krea2_fallback_preset(preset, unet_name)
-            clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
-            vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+            clip_models = _list_lazy_clip_models() or [DEFAULT_LAZY_CLIP_NAME]
+            vae_models = list_vae_models() or [DEFAULT_LAZY_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
             try:
                 lora_files = folder_paths.get_filename_list("loras")
@@ -4468,7 +4468,7 @@ class GJJ_LazyImageStudio:
                             f"模型族 {preset.get('id', '(未识别)')} 未解析到合法 CLIP。"
                         )
                     resolved_clip_names.append(
-                        _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
+                        _pick_available_name("", clip_models, DEFAULT_LAZY_CLIP_NAME)
                     )
             # 验证 CLIP 模型是否正确匹配 UNET 模型
             preset_clip_names = preset.get("clip_names", [])

@@ -278,15 +278,29 @@ def _preferred_runtime_device() -> str:
     return "cpu" if "cpu" in devices else devices[0]
 
 
-def _send_status(unique_id: Any, text: str) -> None:
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
     if not unique_id:
         return
     try:
         from server import PromptServer
 
+        status_text = str(text or "")
+        if progress is None:
+            prefix = status_text.split(" ", 1)[0]
+            if "/6" in prefix:
+                try:
+                    stage = max(1, min(6, int(prefix.split("/", 1)[0])))
+                    progress = 0.03 + ((stage - 1) / 5.0) * 0.87
+                except (TypeError, ValueError):
+                    progress = None
+            elif status_text.startswith("完成："):
+                progress = 1.0
+        payload = {"node": str(unique_id), "text": status_text, "pipeline": "seedvr2"}
+        if progress is not None:
+            payload["progress"] = max(0.0, min(1.0, float(progress)))
         PromptServer.instance.send_sync(
             "gjj_node_progress",
-            {"node": str(unique_id), "text": str(text or "")},
+            payload,
         )
     except Exception:
         pass
@@ -1772,7 +1786,11 @@ class GJJ_SeedVR2ImageUpscaler:
             offset = phase_offset.get(phase_key, 0.0)
             phase_progress = (current_step / total_steps) if total_steps > 0 else 0.0
             pbar.update_absolute(int((offset + phase_progress * weight) * 100), 100)
-            _send_status(unique_id, f"{phase_name}：{current_step}/{total_steps}")
+            _send_status(
+                unique_id,
+                f"{phase_name}：{current_step}/{total_steps}",
+                0.67 + (offset + phase_progress * weight) * 0.28,
+            )
 
         def cleanup() -> None:
             nonlocal runner, ctx

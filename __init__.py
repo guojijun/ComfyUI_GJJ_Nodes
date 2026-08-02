@@ -163,6 +163,27 @@ def _gjj_default_user_settings() -> dict:
 			"annotate_clip": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
 			"seedvr2_dit": "seedvr2_3b_int8_convrot.safetensors",
 			"seedvr2_vae": "ema_vae_fp16.safetensors",
+			"final_width": 2048,
+			"final_height": 1024,
+			"base_width": 1024,
+			"base_height": 512,
+			"generation_steps": 4,
+			"generation_cfg": 1.0,
+			"generation_seed": 0,
+			"generation_denoise": 1.0,
+			"repair_enabled": True,
+			"seam_mask_width": 256,
+			"seam_blur": 24,
+			"seedvr2_enabled": True,
+			"seedvr2_color_correction": "lab",
+			"seedvr2_input_noise": 0.0,
+			"seedvr2_latent_noise": 0.0,
+			"seedvr2_encode_tiled": True,
+			"seedvr2_encode_tile_size": 512,
+			"seedvr2_encode_tile_overlap": 128,
+			"seedvr2_decode_tiled": True,
+			"seedvr2_decode_tile_size": 512,
+			"seedvr2_decode_tile_overlap": 128,
 		},
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
@@ -2875,6 +2896,9 @@ def _register_gjj_scene_library_api():
 		text = SAFE_TEXT_RE.sub("_", str(value or "").strip()).strip("._- ")
 		return (text or fallback)[:96]
 
+	def has_chinese_text(value) -> bool:
+		return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
+
 	def clean_scene_type(value: str, fallback: str = "360") -> str:
 		return "360"
 
@@ -3480,6 +3504,22 @@ def _register_gjj_scene_library_api():
 		except Exception:
 			required = {}
 		scene_settings = _gjj_section_settings("scene_library")
+		def setting_int(key: str, fallback: int, minimum: int, maximum: int) -> int:
+			try:
+				return max(minimum, min(maximum, int(scene_settings.get(key, fallback))))
+			except (TypeError, ValueError):
+				return fallback
+
+		def setting_float(key: str, fallback: float, minimum: float, maximum: float) -> float:
+			try:
+				return max(minimum, min(maximum, float(scene_settings.get(key, fallback))))
+			except (TypeError, ValueError):
+				return fallback
+
+		final_width = setting_int("final_width", 2048, 256, 8192)
+		final_height = setting_int("final_height", 1024, 128, 4096)
+		base_width = setting_int("base_width", 1024, 256, 4096)
+		base_height = setting_int("base_height", 512, 128, 2048)
 
 		def selected_model(key: str, setting_key: str, fallback: str) -> str:
 			spec = required.get(key)
@@ -3525,23 +3565,23 @@ def _register_gjj_scene_library_api():
 				lora_1_strength=1.0,
 				lora_2_name=default_for(required, "lora_2_name", ""),
 				lora_2_strength=1.0,
-				seed=0,
-				steps=4,
-				cfg=1.0,
+				seed=setting_int("generation_seed", 0, 0, 0xFFFFFFFFFFFFFFFF),
+				steps=setting_int("generation_steps", 4, 1, 100),
+				cfg=setting_float("generation_cfg", 1.0, 0.0, 100.0),
 				sampler_name=default_for(required, "sampler_name", "euler"),
 				scheduler=default_for(required, "scheduler", "simple"),
-				denoise=1.0,
-				base_width=1024,
-				base_height=512,
-				final_width=1024,
-				final_height=512,
+				denoise=setting_float("generation_denoise", 1.0, 0.0, 1.0),
+				base_width=base_width,
+				base_height=base_height,
+				final_width=base_width,
+				final_height=base_height,
 				upscale_enabled=False,
 				upscale_model_name=default_for(required, "upscale_model_name", ""),
 				prompt_suffix=DEFAULT_PROMPT_SUFFIX,
 				seam_prompt=DEFAULT_SEAM_PROMPT,
-				seam_mask_width=256,
-				seam_blur=24,
-				repair_enabled=True,
+				seam_mask_width=setting_int("seam_mask_width", 256, 0, 2048),
+				seam_blur=setting_int("seam_blur", 24, 0, 256),
+				repair_enabled=bool(scene_settings.get("repair_enabled", True)),
 				image=pil_to_scene_tensor(image),
 				output_current_view=False,
 				current_view_data="",
@@ -3579,44 +3619,47 @@ def _register_gjj_scene_library_api():
 						return str(option)
 				return str(seed_default(input_key, fallback) or fallback)
 
-			seed_input = output.detach().clone().contiguous() if torch.is_tensor(output) else output
-			with _GJJTemporaryPromptId(server, context_unique_id):
-				with torch.inference_mode():
-					output = GJJ_SeedVR2ImageUpscaler().upscale_image(
-				common_video_height="手动输入",
-				resolution=1024,
-				max_resolution=2048,
-				seed=0,
-				dit_model=seed_model("seedvr2_dit", "dit_model", "seedvr2_3b_int8_convrot.safetensors"),
-				vae_model=seed_model("seedvr2_vae", "vae_model", "ema_vae_fp16.safetensors"),
-				device=seed_default("device", "cuda:0"),
-				model_offload_device=seed_default("model_offload_device", "none"),
-				tensor_offload_device=seed_default("tensor_offload_device", "cuda:0"),
-				attention_mode=seed_default("attention_mode", "sdpa"),
-				blocks_to_swap=seed_default("blocks_to_swap", 0),
-				swap_io_components=seed_default("swap_io_components", False),
-				encode_tiled=seed_default("encode_tiled", True),
-				encode_tile_size=seed_default("encode_tile_size", 512),
-				encode_tile_overlap=seed_default("encode_tile_overlap", 128),
-				decode_tiled=seed_default("decode_tiled", True),
-				decode_tile_size=seed_default("decode_tile_size", 512),
-				decode_tile_overlap=seed_default("decode_tile_overlap", 128),
-				tile_debug=seed_default("tile_debug", "false"),
-				color_correction=seed_default("color_correction", "lab"),
-				input_noise_scale=seed_default("input_noise_scale", 0.0),
-				latent_noise_scale=seed_default("latent_noise_scale", 0.0),
-				enable_debug=False,
-				video_chunk_mode="关闭",
-				frames_per_chunk=1,
-				temporal_overlap=0,
-				vae_temporal_size=seed_default("vae_temporal_size", 32),
-				vae_temporal_overlap=seed_default("vae_temporal_overlap", 8),
-				media=seed_input,
-				unique_id=context_unique_id,
-					)[0]
+			if bool(scene_settings.get("seedvr2_enabled", True)):
+				seed_input = output.detach().clone().contiguous() if torch.is_tensor(output) else output
+				with _GJJTemporaryPromptId(server, context_unique_id):
+					with torch.inference_mode():
+						output = GJJ_SeedVR2ImageUpscaler().upscale_image(
+							common_video_height="手动输入",
+							resolution=final_height,
+							max_resolution=max(final_width, final_height),
+							seed=setting_int("generation_seed", 0, 0, 0xFFFFFFFFFFFFFFFF),
+							dit_model=seed_model("seedvr2_dit", "dit_model", "seedvr2_3b_int8_convrot.safetensors"),
+							vae_model=seed_model("seedvr2_vae", "vae_model", "ema_vae_fp16.safetensors"),
+							device=seed_default("device", "cuda:0"),
+							model_offload_device=seed_default("model_offload_device", "none"),
+							tensor_offload_device=seed_default("tensor_offload_device", "cuda:0"),
+							attention_mode=seed_default("attention_mode", "sdpa"),
+							blocks_to_swap=seed_default("blocks_to_swap", 0),
+							swap_io_components=seed_default("swap_io_components", False),
+							encode_tiled=bool(scene_settings.get("seedvr2_encode_tiled", True)),
+							encode_tile_size=setting_int("seedvr2_encode_tile_size", 512, 128, 2048),
+							encode_tile_overlap=setting_int("seedvr2_encode_tile_overlap", 128, 0, 1024),
+							decode_tiled=bool(scene_settings.get("seedvr2_decode_tiled", True)),
+							decode_tile_size=setting_int("seedvr2_decode_tile_size", 512, 128, 2048),
+							decode_tile_overlap=setting_int("seedvr2_decode_tile_overlap", 128, 0, 1024),
+							tile_debug=seed_default("tile_debug", "false"),
+							color_correction=str(scene_settings.get("seedvr2_color_correction") or seed_default("color_correction", "lab")),
+							input_noise_scale=setting_float("seedvr2_input_noise", 0.0, 0.0, 1.0),
+							latent_noise_scale=setting_float("seedvr2_latent_noise", 0.0, 0.0, 1.0),
+							enable_debug=False,
+							video_chunk_mode="关闭",
+							frames_per_chunk=1,
+							temporal_overlap=0,
+							vae_temporal_size=seed_default("vae_temporal_size", 32),
+							vae_temporal_overlap=seed_default("vae_temporal_overlap", 8),
+							local_media_file="",
+							save_in_place=False,
+							media=seed_input,
+							unique_id=context_unique_id,
+						)[0]
 		except Exception as exc:
 			raise RuntimeError(f"SeedVR2 全景放大失败：{exc}") from exc
-		return fit_to_360_png_canvas(_tensor_to_pil(output), 2048, 1024)
+		return fit_to_360_png_canvas(_tensor_to_pil(output), final_width, final_height)
 
 	def save_360_png_asset(manifest: dict, image: Image.Image, label: str, method: str = "direct") -> dict:
 		scene_id = clean_key(manifest.get("id") or "", "")
@@ -3628,7 +3671,13 @@ def _register_gjj_scene_library_api():
 		target_name = f"{stem}_360.png"
 		if (base / target_name).exists():
 			target_name = f"{stem}_360_{now_ms()}.png"
-		final = fit_to_360_png_canvas(image, 2048, 1024)
+		scene_settings = _gjj_section_settings("scene_library")
+		try:
+			final_width = max(256, min(8192, int(scene_settings.get("final_width", 2048))))
+			final_height = max(128, min(4096, int(scene_settings.get("final_height", 1024))))
+		except (TypeError, ValueError):
+			final_width, final_height = 2048, 1024
+		final = fit_to_360_png_canvas(image, final_width, final_height)
 		final.save(base / target_name, "PNG")
 		timestamp = now_ms()
 		asset = {
@@ -3794,20 +3843,20 @@ def _register_gjj_scene_library_api():
 			"settings_section": "scene_library",
 			"settings": settings,
 			"controls": [
-				{"key": "panorama_unet", "label": "360 生成 UNET", "options": choices.get("diffusion_models") or []},
-				{"key": "panorama_clip", "label": "360 生成 CLIP / VL", "options": choices.get("text_encoders") or []},
-				{"key": "panorama_vae", "label": "360 生成 VAE", "options": choices.get("vae") or []},
-				{"key": "annotate_clip", "label": "自动打标文本编码器", "options": choices.get("text_encoders") or []},
-				{"key": "seedvr2_dit", "label": "SeedVR2 放大主模型", "options": seedvr2_dit_choices},
-				{"key": "seedvr2_vae", "label": "SeedVR2 放大 VAE", "options": seedvr2_vae_choices},
+				{"key": "panorama_unet", "label": "360 生成 UNET", "default": "qwen_image_edit_2511_int4_convrot.safetensors", "options": choices.get("diffusion_models") or []},
+				{"key": "panorama_clip", "label": "360 生成 CLIP / VL", "default": "qwen_2.5_vl_7b_int4_convrot.safetensors", "options": choices.get("text_encoders") or []},
+				{"key": "panorama_vae", "label": "360 生成 VAE", "default": "qwen_image_vae.safetensors", "options": choices.get("vae") or []},
+				{"key": "annotate_clip", "label": "自动打标文本编码器", "default": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors", "options": choices.get("text_encoders") or []},
+				{"key": "seedvr2_dit", "label": "SeedVR2 放大主模型", "default": "seedvr2_3b_int8_convrot.safetensors", "options": seedvr2_dit_choices},
+				{"key": "seedvr2_vae", "label": "SeedVR2 放大 VAE", "default": "ema_vae_fp16.safetensors", "options": seedvr2_vae_choices},
 			],
 			"groups": [
 				{
 					"name": "🌏 360 场景生成",
 					"items": [
-						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('panorama_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
-						{"label": "CLIP / VL", "path": f"models/text_encoders/{settings.get('panorama_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
-						{"label": "VAE", "path": f"models/vae/{settings.get('panorama_vae') or 'qwen_image_vae.safetensors'}"},
+						{"label": "UNET", "control_key": "panorama_unet", "icon": "🟣", "path": f"models/diffusion_models/{settings.get('panorama_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
+						{"label": "CLIP / VL", "control_key": "panorama_clip", "icon": "🟡", "path": f"models/text_encoders/{settings.get('panorama_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
+						{"label": "VAE", "control_key": "panorama_vae", "icon": "🔴", "path": f"models/vae/{settings.get('panorama_vae') or 'qwen_image_vae.safetensors'}"},
 						*[
 							item for item in panorama_items
 							if not any(part in str(item.get("path") or "").replace("\\", "/").lower() for part in ("/diffusion_models/", "/text_encoders/", "/vae/"))
@@ -3817,14 +3866,14 @@ def _register_gjj_scene_library_api():
 				{
 					"name": "🧠 自动打标",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
+						{"label": "Gemma / Qwen VL 文本编码器", "control_key": "annotate_clip", "icon": "🟡", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
 					],
 				},
 				{
 					"name": "🔍 SeedVR2 全景放大",
 					"items": [
-						{"label": "SeedVR2 主模型", "path": f"models/SEEDVR2/{settings.get('seedvr2_dit') or 'seedvr2_3b_int8_convrot.safetensors'}"},
-						{"label": "SeedVR2 VAE", "path": f"models/SEEDVR2/{settings.get('seedvr2_vae') or 'ema_vae_fp16.safetensors'}"},
+						{"label": "SeedVR2 主模型", "control_key": "seedvr2_dit", "icon": "🟣", "path": f"models/SEEDVR2/{settings.get('seedvr2_dit') or 'seedvr2_3b_int8_convrot.safetensors'}"},
+						{"label": "SeedVR2 VAE", "control_key": "seedvr2_vae", "icon": "🔴", "path": f"models/SEEDVR2/{settings.get('seedvr2_vae') or 'ema_vae_fp16.safetensors'}"},
 					],
 				},
 				{
@@ -3875,6 +3924,7 @@ def _register_gjj_scene_library_api():
 	@server.routes.post("/gjj/scene_library/import_auto")
 	async def gjj_scene_library_import_auto(request):
 		try:
+			import asyncio
 			reader = await request.multipart()
 			fields = {}
 			raw = b""
@@ -3893,6 +3943,13 @@ def _register_gjj_scene_library_api():
 			label = fields.get("label") or Path(file_name).stem or "场景"
 			name = fields.get("name") or label or "新场景"
 			import_unique_id = clean_key(fields.get("unique_id") or "", "")
+			if import_unique_id:
+				server.send_sync("gjj_node_progress", {
+					"node": import_unique_id,
+					"text": f"1/7 已接收文件，正在读取：{file_name}",
+					"progress": 0.03,
+					"pipeline": "scene_import",
+				})
 			scene_id = clean_key(fields.get("id") or "", "") or unique_scene_id(name)
 			manifest = read_manifest(scene_id)
 			manifest["name"] = name or manifest.get("name") or scene_id
@@ -3920,7 +3977,14 @@ def _register_gjj_scene_library_api():
 					method = "direct_360"
 				else:
 					method = "generated_360"
-					image = generate_360_from_scene_image(image, name, import_unique_id)
+					image = await asyncio.to_thread(generate_360_from_scene_image, image, name, import_unique_id)
+			if import_unique_id:
+				server.send_sync("gjj_node_progress", {
+					"node": import_unique_id,
+					"text": "7/7 正在保存 2048×1024 全景图...",
+					"progress": 0.98,
+					"pipeline": "scene_import",
+				})
 			asset = save_360_png_asset(manifest, image, label, method)
 			scene = enrich_manifest(write_manifest(manifest))
 			return web.json_response({"ok": True, "scene": scene, "asset": asset, "method": method})
@@ -4049,7 +4113,11 @@ def _register_gjj_scene_library_api():
 				has_annotations = bool(manifest.get("annotations"))
 				has_keywords = bool(manifest.get("keywords"))
 				has_notes = bool(str(manifest.get("notes") or "").strip())
-				needs_rename = "_unsaved" in scene_label.lower()
+				needs_rename = (
+					"_unsaved" in scene_label.lower()
+					or not has_chinese_text(scene_label)
+					or not has_chinese_text(scene_id)
+				)
 				rename_only = needs_rename and has_annotations and has_keywords and has_notes
 				if has_annotations and has_keywords and has_notes and not needs_rename:
 					skipped.append(scene_id)
@@ -4148,12 +4216,29 @@ def _register_gjj_scene_library_api():
 				if notes and not str(manifest.get("notes") or "").strip():
 					manifest["notes"] = notes
 				current_name = str(manifest.get("name") or scene_id).strip()
-				if "_unsaved" in current_name.lower():
+				if needs_rename:
 					replacement_name = re.sub(r"(?i)_?unsaved(?:[_\-\s].*)?$", "", suggested_name).strip(" _-.")
-					if not replacement_name and keywords:
-						replacement_name = str(keywords[0] or "").strip()
-					if replacement_name:
+					if not has_chinese_text(replacement_name):
+						replacement_name = next(
+							(str(item or "").strip() for item in keywords if has_chinese_text(item)),
+							"",
+						)
+					if (
+						replacement_name
+						and has_chinese_text(replacement_name)
+						and ("_unsaved" in current_name.lower() or not has_chinese_text(current_name))
+					):
 						manifest["name"] = replacement_name[:96]
+				if not has_chinese_text(scene_id) and has_chinese_text(manifest.get("name")):
+					new_scene_id = unique_scene_id(str(manifest.get("name") or ""), scene_id)
+					if new_scene_id != scene_id:
+						old_scene_path = scene_dir(scene_id)
+						new_scene_path = scene_dir(new_scene_id)
+						if new_scene_path.exists():
+							raise RuntimeError(f"场景中文目录已存在：{new_scene_id}")
+						old_scene_path.rename(new_scene_path)
+						manifest["id"] = new_scene_id
+						scene_id = new_scene_id
 				write_manifest(manifest)
 				processed.append({
 					"id": scene_id,

@@ -1,5 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 
 (function () {
 	"use strict";
@@ -118,299 +120,93 @@ import { api } from "/scripts/api.js";
 		return { filename, subfolder, type: String(data?.type || "input") };
 	}
 
-	function imageWidgetValue(uploaded) {
-		const filename = String(uploaded?.filename || "").trim();
-		const subfolder = String(uploaded?.subfolder || "").trim();
-		return subfolder ? `${subfolder}/${filename}` : filename;
-	}
-
-	function canvasCenterPosition(width = 315, height = 315) {
-		const canvas = app?.canvas;
-		const element = canvas?.canvas || canvas?.canvas_mouse || document.querySelector("canvas");
+	function canvasClientCenter() {
+		const element = app?.canvas?.canvas || app?.canvas?.canvas_mouse || document.querySelector("canvas");
 		const rect = element?.getBoundingClientRect?.();
-		const cssWidth = Math.max(1, rect?.width || element?.clientWidth || element?.width || 1200);
-		const cssHeight = Math.max(1, rect?.height || element?.clientHeight || element?.height || 800);
-		const ds = canvas?.ds || canvas?.viewport || null;
-		const scale = Math.max(0.001, Number(ds?.scale || 1));
-		const offset = Array.isArray(ds?.offset) ? ds.offset : [0, 0];
-		return [
-			Math.round(cssWidth * 0.5 / scale - Number(offset[0] || 0) - width * 0.5),
-			Math.round(cssHeight * 0.5 / scale - Number(offset[1] || 0) - height * 0.5),
-		];
+		return rect
+			? [rect.left + rect.width * 0.5, rect.top + rect.height * 0.5]
+			: [window.innerWidth * 0.5, window.innerHeight * 0.5];
 	}
 
-	function setNodeWidgetValue(node, name, value) {
-		const widget = node?.widgets?.find((item) => item?.name === name) || node?.widgets?.[0];
-		if (!widget) return false;
-		if (Array.isArray(widget.options?.values) && value && !widget.options.values.includes(value)) {
-			widget.options.values = [value, ...widget.options.values];
-		}
-		if (widget.inputEl && "value" in widget.inputEl) widget.inputEl.value = value;
-		widget.value = value;
-		const index = node.widgets.indexOf(widget);
-		if (!Array.isArray(node.widgets_values)) node.widgets_values = node.widgets.map((item) => item?.value);
-		if (index >= 0) node.widgets_values[index] = value;
-		if (typeof widget.callback === "function") widget.callback(value);
+	function sceneAssetMediaPayload(scene, asset) {
+		return {
+			filename: String(asset?.preview_file || asset?.file || "scene.png"),
+			preview_url: asset?.preview_url ? apiUrl(asset.preview_url) : "",
+			media_type: "image",
+			label: String(asset?.label || scene?.name || scene?.id || "场景"),
+		};
+	}
+
+	function bindSceneAssetDrag(element, scene, asset) {
+		if (!element || !asset?.preview_url) return;
+		element.draggable = true;
+		element.title = `${element.title ? `${element.title}\n` : ""}拖到空白画布可创建 GJJ_AnyPreview`;
+		element.addEventListener("dragstart", (event) => {
+			const payload = sceneAssetMediaPayload(scene, asset);
+			event.dataTransfer?.setData(GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME, JSON.stringify(payload));
+			event.dataTransfer?.setData("text/plain", payload.preview_url || payload.filename);
+			if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+		});
+	}
+
+	async function importIntoAnyPreview(payload, clientPoint = canvasClientCenter()) {
+		const importer = globalThis.__gjjAnyPreviewImportMediaAtPoint;
+		if (typeof importer !== "function") throw new Error("GJJ_AnyPreview 前端尚未加载，请刷新页面后重试");
+		const ok = await importer(payload, Number(clientPoint[0]), Number(clientPoint[1]));
+		if (!ok) throw new Error("GJJ_AnyPreview 未能接收场景图片");
 		return true;
 	}
 
-	function addLoadImageNodeToCanvas(uploaded, label = "场景视图") {
-		const graph = app?.canvas?.graph || app?.graph;
-		const node = globalThis.LiteGraph?.createNode?.("LoadImage");
-		if (!graph || !node) throw new Error("无法在画布创建 Load Image 节点");
-		node.title = label || "场景视图";
-		node.pos = canvasCenterPosition(Number(node.size?.[0] || 315), Number(node.size?.[1] || 315));
-		graph.add(node);
-		const value = imageWidgetValue(uploaded);
-		if (!setNodeWidgetValue(node, "image", value)) throw new Error("Load Image 节点缺少 image 控件");
-		try { node.onAdded?.(graph); } catch (_) {}
-		try { node.setDirtyCanvas?.(true, true); } catch (_) {}
-		try { graph.change?.(); } catch (_) {}
-		dirtyCanvas();
-		return node;
-	}
-
-	function modelTreeParts(path) {
-		const parts = String(path || "").replace(/\\/g, "/").split("/").map((item) => item.trim()).filter(Boolean);
-		const modelsIndex = parts.findIndex((item) => item.toLowerCase() === "models");
-		return modelsIndex >= 0 ? parts.slice(modelsIndex) : [];
-	}
-
-	function insertModelTreePath(root, parts, forceDirectory = false) {
-		let node = root;
-		for (let index = 0; index < parts.length; index += 1) {
-			const part = parts[index];
-			if (!node.children.has(part)) node.children.set(part, { name: part, children: new Map(), directory: false });
-			node = node.children.get(part);
-			if (forceDirectory && index === parts.length - 1) node.directory = true;
-		}
-	}
-
-	function renderModelTreeNode(node, prefix = "") {
-		const entries = Array.from(node.children.values()).sort((a, b) => {
-			const aDir = a.children.size > 0;
-			const bDir = b.children.size > 0;
-			if (aDir !== bDir) return aDir ? -1 : 1;
-			return a.name.localeCompare(b.name, "zh-Hans-CN");
-		});
-		const lines = [];
-		for (let index = 0; index < entries.length; index += 1) {
-			const child = entries[index];
-			const last = index === entries.length - 1;
-			const isDir = child.directory || child.children.size > 0;
-			lines.push(`${prefix}${last ? "└──" : "├──"}${isDir ? "📁 " : "🧠 "}${child.name}${isDir ? "/" : ""}`);
-			lines.push(...renderModelTreeNode(child, `${prefix}${last ? "    " : "│   "}`));
-		}
-		return lines;
-	}
-
-	function buildModelTreeText(items = []) {
-		const root = { name: "ComfyUI", children: new Map() };
-		for (const item of items || []) {
-			const parts = modelTreeParts(item?.path || item);
-			const last = parts[parts.length - 1] || "";
-			const forceDirectory = Boolean(item?.folder || item?.directory || (last && !/\.[^/.]+$/.test(last)));
-			if (parts.length) insertModelTreePath(root, parts, forceDirectory);
-		}
-		return ["ComfyUI/", ...renderModelTreeNode(root)].join("\n");
-	}
-
-	function normalizeModelText(value) {
-		return String(value || "").replace(/\\/g, "/").toLowerCase();
-	}
-
-	function displayModelFilename(value, fallback = "") {
-		const text = String(value || fallback || "").replace(/\\/g, "/").trim();
-		return text ? text.split("/").filter(Boolean).pop() || text : "未选择";
-	}
-
-	function modelSearchTokens(query) {
-		return String(query || "").toLowerCase().split(/[\s,，;；|/\\]+/).map((token) => token.trim()).filter(Boolean);
-	}
-
-	function modelNameScore(value, tokens, index) {
-		const text = normalizeModelText(value);
-		const suffixScore = text.endsWith(".safetensors") ? 0 : text.endsWith(".gguf") ? 1 : 2;
-		if (!tokens.length) return [suffixScore, index];
-		let positionScore = 0;
-		for (const token of tokens) {
-			const needle = normalizeModelText(token);
-			const found = text.indexOf(needle);
-			if (found < 0) return null;
-			positionScore += found;
-		}
-		return [suffixScore, positionScore, index];
-	}
-
-	function filteredControlOptions(control, current, query = "", limit = 80) {
-		const options = Array.isArray(control?.options) ? control.options : [];
-		const tokens = modelSearchTokens(query);
-		const seen = new Set();
-		const scored = [];
-		for (const [index, option] of options.entries()) {
-			const text = String(option || "").trim();
-			const key = normalizeModelText(text);
-			if (!text || seen.has(key)) continue;
-			seen.add(key);
-			const score = modelNameScore(text, tokens, index);
-			if (score) scored.push({ text, score });
-		}
-		scored.sort((a, b) => {
-			for (let index = 0; index < a.score.length; index += 1) {
-				if (a.score[index] !== b.score[index]) return a.score[index] - b.score[index];
+	function createSharedModelTree(items, controls, values, onApply = null) {
+		const controlMap = new Map((controls || []).map((control) => [String(control?.key || ""), control]));
+		const adapters = new Map();
+		const entries = (items || []).map((item) => {
+			const path = String(item?.path || item || "").replace(/\\/g, "/");
+			const parts = path.split("/").filter(Boolean);
+			const modelsIndex = parts.findIndex((part) => part.toLowerCase() === "models");
+			const relative = modelsIndex >= 0 ? parts.slice(modelsIndex + 1) : parts;
+			const filename = relative.pop() || path || "未选择";
+			const folder = `models/${relative.join("/")}`.replace(/\/$/, "");
+			const controlKey = String(item?.control_key || item?.controlKey || "");
+			const control = controlMap.get(controlKey) || null;
+			if (!control) {
+				const adapter = { value: filename, options: { values: [filename] } };
+				return {
+					label: String(item?.label || filename),
+					folder,
+					filename,
+					models: [filename],
+					defaultModel: filename,
+					readOnly: true,
+					icon: item?.folder ? "📁" : (item?.icon || "🟣"),
+					getWidget: () => adapter,
+				};
 			}
-			return a.text.localeCompare(b.text, "zh-Hans-CN");
-		});
-		const result = scored.slice(0, limit).map((item) => item.text);
-		if (current && !result.includes(current) && (!tokens.length || modelNameScore(current, tokens, -1))) {
-			result.unshift(current);
-		}
-		return result;
-	}
-
-	function modelFileIcon(path) {
-		const text = normalizeModelText(path);
-		if (text.includes("/loras/")) return "🟠";
-		if (text.includes("/text_encoders/")) return "🟡";
-		if (text.includes("/vae/")) return "🔴";
-		return "🟣";
-	}
-
-	function findControlForModelItem(item, controls, values) {
-		const path = normalizeModelText(item?.path || item);
-		for (const control of controls || []) {
-			const current = normalizeModelText(values?.[control.key]);
-			if (current && (path.endsWith(current) || path.includes(`/${current}`))) return control;
-		}
-		if (path.includes("/text_encoders/")) return controls.find((control) => /clip|encoder/i.test(control.key));
-		if (path.includes("/diffusion_models/")) return controls.find((control) => /unet|diffusion/i.test(control.key));
-		if (path.includes("/loras/")) return controls.find((control) => /lora/i.test(control.key));
-		return null;
-	}
-
-	function modelTreeLine(prefix, icon, text, clickable = false) {
-		const row = document.createElement(clickable ? "button" : "div");
-		if (clickable) row.type = "button";
-		row.className = `gjj-sl-model-line${clickable ? " clickable" : ""}`;
-		row.textContent = `${prefix}${icon} ${text}`;
-		return row;
-	}
-
-	function makeModelChoicePanel(control, values, onApply) {
-		const wrap = document.createElement("div");
-		wrap.className = "gjj-sl-model-choice";
-		const search = document.createElement("input");
-		search.type = "text";
-		search.className = "gjj-sl-model-search";
-		search.placeholder = "输入关键词，自动使用第一个匹配模型";
-		const list = document.createElement("div");
-		list.className = "gjj-sl-model-options";
-		const render = (autoPick = false) => {
-			const current = String(values[control.key] || "");
-			const options = filteredControlOptions(control, current, search.value, 80);
-			if (autoPick && options.length) onApply(options[0]);
-			list.replaceChildren();
-			if (!options.length) {
-				const empty = document.createElement("div");
-				empty.className = "gjj-sl-model-empty";
-				empty.textContent = "没有匹配模型";
-				list.appendChild(empty);
-				return;
-			}
-			for (const option of options) {
-				const item = document.createElement("button");
-				item.type = "button";
-				item.className = "gjj-sl-model-option";
-				if (String(option || "") === String(values[control.key] || "")) item.classList.add("selected");
-				item.textContent = `${item.classList.contains("selected") ? "✓ " : ""}${displayModelFilename(option)}`;
-				item.title = String(option || "");
-				item.addEventListener("click", () => {
-					onApply(option);
-					render(false);
-				});
-				list.appendChild(item);
-			}
-		};
-		search.addEventListener("input", () => render(true));
-		search.addEventListener("keydown", (event) => {
-			if (event.key !== "Enter") return;
-			event.preventDefault();
-			const first = filteredControlOptions(control, values[control.key], search.value, 1)[0];
-			if (first != null) {
-				onApply(first);
-				render(false);
-			}
-		});
-		wrap.append(search, list);
-		render(false);
-		setTimeout(() => search.focus(), 0);
-		return wrap;
-	}
-
-	function makeClickableModelFile(item, prefix, control, values) {
-		const host = document.createElement("div");
-		let choicePanel = null;
-		const renderLine = () => {
-			const current = control ? String(values[control.key] || "") : "";
-			const displayValue = control && (/[/\\]/.test(current) || /\.(safetensors|gguf|ckpt|pt|pth|bin)$/i.test(current)) ? current : item?.path || item;
-			const name = displayModelFilename(displayValue);
-			const line = modelTreeLine(prefix, modelFileIcon(item?.path || item), name, Boolean(control));
-			line.title = String(control ? values[control.key] || item?.path || "" : item?.path || item || "");
-			if (control) {
-				line.addEventListener("click", () => {
-					if (choicePanel) {
-						choicePanel.remove();
-						choicePanel = null;
-						renderLine();
-						return;
-					}
-					choicePanel = makeModelChoicePanel(control, values, (value) => {
-						values[control.key] = String(value || "");
-						renderLine();
-					});
-					host.appendChild(choicePanel);
-					renderLine();
+			if (!adapters.has(controlKey)) {
+				adapters.set(controlKey, {
+					get value() { return String(values[controlKey] || ""); },
+					set value(next) { values[controlKey] = String(next || ""); },
+					options: { values: Array.isArray(control.options) ? control.options.slice() : [] },
+					callback(next) { values[controlKey] = String(next || ""); },
 				});
 			}
-			if (host.firstChild) host.replaceChild(line, host.firstChild);
-			else host.prepend(line);
-		};
-		renderLine();
-		return host;
-	}
-
-	function buildClickableModelTree(items, controls, values) {
-		const tree = document.createElement("div");
-		tree.className = "gjj-sl-model-tree";
-		tree.appendChild(modelTreeLine("", "📁", "models/"));
-		const folders = new Map();
-		for (const item of items || []) {
-			const parts = modelTreeParts(item?.path || item);
-			if (!parts.length || parts[0].toLowerCase() !== "models") continue;
-			const folder = parts.length > 2 ? parts[1] : "";
-			if (!folder) continue;
-			if (!folders.has(folder)) folders.set(folder, []);
-			folders.get(folder).push(item);
-		}
-		const folderNames = Array.from(folders.keys()).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
-		if (!folderNames.length) {
-			for (const item of items || []) {
-				const path = String(item?.path || item || "").replace(/\\/g, "/");
-				const isFolder = Boolean(item?.folder || item?.directory || (path && !/\.[^/.]+$/.test(path)));
-				tree.appendChild(modelTreeLine("└─", isFolder ? "📁" : modelFileIcon(path), `${displayModelFilename(path)}${isFolder ? "/" : ""}`));
-			}
-			return tree;
-		}
-		for (const [folderIndex, folder] of folderNames.entries()) {
-			const isLastFolder = folderIndex === folderNames.length - 1;
-			tree.appendChild(modelTreeLine(isLastFolder ? "└─" : "├─", "📁", `${folder}/`));
-			const files = folders.get(folder) || [];
-			files.forEach((item, index) => {
-				const prefix = `${isLastFolder ? "　" : "│　"}${index === files.length - 1 ? "└─" : "├─"}`;
-				tree.appendChild(makeClickableModelFile(item, prefix, findControlForModelItem(item, controls, values), values));
-			});
-		}
-		return tree;
+			return {
+				label: String(control.label || item?.label || controlKey),
+				folder,
+				filename,
+				models: Array.isArray(control.options) ? control.options : [],
+				defaultModel: String(control.default || item?.default_model || filename),
+				fallback: String(control.default || item?.default_model || filename),
+				icon: item?.icon || "🟣",
+				autoSelect: true,
+				getWidget: () => adapters.get(controlKey),
+			};
+		});
+		return GJJ_Utils.createModelTreeView({
+			node: null,
+			entries,
+			onApply: (entry, value, widget) => onApply?.(entry, value, widget),
+		});
 	}
 
 	function stop(event) {
@@ -438,6 +234,15 @@ import { api } from "/scripts/api.js";
 #${BUTTON_ID}:hover,#${BUTTON_ID}.active{border-color:rgba(97,175,239,.9);background:rgba(28,48,66,.96);}
 #${PANEL_ID}{position:fixed;z-index:100000;width:min(940px,calc(100vw - 20px));height:min(700px,calc(100vh - 20px));min-width:min(560px,calc(100vw - 20px));min-height:min(420px,calc(100vh - 20px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);resize:both;display:none;grid-template-columns:minmax(260px,330px) 1fr;border:1px solid #40525b;border-radius:8px;background:#0f171b;color:#e7f2f4;box-shadow:0 18px 46px rgba(0,0,0,.54);font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:auto;}
 #${PANEL_ID}.open{display:grid;}
+#${PANEL_ID}.busy .gjj-sl-sidebar,#${PANEL_ID}.busy .gjj-sl-main{filter:grayscale(.75);opacity:.42;pointer-events:none;}
+.gjj-sl-busy-mask{position:absolute;z-index:100020;inset:0;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(5,10,12,.48);backdrop-filter:blur(1.5px);cursor:wait;}
+#${PANEL_ID}.busy .gjj-sl-busy-mask{display:flex;}
+.gjj-sl-busy-card{width:min(440px,calc(100% - 32px));padding:18px;border:1px solid #69c995;border-radius:12px;background:rgba(12,24,27,.97);box-shadow:0 18px 44px rgba(0,0,0,.62);color:#effff7;text-align:center;}
+.gjj-sl-busy-title{font-size:17px;font-weight:900;letter-spacing:.03em;}
+.gjj-sl-busy-status{margin-top:8px;color:#c8ddd5;font-size:12px;line-height:1.45;overflow-wrap:anywhere;}
+.gjj-sl-busy-progress{height:14px;margin-top:14px;border:1px solid #41675a;border-radius:999px;background:#081115;overflow:hidden;}
+.gjj-sl-busy-progress-bar{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#42c978,#5ee0cf,#72bfff);box-shadow:0 0 14px rgba(94,224,207,.62);transition:width .22s ease;}
+.gjj-sl-busy-percent{margin-top:7px;color:#80e6bc;font-size:14px;font-weight:900;}
 .gjj-sl-sidebar{min-width:0;min-height:0;border-right:1px solid #263842;background:#111a1f;display:flex;flex-direction:column;}
 .gjj-sl-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:#0c1418;}
 .gjj-sl-head{display:flex;align-items:center;gap:6px;min-height:42px;padding:7px 8px;border-bottom:1px solid #263842;}
@@ -534,6 +339,15 @@ import { api } from "/scripts/api.js";
 .gjj-sl-model-option:hover{border-color:#6aa6b8;background:#1d2b32;}
 .gjj-sl-model-option.selected{border-color:#2f7d67;background:#18352f;}
 .gjj-sl-model-empty{color:#8da2ad;font-size:11px;padding:4px 2px;}
+.gjj-sl-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;}
+.gjj-sl-setting{display:flex;flex-direction:column;gap:4px;min-width:0;}
+.gjj-sl-setting.wide{grid-column:1/-1;}
+.gjj-sl-setting-label{color:#cfe0da;font-size:12px;font-weight:800;}
+.gjj-sl-setting-hint{color:#82979e;font-size:10px;line-height:1.35;}
+.gjj-sl-setting input,.gjj-sl-setting select{width:100%;height:30px;box-sizing:border-box;border:1px solid #40535b;border-radius:6px;background:#071014;color:#e7f2f4;padding:0 8px;outline:none;}
+.gjj-sl-setting-check{height:30px;display:flex;align-items:center;gap:7px;color:#dce7e2;font-size:12px;}
+.gjj-sl-setting-check input{width:16px;height:16px;}
+@media(max-width:680px){.gjj-sl-settings-grid{grid-template-columns:1fr;}.gjj-sl-setting.wide{grid-column:auto;}}
 .gjj-sl-empty{height:100%;display:flex;align-items:center;justify-content:center;color:#85979d;font-size:13px;text-align:center;padding:20px;}
 `;
 		document.head.appendChild(style);
@@ -799,11 +613,18 @@ import { api } from "/scripts/api.js";
 		const wrap = panel?.querySelector("[data-sl-import-progress]");
 		const bar = panel?.querySelector("[data-sl-import-bar]");
 		const label = panel?.querySelector("[data-sl-import-text]");
+		const busyStatus = panel?.querySelector("[data-sl-busy-status]");
+		const busyBar = panel?.querySelector("[data-sl-busy-bar]");
+		const busyPercent = panel?.querySelector("[data-sl-busy-percent]");
 		const active = state.importing || state.annotating || state.importTotal > 0;
+		panel?.classList.toggle("busy", !!state.importing);
 		if (wrap) wrap.classList.toggle("open", active);
 		const percent = state.importTotal ? Math.round(clamp(state.importCurrent / state.importTotal, 0, 1) * 100) : 0;
 		if (bar) bar.style.width = `${percent}%`;
 		if (label) label.textContent = state.importStatus || (active ? `执行进度 ${percent}%` : "");
+		if (busyStatus) busyStatus.textContent = state.importStatus || "正在处理场景素材，请稍候…";
+		if (busyBar) busyBar.style.width = `${percent}%`;
+		if (busyPercent) busyPercent.textContent = `${percent}%`;
 		if (state.importButton) {
 			state.importButton.textContent = state.importing ? "导入中" : "➕";
 			state.importButton.disabled = !!state.importing || !!state.annotating;
@@ -910,8 +731,139 @@ import { api } from "/scripts/api.js";
 			const groupTitle = document.createElement("div");
 			groupTitle.className = "gjj-sl-model-group-title";
 			groupTitle.textContent = group.name || "依赖";
-			groupEl.append(groupTitle, buildClickableModelTree(group.items || [], controls, values));
+			const treeHost = document.createElement("div");
+			const renderTree = () => {
+				const tree = createSharedModelTree(group.items || [], controls, values, () => {
+					queueMicrotask(renderTree);
+				});
+				treeHost.replaceChildren(tree);
+			};
+			renderTree();
+			groupEl.append(groupTitle, treeHost);
 			body.appendChild(groupEl);
+		}
+		dialog.append(head, body);
+		backdrop.appendChild(dialog);
+		backdrop.addEventListener("click", (event) => {
+			stop(event);
+			if (event.target === backdrop) backdrop.remove();
+		});
+		panel.appendChild(backdrop);
+	}
+
+	async function showGenerationSettings() {
+		const data = await apiJson("/gjj/user_settings");
+		const values = { ...(data.settings?.scene_library || {}) };
+		const groups = [
+			["🖼️ 最终输出", [
+				["final_width", "最终宽度", "number", 2048, "建议与高度保持 2:1；范围 256–8192。", 256, 8192, 8],
+				["final_height", "最终高度", "number", 1024, "最终保存 PNG 的实际高度；范围 128–4096。", 128, 4096, 8],
+			]],
+			["🌏 360° 生成", [
+				["base_width", "生成底图宽度", "number", 1024, "进入 SeedVR2 前的全景宽度。", 256, 4096, 8],
+				["base_height", "生成底图高度", "number", 512, "建议与底图宽度保持 2:1。", 128, 2048, 8],
+				["generation_steps", "采样步数", "number", 4, "主生成与中缝修复使用的步数。", 1, 100, 1],
+				["generation_cfg", "CFG", "number", 1, "提示词引导强度。", 0, 100, 0.1],
+				["generation_seed", "随机种子", "number", 0, "同一图片与参数可复现结果。", 0, Number.MAX_SAFE_INTEGER, 1],
+				["generation_denoise", "降噪强度", "number", 1, "0–1，越高改动越明显。", 0, 1, 0.01],
+				["repair_enabled", "启用中缝修复", "checkbox", true, "关闭可提速，但全景接缝可能明显。"],
+				["seam_mask_width", "中缝遮罩宽度", "number", 256, "修复区域宽度。", 0, 2048, 8],
+				["seam_blur", "中缝羽化", "number", 24, "遮罩边缘过渡宽度。", 0, 256, 1],
+			]],
+			["🔍 SeedVR2 放大", [
+				["seedvr2_enabled", "启用 SeedVR2", "checkbox", true, "关闭后直接缩放底图到最终尺寸。"],
+				["seedvr2_color_correction", "颜色校正", "select", "lab", "LAB 通常能更稳定地保留原图色彩。", ["lab", "wavelet", "none"]],
+				["seedvr2_input_noise", "输入噪声", "number", 0, "范围 0–1。", 0, 1, 0.01],
+				["seedvr2_latent_noise", "潜空间噪声", "number", 0, "范围 0–1。", 0, 1, 0.01],
+				["seedvr2_encode_tiled", "VAE 分块编码", "checkbox", true, "降低编码显存占用。"],
+				["seedvr2_encode_tile_size", "编码块大小", "number", 512, "范围 128–2048。", 128, 2048, 64],
+				["seedvr2_encode_tile_overlap", "编码块重叠", "number", 128, "范围 0–1024。", 0, 1024, 16],
+				["seedvr2_decode_tiled", "VAE 分块解码", "checkbox", true, "降低解码显存占用。"],
+				["seedvr2_decode_tile_size", "解码块大小", "number", 512, "范围 128–2048。", 128, 2048, 64],
+				["seedvr2_decode_tile_overlap", "解码块重叠", "number", 128, "范围 0–1024。", 0, 1024, 16],
+			]],
+		];
+		const panel = buildPanel();
+		panel.querySelector(".gjj-sl-settings-backdrop")?.remove();
+		const backdrop = document.createElement("div");
+		backdrop.className = "gjj-sl-model-backdrop gjj-sl-settings-backdrop";
+		const dialog = document.createElement("div");
+		dialog.className = "gjj-sl-model-dialog";
+		const head = document.createElement("div");
+		head.className = "gjj-sl-model-head";
+		const title = document.createElement("div");
+		title.className = "gjj-sl-model-title";
+		title.textContent = "⚙️ 场景生成设置";
+		const spacer = document.createElement("div");
+		spacer.className = "gjj-sl-spacer";
+		const save = button("保存设置", "保存并应用到之后的导入任务", "gjj-sl-btn", async () => {
+			await apiJson("/gjj/user_settings", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ section: "scene_library", values }),
+			});
+			setStatus(`场景生成设置已保存：${values.final_width || 2048}×${values.final_height || 1024}`);
+			backdrop.remove();
+		});
+		head.append(title, spacer, save, button("❌关闭", "关闭设置", "gjj-sl-btn", () => backdrop.remove()));
+		const body = document.createElement("div");
+		body.className = "gjj-sl-model-body";
+		for (const [groupName, fields] of groups) {
+			const group = document.createElement("div");
+			group.className = "gjj-sl-model-group";
+			const groupTitle = document.createElement("div");
+			groupTitle.className = "gjj-sl-model-group-title";
+			groupTitle.textContent = groupName;
+			const grid = document.createElement("div");
+			grid.className = "gjj-sl-settings-grid";
+			for (const [key, label, type, fallback, hint, minOrOptions, max, step] of fields) {
+				const field = document.createElement("label");
+				field.className = "gjj-sl-setting";
+				const caption = document.createElement("span");
+				caption.className = "gjj-sl-setting-label";
+				caption.textContent = label;
+				let input;
+				if (type === "checkbox") {
+					input = document.createElement("input");
+					input.type = "checkbox";
+					input.checked = values[key] == null ? Boolean(fallback) : Boolean(values[key]);
+					const row = document.createElement("span");
+					row.className = "gjj-sl-setting-check";
+					row.append(input, document.createTextNode(input.checked ? "已启用" : "已关闭"));
+					input.addEventListener("change", () => {
+						values[key] = input.checked;
+						row.lastChild.textContent = input.checked ? "已启用" : "已关闭";
+					});
+					field.append(caption, row);
+				} else if (type === "select") {
+					input = document.createElement("select");
+					for (const optionValue of minOrOptions || []) {
+						const option = document.createElement("option");
+						option.value = optionValue;
+						option.textContent = optionValue;
+						input.appendChild(option);
+					}
+					input.value = String(values[key] ?? fallback);
+					input.addEventListener("change", () => { values[key] = input.value; });
+					field.append(caption, input);
+				} else {
+					input = document.createElement("input");
+					input.type = "number";
+					input.value = String(values[key] ?? fallback);
+					input.min = String(minOrOptions);
+					input.max = String(max);
+					input.step = String(step);
+					input.addEventListener("input", () => { values[key] = Number(input.value); });
+					field.append(caption, input);
+				}
+				const help = document.createElement("span");
+				help.className = "gjj-sl-setting-hint";
+				help.textContent = hint;
+				field.appendChild(help);
+				grid.appendChild(field);
+			}
+			group.append(groupTitle, grid);
+			body.appendChild(group);
 		}
 		dialog.append(head, body);
 		backdrop.appendChild(dialog);
@@ -952,6 +904,7 @@ import { api } from "/scripts/api.js";
 					<li><b>⬆ 导入场景：</b>给当前场景上传或替换素材。</li>
 					<li><b>🧑‍🎨 批量打标：</b>单击给全库缺失内容补充关键词和备注；双击切换“导入后自动打标”。</li>
 					<li><b>🧠 模型树：</b>查看模型所在目录，设置 360°生成和自动打标模型；点击模型行可搜索选择，复制按钮可复制模型名。</li>
+					<li><b>⚙️ 生成设置：</b>调整最终图片尺寸、360°采样与中缝修复参数，以及 SeedVR2 放大和分块参数。</li>
 					<li><b>❓ 帮助：</b>打开当前这份场景库完整说明。</li>
 				</ul>
 			</section>
@@ -998,7 +951,7 @@ import { api } from "/scripts/api.js";
 		const files = await fileInput("image/*,.hdr,.exr", true);
 		if (!files?.length) return;
 		state.importing = true;
-		setImportProgress(0, files.length + 1, `准备导入 ${files.length} 个场景...`);
+		setImportProgress(0.02, files.length + 1, `准备上传 ${files.length} 个场景...`);
 		setStatus(`准备导入 ${files.length} 个场景...`);
 		const importedIds = [];
 		const errors = [];
@@ -1007,7 +960,7 @@ import { api } from "/scripts/api.js";
 				const file = files[index];
 				state.importActiveIndex = index;
 				state.importNodeId = `gjj_scene_import_${Date.now()}_${index}`;
-				setImportProgress(index, files.length + 1, `正在导入 ${index + 1}/${files.length}：${file.name}`);
+				setImportProgress(index + 0.02, files.length + 1, `正在上传 ${index + 1}/${files.length}：${file.name}`);
 				const form = new FormData();
 				if (scene?.id) form.append("id", scene.id);
 				form.append("name", scene?.name || autoSceneName(file));
@@ -1077,8 +1030,12 @@ import { api } from "/scripts/api.js";
 			const safeName = String(scene?.name || scene?.id || "scene").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 48) || "scene";
 			setStatus("正在发送当前场景视图到画布...");
 			const uploaded = await uploadImageDataUrl(dataUrl, `scene_view_${safeName}_${Date.now()}.png`);
-			addLoadImageNodeToCanvas(uploaded, `${scene?.name || "场景"} 当前视图`);
-			setStatus("已将当前场景视图发送到画布");
+			await importIntoAnyPreview({
+				...uploaded,
+				media_type: "image",
+				label: `${scene?.name || "场景"} 当前视图`,
+			});
+			setStatus("已将当前场景视图发送到 GJJ_AnyPreview");
 		} finally {
 			state.cameraSending = false;
 			renderPanel();
@@ -1169,7 +1126,9 @@ import { api } from "/scripts/api.js";
 		const missingCount = candidates.filter((item) => {
 			const hasAsset = (item.assets || []).some((asset) => asset.preview_url);
 			const done = (item.annotations || []).length && (item.keywords || []).length && String(item.notes || "").trim();
-			const needsRename = String(item.name || "").toLowerCase().includes("_unsaved");
+			const needsRename = String(item.name || "").toLowerCase().includes("_unsaved")
+				|| !/[\u3400-\u9fff]/.test(String(item.name || ""))
+				|| !/[\u3400-\u9fff]/.test(String(item.id || ""));
 			return hasAsset && (!done || needsRename);
 		}).length;
 		const total = Math.max(1, missingCount || candidates.length || 1);
@@ -1520,6 +1479,7 @@ import { api } from "/scripts/api.js";
 			if (asset?.preview_url) {
 				const img = document.createElement("img");
 				img.src = apiUrl(asset.preview_url);
+				bindSceneAssetDrag(img, scene, asset);
 				cover.appendChild(img);
 			} else {
 				const empty = document.createElement("div");
@@ -1718,7 +1678,7 @@ import { api } from "/scripts/api.js";
 		body.appendChild(form);
 		const actions = document.createElement("div");
 		actions.className = "gjj-sl-row";
-		const camera = button(state.cameraSending ? "发送中" : "📷", "将当前场景视图发送到画布", "gjj-sl-btn gjj-sl-icon", () => sendCurrentSceneViewToCanvas(scene).catch((error) => setStatus(error.message)));
+		const camera = button(state.cameraSending ? "发送中" : "📷", "将当前场景视图发送到 GJJ_AnyPreview", "gjj-sl-btn gjj-sl-icon", () => sendCurrentSceneViewToCanvas(scene).catch((error) => setStatus(error.message)));
 		camera.disabled = !!state.cameraSending || !sceneCover(scene)?.preview_url;
 		const viewportRef = button("引用视窗", "插入或复制当前场景视窗框引用", "gjj-sl-btn", (event) => copyOrInsertCurrentSceneViewport(scene, event?.currentTarget).catch((error) => setStatus(error.message)));
 		viewportRef.disabled = !sceneCover(scene)?.preview_url;
@@ -1785,6 +1745,7 @@ import { api } from "/scripts/api.js";
 			if (asset.preview_url) {
 				const img = document.createElement("img");
 				img.src = apiUrl(asset.preview_url);
+				bindSceneAssetDrag(img, scene, asset);
 				preview.appendChild(img);
 			} else {
 				preview.textContent = "场景文件";
@@ -1924,6 +1885,7 @@ import { api } from "/scripts/api.js";
 		head.appendChild(button("⬆", "导入场景文件", "gjj-sl-btn gjj-sl-icon", () => uploadAsset(selectedScene()).catch((error) => setStatus(error.message))));
 		head.appendChild(annotateButton([], "全库场景"));
 		head.appendChild(button("🧠", "查看并设置场景库使用的模型树", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
+		head.appendChild(button("⚙️", "设置最终图片大小和场景生成参数", "gjj-sl-btn gjj-sl-icon", () => showGenerationSettings().catch((error) => setStatus(error.message))));
 		head.appendChild(button("❓", "查看整个场景库的详细实用方法", "gjj-sl-btn gjj-sl-icon", showSceneLibraryHelp));
 		const search = document.createElement("input");
 		search.className = "gjj-sl-search";
@@ -1988,7 +1950,30 @@ import { api } from "/scripts/api.js";
 		sidebar.append(head, search, tools, importProgress, list, pager);
 		const main = document.createElement("div");
 		main.className = "gjj-sl-main";
-		panel.append(sidebar, main);
+		const busyMask = document.createElement("div");
+		busyMask.className = "gjj-sl-busy-mask";
+		const busyCard = document.createElement("div");
+		busyCard.className = "gjj-sl-busy-card";
+		const busyTitle = document.createElement("div");
+		busyTitle.className = "gjj-sl-busy-title";
+		busyTitle.textContent = "⏳ 正在导入场景";
+		const busyStatus = document.createElement("div");
+		busyStatus.className = "gjj-sl-busy-status";
+		busyStatus.dataset.slBusyStatus = "1";
+		busyStatus.textContent = state.importStatus || "正在处理场景素材，请稍候…";
+		const busyProgress = document.createElement("div");
+		busyProgress.className = "gjj-sl-busy-progress";
+		const busyProgressBar = document.createElement("div");
+		busyProgressBar.className = "gjj-sl-busy-progress-bar";
+		busyProgressBar.dataset.slBusyBar = "1";
+		busyProgress.appendChild(busyProgressBar);
+		const busyPercent = document.createElement("div");
+		busyPercent.className = "gjj-sl-busy-percent";
+		busyPercent.dataset.slBusyPercent = "1";
+		busyCard.append(busyTitle, busyStatus, busyProgress, busyPercent);
+		busyMask.appendChild(busyCard);
+		panel.classList.toggle("busy", !!state.importing);
+		panel.append(sidebar, main, busyMask);
 		document.body.appendChild(panel);
 		return panel;
 	}
@@ -2121,9 +2106,14 @@ import { api } from "/scripts/api.js";
 		if (!state.importing || !state.importNodeId) return;
 		const detail = event?.detail || {};
 		if (String(detail.node || "") !== state.importNodeId) return;
-		const progress = clamp(Number(detail.progress || 0), 0, 1);
+		let progress = clamp(Number(detail.progress || 0), 0, 1);
+		if (detail.pipeline === "seedvr2") {
+			progress = 0.58 + progress * 0.38;
+		} else if (Number(detail.stage_total || 0) === 5) {
+			progress = 0.03 + progress * 0.52;
+		}
 		const current = state.importActiveIndex + progress;
-		const text = detail.text ? `正在转换 ${state.importActiveIndex + 1}/${Math.max(1, state.importTotal - 1)}：${detail.text}` : state.importStatus;
+		const text = detail.text ? `场景 ${state.importActiveIndex + 1}/${Math.max(1, state.importTotal - 1)} · ${detail.text}` : state.importStatus;
 		setImportProgress(current, state.importTotal, text);
 	});
 
