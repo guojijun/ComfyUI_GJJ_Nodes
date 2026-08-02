@@ -89,6 +89,8 @@ from .common_utils.model_family import (
     gjjutils_model_family_pick_model_name as _pick_available_name,
     MODEL_FAMILY_PRESETS,
     CLIP_TYPE_KEYWORDS,
+    DEFAULT_CLIP_NAME,
+    DEFAULT_VAE_NAME,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.mage_flow_runtime import (

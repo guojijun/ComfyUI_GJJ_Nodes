@@ -1451,7 +1451,7 @@ function ensureGlobalLoraPopup() {
 	panel.style.position = "fixed";
 	panel.style.left = "12px";
 	panel.style.top = "12px";
-	panel.style.zIndex = "99999";
+	panel.style.zIndex = "2147483000";
 	panel.style.margin = "0";
 
 	const search = document.createElement("input");
@@ -1676,6 +1676,59 @@ function ensureGlobalLoraPopup() {
 	globalThis.__gjjLoraPopup = popup;
 	return popup;
 }
+
+function ensureSharedLoraPickerStyles() {
+	if (document.getElementById("gjj-shared-lora-picker-styles")) return;
+	const host = document.createElement("div");
+	host.id = "gjj-shared-lora-picker-styles";
+	host.style.display = "none";
+	createStyleTag(host);
+	document.body.appendChild(host);
+}
+
+async function openSharedLoraPicker({ anchorEl, options = [], selectedValue = "", searchValue = "", onSelect, onSearchChange } = {}) {
+	if (!anchorEl) return;
+	ensureSharedLoraPickerStyles();
+	const metadataResult = await fetchLoraMetadata();
+	const metadata = metadataResult.metadata;
+	const previews = metadataResult.previews;
+	const normalizedOptions = [...new Set(["", ...options.map((item) => String(item || ""))])]
+		.map((value) => ({ value, label: value || "＋ 空 LoRA 插槽" }));
+	const popup = ensureGlobalLoraPopup();
+	popup.open({
+		anchorEl,
+		searchValue,
+		placeholder: "二次过滤关键词",
+		searchTitle: "在当前 LoRA 列表中继续过滤；支持 & 与，逗号或 | 表示或。",
+		getSelectedValue: () => selectedValue,
+		getOptions: (query) => {
+			const expression = parseSearchExpression(query);
+			return normalizedOptions.filter((option) => {
+				if (!option.value || expression.length === 0) return true;
+				const item = getLoraMetadata({ metadata }, option.value);
+				const searchable = normalizeKeyword([
+					option.value,
+					item?.title,
+					item?.summary,
+					item?.trigger,
+				].filter(Boolean).join(" "));
+				return matchesSearchExpression(searchable, expression);
+			});
+		},
+		getMetadata: (value) => getLoraMetadata({ metadata }, value),
+		getPreviewUrl: (value) => loraPreviewUrl(value, previews),
+		hasPreview: (value) => Boolean(previews?.[String(value || "")]),
+		onSearchChange,
+		onSelect: (value) => {
+			onSelect?.(value);
+			popup.close();
+		},
+	});
+}
+
+globalThis.GJJ_LoraPicker = {
+	open: openSharedLoraPicker,
+};
 
 function buildRow(node, row, index, rowsContainer) {
 	const state = ensureNodeState(node);

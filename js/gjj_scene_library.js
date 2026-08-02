@@ -33,6 +33,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		importTotal: 0,
 		importStatus: "",
 		importButton: null,
+		thumbnailObserver: null,
 		importNodeId: "",
 		importActiveIndex: 0,
 		annotating: false,
@@ -648,6 +649,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		state.pageSize = Math.max(1, Number(data.page_size || state.pageSize || 15));
 		state.pageCount = Math.max(1, Number(data.page_count || 1));
 		state.selectedId = state.scenes.some((item) => item.id === previous) ? previous : (state.scenes[0]?.id || "");
+		globalThis.dispatchEvent(new CustomEvent("gjj_scene_library_updated", { detail: { scenes: state.scenes.slice() } }));
 		renderPanel();
 		return state.scenes;
 	}
@@ -905,7 +907,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		body.innerHTML = `
 			<section>
 				<h3>一、场景库用途</h3>
-				<p>场景库用于保存地点、环境图、360°全景图、关键词和场景备注。分镜提示词中可使用 <code>@场景名</code> 引用已保存场景，名称应简短且唯一。</p>
+				<p>场景库用于保存地点、环境图、360°全景图、关键词和场景备注。分镜提示词中使用 <code>🏕️场景名</code> 引用；指定标注位置时可写 <code>🏕️场景名/位置名</code>。</p>
 			</section>
 			<section>
 				<h3>二、顶部按钮</h3>
@@ -1171,6 +1173,25 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 
 	function sceneCover(scene) {
 		return (scene?.assets || []).find((item) => item.preview_url) || null;
+	}
+
+	function streamSceneThumbnail(img, url) {
+		img.loading = "lazy";
+		img.decoding = "async";
+		if (!("IntersectionObserver" in window)) {
+			img.src = url;
+			return;
+		}
+		img.dataset.src = url;
+		state.thumbnailObserver ||= new IntersectionObserver((entries, observer) => {
+			for (const entry of entries) {
+				if (!entry.isIntersecting) continue;
+				observer.unobserve(entry.target);
+				entry.target.src = entry.target.dataset.src || "";
+				delete entry.target.dataset.src;
+			}
+		}, { rootMargin: "160px 0px" });
+		state.thumbnailObserver.observe(img);
 	}
 
 	function createScenePanoramaRenderer(canvas, status, onRender, onPick) {
@@ -1478,6 +1499,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 	function renderSceneList(panel) {
 		const list = panel.querySelector(".gjj-sl-list");
 		if (!list) return;
+		state.thumbnailObserver?.disconnect();
 		list.replaceChildren();
 		for (const scene of state.scenes) {
 			const card = document.createElement("button");
@@ -1486,15 +1508,15 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 			const cover = document.createElement("div");
 			cover.className = "gjj-sl-cover";
 			const asset = sceneCover(scene);
-			if (asset?.preview_url) {
+			if (asset?.preview_url && scene.thumbnail_url) {
 				const img = document.createElement("img");
-				img.src = apiUrl(asset.preview_url);
+				streamSceneThumbnail(img, apiUrl(scene.thumbnail_url));
 				bindSceneAssetDrag(img, scene, asset);
 				cover.appendChild(img);
 			} else {
 				const empty = document.createElement("div");
 				empty.className = "gjj-sl-empty-cover";
-				empty.textContent = "🌏";
+				empty.textContent = "🏕️";
 				cover.appendChild(empty);
 			}
 			const name = document.createElement("div");
@@ -2037,7 +2059,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		const btn = document.createElement("button");
 		btn.id = BUTTON_ID;
 		btn.type = "button";
-		btn.textContent = "🌏";
+		btn.textContent = "🏕️";
 		btn.title = "场景库：导入/管理360场景和物品坐标";
 		btn.setAttribute("aria-label", btn.title);
 		btn.addEventListener("pointerdown", stop, true);
@@ -2094,7 +2116,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		const name = String(scene?.name || scene?.id || "").trim();
 		const keyword = String(mark?.keyword || "").trim();
 		if (!name) return "";
-		return keyword ? `[场景:${name}/${keyword}]` : `[场景:${name}]`;
+		return keyword ? `🏕️${name}/${keyword}` : `🏕️${name}`;
 	}
 
 	function installPublicApi() {

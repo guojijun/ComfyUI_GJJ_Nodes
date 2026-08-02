@@ -143,8 +143,6 @@ def _safe_import_node_module(module_name):
     try:
         return importlib.import_module("." + module_name, __name__)
     except Exception as exc:
-        if not _console_dependency_warnings_enabled():
-            return None
         # ANSI 颜色代码
         RED = '\033[91m'
         YELLOW = '\033[93m'
@@ -168,12 +166,13 @@ def _safe_import_node_module(module_name):
 
         # 构建解决方案提示
         solution_lines = []
-        if missing_module and missing_module in DEPENDENCY_SOLUTIONS:
-            solution_lines.append(f"{YELLOW}[GJJ] {BOLD}快速安装命令:{RESET}")
-            solution_lines.append(f"  {GREEN}{DEPENDENCY_SOLUTIONS[missing_module]}{RESET}")
-        else:
-            solution_lines.append(f"{YELLOW}[GJJ] {BOLD}请根据错误信息安装缺失的依赖:{RESET}")
-            solution_lines.append(f"  {GREEN}{_get_pip_cmd('<缺失的包名>')}{RESET}")
+        if _console_dependency_warnings_enabled():
+            if missing_module and missing_module in DEPENDENCY_SOLUTIONS:
+                solution_lines.append(f"{YELLOW}[GJJ] {BOLD}快速安装命令:{RESET}")
+                solution_lines.append(f"  {GREEN}{DEPENDENCY_SOLUTIONS[missing_module]}{RESET}")
+            else:
+                solution_lines.append(f"{YELLOW}[GJJ] {BOLD}请根据错误信息安装缺失的依赖:{RESET}")
+                solution_lines.append(f"  {GREEN}{_get_pip_cmd('<缺失的包名>')}{RESET}")
 
         print(f"\n{RED}{'=' * 80}{RESET}")
         print(f"{YELLOW}[GJJ] {BOLD}跳过节点模块:{RESET} {CYAN}{module_name}{RESET}")
@@ -181,7 +180,8 @@ def _safe_import_node_module(module_name):
         print(f"{YELLOW}[GJJ]{RESET} 该模块中的节点不会注册，但其它 GJJ 节点会继续加载。")
         for line in solution_lines:
             print(line)
-        print(f"{YELLOW}[GJJ] {BOLD}提示:{RESET} 安装完成后请重启 ComfyUI 服务器")
+        if solution_lines:
+            print(f"{YELLOW}[GJJ] {BOLD}提示:{RESET} 修复完成后请重启 ComfyUI 服务器")
         print(f"{RED}{'=' * 80}{RESET}\n")
         traceback.print_exc()
         return None
@@ -238,8 +238,8 @@ for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
         if _console_dependency_warnings_enabled():
             print(f"[GJJ] 已加载子包: {subdir_name}")
     except Exception as exc:
-        if _console_dependency_warnings_enabled():
-            print(f"[GJJ] 跳过子包 {subdir_name}: {type(exc).__name__}: {exc}")
+        print(f"[GJJ] 子包注册失败 {subdir_name}: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
 
 
 # 单独导入可选节点：LatentSync

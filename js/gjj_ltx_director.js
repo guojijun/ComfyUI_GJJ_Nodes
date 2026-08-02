@@ -1108,6 +1108,12 @@ class TimelineEditor {
     this._prevStartSeconds = this.startSecondsWidget ? this.startSecondsWidget.value : 0;
 
     this.timeline = parseInitial(this.timelineDataWidget?.value);
+    this.node.properties.defaultSegmentSeconds = Math.max(
+      0.1,
+      Number(this.timeline.defaultSegmentSeconds ?? this.node.properties.defaultSegmentSeconds ?? 5) || 5,
+    );
+    this.timeline.defaultSegmentSeconds = this.node.properties.defaultSegmentSeconds;
+    this.repairDegenerateDuration();
     this.retakeMode = this.timeline.retakeMode === true;
     if (this.retakeMode) {
       if (this.timeline.retake_global_prompt) {
@@ -1540,6 +1546,32 @@ class TimelineEditor {
 
   getDurationFrames() {
     return parseInt((this.durationFramesWidget && this.durationFramesWidget.value > 0) ? this.durationFramesWidget.value : 24, 10);
+  }
+
+  repairDegenerateDuration() {
+    const current = Number(this.durationFramesWidget?.value);
+    if (Number.isFinite(current) && current > 1) return;
+
+    const start = Number(this.startFramesWidget?.value) || 0;
+    const frameRate = Number(this.frameRateWidget?.value) || 24;
+    const candidates = [current, Number(this.endFramesWidget?.value) - start];
+    candidates.push(Number(this.durationSecondsWidget?.value) * frameRate);
+    candidates.push(Number(this.timeline?.normalDurationFrames));
+
+    for (const collection of [this.timeline?.segments, this.timeline?.audioSegments, this.timeline?.motionSegments]) {
+      for (const segment of collection || []) {
+        candidates.push((Number(segment?.start) || 0) + (Number(segment?.length) || 0) - start);
+      }
+    }
+
+    const recovered = Math.max(1, ...candidates.filter(Number.isFinite).map(value => Math.round(value)));
+    if (recovered <= 1) return;
+
+    console.warn(`[LTXDirector] 检测到 duration_frames=${current || 1}，已从其它时间轴字段恢复为 ${recovered} 帧。`);
+    if (this.durationFramesWidget) this.durationFramesWidget.value = recovered;
+    if (this.endFramesWidget) this.endFramesWidget.value = start + recovered;
+    if (this.durationSecondsWidget) this.durationSecondsWidget.value = parseFloat((recovered / frameRate).toFixed(3));
+    if (this.endSecondsWidget) this.endSecondsWidget.value = parseFloat(((start + recovered) / frameRate).toFixed(3));
   }
 
   getFrameRate() {
@@ -2542,7 +2574,10 @@ class TimelineEditor {
     materialBtn.className = "pr-btn";
     materialBtn.innerHTML = `${ICONS.folder} 添加素材`;
     materialBtn.title = "一次选择多张图片、多个视频和音频；自动识别格式并分布到对应时间线轨道。";
-    materialBtn.addEventListener("click", () => this.materialFileInput.click());
+    materialBtn.addEventListener("click", () => {
+      if (!materialBtn.disabled) this.materialFileInput.click();
+    });
+    this.materialBtn = materialBtn;
 
     this.gridFileInput = document.createElement("input");
     this.gridFileInput.type = "file";
@@ -2557,7 +2592,10 @@ class TimelineEditor {
     gridBtn.className = "pr-btn";
     gridBtn.textContent = "🪟 宫格";
     gridBtn.title = "按设置中的宫格布局和切边强度拆分图片，并均分总帧数。";
-    gridBtn.addEventListener("click", () => this.gridFileInput.click());
+    gridBtn.addEventListener("click", () => {
+      if (!gridBtn.disabled) this.gridFileInput.click();
+    });
+    this.gridBtn = gridBtn;
 
     const refreshUpstreamBtn = document.createElement("button");
     refreshUpstreamBtn.className = "pr-btn";
@@ -2578,6 +2616,18 @@ class TimelineEditor {
       }
     });
     this.refreshUpstreamBtn = refreshUpstreamBtn;
+
+    const sizeBtn = document.createElement("button");
+    sizeBtn.className = "pr-btn";
+    sizeBtn.textContent = "📐";
+    sizeBtn.title = "打开尺寸浮动窗口";
+    sizeBtn.style.width = "34px";
+    sizeBtn.style.justifyContent = "center";
+    sizeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.showSizeMenu(sizeBtn);
+    });
+    this.sizeBtn = sizeBtn;
 
     const translateToggleBtn = document.createElement("button");
     translateToggleBtn.className = "pr-btn";
@@ -2652,6 +2702,7 @@ class TimelineEditor {
     actionGroup.appendChild(materialBtn);
     actionGroup.appendChild(gridBtn);
     actionGroup.appendChild(refreshUpstreamBtn);
+    actionGroup.appendChild(sizeBtn);
     actionGroup.appendChild(translateToggleBtn);
     actionGroup.appendChild(addTextBtn);
     actionGroup.appendChild(deleteBtn);
@@ -2669,6 +2720,7 @@ class TimelineEditor {
     actionGroup.appendChild(deleteRetakeBtn);
 
     toolbar.appendChild(actionGroup);
+    this.updateLinkedInputButtonStates();
 
     const rightGroup = document.createElement("div");
     rightGroup.className = "pr-right-group";
@@ -4790,14 +4842,18 @@ class TimelineEditor {
     if (!prompts.length) return;
     this._removePromptUpstreamSegments();
     const total = this.getDurationFrames();
+    const defaultSeconds = Math.max(
+      1 / this.getFrameRate(),
+      Number(this.node.properties?.defaultSegmentSeconds ?? this.timeline.defaultSegmentSeconds ?? 5) || 5,
+    );
+    const defaultLength = Math.max(1, Math.round(defaultSeconds * this.getFrameRate()));
     let cursor = 0;
     const targets = (targetSegments || []).filter(Boolean).sort((a, b) => a.start - b.start);
     if (targets.length) {
       for (let index = 0; index < targets.length; index++) {
         const info = prompts[index] || prompts[prompts.length - 1];
         const start = info.start ?? cursor;
-        const fallbackLength = Math.max(1, Math.floor(total / Math.max(1, targets.length)));
-        const length = Math.max(1, info.length ?? fallbackLength);
+        const length = Math.max(1, info.length ?? defaultLength);
         targets[index].start = start;
         targets[index].length = length;
         targets[index].prompt = info.text;
@@ -4807,8 +4863,7 @@ class TimelineEditor {
     } else {
       for (const info of prompts) {
         const start = info.start ?? cursor;
-        const fallbackLength = Math.max(1, Math.floor(total / Math.max(1, prompts.length)));
-        const length = Math.max(1, info.length ?? fallbackLength);
+        const length = Math.max(1, info.length ?? defaultLength);
         this.timeline.segments.push({
           id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
           start,
@@ -4820,7 +4875,7 @@ class TimelineEditor {
         cursor = start + length;
       }
     }
-    const end = Math.max(total, cursor, ...this.timeline.segments.map(seg => (seg.start || 0) + (seg.length || 0)));
+    const end = Math.max(cursor, ...this.timeline.segments.map(seg => (seg.start || 0) + (seg.length || 0)));
     this._setWidgetValue("duration_frames", end);
     this._setWidgetValue("end_frame", this.getStartFrames() + end);
     this.timeline.segments.sort((a, b) => a.start - b.start);
@@ -10041,6 +10096,7 @@ class TimelineEditor {
       } : null,
       normalStartFrame: this.timeline.normalStartFrame,
       normalDurationFrames: this.timeline.normalDurationFrames,
+      defaultSegmentSeconds: Math.max(0.1, Number(this.node.properties?.defaultSegmentSeconds ?? this.timeline.defaultSegmentSeconds ?? 5) || 5),
       segments: sortedSegments.map(s => {
         const { imgObj, videoEl, _isSeeking, thumbnails, _extractingThumbs, _sSecs, _lSecs, _tSecs, _dSecs, _uploading, _blobUrl, ...rest } = s;
         return rest;
@@ -11496,6 +11552,144 @@ class TimelineEditor {
     return row;
   }
 
+  updateLinkedInputButtonStates() {
+    const linked = (name) => this.node.inputs?.find(input => input?.name === name)?.link != null;
+    const apply = (button, disabled, disabledTitle, enabledTitle) => {
+      if (!button) return;
+      button.disabled = !!disabled;
+      button.style.opacity = disabled ? "0.42" : "1";
+      button.style.cursor = disabled ? "not-allowed" : "pointer";
+      button.title = disabled ? disabledTitle : enabledTitle;
+      button.setAttribute("aria-disabled", disabled ? "true" : "false");
+    };
+    apply(
+      this.materialBtn,
+      linked("material_1") || linked("material_2"),
+      "素材入口已有连线，请从上游同步素材。",
+      "一次选择多张图片、多个视频和音频；自动识别格式并分布到对应时间线轨道。",
+    );
+    apply(
+      this.gridBtn,
+      linked("grid_material"),
+      "宫格输入已有连线，请从上游同步宫格素材。",
+      "按设置中的宫格布局和切边强度拆分图片，并均分总帧数。",
+    );
+  }
+
+  showSizeMenu(anchorEl) {
+    this.dismissSettingsMenu();
+    const menu = document.createElement("div");
+    menu.className = "pr-settings-menu";
+    menu.setAttribute("popover", "manual");
+    menu.style.margin = "0";
+    menu.style.pointerEvents = "auto";
+    for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu"]) {
+      menu.addEventListener(eventName, event => event.stopPropagation());
+    }
+
+    const title = document.createElement("div");
+    title.className = "pr-settings-title";
+    title.style.display = "flex";
+    title.style.justifyContent = "space-between";
+    title.style.alignItems = "center";
+    const caption = document.createElement("span");
+    caption.textContent = "📐 尺寸";
+    const close = document.createElement("button");
+    close.className = "pr-settings-close-btn";
+    close.innerHTML = ICONS.close;
+    close.title = "关闭尺寸设置";
+    close.addEventListener("click", () => this.dismissSettingsMenu());
+    title.append(caption, close);
+    menu.appendChild(title);
+
+    const widget = name => this.node.widgets?.find(item => item.name === name);
+    const setValue = (name, value) => {
+      this._setWidgetValue(name, value);
+      this.commitChanges(true);
+    };
+    const numberInput = (name, step = 8) => {
+      const targetWidget = widget(name);
+      const minimum = Number.isFinite(Number(targetWidget?.options?.min)) ? Number(targetWidget.options.min) : 0;
+      const maximum = Number.isFinite(Number(targetWidget?.options?.max)) ? Number(targetWidget.options.max) : 8192;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.className = "pr-settings-input";
+      input.min = String(minimum);
+      input.max = String(maximum);
+      input.step = String(step);
+      input.value = String(Number(targetWidget?.value) || minimum);
+      input.addEventListener("change", () => {
+        const value = Math.max(minimum, Math.min(maximum, Math.round(Number(input.value) || minimum)));
+        input.value = String(value);
+        setValue(name, value);
+      });
+      return input;
+    };
+
+    const source = document.createElement("div");
+    source.className = "pr-segmented-control";
+    const sourceInput = document.createElement("div");
+    sourceInput.className = "pr-segment";
+    sourceInput.textContent = "输入尺寸";
+    const sourcePanel = document.createElement("div");
+    sourcePanel.className = "pr-segment";
+    sourcePanel.textContent = "面板尺寸";
+    const refreshSource = () => {
+      const useInput = !(Number(widget("custom_width")?.value) > 0 && Number(widget("custom_height")?.value) > 0);
+      sourceInput.classList.toggle("active", useInput);
+      sourcePanel.classList.toggle("active", !useInput);
+    };
+    sourceInput.addEventListener("click", () => {
+      setValue("custom_width", 0);
+      setValue("custom_height", 0);
+      this.dismissSettingsMenu();
+      this.showSizeMenu(anchorEl);
+    });
+    sourcePanel.addEventListener("click", () => {
+      if (!(Number(widget("custom_width")?.value) > 0)) setValue("custom_width", 1280);
+      if (!(Number(widget("custom_height")?.value) > 0)) setValue("custom_height", 720);
+      this.dismissSettingsMenu();
+      this.showSizeMenu(anchorEl);
+    });
+    source.append(sourceInput, sourcePanel);
+    refreshSource();
+    menu.appendChild(this._makeSettingRow("尺寸来源", source));
+    menu.appendChild(this._makeSettingRow("宽度", numberInput("custom_width")));
+    menu.appendChild(this._makeSettingRow("高度", numberInput("custom_height")));
+
+    const resize = document.createElement("select");
+    resize.className = "pr-settings-select";
+    for (const [value, label] of [["maintain aspect ratio", "保持比例"], ["stretch to fit", "拉伸适配"], ["pad", "黑边填充"], ["pad green", "绿边填充"], ["crop", "居中裁剪"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      resize.appendChild(option);
+    }
+    resize.value = String(widget("resize_method")?.value || "maintain aspect ratio");
+    resize.addEventListener("change", () => setValue("resize_method", resize.value));
+    menu.appendChild(this._makeSettingRow("适配方式", resize));
+    menu.appendChild(this._makeSettingRow("尺寸整除", numberInput("divisible_by", 1)));
+
+    document.body.appendChild(menu);
+    try { menu.showPopover?.(); } catch (_) { }
+    const rect = anchorEl.getBoundingClientRect();
+    const menuW = menu.offsetWidth || 360;
+    const menuH = menu.offsetHeight || 300;
+    let left = Math.max(4, Math.min(window.innerWidth - menuW - 4, rect.left));
+    let top = rect.bottom + 6;
+    if (top + menuH > window.innerHeight - 4) top = Math.max(4, rect.top - menuH - 6);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    this._settingsMenu = menu;
+    setTimeout(() => {
+      this._settingsDismisser = event => {
+        if (!menu.contains(event.target) && !anchorEl.contains(event.target)) this.dismissSettingsMenu();
+      };
+      document.addEventListener("pointerdown", this._settingsDismisser, true);
+      document.addEventListener("wheel", this._settingsDismisser, true);
+    }, 0);
+  }
+
   showSettingsMenu(anchorEl) {
     this.dismissSettingsMenu();
     const menu = document.createElement("div");
@@ -11740,6 +11934,21 @@ class TimelineEditor {
       const widget = this.node.widgets?.find((item) => item.name === name);
       if (widget) menu.appendChild(this._makeSettingRow(label, createScrubbableNumberControl(widget, step, min, max, isFloat)));
     }
+
+    // Duration used by ordered `---` prompt blocks without explicit timing.
+    const defaultSegmentSetting = {
+      value: Math.max(0.1, Number(this.node.properties?.defaultSegmentSeconds ?? this.timeline.defaultSegmentSeconds ?? 5) || 5),
+      callback: (value) => {
+        const seconds = Math.max(0.1, Number(value) || 5);
+        this.node.properties.defaultSegmentSeconds = seconds;
+        this.timeline.defaultSegmentSeconds = seconds;
+        this.commitChanges(true);
+      },
+    };
+    menu.appendChild(this._makeSettingRow(
+      "默认每段（秒）",
+      createScrubbableNumberControl(defaultSegmentSetting, 0.1, 0.1, 1000, true),
+    ));
 
     const resizeWidget = this.node.widgets?.find((item) => item.name === "resize_method");
     if (resizeWidget) {
@@ -12465,6 +12674,7 @@ app.registerExtension({
           duration_frames: 120,
           grid_layout: "2x2",
           grid_edge_cut: 0,
+          defaultSegmentSeconds: 5,
         };
         for (const [key, val] of Object.entries(DEFAULTS)) {
           if (this.properties[key] === undefined) {
@@ -12592,6 +12802,7 @@ app.registerExtension({
           const input = typeof index === "number" ? self.inputs?.[index] : null;
           if (input && ["global_prompt", "material_1", "material_2", "grid_material"].includes(input.name)) {
             self._timelineEditor?._scheduleUpstreamAutoRefresh?.(true);
+            self._timelineEditor?.updateLinkedInputButtonStates?.();
           }
         };
 

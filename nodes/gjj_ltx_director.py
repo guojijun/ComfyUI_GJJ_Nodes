@@ -546,7 +546,9 @@ def _runtime_material_segments(material_1=None, material_2=None, grid_material=N
                                grid_layout="2x2", grid_edge_cut=0) -> list[dict]:
     grid_images = _split_runtime_grid_images(grid_material, grid_layout, grid_edge_cut)
     material_images = [*_split_runtime_images(material_1), *_split_runtime_images(material_2)]
-    images = [*grid_images, *material_images]
+    # Follow the visible input order: material 1 -> material 2 -> grid cells.
+    # Tensor batches retain their original frame/image order inside each input.
+    images = [*material_images, *grid_images]
     if not images:
         return []
     total = max(1, int(duration_frames or 1))
@@ -847,6 +849,30 @@ def _build_combined_audio(timeline_data_str: str, start_frame: int, duration_fra
             continue
 
     return {"waveform": out_waveform.unsqueeze(0), "sample_rate": target_sr}
+
+
+def _pad_waveform_for_vae(waveform: torch.Tensor, audio_vae) -> torch.Tensor:
+    """Keep short audio from being cropped to zero by ComfyUI's VAE wrapper."""
+    compression = 1
+    compression_getter = getattr(audio_vae, "spacial_compression_encode", None)
+    if callable(compression_getter):
+        try:
+            compression = max(1, int(math.ceil(float(compression_getter()))))
+        except (TypeError, ValueError, OverflowError):
+            compression = 1
+
+    sample_count = int(waveform.shape[-1])
+    minimum_samples = compression
+    if sample_count >= minimum_samples:
+        return waveform
+
+    padding = minimum_samples - sample_count
+    log.warning(
+        "[PromptRelay] 音频仅有 %d 个采样，低于当前音频 VAE 的最小编码块 %d；已在末尾补零。",
+        sample_count,
+        minimum_samples,
+    )
+    return F.pad(waveform, (0, padding))
 
 
 def _convert_to_latent_lengths(pixel_lengths, temporal_stride, latent_frames):
@@ -1199,6 +1225,48 @@ class GJJLTXDirector(io.ComfyNode):
         except Exception:
             requested_duration_frames = 1
 
+        # Old/stale workflows can carry duration_frames=1 while the other
+        # synchronized duration fields still contain the real timeline length.
+        # Recover only the degenerate value so an intentionally configured
+        # one-frame timeline remains valid when all fields agree.
+        if requested_duration_frames <= 1:
+            duration_candidates = [requested_duration_frames]
+            try:
+                duration_candidates.append(max(1, int(end_frame) - start_frame))
+            except Exception:
+                pass
+            try:
+                duration_candidates.append(max(1, int(round(float(duration_seconds) * float(frame_rate)))))
+            except Exception:
+                pass
+            if isinstance(tdata, dict):
+                for key in ("durationFrames", "duration_frames", "normalDurationFrames"):
+                    try:
+                        duration_candidates.append(max(1, int(tdata.get(key))))
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    saved_segments = [
+                        *tdata.get("segments", []),
+                        *tdata.get("audioSegments", []),
+                        *tdata.get("motionSegments", []),
+                    ]
+                    saved_end = max(
+                        (int(seg.get("start", 0)) + int(seg.get("length", 0)) for seg in saved_segments),
+                        default=1,
+                    )
+                    duration_candidates.append(max(1, saved_end - start_frame))
+                except (TypeError, ValueError):
+                    pass
+            recovered_duration = max(duration_candidates)
+            if recovered_duration > requested_duration_frames:
+                log.warning(
+                    "[LTXDirector] 检测到时长字段不一致：duration_frames=%d，已从其它时间轴字段恢复为 %d 帧。",
+                    requested_duration_frames,
+                    recovered_duration,
+                )
+                requested_duration_frames = recovered_duration
+
         # LTXV requires pixel frame counts to be 8n+1. Snap once at the
         # entrance and make the snapped value authoritative for the whole run.
         ltxv_length = int(math.ceil((requested_duration_frames - 1) / 8.0) * 8) + 1
@@ -1226,6 +1294,21 @@ class GJJLTXDirector(io.ComfyNode):
                 tdata["durationSeconds"] = float(duration_seconds)
                 tdata["duration_seconds"] = float(duration_seconds)
 
+        is_retake_mode = tdata.get("retakeMode", False)
+        is_retake_active = is_retake_mode and tdata.get("retakeVideo") is not None
+
+        # Resolve and split the external prompt before constructing runtime
+        # material segments. This makes the timeline the authoritative binding
+        # between ordered input images and ordered `---` scene prompts.
+        if not global_prompt:
+            if is_retake_mode:
+                global_prompt = tdata.get("retake_global_prompt", "")
+            else:
+                global_prompt = tdata.get("global_prompt", "")
+        parsed_global_prompt, storyboard_prompts = _parse_external_prompt_script(global_prompt)
+        if storyboard_prompts:
+            global_prompt = parsed_global_prompt
+
         runtime_segments = _runtime_material_segments(
             material_1=material_1,
             material_2=material_2,
@@ -1239,30 +1322,33 @@ class GJJLTXDirector(io.ComfyNode):
                 seg for seg in tdata.get("segments", [])
                 if not (isinstance(seg, dict) and seg.get("gjjUpstream"))
             ]
-            tdata["segments"] = [*manual_segments, *runtime_segments]
-            if not str(local_prompts or "").strip():
+            runtime_segments.sort(key=lambda seg: (int(seg.get("start", 0)), str(seg.get("id", ""))))
+            if storyboard_prompts:
+                for index, seg in enumerate(runtime_segments):
+                    seg["prompt"] = storyboard_prompts[min(index, len(storyboard_prompts) - 1)]
+                    seg["gjjPromptUpstream"] = True
+                local_prompts = "|".join(str(seg.get("prompt") or "video") for seg in runtime_segments)
+                segment_lengths = ",".join(str(max(1, int(seg.get("length", 1)))) for seg in runtime_segments)
+                log.info(
+                    "[LTXDirector] 已按时间线绑定 %d 张素材与 %d 段提示词。",
+                    len(runtime_segments),
+                    len(storyboard_prompts),
+                )
+            elif not str(local_prompts or "").strip():
                 fallback_prompt = str(global_prompt or tdata.get("global_prompt", "") or "video").strip() or "video"
                 local_prompts = "|".join(fallback_prompt for _ in runtime_segments)
-            if not str(segment_lengths or "").strip():
+            if not storyboard_prompts and not str(segment_lengths or "").strip():
                 segment_lengths = ",".join(str(max(1, int(seg.get("length", 1)))) for seg in runtime_segments)
+            tdata["segments"] = sorted(
+                [*manual_segments, *runtime_segments],
+                key=lambda seg: (int(seg.get("start", 0)), str(seg.get("id", ""))),
+            )
             log.info("[LTXDirector] 使用运行时上游素材刷新时间线：%d 个图片片段。", len(runtime_segments))
 
         if isinstance(tdata, dict):
             timeline_data = json.dumps(_strip_runtime_tensors(tdata), ensure_ascii=False)
 
-        is_retake_mode = tdata.get("retakeMode", False)
-        is_retake_active = is_retake_mode and tdata.get("retakeVideo") is not None
-
-        # Extract global_prompt from timeline_data if not connected/empty
-        if not global_prompt:
-            if is_retake_mode:
-                global_prompt = tdata.get("retake_global_prompt", "")
-            else:
-                global_prompt = tdata.get("global_prompt", "")
-
-        parsed_global_prompt, storyboard_prompts = _parse_external_prompt_script(global_prompt)
-        if storyboard_prompts:
-            global_prompt = parsed_global_prompt
+        if storyboard_prompts and not runtime_segments:
             local_prompts = "|".join(storyboard_prompts)
             segment_lengths = ""
 
@@ -1480,6 +1566,7 @@ class GJJLTXDirector(io.ComfyNode):
                             raise ValueError(
                                 f"Expected custom audio waveform with 2 or 3 dims, got shape {tuple(waveform.shape)}"
                             )
+                        waveform = _pad_waveform_for_vae(waveform, audio_vae)
 
                         # Wrapped ComfyUI VAE expects (batch, samples, channels);
                         # raw AudioVAE expects a dict with waveform in (batch, channels, samples).

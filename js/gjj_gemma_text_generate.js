@@ -17,8 +17,10 @@ const WORKFLOW_VALUES_WIDGET = "workflow_values_json";
 const MODEL_FILTER_WIDGET = "model_filter_keywords";
 const MODEL_SIZES_ENDPOINT = "/gjj/text_encoder_model_sizes";
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
+const SCENE_LIBRARY_ENDPOINT = "/gjj/scene_library/list?page=1&page_size=80";
 const ACTORS_PROPERTY = "gjj_gemma_text_generate_actors";
 const ACTOR_PREFIXES_PROPERTY = "gjj_gemma_text_generate_actor_prefixes";
+const SCENES_PROPERTY = "gjj_gemma_text_generate_scenes";
 const CLIP_TYPE_REFERENCE_MIGRATION = "gjj_text_generate_clip_type_reference_v1";
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
@@ -160,6 +162,131 @@ function actorPromptLine(character) {
 	return `@${characterDisplayName(character)}`;
 }
 
+function appendReferenceToPrompt(node, reference) {
+	const current = String(widgetValue(node, PROMPT_WIDGET, "") || "").trimEnd();
+	const value = String(reference || "").trim();
+	if (!value) return;
+	setWidgetValue(node, PROMPT_WIDGET, current ? `${current} ${value}` : value);
+}
+
+function sceneDisplayName(scene) {
+	return String(scene?.name || scene?.id || "未命名场景").trim();
+}
+
+function sceneCover(scene) {
+	if (scene?.thumbnail_url) return String(scene.thumbnail_url);
+	const asset = (scene?.assets || []).find((item) => item?.preview_url || item?.url);
+	return String(asset?.preview_url || asset?.url || "");
+}
+
+function selectedScenes(node) {
+	const scenes = node?.properties?.[SCENES_PROPERTY];
+	return Array.isArray(scenes) ? scenes.filter((item) => item && item.id) : [];
+}
+
+function saveScenes(node, scenes) {
+	node.properties ||= {};
+	node.properties[SCENES_PROPERTY] = scenes.map((item) => ({
+		id: String(item.id),
+		name: sceneDisplayName(item),
+		notes: String(item.notes || ""),
+		cover: String(item.cover || sceneCover(item) || ""),
+	}));
+	markChanged(node);
+	renderSceneChips(node);
+}
+
+function makeReferenceChipSortable(chip, items, index, kind, save) {
+	chip.draggable = true;
+	chip.title = `${chip.title || ""}；拖动可调整顺序`;
+	const mime = `application/x-gjj-gemma-${kind}-index`;
+	chip.addEventListener("dragstart", (event) => {
+		event.stopPropagation();
+		chip.classList.add("dragging");
+		event.dataTransfer.effectAllowed = "move";
+		event.dataTransfer.setData(mime, String(index));
+	});
+	chip.addEventListener("dragover", (event) => {
+		if (!event.dataTransfer.types.includes(mime)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		event.dataTransfer.dropEffect = "move";
+		chip.classList.add("drag-over");
+	});
+	chip.addEventListener("dragleave", () => chip.classList.remove("drag-over"));
+	chip.addEventListener("drop", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		chip.classList.remove("drag-over");
+		const from = Number(event.dataTransfer.getData(mime));
+		if (!Number.isInteger(from) || from < 0 || from >= items.length || from === index) return;
+		const reordered = items.slice();
+		const [moved] = reordered.splice(from, 1);
+		reordered.splice(index, 0, moved);
+		chip.__gjjJustDragged = true;
+		save(reordered);
+	});
+	chip.addEventListener("dragend", () => {
+		chip.classList.remove("dragging", "drag-over");
+		setTimeout(() => { chip.__gjjJustDragged = false; }, 0);
+	});
+}
+
+function renderSceneChips(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state?.sceneChips) return;
+	const scenes = selectedScenes(node);
+	state.sceneChips.replaceChildren();
+	state.sceneChips.style.display = scenes.length ? "flex" : "none";
+	for (const [index, scene] of scenes.entries()) {
+		const chip = document.createElement("button");
+		chip.type = "button";
+		chip.className = "gjj-gemma-actor-chip";
+		chip.title = `${sceneDisplayName(scene)}${scene.notes ? `：${scene.notes}` : ""}；点击添加引用，Ctrl/Cmd+点击移除`;
+		if (scene.cover) {
+			const image = document.createElement("img");
+			image.src = api.apiURL ? api.apiURL(scene.cover) : scene.cover;
+			chip.appendChild(image);
+		}
+		const name = document.createElement("span");
+		name.textContent = `🏕️${sceneDisplayName(scene)}`;
+		chip.appendChild(name);
+		chip.addEventListener("mouseenter", () => {
+			if (!scene.cover) return;
+			const preview = document.createElement("div");
+			preview.className = "gjj-gemma-actor-preview";
+			const large = document.createElement("img");
+			large.src = api.apiURL ? api.apiURL(scene.cover) : scene.cover;
+			const caption = document.createElement("div");
+			const notes = String(scene.notes || "").replace(/\s+/g, " ").trim();
+			caption.textContent = `🏕️${sceneDisplayName(scene)}${notes ? `（${notes}）` : ""}`;
+			preview.append(large, caption);
+			document.body.appendChild(preview);
+			const rect = chip.getBoundingClientRect();
+			preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
+			preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
+			chip.__gjjActorPreview = preview;
+		});
+		chip.addEventListener("mouseleave", () => {
+			chip.__gjjActorPreview?.remove();
+			chip.__gjjActorPreview = null;
+		});
+		chip.addEventListener("click", (event) => {
+			if (chip.__gjjJustDragged) return;
+			chip.__gjjActorPreview?.remove();
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.ctrlKey || event.metaKey) {
+				saveScenes(node, scenes.filter((item) => String(item.id) !== String(scene.id)));
+				return;
+			}
+			appendReferenceToPrompt(node, `🏕️${sceneDisplayName(scene)}`);
+		});
+		makeReferenceChipSortable(chip, scenes, index, "scene", (items) => saveScenes(node, items));
+		state.sceneChips.appendChild(chip);
+	}
+}
+
 function selectedActors(node) {
 	const actors = node?.properties?.[ACTORS_PROPERTY];
 	return Array.isArray(actors) ? actors.filter((item) => item && item.id) : [];
@@ -229,11 +356,12 @@ function renderActorChips(node) {
 	const actors = selectedActors(node);
 	state.actorChips.replaceChildren();
 	state.actorChips.style.display = actors.length ? "flex" : "none";
-	for (const actor of actors) {
+	for (const [index, actor] of actors.entries()) {
 		const chip = document.createElement("button");
 		chip.type = "button";
 		chip.className = "gjj-gemma-actor-chip";
-		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击从角色表中移除`);
+		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击添加引用，Ctrl/Cmd+点击移除`);
+		chip.title = `${actorPromptLine(actor)}；点击添加引用，Ctrl/Cmd+点击移除`;
 		if (actor.cover) {
 			const image = document.createElement("img");
 			image.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
@@ -263,11 +391,17 @@ function renderActorChips(node) {
 			chip.__gjjActorPreview = null;
 		});
 		chip.addEventListener("click", (event) => {
+			if (chip.__gjjJustDragged) return;
 			chip.__gjjActorPreview?.remove();
 			event.preventDefault();
 			event.stopPropagation();
-			saveActors(node, actors.filter((item) => String(item.id) !== String(actor.id)));
+			if (event.ctrlKey || event.metaKey) {
+				saveActors(node, actors.filter((item) => String(item.id) !== String(actor.id)));
+				return;
+			}
+			appendReferenceToPrompt(node, actorPromptLine(actor));
 		});
+		makeReferenceChipSortable(chip, actors, index, "actor", (items) => saveActors(node, items));
 		state.actorChips.appendChild(chip);
 	}
 }
@@ -330,6 +464,9 @@ function logicalKeywordMatch(value, query) {
 async function toggleActorPicker(node) {
 	const state = node?.__gjjGemmaPanel;
 	if (!state) return;
+	state.scenePicker?.remove();
+	state.scenePicker = null;
+	state.sceneButton?.classList.remove("active");
 	if (state.actorPicker?.isConnected) {
 		state.actorPicker.remove();
 		state.actorPicker = null;
@@ -472,6 +609,75 @@ async function toggleActorPicker(node) {
 	state.actorButton.classList.add("active");
 }
 
+async function toggleScenePicker(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state) return;
+	if (state.scenePicker?.isConnected) {
+		state.scenePicker.remove();
+		state.scenePicker = null;
+		state.sceneButton.classList.remove("active");
+		return;
+	}
+	state.actorPicker?.remove();
+	state.actorPicker = null;
+	state.actorButton.classList.remove("active");
+	const response = await api.fetchApi(SCENE_LIBRARY_ENDPOINT);
+	const data = await response.json();
+	if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取场景库失败");
+	const scenes = Array.isArray(data.scenes) ? data.scenes : [];
+	const picker = document.createElement("div");
+	picker.className = "gjj-gemma-actor-picker";
+	const tools = document.createElement("div");
+	tools.className = "gjj-gemma-actor-tools";
+	const grid = document.createElement("div");
+	grid.className = "gjj-gemma-actor-grid";
+	let query = "";
+	const render = () => {
+		const selectedIds = new Set(selectedScenes(node).map((item) => String(item.id)));
+		const filtered = scenes.filter((scene) => logicalKeywordMatch([
+			sceneDisplayName(scene), scene?.id, scene?.notes, ...(scene?.keywords || []),
+		].filter(Boolean).join(" "), query));
+		grid.replaceChildren();
+		for (const scene of filtered) {
+			const item = document.createElement("button");
+			item.type = "button";
+			item.className = `gjj-gemma-actor-item${selectedIds.has(String(scene.id)) ? " active" : ""}`;
+			const image = document.createElement("img");
+			const cover = sceneCover(scene);
+			if (cover) image.src = api.apiURL ? api.apiURL(cover) : cover;
+			const name = document.createElement("span");
+			name.textContent = sceneDisplayName(scene);
+			item.append(image, name);
+			item.title = String(scene.notes || sceneDisplayName(scene));
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const current = selectedScenes(node);
+				const exists = current.some((entry) => String(entry.id) === String(scene.id));
+				saveScenes(node, exists ? current.filter((entry) => String(entry.id) !== String(scene.id)) : [...current, { ...scene, cover }]);
+				render();
+			});
+			grid.appendChild(item);
+		}
+	};
+	const search = document.createElement("input");
+	search.type = "text";
+	search.className = "gjj-gemma-actor-keyword-filter";
+	search.placeholder = "搜索场景名称、关键词或备注";
+	search.addEventListener("input", () => { query = search.value; render(); });
+	search.addEventListener("keydown", (event) => event.stopPropagation());
+	const clear = button("清空", "清空已选场景", () => { saveScenes(node, []); render(); });
+	clear.classList.add("compact");
+	const confirm = button("确定", "保存选择并关闭场景库", () => closeFloatingPanels(node));
+	confirm.classList.add("compact");
+	tools.append(search, clear, confirm);
+	picker.append(tools, grid);
+	render();
+	state.root.appendChild(picker);
+	state.scenePicker = picker;
+	state.sceneButton.classList.add("active");
+}
+
 function collectWorkflowValues(node) {
 	const values = {};
 	for (const name of STATE_WIDGETS) {
@@ -480,6 +686,9 @@ function collectWorkflowValues(node) {
 	}
 	values.selected_actors = selectedActors(node)
 		.map((actor) => characterDisplayName(actor))
+		.filter(Boolean);
+	values.selected_scenes = selectedScenes(node)
+		.map((scene) => sceneDisplayName(scene))
 		.filter(Boolean);
 	return values;
 }
@@ -1645,6 +1854,12 @@ function closeFloatingPanels(node) {
 	state.actorPicker?.remove();
 	state.actorPicker = null;
 	state.actorButton?.classList.remove("active");
+	state.scenePicker?.remove();
+	state.scenePicker = null;
+	state.sceneButton?.classList.remove("active");
+	state.scenePicker?.remove();
+	state.scenePicker = null;
+	state.sceneButton?.classList.remove("active");
 	syncPanel(node);
 }
 
@@ -1679,6 +1894,8 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-templates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; width:100%; min-width:0; overflow:visible; padding:1px 0 3px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chips { display:none; flex-wrap:wrap; align-items:center; gap:5px; padding:2px 0; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip { display:flex; align-items:center; gap:5px; min-height:28px; padding:2px 8px 2px 3px; border:1px solid #4f7b68; border-radius:999px; background:#173126; color:#eafff3; cursor:pointer; font:700 11px/1.2 system-ui,sans-serif; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.dragging { opacity:.42; cursor:grabbing; }
+		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.drag-over { border-color:#ffd166; box-shadow:0 0 0 2px rgba(255,209,102,.32); }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip img { width:23px; height:23px; border-radius:50%; object-fit:cover; background:#0c1518; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-picker { position:absolute; z-index:1002; top:34px; left:0; width:min(420px,100%); max-height:min(430px,70vh); overflow:hidden; display:flex; flex-direction:column; gap:6px; padding:7px; border:1px solid #526a73; border-radius:8px; background:rgba(13,22,25,.98); box-shadow:0 12px 32px rgba(0,0,0,.58); }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-tools { flex:0 0 auto; display:flex; align-items:center; gap:5px; padding-bottom:5px; border-bottom:1px solid rgba(82,106,115,.45); }
@@ -1743,8 +1960,13 @@ function createPanel(node) {
 	templates.className = "gjj-ia-templates";
 	const actorChips = document.createElement("div");
 	actorChips.className = "gjj-gemma-actor-chips";
+	const sceneChips = document.createElement("div");
+	sceneChips.className = "gjj-gemma-actor-chips";
 	const actorButton = button("👤", "选择参与演员", () => {
 		toggleActorPicker(node).catch((error) => alert(`读取角色库失败：${error?.message || error}`));
+	});
+	const sceneButton = button("🏕️", "选择引用场景", () => {
+		toggleScenePicker(node).catch((error) => alert(`读取场景库失败：${error?.message || error}`));
 	});
 	const templateButton = button("📚", "展开模板设置", () => {
 		const state = node.__gjjGemmaPanel;
@@ -1794,14 +2016,14 @@ function createPanel(node) {
 			runButton.disabled = false;
 		}
 	});
-	toolbar.append(actorButton, templateButton, thinking, modelPanelButton, randomSeed, settingsButton, runButton);
+	toolbar.append(actorButton, sceneButton, templateButton, thinking, modelPanelButton, randomSeed, settingsButton, runButton);
 
 	const settingsState = buildSettings(node);
 	const modelState = buildModelPanel(node, settingsState);
 	settingsState.templateSettings.appendChild(floatingWindowActions(node));
 	modelState.panel.appendChild(floatingWindowActions(node));
 	settingsState.settings.appendChild(floatingWindowActions(node));
-	root.append(style, toolbar, templates, actorChips, settingsState.templateSettings, modelState.panel, settingsState.settings);
+	root.append(style, toolbar, templates, actorChips, sceneChips, settingsState.templateSettings, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
@@ -1809,8 +2031,9 @@ function createPanel(node) {
 	domWidget.computeSize = (width) => {
 		const toolbarHeight = Number(toolbar.offsetHeight || 30);
 		const actorRowHeight = actorChips.style.display === "none" ? 0 : Number(actorChips.offsetHeight || 30);
+		const sceneRowHeight = sceneChips.style.display === "none" ? 0 : Number(sceneChips.offsetHeight || 30);
 		const templateRowHeight = Number(templates.offsetHeight || 25);
-		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + templateRowHeight + 13);
+		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + sceneRowHeight + templateRowHeight + 13);
 		return [
 			Math.max(470, Number(width || node.size?.[0] || 470)),
 			Math.max(35, mainPanelHeight),
@@ -1822,6 +2045,9 @@ function createPanel(node) {
 		actorButton,
 		actorChips,
 		actorPicker: null,
+		sceneButton,
+		sceneChips,
+		scenePicker: null,
 		templates,
 		templateButtons: new Map(),
 		templateButton,
@@ -1848,7 +2074,7 @@ function createPanel(node) {
 	}
 	const handleOutsidePointerDown = (event) => {
 		const state = node.__gjjGemmaPanel;
-		if (!state || (!state.templatesExpanded && !state.modelExpanded && !state.expanded && !state.actorPicker)) return;
+		if (!state || (!state.templatesExpanded && !state.modelExpanded && !state.expanded && !state.actorPicker && !state.scenePicker)) return;
 		if (root.contains(event.target)) return;
 		if (event.target?.closest?.(".gjj-ia-search-popup")) return;
 		closeFloatingPanels(node);
@@ -1864,6 +2090,7 @@ function createPanel(node) {
 			this.__gjjGemmaActorTriggerHandler = null;
 		}
 		try { this.__gjjGemmaPanel?.actorPicker?.remove(); } catch (_) {}
+		try { this.__gjjGemmaPanel?.scenePicker?.remove(); } catch (_) {}
 		document.querySelectorAll(".gjj-gemma-actor-preview").forEach((item) => item.remove());
 		try { clipName.__gjjSearchSelectPopup?.remove(); } catch (_) {}
 		return originalOnRemoved?.apply(this, args);
@@ -1881,6 +2108,9 @@ function createPanel(node) {
 	const restoredActors = selectedActors(node);
 	if (restoredActors.length) saveActors(node, restoredActors);
 	else renderActorChips(node);
+	const restoredScenes = selectedScenes(node);
+	if (restoredScenes.length) saveScenes(node, restoredScenes);
+	else renderSceneChips(node);
 	syncPanel(node);
 }
 

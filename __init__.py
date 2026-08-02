@@ -3451,6 +3451,52 @@ def _register_gjj_scene_library_api():
 			pass
 		return preview if tonemap_hdr_preview(path, preview) and preview.is_file() else None
 
+	def scene_thumbnail_path(scene_id: str) -> Path:
+		scene_id = clean_key(scene_id, "")
+		if not scene_id:
+			raise ValueError("缺少场景 ID。")
+		base = root_dir().resolve()
+		path = (base / f"{scene_id}.jpg").resolve()
+		if path.parent != base:
+			raise ValueError("场景缩略图路径不安全。")
+		return path
+
+	def scene_thumbnail_url(scene_id: str, mtime: float = 0) -> str:
+		return f"/gjj/scene_library/thumbnail/{clean_key(scene_id, '')}.jpg?mtime={int(mtime or 0)}"
+
+	def sync_scene_thumbnail(data: dict) -> str:
+		scene_id = clean_key(data.get("id") or "", "")
+		if not scene_id:
+			return ""
+		base = scene_dir(scene_id)
+		assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+		source_asset = next((item for item in assets if str(item.get("file") or "").strip()), None)
+		if not source_asset:
+			return ""
+		source_path = base / str(source_asset.get("file") or "")
+		if not source_path.is_file():
+			return ""
+		preview_path = ensure_scene_asset_preview(base, source_path)
+		if not preview_path or not preview_path.is_file():
+			return ""
+		target = scene_thumbnail_path(scene_id)
+		try:
+			if target.is_file() and target.stat().st_size > 0 and target.stat().st_mtime >= preview_path.stat().st_mtime:
+				return scene_thumbnail_url(scene_id, target.stat().st_mtime)
+			with Image.open(preview_path) as source:
+				image = source.convert("RGB")
+				resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+				image.thumbnail((192, 108), resample)
+				canvas = Image.new("RGB", (192, 108), (10, 17, 21))
+				canvas.paste(image, ((192 - image.width) // 2, (108 - image.height) // 2))
+				tmp = target.with_suffix(".jpg.tmp")
+				canvas.save(tmp, format="JPEG", quality=78, optimize=True, progressive=True)
+				os.replace(str(tmp), str(target))
+			return scene_thumbnail_url(scene_id, target.stat().st_mtime)
+		except Exception as exc:
+			print(f"[GJJ] 生成场景 JPG 缩略图失败（{scene_id}）：{exc}")
+			return ""
+
 	def scene_pil_from_hdr(path: Path) -> Image.Image:
 		return hdr_array_to_display_image(read_hdr_preview_array(path))
 
@@ -3716,6 +3762,7 @@ def _register_gjj_scene_library_api():
 				next_item["missing"] = True
 			enriched_assets.append(next_item)
 		data["assets"] = enriched_assets
+		data["thumbnail_url"] = sync_scene_thumbnail(data)
 		data["reference"] = f"@{data.get('name') or scene_id}"
 		return data
 
@@ -4278,6 +4325,19 @@ def _register_gjj_scene_library_api():
 				return web.Response(status=404, text="not found")
 			content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 			return web.FileResponse(path, headers={"Cache-Control": "no-store", "Content-Type": content_type})
+		except Exception as exc:
+			return web.Response(status=400, text=str(exc))
+
+	@server.routes.get("/gjj/scene_library/thumbnail/{file_name}")
+	async def gjj_scene_library_thumbnail(request):
+		try:
+			file_name = clean_key(request.match_info.get("file_name") or "", "")
+			if not file_name.lower().endswith(".jpg"):
+				raise ValueError("只能读取 JPG 场景缩略图。")
+			path = scene_thumbnail_path(Path(file_name).stem)
+			if not path.is_file():
+				return web.Response(status=404, text="not found")
+			return web.FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable", "Content-Type": "image/jpeg"})
 		except Exception as exc:
 			return web.Response(status=400, text=str(exc))
 

@@ -856,6 +856,28 @@ def _normalize_actor_name(value: Any) -> str:
     return re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(value or "")).strip().lstrip("@")
 
 
+def _scene_library_notes() -> dict[str, str]:
+    if folder_paths is None:
+        return {}
+    root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / "scene_library"
+    if not root.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for path in root.glob("*/manifest.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = str(data.get("name") or data.get("id") or path.parent.name).strip().lstrip("@")
+        notes = re.sub(r"\s+", " ", str(data.get("notes") or "")).strip()
+        for key in {name, str(data.get("id") or "").strip(), path.parent.name}:
+            if key:
+                result[key.casefold()] = notes
+    return result
+
+
 def _inject_character_notes(prompt: str, selected_actors: Any = None) -> str:
     """把选中的角色名 + 备注隐性拼接到用户指令前面；不在原文中插入或替换 @名。
 
@@ -893,6 +915,27 @@ def _inject_character_notes(prompt: str, selected_actors: Any = None) -> str:
         f"本次共有 {len(names)} 名演员：{actor_refs}。\n"
         f"{actor_block}\n"
         "人物括号内备注仅供理解角色外观，禁止在生成文本中单独输出人物表、角色备注或逐条复述这些备注。\n\n"
+    )
+    return f"{preface}{user_text}"
+
+
+def _inject_scene_notes(prompt: str, selected_scenes: Any = None) -> str:
+    user_text = str(prompt or "")
+    names = list(dict.fromkeys(
+        str(value or "").strip().lstrip("@")
+        for value in (selected_scenes if isinstance(selected_scenes, list) else [])
+        if str(value or "").strip().lstrip("@")
+    ))
+    if not names:
+        return user_text
+    notes_by_name = _scene_library_notes()
+    scene_lines = [f"🏕️{name}{f'（{notes_by_name.get(name.casefold(), '')}）' if notes_by_name.get(name.casefold()) else ''}" for name in names]
+    preface = (
+        "【场景库参考】以下是本次引用的场景名称和备注。生成结果涉及这些地点时，"
+        "必须按场景库引用方式使用 🏕️场景名，保持名称完全一致，不得另起近义名称；"
+        "括号内备注只用于理解环境，不要单独输出场景资料表。\n"
+        + "\n".join(scene_lines)
+        + "\n\n"
     )
     return f"{preface}{user_text}"
 
@@ -1267,6 +1310,10 @@ class GJJ_GemmaTextGenerate:
             injected_prompt = _inject_character_notes(
                 prompt,
                 saved_values.get("selected_actors", []),
+            )
+            injected_prompt = _inject_scene_notes(
+                injected_prompt,
+                saved_values.get("selected_scenes", []),
             )
             text = _generate_text(
                 clip,

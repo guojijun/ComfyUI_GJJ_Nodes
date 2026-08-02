@@ -18,10 +18,7 @@ from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.model_family import gjjutils_model_family_match_preset as _match_model_family_preset
 from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_bytes, gjjutils_write_temp_tensor_images
 from .gjj_lazy_image_studio import (
-    DEFAULT_CLIP_NAME,
     DEFAULT_UNET_DTYPE,
-    DEFAULT_UNET_NAME,
-    DEFAULT_VAE_NAME,
     GJJ_LazyImageStudio,
     MAX_MAIN_IMAGE_INDEX,
     UNET_DTYPE_OPTIONS,
@@ -57,8 +54,8 @@ SCENE_BRACKET_LINE_RE = re.compile(
 )
 CHARACTER_REF_RE = re.compile(r"@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?")
 SCENE_REF_RE = re.compile(
-    r"(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?"
-    r"|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]"
+    r"🏕️?([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?"
+    r"|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]"
 )
 SCENE_VIEW_REF_RE = re.compile(
     r"\[\s*([^\[\]/:：]+?)\s*[:：]\s*"
@@ -78,7 +75,6 @@ COSTUME_REF_RE = re.compile(
     r"|\[costume[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]",
     re.IGNORECASE,
 )
-SCENE_BRACKET_REF_RE = re.compile(r"\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]")
 CHARACTER_VIEW_SUFFIX_RE = re.compile(r"^(.+?)([a-gA-G])$")
 CHARACTER_SPACED_VIEW_RE = re.compile(r"^[ \t　]+([a-gA-G])(?=$|[\s,，.。;；!！?？]|[\u4e00-\u9fff])")
 MULTI_PERSON_KEYWORDS = (
@@ -124,6 +120,9 @@ CELL_BLEED_PROMPT = "按当前宫格画幅构图，画面铺满宫格；主体�
 GENDER_PREFIX_RE = re.compile(r"^\s*(?:♀️|♂️|♀|♂)\s*")
 NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors"
 FLUX_STORYBOARD_LORA = "f2k_9B_lcs_consist"
+DEFAULT_STORYBOARD_UNET = "qwen_image_edit_2511_int4_convrot.safetensors"
+DEFAULT_STORYBOARD_CLIP = "qwen_2.5_vl_7b_int4_convrot.safetensors"
+DEFAULT_STORYBOARD_VAE = "qwen_image_vae.safetensors"
 NEXT_SCENE_PROMPT_PREFIX = "下一个场景："
 STORYBOARD_LORA_NONE = ""
 
@@ -1469,22 +1468,7 @@ def _extract_scene_refs(text: str) -> list[tuple[str, str]]:
         place = _safe_text(match.group(2) or match.group(4)).strip(" 　.,，;；。!！?？")
         if not name:
             continue
-        key = (name.casefold(), place.casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        refs.append((name, place))
-    for match in SCENE_BRACKET_REF_RE.finditer(source):
-        raw_name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
-        place = _safe_text(match.group(2)).strip(" 　.,，;；。!！?？")
-        name = raw_name
-        if raw_name in {"场景", "scene", "Scene"}:
-            continue
-        if place.lower().startswith(("视窗@", "view@", "viewport@")):
-            continue
-        if ":" in raw_name or "：" in raw_name:
-            continue
-        if not _find_scene(name):
+        if match.group(3) and not _find_scene(name):
             continue
         key = (name.casefold(), place.casefold())
         if key in seen:
@@ -3439,14 +3423,16 @@ def _storyboard_lora_choices(default_unet_name: Any = "") -> tuple[list[str], st
     choices.extend(loras)
     default = STORYBOARD_LORA_NONE
     if _is_next_scene_image_edit_unet(default_unet_name):
-        default = _resolve_storyboard_lora_name("next-scene")
+        default = _resolve_storyboard_lora_name(NEXT_SCENE_LORA) or NEXT_SCENE_LORA
         if default and default not in choices:
-            choices.insert(1, default)
+            # 缺失的默认模型不伪装成可用选项；前端模型树会显示完整默认名并标红。
+            if _resolve_storyboard_lora_name(default):
+                choices.insert(1, default)
     elif _is_flux_storyboard_unet(default_unet_name):
         default = _resolve_storyboard_lora_name(FLUX_STORYBOARD_LORA)
         if default and default not in choices:
             choices.insert(1, default)
-    return choices, default if default in choices else STORYBOARD_LORA_NONE
+    return choices, default
 
 
 def _append_lora_row(rows: list[dict[str, Any]], name: str, strength: float = 1.0) -> None:
@@ -3516,10 +3502,6 @@ def _preset_lora_data(unet_name: Any) -> str:
                     "strength": _normalize_strength(preset.get("lora_2_strength"), 0.7),
                 }
             )
-    if _is_next_scene_image_edit_unet(unet_name):
-        _append_lora_row(rows, NEXT_SCENE_LORA, 1.0)
-    elif _is_flux_storyboard_unet(unet_name):
-        _append_lora_row(rows, FLUX_STORYBOARD_LORA, 1.0)
     return json.dumps(rows, ensure_ascii=False) if rows else "[]"
 
 
@@ -3531,9 +3513,18 @@ def _ensure_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
         rows = []
     if not isinstance(rows, list):
         rows = []
-    rows = [row for row in rows if isinstance(row, dict)]
-    if _is_next_scene_image_edit_unet(unet_name):
-        _append_lora_row(rows, NEXT_SCENE_LORA, 1.0)
+    unique_rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = _safe_text(row.get("name")).strip()
+        key = name.replace("\\", "/").casefold().rsplit("/", 1)[-1]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(row)
+    rows = unique_rows
     return json.dumps(rows, ensure_ascii=False) if rows else "[]"
 
 
@@ -3600,13 +3591,13 @@ class GJJ_StoryboardGridGenerator:
 
     @classmethod
     def INPUT_TYPES(cls):
-        raw_unet_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
+        raw_unet_models = _list_lazy_unet_models() or [DEFAULT_STORYBOARD_UNET]
         diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
         filtered = [m for m in raw_unet_models if any(k in str(m).lower() for k in diffusion_keywords)]
         diffusion_models = filtered if filtered else raw_unet_models
-        default_unet_name = _preferred_default(diffusion_models, DEFAULT_UNET_NAME)
-        clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
-        vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+        default_unet_name = DEFAULT_STORYBOARD_UNET
+        clip_models = _list_lazy_clip_models() or [DEFAULT_STORYBOARD_CLIP]
+        vae_models = list_vae_models() or [DEFAULT_STORYBOARD_VAE]
         lora_models, default_storyboard_lora = _storyboard_lora_choices(default_unet_name)
         return {
             "required": {
@@ -3665,11 +3656,11 @@ class GJJ_StoryboardGridGenerator:
                 ),
                 "clip_name1": (
                     clip_models,
-                    {"default": _preferred_default(clip_models, DEFAULT_CLIP_NAME), "display_name": "🟡 CLIP 编码器"},
+                    {"default": _preferred_default(clip_models, DEFAULT_STORYBOARD_CLIP), "display_name": "🟡 CLIP 编码器"},
                 ),
                 "vae_name": (
                     vae_models,
-                    {"default": _preferred_default(vae_models, DEFAULT_VAE_NAME), "display_name": "🔴 VAE 解码器"},
+                    {"default": _preferred_default(vae_models, DEFAULT_STORYBOARD_VAE), "display_name": "🔴 VAE 解码器"},
                 ),
                 "seed": (
                     "INT",
@@ -3735,6 +3726,7 @@ class GJJ_StoryboardGridGenerator:
                     lora_models,
                     {
                         "default": default_storyboard_lora,
+                        "gjj_default_model": NEXT_SCENE_LORA,
                         "display_name": "🟢 LoRA",
                         "tooltip": "可选单行 LoRA。主模型为 qwen-image-edit / firered-image-edit 时默认选择名称匹配 next-scene 的 LoRA；flux/f2k/klein 时默认选择名称匹配 f2k_9B_lcs_consist 的 LoRA。",
                     },

@@ -28,7 +28,7 @@ const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomi
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const CHARACTER_REF_PATTERN = /@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:\/([0-9A-Za-z\u4e00-\u9fff._-]+))?/g;
 const SCENE_VIEW_REF_PATTERN = /\[\s*([^\[\]/:：]+?)\s*[:：]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]/g;
-const SCENE_REF_PATTERN = /(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
+const SCENE_REF_PATTERN = /🏕️?([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
 const COSTUME_REF_PATTERN = /(?:💼|👗|📦)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|产品|prop|product|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set(["unet_name", "lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
@@ -84,6 +84,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 const DEFAULT_LORA_ROW = { enabled: true, name: "", strength: 1.0 };
 const NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors";
 const FLUX_STORYBOARD_LORA = "f2k_9B_lcs_consist";
+const REQUIRED_LIGHTNING_LORA_ENTRY = "__required_lightning_lora";
 
 function normalizeStoryboardLoraData(value) {
 	let rows;
@@ -93,6 +94,7 @@ function normalizeStoryboardLoraData(value) {
 		rows = [];
 	}
 	if (!Array.isArray(rows)) rows = [];
+	const seen = new Set();
 	const configured = rows
 		.filter((row) => row && typeof row === "object" && String(row.name || "").trim())
 		.map((row) => ({
@@ -100,7 +102,13 @@ function normalizeStoryboardLoraData(value) {
 			enabled: row.enabled !== false,
 			name: String(row.name || "").trim(),
 			strength: normalizeStrength(row.strength, 1.0),
-		}));
+		}))
+		.filter((row) => {
+			const key = row.name.replace(/\\/g, "/").toLowerCase().split("/").pop();
+			if (!key || seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
 	configured.push({ ...DEFAULT_LORA_ROW });
 	return JSON.stringify(configured);
 }
@@ -1011,6 +1019,41 @@ function appendLoraRow(rows, name, strength = 1.0, widget = null) {
 	rows.push({ enabled: true, name: target, strength });
 }
 
+function loraBaseKey(name) {
+	return String(name || "").replace(/\\/g, "/").toLowerCase().split("/").pop();
+}
+
+function isQwenLightningLora(name) {
+	const key = loraBaseKey(name);
+	return ["qwen", "image", "edit", "lightning"].every((token) => key.includes(token));
+}
+
+function isRequiredLightningRow(row) {
+	return row?.role === "required_lightning" || isQwenLightningLora(row?.name);
+}
+
+function requiredLightningLora(node, optionWidget = null) {
+	if (!isNextSceneImageEdit(String(getWidget(node, "unet_name")?.value || ""), null)) return "";
+	const configured = storyboardLoraRows(node, false).find((row) => row?.name && isRequiredLightningRow(row));
+	if (configured?.name) return String(configured.name);
+	return allWidgetOptions(optionWidget || getWidget(node, STORYBOARD_LORA_NAME)).find(isQwenLightningLora) || "";
+}
+
+function setRequiredLightningLora(node, name) {
+	const rows = storyboardLoraRows(node, false);
+	const existing = rows.find(isRequiredLightningRow);
+	if (existing) {
+		existing.name = String(name || "");
+		existing.enabled = Boolean(name);
+		existing.strength = normalizeStrength(existing.strength, 1.0);
+		existing.role = "required_lightning";
+	} else if (name) {
+		rows.unshift({ enabled: true, name: String(name), strength: 1.0, role: "required_lightning" });
+	}
+	setWidgetValue(getWidget(node, "lora_data"), normalizeStoryboardLoraData(JSON.stringify(rows)));
+	saveParamValues(node);
+}
+
 function presetLoraRows(preset, unetName = "", loraWidget = null) {
 	const rows = [];
 	const lora1 = resolveLoraOption(loraWidget, preset?.lora1);
@@ -1029,8 +1072,6 @@ function presetLoraRows(preset, unetName = "", loraWidget = null) {
 			strength: normalizeStrength(preset.lora2Strength, 0.7),
 		});
 	}
-	if (isNextSceneImageEdit(unetName, preset)) appendLoraRow(rows, NEXT_SCENE_LORA, 1.0, loraWidget);
-	else if (isFluxStoryboardModel(unetName, preset)) appendLoraRow(rows, FLUX_STORYBOARD_LORA, 1.0, loraWidget);
 	if (rows.length) rows.push({ ...DEFAULT_LORA_ROW });
 	return rows;
 }
@@ -1290,81 +1331,6 @@ function createParameterControl(widget, name) {
 	return control;
 }
 
-function modelFamilyFilterTokens(unetName, targetName, preset = null) {
-	const model = normalizedModelText(unetName);
-	if (/qwen.*image.*edit|firered/.test(model)) {
-		if (targetName === STORYBOARD_LORA_NAME) return ["next-scene", "next_scene"];
-		if (targetName === "clip_name1") return ["qwen_2.5_vl", "qwen25vl", "qwen2.5vl"];
-		if (targetName === "vae_name") return ["qwen_image_vae", "qwenimagevae"];
-	}
-	if (/qwen/.test(model)) {
-		if (targetName === STORYBOARD_LORA_NAME) return ["qwen", "next-scene", "next_scene"];
-		return ["qwen", "qwen25", "qwen2.5"];
-	}
-	if (targetName === "clip_name1" && preset?.clipNames?.length) {
-		const tokens = preset.clipNames
-			.flatMap((name) => normalizedModelText(name).split(/[^a-z0-9]+/))
-			.filter((token) => token.length >= 4 && !["safetensors", "scaled", "float", "default"].includes(token));
-		if (tokens.length) return [...new Set(tokens)];
-	}
-	if (targetName === "vae_name" && preset?.vaeName) {
-		const tokens = normalizedModelText(preset.vaeName)
-			.split(/[^a-z0-9]+/)
-			.filter((token) => token.length >= 4 && token !== "safetensors");
-		if (tokens.length) return [...new Set(tokens)];
-	}
-	if (/flux|f2k|klein/.test(model)) {
-		if (targetName === STORYBOARD_LORA_NAME) return ["flux", "f2k", "klein", "consist"];
-		if (targetName === "vae_name") return ["ae.", "flux", "f2k", "klein"];
-		return ["flux", "clip_l", "t5", "qwen"];
-	}
-	if (/zimage|z_image|z-image|zit/.test(model)) return ["zimage", "z_image", "z-image", "qwen"];
-	const stem = model.split(/[\\/_\-.]+/).find((token) => token.length >= 4 && !/^\d+$/.test(token));
-	return stem ? [stem] : [];
-}
-
-function optionMatchesFamily(option, tokens) {
-	if (!tokens.length) return true;
-	const normalized = normalizedModelText(option);
-	return tokens.some((token) => normalized.includes(normalizedModelText(token)));
-}
-
-function matchesAllModelKeywords(value, keywords) {
-	const normalized = normalizedModelText(value);
-	return keywords.every((keyword) => normalized.includes(normalizedModelText(keyword)));
-}
-
-function setFilteredSelectOptions(control, options, preferredValues = []) {
-	if (!control || control.tagName !== "SELECT") return;
-	const unique = [...new Set(options.map((item) => String(item ?? "")))];
-	control.replaceChildren();
-	for (const optionValue of unique) {
-		const option = document.createElement("option");
-		option.value = optionValue;
-		option.textContent = optionValue || "无";
-		control.append(option);
-	}
-	if (!unique.length) {
-		control.value = "";
-		return;
-	}
-	const int4Default = unique.find((item) => /int4[_-]?convrot/i.test(item));
-	const preferred = preferredValues
-		.map((item) => String(item || ""))
-		.map((wanted) => unique.find((item) => {
-			const optionText = normalizedModelText(item).replace(/\\/g, "/");
-			const wantedText = normalizedModelText(wanted).replace(/\\/g, "/");
-			const wantedBase = wantedText.split("/").pop();
-			return wantedText && (optionText === wantedText || optionText.endsWith(`/${wantedBase}`) || optionText.includes(wantedBase));
-		}))
-		.find(Boolean);
-	const selected = int4Default
-		|| preferred
-		|| unique[0];
-	control.value = selected;
-	control.__gjjRefreshSearchPicker?.();
-}
-
 function closeModelSearchPopup() {
 	if (!activeModelSearchPopup) return;
 	activeModelSearchPopup.cleanup?.();
@@ -1521,69 +1487,54 @@ function createSearchableModelSelect(control) {
 	return host;
 }
 
-async function refreshModelFamilyDialogControls(controls) {
-	const unetControl = controls.get("unet_name")?.control;
-	if (!unetControl) return;
-	const unetName = String(unetControl.value || "");
-	let preset = null;
-	try {
-		preset = matchModelFamilyPreset(unetName, await getModelFamilyPresets()) || null;
-	} catch {
-		preset = null;
-	}
-	if (String(unetControl.value || "") !== unetName) return;
-	const preferredByName = {
-		clip_name1: preset?.clipNames || [],
-		vae_name: preset?.vaeName ? [preset.vaeName] : [],
-		[STORYBOARD_LORA_NAME]: isFluxStoryboardModel(unetName, preset) ? [FLUX_STORYBOARD_LORA] : [],
-	};
-	for (const name of ["clip_name1", "vae_name", STORYBOARD_LORA_NAME]) {
-		const entry = controls.get(name);
-		if (!entry?.control || entry.control.tagName !== "SELECT") continue;
-		const allOptions = allWidgetOptions(entry.widget);
-		const tokens = modelFamilyFilterTokens(unetName, name, preset);
-		const mandatoryNextSceneLora = name === STORYBOARD_LORA_NAME
-			&& matchesAllModelKeywords(unetName, ["qwen", "image", "edit", "2511"]);
-		const filtered = allOptions.filter((option) => {
-			if (mandatoryNextSceneLora) return matchesAllModelKeywords(option, ["next", "scene", "lora", "v2", "3000"]);
-			return (name === STORYBOARD_LORA_NAME && !String(option || "").trim()) || optionMatchesFamily(option, tokens);
-		});
-		setFilteredSelectOptions(entry.control, filtered.length ? filtered : allOptions, preferredByName[name]);
-		if (mandatoryNextSceneLora) {
-			entry.control.disabled = true;
-			entry.control.title = "Qwen Image Edit 2511 必须使用 next-scene_lora-v2-3000";
-		} else {
-			entry.control.disabled = false;
-			entry.control.title = "";
-		}
-	}
-}
-
 function renderStoryboardModelTree(node, controls, host) {
 	const definitions = [
 		{ name: "unet_name", label: "UNET 主模型", folder: "models/diffusion_models", icon: "🟣" },
 		{ name: "clip_name1", label: "CLIP 编码器", folder: "models/text_encoders", icon: "🟡" },
 		{ name: "vae_name", label: "VAE 解码器", folder: "models/vae", icon: "🔴" },
-		{ name: STORYBOARD_LORA_NAME, label: "LoRA", folder: "models/loras", icon: "🟢" },
+		{ name: STORYBOARD_LORA_NAME, label: "Next-Scene LoRA", folder: "models/loras", icon: "🟢" },
 	];
+	if (isNextSceneImageEdit(String(getWidget(node, "unet_name")?.value || ""), null)) {
+		definitions.push({ name: REQUIRED_LIGHTNING_LORA_ENTRY, label: "Lightning LoRA", folder: "models/loras", icon: "⚡" });
+	}
 	const entries = definitions.map((definition) => {
-		const entry = controls.get(definition.name);
-		const values = entry?.control?.tagName === "SELECT"
-			? [...entry.control.options].map((option) => option.value)
-			: [];
+		const isLightning = definition.name === REQUIRED_LIGHTNING_LORA_ENTRY;
+		const entry = isLightning ? controls.get(STORYBOARD_LORA_NAME) : controls.get(definition.name);
+		const values = allWidgetOptions(entry?.widget);
+		const lightningValue = isLightning ? requiredLightningLora(node, entry?.widget) : "";
+		const defaultModel = isLightning
+			? lightningValue
+			: String(entry?.widget?.options?.gjj_default_model || entry?.widget?.options?.default || "");
 		const proxyWidget = {
-			value: entry?.control?.value ?? "",
+			value: isLightning ? lightningValue : (entry?.widget?.value ?? entry?.control?.value ?? ""),
 			options: { values },
 			callback: (value) => {
-				if (!entry?.control) return;
-				entry.control.value = value;
-				entry.control.dispatchEvent(new Event("change", { bubbles: true }));
+				if (isLightning) {
+					setRequiredLightningLora(node, value);
+					return;
+				}
+				if (entry?.widget) {
+					entry.widget.value = value;
+					entry.widget.callback?.(value);
+				}
+				if (entry?.control) {
+					if (entry.control.tagName === "SELECT" && ![...entry.control.options].some((option) => option.value === value)) {
+						const option = document.createElement("option");
+						option.value = value;
+						option.textContent = value;
+						entry.control.appendChild(option);
+					}
+					entry.control.value = value;
+					entry.control.dispatchEvent(new Event("change", { bubbles: true }));
+				}
 			},
 		};
 		return {
 			...definition,
 			models: values,
-			fallback: String(entry?.control?.value || ""),
+			defaultModel,
+			fallback: defaultModel,
+			autoSelect: true,
 			getWidget: () => proxyWidget,
 		};
 	});
@@ -1591,6 +1542,7 @@ function renderStoryboardModelTree(node, controls, host) {
 		node,
 		entries,
 		refresh: () => GJJ_Utils.refreshNode?.(node),
+		onApply: () => queueMicrotask(() => renderStoryboardModelTree(node, controls, host)),
 	});
 	tree.style.gridColumn = "1 / -1";
 	tree.style.maxHeight = "360px";
@@ -1598,11 +1550,20 @@ function renderStoryboardModelTree(node, controls, host) {
 	host.replaceChildren(tree, slots);
 }
 
-function storyboardLoraRows(node) {
+function storyboardLoraRows(node, hideRequired = true) {
 	const widget = getWidget(node, "lora_data");
 	const normalized = normalizeStoryboardLoraData(widget?.value);
 	try {
-		return JSON.parse(normalized);
+		const rows = JSON.parse(normalized);
+		if (!hideRequired) return rows;
+		const required = new Set([loraBaseKey(getWidget(node, STORYBOARD_LORA_NAME)?.value)]);
+		for (const row of rows) {
+			if (isRequiredLightningRow(row)) required.add(loraBaseKey(row.name));
+		}
+		return rows.filter((row) => {
+			if (!row?.name) return true;
+			return !required.has(loraBaseKey(row.name));
+		});
 	} catch {
 		return [{ ...DEFAULT_LORA_ROW }];
 	}
@@ -1612,7 +1573,7 @@ function renderStoryboardLoraSlots(node, controls, host) {
 	const wrapper = document.createElement("div");
 	wrapper.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #2b3d44;";
 	const title = document.createElement("div");
-	title.textContent = "🔗 LoRA 插槽";
+	title.textContent = "🔗 可选 LoRA 插槽";
 	title.style.cssText = "color:#c9d8dc;font:700 12px sans-serif;";
 	wrapper.append(title);
 	const rows = storyboardLoraRows(node);
@@ -1621,21 +1582,11 @@ function renderStoryboardLoraSlots(node, controls, host) {
 	rows.forEach((row, index) => {
 		const line = document.createElement("div");
 		line.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 82px;gap:6px;align-items:center;";
-		const select = document.createElement("select");
-		select.style.cssText = "min-width:0;height:30px;border:1px solid #415761;border-radius:6px;background:#111c21;color:#e9f4ef;padding:0 7px;";
-		for (const value of options) {
-			const option = document.createElement("option");
-			option.value = value;
-			option.textContent = value || "＋ 空 LoRA 插槽";
-			select.append(option);
-		}
-		if (row.name && !options.includes(row.name)) {
-			const option = document.createElement("option");
-			option.value = row.name;
-			option.textContent = row.name;
-			select.append(option);
-		}
-		select.value = row.name || "";
+		const picker = document.createElement("button");
+		picker.type = "button";
+		picker.textContent = row.name || "＋ 空 LoRA 插槽";
+		picker.title = row.name || "选择 LoRA；弹出列表可按关键词二次过滤并查看介绍。";
+		picker.style.cssText = "min-width:0;height:30px;border:1px solid #415761;border-radius:6px;background:#111c21;color:#e9f4ef;padding:0 7px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;";
 		const strength = document.createElement("input");
 		strength.type = "number";
 		strength.step = "0.05";
@@ -1643,7 +1594,7 @@ function renderStoryboardLoraSlots(node, controls, host) {
 		strength.disabled = !row.name;
 		strength.title = row.name ? "LoRA 强度" : "选择 LoRA 后可设置强度";
 		strength.style.cssText = "width:100%;box-sizing:border-box;height:30px;border:1px solid #415761;border-radius:6px;background:#111c21;color:#e9f4ef;padding:0 7px;";
-		const commit = (nextName = select.value, nextStrength = strength.value) => {
+		const commit = (nextName = row.name, nextStrength = strength.value) => {
 			const currentRows = storyboardLoraRows(node);
 			while (currentRows.length <= index) currentRows.push({ ...DEFAULT_LORA_ROW });
 			currentRows[index] = {
@@ -1655,9 +1606,24 @@ function renderStoryboardLoraSlots(node, controls, host) {
 			saveParamValues(node);
 			renderStoryboardModelTree(node, controls, host);
 		};
-		select.addEventListener("change", () => commit());
+		picker.addEventListener("click", async (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const pickerApi = globalThis.GJJ_LoraPicker;
+			if (!pickerApi?.open) {
+				console.warn("[GJJ_StoryboardGridGenerator] LoRA 选择器尚未加载");
+				return;
+			}
+			await pickerApi.open({
+				anchorEl: picker,
+				options: row.name && !options.includes(row.name) ? [...options, row.name] : options,
+				selectedValue: row.name || "",
+				searchValue: "",
+				onSelect: (value) => commit(value, strength.value),
+			});
+		});
 		strength.addEventListener("change", () => commit());
-		line.append(select, strength);
+		line.append(picker, strength);
 		wrapper.append(line);
 	});
 	return wrapper;
@@ -1810,10 +1776,8 @@ function openParameterDialog(node, groupName) {
 	if (groupName === "model") {
 		body.prepend(modelTreeHost);
 		const unetControl = controls.get("unet_name")?.control;
-		unetControl?.addEventListener("change", () => {
-			void refreshModelFamilyDialogControls(controls).then(() => renderStoryboardModelTree(node, controls, modelTreeHost));
-		});
-		void refreshModelFamilyDialogControls(controls).then(() => renderStoryboardModelTree(node, controls, modelTreeHost));
+		unetControl?.addEventListener("change", () => renderStoryboardModelTree(node, controls, modelTreeHost));
+		renderStoryboardModelTree(node, controls, modelTreeHost);
 	}
 	if (!controls.size) {
 		const empty = document.createElement("div");
@@ -2648,7 +2612,7 @@ function referenceSyntaxCandidates() {
 	}
 	for (const scene of scenes) {
 		const ref = globalThis.GJJ_SceneLibrary?.referenceText?.(scene)
-			|| `[场景:${referenceDisplayName(scene)}]`;
+			|| `🏕️${referenceDisplayName(scene)}`;
 		for (const alias of referenceAliases(scene)) {
 			raw.push({ alias, ref, kind: "scene", label: referenceDisplayName(scene) });
 			const key = refKey(alias);
@@ -2880,11 +2844,11 @@ function promptReferenceIcons(promptText, node = null) {
 		}
 	}
 	for (const match of text.matchAll(SCENE_REF_PATTERN)) {
-		const rawName = match[1] || match[3] || match[5] || "";
+		const rawName = match[1] || match[3] || "";
 		if (!rawName || rawName === "场景" || /[:：]/.test(rawName)) continue;
 		const scene = findLibraryItem(scenes, rawName);
 		if (scene) {
-			const place = match[2] || match[4] || match[6] || "";
+			const place = match[2] || match[4] || "";
 			const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
 			if (icon) icon.source = { pattern: match[0], scene, place };
 		}
@@ -3052,7 +3016,7 @@ function characterViewReference(character, view) {
 function sceneViewReference(scene, mark = null) {
 	const name = String(scene?.name || scene?.id || "").trim();
 	const keyword = String(mark?.keyword || "").trim();
-	return keyword ? `[场景:${name}/${keyword}]` : `[场景:${name}]`;
+	return keyword ? `🏕️${name}/${keyword}` : `🏕️${name}`;
 }
 
 function referencePickerOptions(icon) {
@@ -3806,6 +3770,16 @@ globalThis.addEventListener("gjj_character_library_updated", () => {
 	for (const node of app.graph?._nodes || []) {
 		if (!isTarget(node)) continue;
 		node.__gjjStoryboardResolvedCharacters = new Map();
+		node.__gjjStoryboardReferenceIconImages?.clear?.();
+		closeReferencePicker(node);
+		void resolvePromptCharacters(node, currentPromptText(node));
+		drawPromptGridPreview(node);
+	}
+});
+
+globalThis.addEventListener("gjj_scene_library_updated", () => {
+	for (const node of app.graph?._nodes || []) {
+		if (!isTarget(node)) continue;
 		node.__gjjStoryboardReferenceIconImages?.clear?.();
 		closeReferencePicker(node);
 		void resolvePromptCharacters(node, currentPromptText(node));
