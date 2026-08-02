@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
+import { gjjCharacterThumbnailPath, gjjSceneThumbnailPath, loadGjjLibraryThumbnailBlobUrl, setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 
 const NODE_TYPE = "GJJ_GemmaTextGenerate";
 const NODE_TITLE_PREFIX = "GJJ·💛Gemma🧠";
@@ -17,7 +18,7 @@ const WORKFLOW_VALUES_WIDGET = "workflow_values_json";
 const MODEL_FILTER_WIDGET = "model_filter_keywords";
 const MODEL_SIZES_ENDPOINT = "/gjj/text_encoder_model_sizes";
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
-const SCENE_LIBRARY_ENDPOINT = "/gjj/scene_library/list?page=1&page_size=80";
+const SCENE_LIBRARY_ENDPOINT = "/gjj/scene_library/thumbnail_index";
 const ACTORS_PROPERTY = "gjj_gemma_text_generate_actors";
 const ACTOR_PREFIXES_PROPERTY = "gjj_gemma_text_generate_actor_prefixes";
 const SCENES_PROPERTY = "gjj_gemma_text_generate_scenes";
@@ -104,6 +105,58 @@ const NUMERIC_DEFAULTS = {
 };
 let sharedSettingsPromise = null;
 let modelSizesPromise = null;
+let characterSummariesPromise = null;
+let activeFloatingPreview = null;
+
+function closeFloatingPreview(owner = null) {
+	if (!activeFloatingPreview || (owner && activeFloatingPreview.owner !== owner)) return;
+	activeFloatingPreview.element.remove();
+	if (activeFloatingPreview.owner) activeFloatingPreview.owner.__gjjActorPreview = null;
+	activeFloatingPreview = null;
+}
+
+function showFloatingPreview(owner, imageUrl, captionText) {
+	closeFloatingPreview();
+	if (!owner || !imageUrl) return;
+	const preview = document.createElement("div");
+	preview.className = "gjj-gemma-actor-preview";
+	const large = document.createElement("img");
+	const thumbnailKind = String(imageUrl).includes("/scene_library/") ? "scene" : "character";
+	const thumbnailId = decodeURIComponent(String(imageUrl).split("/").pop()?.replace(/\.(?:png|jpg)(?:\?.*)?$/i, "") || "");
+	void loadGjjLibraryThumbnailBlobUrl(api, thumbnailKind, thumbnailId).then((blobUrl) => {
+		large.src = blobUrl || (api.apiURL ? api.apiURL(imageUrl) : imageUrl);
+	});
+	const caption = document.createElement("div");
+	caption.textContent = captionText;
+	preview.append(large, caption);
+	document.body.appendChild(preview);
+	const rect = owner.getBoundingClientRect();
+	preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
+	preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
+	owner.__gjjActorPreview = preview;
+	activeFloatingPreview = { owner, element: preview };
+}
+
+window.addEventListener("blur", () => closeFloatingPreview());
+document.addEventListener("visibilitychange", () => {
+	if (document.hidden) closeFloatingPreview();
+});
+globalThis.addEventListener("gjj_character_library_updated", () => {
+	characterSummariesPromise = null;
+	for (const node of app.graph?._nodes || []) {
+		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
+		renderActorChips(node);
+	}
+});
+globalThis.addEventListener("gjj_scene_library_updated", () => {
+	for (const node of app.graph?._nodes || []) {
+		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
+		renderSceneChips(node);
+	}
+});
+document.addEventListener("pointerdown", (event) => {
+	if (activeFloatingPreview && !activeFloatingPreview.owner?.contains(event.target)) closeFloatingPreview();
+}, true);
 
 function loadModelSizes() {
 	if (!modelSizesPromise) {
@@ -139,6 +192,14 @@ function protect(element) {
 	return element;
 }
 
+function prioritizeIconImage(image) {
+	if (!image) return image;
+	image.loading = "eager";
+	image.fetchPriority = "high";
+	image.decoding = "sync";
+	return image;
+}
+
 function markChanged(node) {
 	node.graph?.change?.();
 	GJJ_Utils.dirtyCanvas(node);
@@ -162,6 +223,10 @@ function actorPromptLine(character) {
 	return `@${characterDisplayName(character)}`;
 }
 
+function characterCover(character) {
+	return gjjCharacterThumbnailPath(character);
+}
+
 function appendReferenceToPrompt(node, reference) {
 	const current = String(widgetValue(node, PROMPT_WIDGET, "") || "").trimEnd();
 	const value = String(reference || "").trim();
@@ -174,9 +239,7 @@ function sceneDisplayName(scene) {
 }
 
 function sceneCover(scene) {
-	if (scene?.thumbnail_url) return String(scene.thumbnail_url);
-	const asset = (scene?.assets || []).find((item) => item?.preview_url || item?.url);
-	return String(asset?.preview_url || asset?.url || "");
+	return gjjSceneThumbnailPath(scene);
 }
 
 function selectedScenes(node) {
@@ -190,7 +253,7 @@ function saveScenes(node, scenes) {
 		id: String(item.id),
 		name: sceneDisplayName(item),
 		notes: String(item.notes || ""),
-		cover: String(item.cover || sceneCover(item) || ""),
+		thumbnail_url: sceneCover(item),
 	}));
 	markChanged(node);
 	renderSceneChips(node);
@@ -239,41 +302,28 @@ function renderSceneChips(node) {
 	state.sceneChips.replaceChildren();
 	state.sceneChips.style.display = scenes.length ? "flex" : "none";
 	for (const [index, scene] of scenes.entries()) {
+		const sceneCoverUrl = sceneCover(scene);
 		const chip = document.createElement("button");
 		chip.type = "button";
 		chip.className = "gjj-gemma-actor-chip";
 		chip.title = `${sceneDisplayName(scene)}${scene.notes ? `：${scene.notes}` : ""}；点击添加引用，Ctrl/Cmd+点击移除`;
-		if (scene.cover) {
-			const image = document.createElement("img");
-			image.src = api.apiURL ? api.apiURL(scene.cover) : scene.cover;
+		if (sceneCoverUrl) {
+			const image = prioritizeIconImage(document.createElement("img"));
+			setGjjLibraryThumbnail(image, api, "scene", scene);
 			chip.appendChild(image);
 		}
 		const name = document.createElement("span");
 		name.textContent = `🏕️${sceneDisplayName(scene)}`;
 		chip.appendChild(name);
 		chip.addEventListener("mouseenter", () => {
-			if (!scene.cover) return;
-			const preview = document.createElement("div");
-			preview.className = "gjj-gemma-actor-preview";
-			const large = document.createElement("img");
-			large.src = api.apiURL ? api.apiURL(scene.cover) : scene.cover;
-			const caption = document.createElement("div");
+			if (!sceneCoverUrl) return;
 			const notes = String(scene.notes || "").replace(/\s+/g, " ").trim();
-			caption.textContent = `🏕️${sceneDisplayName(scene)}${notes ? `（${notes}）` : ""}`;
-			preview.append(large, caption);
-			document.body.appendChild(preview);
-			const rect = chip.getBoundingClientRect();
-			preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
-			preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
-			chip.__gjjActorPreview = preview;
+			showFloatingPreview(chip, sceneCoverUrl, `🏕️${sceneDisplayName(scene)}${notes ? `（${notes}）` : ""}`);
 		});
-		chip.addEventListener("mouseleave", () => {
-			chip.__gjjActorPreview?.remove();
-			chip.__gjjActorPreview = null;
-		});
+		chip.addEventListener("mouseleave", () => closeFloatingPreview(chip));
 		chip.addEventListener("click", (event) => {
 			if (chip.__gjjJustDragged) return;
-			chip.__gjjActorPreview?.remove();
+			closeFloatingPreview(chip);
 			event.preventDefault();
 			event.stopPropagation();
 			if (event.ctrlKey || event.metaKey) {
@@ -298,7 +348,6 @@ function saveActors(node, actors) {
 		id: String(item.id),
 		name: characterDisplayName(item),
 		notes: String(item.notes || ""),
-		cover: String(item.cover || ""),
 	}));
 	node.properties[ACTOR_PREFIXES_PROPERTY] = actors.map(actorPromptLine);
 	markChanged(node);
@@ -315,7 +364,6 @@ function toggleActorSelection(node, character) {
 			id: String(character.id),
 			name: characterDisplayName(character),
 			notes: String(character.notes || ""),
-			cover: String(character.cover || ""),
 		});
 	}
 	saveActors(node, actors);
@@ -335,7 +383,6 @@ function applyActorRangeSelection(node, characters, fromIndex, toIndex, additive
 					id: String(character.id),
 					name: characterDisplayName(character),
 					notes: String(character.notes || ""),
-					cover: String(character.cover || ""),
 				});
 			}
 		}
@@ -345,7 +392,6 @@ function applyActorRangeSelection(node, characters, fromIndex, toIndex, additive
 			id: String(character.id),
 			name: characterDisplayName(character),
 			notes: String(character.notes || ""),
-			cover: String(character.cover || ""),
 		})));
 	}
 }
@@ -357,42 +403,31 @@ function renderActorChips(node) {
 	state.actorChips.replaceChildren();
 	state.actorChips.style.display = actors.length ? "flex" : "none";
 	for (const [index, actor] of actors.entries()) {
+		const actorId = String(actor.id);
 		const chip = document.createElement("button");
 		chip.type = "button";
 		chip.className = "gjj-gemma-actor-chip";
 		chip.setAttribute("aria-label", `${actorPromptLine(actor)}；点击添加引用，Ctrl/Cmd+点击移除`);
 		chip.title = `${actorPromptLine(actor)}；点击添加引用，Ctrl/Cmd+点击移除`;
-		if (actor.cover) {
-			const image = document.createElement("img");
-			image.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
+		const actorCoverUrl = characterCover(actor);
+		if (actorCoverUrl) {
+			const image = prioritizeIconImage(document.createElement("img"));
+			image.dataset.gjjActorAvatarId = actorId;
+			setGjjLibraryThumbnail(image, api, "character", actor);
 			chip.appendChild(image);
 		}
 		const name = document.createElement("span");
 		name.textContent = `@${characterDisplayName(actor)}`;
 		chip.appendChild(name);
 		chip.addEventListener("mouseenter", () => {
-			if (!actor.cover) return;
-			const preview = document.createElement("div");
-			preview.className = "gjj-gemma-actor-preview";
-			const large = document.createElement("img");
-			large.src = api.apiURL ? api.apiURL(actor.cover) : actor.cover;
-			const caption = document.createElement("div");
+			if (!actorCoverUrl) return;
 			const notes = String(actor.notes || "").replace(/\s+/g, " ").trim();
-			caption.textContent = `${actorPromptLine(actor)}${notes ? `（${notes}）` : ""}`;
-			preview.append(large, caption);
-			document.body.appendChild(preview);
-			const rect = chip.getBoundingClientRect();
-			preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
-			preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
-			chip.__gjjActorPreview = preview;
+			showFloatingPreview(chip, actorCoverUrl, `${actorPromptLine(actor)}${notes ? `（${notes}）` : ""}`);
 		});
-		chip.addEventListener("mouseleave", () => {
-			chip.__gjjActorPreview?.remove();
-			chip.__gjjActorPreview = null;
-		});
+		chip.addEventListener("mouseleave", () => closeFloatingPreview(chip));
 		chip.addEventListener("click", (event) => {
 			if (chip.__gjjJustDragged) return;
-			chip.__gjjActorPreview?.remove();
+			closeFloatingPreview(chip);
 			event.preventDefault();
 			event.stopPropagation();
 			if (event.ctrlKey || event.metaKey) {
@@ -473,10 +508,21 @@ async function toggleActorPicker(node) {
 		state.actorButton.classList.remove("active");
 		return;
 	}
-	const response = await api.fetchApi(CHARACTER_LIBRARY_ENDPOINT);
-	const data = await response.json();
-	if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取角色库失败");
+	if (!characterSummariesPromise) {
+		characterSummariesPromise = api.fetchApi(`${CHARACTER_LIBRARY_ENDPOINT}?summary=1`)
+			.then(async (response) => {
+				const data = await response.json();
+				if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取角色库失败");
+				return data;
+			})
+			.catch((error) => {
+				characterSummariesPromise = null;
+				throw error;
+			});
+	}
+	const data = await characterSummariesPromise;
 	const characters = Array.isArray(data.characters) ? data.characters : [];
+	renderActorChips(node);
 	const picker = document.createElement("div");
 	picker.className = "gjj-gemma-actor-picker";
 	const tools = document.createElement("div");
@@ -508,35 +554,22 @@ async function toggleActorPicker(node) {
 			item.type = "button";
 			item.className = `gjj-gemma-actor-item${selectedIds.has(String(character.id)) ? " active" : ""}`;
 			item.dataset.index = String(index);
-			const image = document.createElement("img");
-			if (character.cover) image.src = api.apiURL ? api.apiURL(character.cover) : character.cover;
+			const image = prioritizeIconImage(document.createElement("img"));
+			const cover = characterCover(character);
+			if (cover) setGjjLibraryThumbnail(image, api, "character", character);
 			const name = document.createElement("span");
 			name.textContent = characterDisplayName(character);
 			item.append(image, name);
 			item.addEventListener("mouseenter", () => {
-				if (!character.cover) return;
-				const preview = document.createElement("div");
-				preview.className = "gjj-gemma-actor-preview";
-				const large = document.createElement("img");
-				large.src = api.apiURL ? api.apiURL(character.cover) : character.cover;
-				const caption = document.createElement("div");
+				if (!cover) return;
 				const notes = String(character?.notes || "").replace(/\s+/g, " ").trim();
-				caption.textContent = `${actorPromptLine(character)}${notes ? `（${notes}）` : ""}`;
-				preview.append(large, caption);
-				document.body.appendChild(preview);
-				const rect = item.getBoundingClientRect();
-				preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 300, rect.right + 8))}px`;
-				preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`;
-				item.__gjjActorPreview = preview;
+				showFloatingPreview(item, cover, `${actorPromptLine(character)}${notes ? `（${notes}）` : ""}`);
 			});
-			item.addEventListener("mouseleave", () => {
-				item.__gjjActorPreview?.remove();
-				item.__gjjActorPreview = null;
-			});
+			item.addEventListener("mouseleave", () => closeFloatingPreview(item));
 			item.addEventListener("click", (event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				item.__gjjActorPreview?.remove();
+				closeFloatingPreview(item);
 				if (event.shiftKey && lastClickedIndex >= 0) {
 					// Shift+点击：从上次点击位置到当前做范围选择；按 Ctrl 时为追加模式
 					applyActorRangeSelection(node, filtered, lastClickedIndex, index, event.ctrlKey || event.metaKey);
@@ -598,7 +631,7 @@ async function toggleActorPicker(node) {
 	keywordFilter.addEventListener("keydown", (event) => event.stopPropagation());
 	tools.appendChild(keywordFilter);
 	const confirmButton = button("确定", "保存选择并关闭角色库", () => {
-		closeFloatingPanels(node);
+		closeActorPicker(node);
 	});
 	confirmButton.classList.add("compact");
 	tools.appendChild(confirmButton);
@@ -607,6 +640,16 @@ async function toggleActorPicker(node) {
 	state.root.appendChild(picker);
 	state.actorPicker = picker;
 	state.actorButton.classList.add("active");
+}
+
+function closeActorPicker(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state) return;
+	closeFloatingPreview();
+	state.actorPicker?.remove();
+	state.actorPicker = null;
+	state.actorButton?.classList.remove("active");
+	GJJ_Utils.dirtyCanvas(node);
 }
 
 async function toggleScenePicker(node) {
@@ -642,9 +685,9 @@ async function toggleScenePicker(node) {
 			const item = document.createElement("button");
 			item.type = "button";
 			item.className = `gjj-gemma-actor-item${selectedIds.has(String(scene.id)) ? " active" : ""}`;
-			const image = document.createElement("img");
+			const image = prioritizeIconImage(document.createElement("img"));
 			const cover = sceneCover(scene);
-			if (cover) image.src = api.apiURL ? api.apiURL(cover) : cover;
+			if (cover) setGjjLibraryThumbnail(image, api, "scene", scene);
 			const name = document.createElement("span");
 			name.textContent = sceneDisplayName(scene);
 			item.append(image, name);
@@ -1285,6 +1328,13 @@ function restorePromptWidget(node) {
 	return target;
 }
 
+function hideNativePromptWidget(node) {
+	const target = widget(node, PROMPT_WIDGET);
+	if (!target) return;
+	GJJ_Utils.hideWidget(target);
+	target.serialize = true;
+}
+
 function ensurePromptInput(node) {
 	if (!Array.isArray(node?.inputs)) node.inputs = [];
 	let promptInput = node.inputs.find((input) =>
@@ -1835,6 +1885,9 @@ function syncPanel(node) {
 	syncInputValue(state.templateEditor, widgetValue(node, TEMPLATE_WIDGET, ""));
 	syncInputValue(state.outputRule, widgetValue(node, OUTPUT_RULE_WIDGET, ""));
 	syncInputValue(state.systemPrompt, widgetValue(node, "system_prompt", ""));
+	if (state.promptEditor && document.activeElement !== state.promptEditor) {
+		syncInputValue(state.promptEditor, widgetValue(node, PROMPT_WIDGET, ""));
+	}
 
 	const config = readTemplateConfig(node);
 	renderTemplateButtons(node, config);
@@ -1893,6 +1946,8 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings,.gjj-gemma-assistant-panel .gjj-ia-settings,.gjj-gemma-assistant-panel .gjj-gemma-model-panel { position:absolute; z-index:1000; top:62px; left:0; width:100%; max-height:min(520px,70vh); overflow:auto; box-shadow:0 12px 32px rgba(0,0,0,.55); }
 		.gjj-gemma-assistant-panel .gjj-ia-templates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; width:100%; min-width:0; overflow:visible; padding:1px 0 3px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chips { display:none; flex-wrap:wrap; align-items:center; gap:5px; padding:2px 0; }
+		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor { display:block; width:100%; height:74px; min-height:74px; box-sizing:border-box; resize:vertical; border:1px solid #334850; border-radius:7px; background:#10181c; color:#eef5f5; padding:7px 9px; outline:none; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }
+		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor:focus { border-color:#6a9dae; background:#111e23; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip { display:flex; align-items:center; gap:5px; min-height:28px; padding:2px 8px 2px 3px; border:1px solid #4f7b68; border-radius:999px; background:#173126; color:#eafff3; cursor:pointer; font:700 11px/1.2 system-ui,sans-serif; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.dragging { opacity:.42; cursor:grabbing; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.drag-over { border-color:#ffd166; box-shadow:0 0 0 2px rgba(255,209,102,.32); }
@@ -1962,6 +2017,17 @@ function createPanel(node) {
 	actorChips.className = "gjj-gemma-actor-chips";
 	const sceneChips = document.createElement("div");
 	sceneChips.className = "gjj-gemma-actor-chips";
+	const promptEditor = document.createElement("textarea");
+	promptEditor.className = "gjj-gemma-prompt-editor";
+	promptEditor.placeholder = "输入指令 / 原文；也可连接外部 STRING";
+	promptEditor.title = "发送给 Gemma 的用户指令 / 原文";
+	promptEditor.addEventListener("input", () => {
+		const target = widget(node, PROMPT_WIDGET);
+		if (target) target.value = promptEditor.value;
+		markChanged(node);
+	});
+	promptEditor.addEventListener("change", () => setWidgetValue(node, PROMPT_WIDGET, promptEditor.value));
+	promptEditor.addEventListener("keydown", (event) => event.stopPropagation());
 	const actorButton = button("👤", "选择参与演员", () => {
 		toggleActorPicker(node).catch((error) => alert(`读取角色库失败：${error?.message || error}`));
 	});
@@ -2023,7 +2089,7 @@ function createPanel(node) {
 	settingsState.templateSettings.appendChild(floatingWindowActions(node));
 	modelState.panel.appendChild(floatingWindowActions(node));
 	settingsState.settings.appendChild(floatingWindowActions(node));
-	root.append(style, toolbar, templates, actorChips, sceneChips, settingsState.templateSettings, modelState.panel, settingsState.settings);
+	root.append(style, toolbar, templates, actorChips, sceneChips, promptEditor, settingsState.templateSettings, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
@@ -2033,7 +2099,8 @@ function createPanel(node) {
 		const actorRowHeight = actorChips.style.display === "none" ? 0 : Number(actorChips.offsetHeight || 30);
 		const sceneRowHeight = sceneChips.style.display === "none" ? 0 : Number(sceneChips.offsetHeight || 30);
 		const templateRowHeight = Number(templates.offsetHeight || 25);
-		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + sceneRowHeight + templateRowHeight + 13);
+		const promptHeight = Number(promptEditor.offsetHeight || PROMPT_HEIGHT);
+		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + sceneRowHeight + templateRowHeight + promptHeight + 19);
 		return [
 			Math.max(470, Number(width || node.size?.[0] || 470)),
 			Math.max(35, mainPanelHeight),
@@ -2045,6 +2112,7 @@ function createPanel(node) {
 		actorButton,
 		actorChips,
 		actorPicker: null,
+		promptEditor,
 		sceneButton,
 		sceneChips,
 		scenePicker: null,
@@ -2091,7 +2159,7 @@ function createPanel(node) {
 		}
 		try { this.__gjjGemmaPanel?.actorPicker?.remove(); } catch (_) {}
 		try { this.__gjjGemmaPanel?.scenePicker?.remove(); } catch (_) {}
-		document.querySelectorAll(".gjj-gemma-actor-preview").forEach((item) => item.remove());
+		closeFloatingPreview();
 		try { clipName.__gjjSearchSelectPopup?.remove(); } catch (_) {}
 		return originalOnRemoved?.apply(this, args);
 	};
@@ -2173,7 +2241,7 @@ function stabilize(node) {
 			}],
 		});
 	});
-	restorePromptWidget(node);
+	hideNativePromptWidget(node);
 	installActorPromptTrigger(node);
 	ensurePromptInput(node);
 	normalizeMediaInput(node);

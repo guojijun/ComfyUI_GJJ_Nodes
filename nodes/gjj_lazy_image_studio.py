@@ -258,14 +258,39 @@ def _send_test_preview(
     if not unique_id:
         return
     try:
+        preview_images = gjjutils_write_temp_tensor_images(image)
+        _send_preview_manifest(
+            unique_id,
+            preview_images,
+            event_name="gjj_lazy_image_studio_test_preview",
+            append=append,
+            prompt_index=prompt_index,
+            prompt_count=prompt_count,
+        )
+    except Exception:
+        pass
+
+
+def _send_preview_manifest(
+    unique_id: Any,
+    preview_images: list[Any],
+    *,
+    event_name: str = "gjj_lazy_image_studio_preview",
+    append: bool = False,
+    prompt_index: int | None = None,
+    prompt_count: int | None = None,
+) -> None:
+    """缩略图落盘后立即推送给节点面板，不等待模型和显存清理结束。"""
+    if not unique_id or not preview_images:
+        return
+    try:
         from server import PromptServer
 
-        preview_images = gjjutils_write_temp_tensor_images(image)
         PromptServer.instance.send_sync(
-            "gjj_lazy_image_studio_test_preview",
+            str(event_name or "gjj_lazy_image_studio_preview"),
             {
                 "node": str(unique_id),
-                "gjj_images": preview_images,
+                "gjj_images": list(preview_images),
                 "images": _standard_queue_images(preview_images),
                 "append": bool(append),
                 "prompt_index": (
@@ -4701,6 +4726,8 @@ class GJJ_LazyImageStudio:
             if keep_model_loaded:
                 cached_result = self._cached_result(result_key)
                 if cached_result is not None:
+                    cached_preview_images = cached_result.get("preview_images", [])
+                    _send_preview_manifest(unique_id, cached_preview_images)
                     cached_runtime = self._cached_runtime(runtime_key)
                     if cached_runtime is not None:
                         cached_model, _cached_clip, _cached_vae = cached_runtime
@@ -4710,8 +4737,8 @@ class GJJ_LazyImageStudio:
                     _send_status(unique_id, "缓存命中：参数未变化，直接返回上次结果。")
                     return {
                         "ui": {
-                            "gjj_images": cached_result.get("preview_images", []),
-                            "images": _standard_queue_images(cached_result.get("preview_images", [])),
+                            "gjj_images": cached_preview_images,
+                            "images": _standard_queue_images(cached_preview_images),
                             "elapsed_time": [0.0],
                             "effective_params": [cached_result.get("effective_params", {})],
                             "cache_hit": [True],
@@ -5195,11 +5222,12 @@ class GJJ_LazyImageStudio:
             elapsed_time = end_time - start_time
             elapsed_str = f"{elapsed_time:.1f}s"
 
-            # 更新状态，显示尺寸和耗时
-            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
-
             # gjj_images 给节点内自定义预览；images 给 ComfyUI 任务队列/历史缩略图。
             preview_images = gjjutils_write_temp_tensor_images(image)
+            _send_preview_manifest(unique_id, preview_images)
+
+            # JPG 缩略图已经推送到节点面板后再报告完成；后续模型/显存清理不会阻塞结果显示。
+            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
 
             effective_params = {
                 "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),

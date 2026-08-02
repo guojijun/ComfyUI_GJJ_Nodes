@@ -1320,7 +1320,10 @@ class GJJLTXDirector(io.ComfyNode):
         if runtime_segments:
             manual_segments = [
                 seg for seg in tdata.get("segments", [])
-                if not (isinstance(seg, dict) and seg.get("gjjUpstream"))
+                if not (
+                    isinstance(seg, dict)
+                    and (seg.get("gjjUpstream") or seg.get("gjjPromptUpstream"))
+                )
             ]
             runtime_segments.sort(key=lambda seg: (int(seg.get("start", 0)), str(seg.get("id", ""))))
             if storyboard_prompts:

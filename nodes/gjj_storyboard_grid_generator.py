@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import hashlib
 import json
+import math
 import os
 import re
-import uuid
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,14 @@ from PIL import Image
 
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.model_family import gjjutils_model_family_match_preset as _match_model_family_preset
-from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_bytes, gjjutils_write_temp_tensor_images
+from .common_utils.temp_files import (
+    gjjutils_read_temp_pil_image,
+    gjjutils_temp_path,
+    gjjutils_write_temp_bytes,
+    gjjutils_write_temp_pil_image,
+    gjjutils_write_temp_tensor_images,
+    gjjutils_write_persistent_pil_image,
+)
 from .gjj_lazy_image_studio import (
     DEFAULT_UNET_DTYPE,
     GJJ_LazyImageStudio,
@@ -42,7 +51,17 @@ from .gjj_reference_grid_generator import (
 NODE_NAME = "GJJ_StoryboardGridGenerator"
 IMAGE_INPUT_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 MIXED_IMAGE_OUTPUT = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
-PREVIEW_SUBFOLDER = "gjj_storyboard_grid_generator"
+SCENE_PREVIEW_CACHE_LIMIT = 128
+_SCENE_PREVIEW_PATH_CACHE: dict[tuple[str, int, int], Path] = {}
+MULTI_REFERENCE_IMAGE_LIMIT = 3
+SMART_REFERENCE_CHARACTERS_PER_BOARD = 3
+SMART_REFERENCE_LAYOUT_VERSION = "smart_three_image_v1"
+CHARACTER_REFERENCE_CARD_CACHE_LIMIT = 32
+CHARACTER_REFERENCE_TENSOR_CACHE_LIMIT = 16
+CHARACTER_REFERENCE_CARD_LAYOUT_VERSION = "character_asset_card_v2"
+_CHARACTER_REFERENCE_CARD_CACHE: OrderedDict[str, Image.Image] = OrderedDict()
+_CHARACTER_REFERENCE_TENSOR_CACHE: OrderedDict[str, torch.Tensor] = OrderedDict()
+_CHARACTER_REFERENCE_CACHE_LOCK = threading.RLock()
 SCENE_LINE_RE = re.compile(
     r"^\s*(?:scene|shot|镜头|分镜)\s*(?:[#:：\-]?\s*[\d一二三四五六七八九十百零〇两]+)?(?:\s*[:：]\s*|\s+)"
     r"(?:(?P<label>.*?)\s*(?:[:：]{1,2}|::)\s*)?(?P<body>.+?)\s*$",
@@ -147,16 +166,16 @@ def _send_live_preview(
     index: int,
     total: int,
     prompt_text: Any = "",
+    cache_signature: Any = "",
 ) -> None:
     if unique_id is None or _safe_text(unique_id).strip() == "" or not isinstance(image, torch.Tensor):
         return
     try:
         preview = _ensure_bhwc_rgb(image)[:1].detach().float().clamp(0.0, 1.0).cpu()[0]
         array = (preview.numpy() * 255.0).round().astype(np.uint8)
-        out_dir = os.path.join(folder_paths.get_temp_directory(), PREVIEW_SUBFOLDER)
-        os.makedirs(out_dir, exist_ok=True)
-        filename = f"storyboard_{uuid.uuid4().hex[:12]}_{int(index):03d}.png"
-        Image.fromarray(array, "RGB").save(os.path.join(out_dir, filename), compress_level=4)
+        source_image = Image.fromarray(array, "RGB")
+        image_info = dict(gjjutils_write_persistent_pil_image(source_image, media_type="image"))
+        image_info["cache_signature"] = _safe_text(cache_signature).strip()
 
         from server import PromptServer
 
@@ -167,11 +186,7 @@ def _send_live_preview(
                 "index": int(index),
                 "total": int(total),
                 "prompt": _safe_text(prompt_text),
-                "image": {
-                    "filename": filename,
-                    "subfolder": PREVIEW_SUBFOLDER,
-                    "type": "temp",
-                },
+                "image": image_info,
             },
         )
     except Exception as exc:
@@ -593,6 +608,18 @@ def _find_costume(name: str, category: str = "clothing") -> dict[str, Any] | Non
     return None
 
 
+def _find_costume_by_explicit_name(name: str) -> dict[str, Any] | None:
+    """Resolve legacy @costume references without fuzzy tag/substring matching."""
+    key = _normalize_costume_key(name)
+    if not key:
+        return None
+    for item in _costume_library_items():
+        explicit_values = (item.get("name"), item.get("id"), item.get("_folder_id"))
+        if any(_normalize_costume_key(value) == key for value in explicit_values):
+            return item
+    return None
+
+
 def _normalize_scene_key(value: Any) -> str:
     return _safe_text(value).strip().lstrip("@").casefold()
 
@@ -736,6 +763,89 @@ def _view_file(character: dict[str, Any], view: dict[str, Any]) -> Path | None:
     except Exception:
         return None
     return path if path.is_file() else None
+
+
+def _character_view_cache_fingerprint(character: dict[str, Any], view: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(view, dict):
+        return {"missing": True}
+    path = _view_file(character, view)
+    if path is not None:
+        try:
+            stat = path.stat()
+            return {
+                "path": str(path).replace("\\", "/").casefold(),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        except Exception:
+            pass
+    return {
+        "character": _safe_text(character.get("id") or character.get("name")).casefold(),
+        "view_id": _safe_text(view.get("id")).casefold(),
+        "view_label": _view_label(view).casefold(),
+        "view_file": _safe_text(view.get("file")).casefold(),
+    }
+
+
+def _character_reference_card_cache_key(
+    kind: str,
+    width: int,
+    height: int,
+    view_items: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    extra: Any = None,
+) -> str:
+    payload = {
+        "version": CHARACTER_REFERENCE_CARD_LAYOUT_VERSION,
+        "kind": str(kind or "card"),
+        "width": max(1, int(width or 1)),
+        "height": max(1, int(height or 1)),
+        "views": [_character_view_cache_fingerprint(character, view) for character, view in view_items],
+        "extra": extra,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_character_reference_card(cache_key: str) -> Image.Image | None:
+    key = str(cache_key or "").strip()
+    if not key:
+        return None
+    with _CHARACTER_REFERENCE_CACHE_LOCK:
+        cached = _CHARACTER_REFERENCE_CARD_CACHE.get(key)
+        if cached is None:
+            return None
+        _CHARACTER_REFERENCE_CARD_CACHE.move_to_end(key)
+        result = cached.copy()
+    result.info["gjj_character_card_cache_key"] = key
+    return result
+
+
+def _remember_character_reference_card(cache_key: str, image: Image.Image) -> Image.Image:
+    key = str(cache_key or "").strip()
+    result = image.convert("RGB")
+    result.info["gjj_character_card_cache_key"] = key
+    if not key:
+        return result
+    with _CHARACTER_REFERENCE_CACHE_LOCK:
+        _CHARACTER_REFERENCE_CARD_CACHE[key] = result.copy()
+        _CHARACTER_REFERENCE_CARD_CACHE.move_to_end(key)
+        while len(_CHARACTER_REFERENCE_CARD_CACHE) > CHARACTER_REFERENCE_CARD_CACHE_LIMIT:
+            _CHARACTER_REFERENCE_CARD_CACHE.popitem(last=False)
+    return result
+
+
+def _character_reference_tensor_cache_key(images: list[Image.Image]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"gjj-character-reference-tensor-v1\0")
+    for image in images:
+        known_key = _safe_text(getattr(image, "info", {}).get("gjj_character_card_cache_key")).strip()
+        if known_key:
+            digest.update(f"card:{known_key}\0".encode("ascii"))
+            continue
+        source = image.convert("RGB")
+        digest.update(f"pixels:{source.width}x{source.height}:RGB\0".encode("ascii"))
+        digest.update(source.tobytes())
+    return digest.hexdigest()
 
 
 def _find_view(character: dict[str, Any], keywords: tuple[str, ...], explicit_label: str = "") -> dict[str, Any] | None:
@@ -1376,7 +1486,7 @@ def _make_multi_character_full_body_board(
     width: int = 1024,
     height: int = 768,
 ) -> tuple[Image.Image | None, list[tuple[str, dict[str, Any]]], list[str]]:
-    resolved: list[tuple[str, dict[str, Any], Image.Image, list[str]]] = []
+    resolved_meta: list[tuple[str, dict[str, Any], dict[str, Any], list[str]]] = []
     for name, explicit_labels in grouped_refs:
         character = _find_character(name)
         if not character:
@@ -1384,36 +1494,63 @@ def _make_multi_character_full_body_board(
         view = _select_multi_character_full_body_view(character, explicit_labels)
         if view is None:
             continue
-        image = _open_character_view_rgba(character, view)
-        if image is None:
-            continue
-        resolved.append((name, character, image, explicit_labels))
-    if not resolved:
+        resolved_meta.append((name, character, view, explicit_labels))
+    if not resolved_meta:
         return None, [], []
 
-    count = len(resolved)
+    count = len(resolved_meta)
     board_h = max(640, min(1024, int(height or 768)))
     board_w = max(768, min(2400, max(int(width or 1024), count * 300)))
-    board = Image.new("RGBA", (board_w, board_h), (255, 255, 255, 255))
-    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-    strip = _make_equal_height_character_strip([image for _name, _character, image, _labels in resolved])
-    if strip is not None:
-        safe_w = int(round(board_w * 0.94))
-        safe_h = int(round(board_h * 0.86))
-        scale = min(safe_w / max(1, strip.width), safe_h / max(1, strip.height))
-        target_w = max(1, int(round(strip.width * scale)))
-        target_h = max(1, int(round(strip.height * scale)))
-        strip = strip.resize((target_w, target_h), resampling)
-        x = max(0, min(board_w - target_w, (board_w - target_w) // 2))
-        y = max(0, min(board_h - target_h, int(round(board_h * 0.94 - target_h))))
-        board.alpha_composite(strip, (x, y))
+    card_key = _character_reference_card_cache_key(
+        "multi_character_full_body",
+        board_w,
+        board_h,
+        [(character, view) for _name, character, view, _labels in resolved_meta],
+    )
+    result_board = _cached_character_reference_card(card_key)
+    if result_board is None:
+        resolved: list[tuple[str, dict[str, Any], Image.Image, list[str]]] = []
+        for name, character, view, explicit_labels in resolved_meta:
+            image = _open_character_view_rgba(character, view)
+            if image is not None:
+                resolved.append((name, character, image, explicit_labels))
+        if not resolved:
+            return None, [], []
+        if len(resolved) != len(resolved_meta):
+            resolved_meta = [
+                (name, character, view, explicit_labels)
+                for name, character, view, explicit_labels in resolved_meta
+                if any(item_name == name and item_character is character for item_name, item_character, _image, _labels in resolved)
+            ]
+            count = len(resolved)
+            board_w = max(768, min(2400, max(int(width or 1024), count * 300)))
+            card_key = _character_reference_card_cache_key(
+                "multi_character_full_body",
+                board_w,
+                board_h,
+                [(character, view) for _name, character, view, _labels in resolved_meta],
+            )
+        board = Image.new("RGBA", (board_w, board_h), (255, 255, 255, 255))
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+        strip = _make_equal_height_character_strip([image for _name, _character, image, _labels in resolved])
+        if strip is not None:
+            safe_w = int(round(board_w * 0.94))
+            safe_h = int(round(board_h * 0.86))
+            scale = min(safe_w / max(1, strip.width), safe_h / max(1, strip.height))
+            target_w = max(1, int(round(strip.width * scale)))
+            target_h = max(1, int(round(strip.height * scale)))
+            strip = strip.resize((target_w, target_h), resampling)
+            x = max(0, min(board_w - target_w, (board_w - target_w) // 2))
+            y = max(0, min(board_h - target_h, int(round(board_h * 0.94 - target_h))))
+            board.alpha_composite(strip, (x, y))
+        result_board = _remember_character_reference_card(card_key, board.convert("RGB"))
 
-    resolved_characters = [(name, character) for name, character, _image, _labels in resolved]
+    resolved_characters = [(name, character) for name, character, _view, _labels in resolved_meta]
     position_lines: list[str] = []
-    for index, (name, character, _image, _labels) in enumerate(resolved):
+    for index, (name, character, _view, _labels) in enumerate(resolved_meta):
         display_name = _character_display_name(character, name)
         position_lines.append(f"{index + 1}. 从左到右第 {index + 1} 人是“{display_name}”")
-    return board.convert("RGB"), resolved_characters, position_lines
+    return result_board, resolved_characters, position_lines
 
 
 def _pil_fit_cell(image: Image.Image, width: int, height: int, contain: bool = False, top_bias: bool = False) -> Image.Image:
@@ -1610,11 +1747,15 @@ def _read_hdr_scene_array(path: Path):
     raise RuntimeError("无法读取 HDR/EXR 场景。")
 
 
-def _write_hdr_scene_placeholder(path: Path, target: Path, message: str = "") -> bool:
+def _store_storyboard_scene_preview(image: Image.Image) -> Path:
+    info = gjjutils_write_temp_pil_image(image, format="PNG", suffix=".png", media_type="image")
+    return gjjutils_temp_path(str(info.get("filename") or ""))
+
+
+def _write_hdr_scene_placeholder(path: Path, message: str = "") -> Path | None:
     try:
         from PIL import ImageDraw, ImageFont
 
-        target.parent.mkdir(parents=True, exist_ok=True)
         image = Image.new("RGB", (960, 540), (11, 18, 24))
         draw = ImageDraw.Draw(image)
         for y in range(image.height):
@@ -1637,13 +1778,12 @@ def _write_hdr_scene_placeholder(path: Path, target: Path, message: str = "") ->
         draw.text((72, 206), "storyboard preview placeholder", fill=(121, 151, 162), font=font_small)
         if message:
             draw.text((72, 242), str(message).replace("\n", " ")[:150], fill=(121, 151, 162), font=font_small)
-        image.save(target, "PNG")
-        return True
+        return _store_storyboard_scene_preview(image)
     except Exception:
-        return False
+        return None
 
 
-def _tonemap_hdr_scene_preview(path: Path, target: Path) -> Path | None:
+def _tonemap_hdr_scene_preview(path: Path) -> Path | None:
     try:
         array = np.asarray(_read_hdr_scene_array(path))
         if array.ndim == 2:
@@ -1674,24 +1814,32 @@ def _tonemap_hdr_scene_preview(path: Path, target: Path) -> Path | None:
         image = Image.fromarray(out, "RGB")
         resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
         image.thumbnail((1600, 900), resampling)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        image.save(target, "PNG")
-        return target if target.is_file() else None
+        return _store_storyboard_scene_preview(image)
     except Exception as exc:
         print(f"[GJJ StoryboardGridGenerator] HDR 预览生成失败: {path.name}: {exc}")
-        return target if _write_hdr_scene_placeholder(path, target, str(exc)) and target.is_file() else None
+        return _write_hdr_scene_placeholder(path, str(exc))
 
 
 def _ensure_storyboard_scene_preview(path: Path) -> Path | None:
     if path.suffix.lower() not in {".hdr", ".exr"}:
         return path
-    target = path.parent / f"__storyboard_rgbe_preview_{path.stem}.png"
     try:
-        if target.is_file() and target.stat().st_size > 0 and target.stat().st_mtime >= path.stat().st_mtime:
-            return target
+        resolved = path.resolve()
+        stat = resolved.stat()
+        cache_key = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
     except Exception:
-        pass
-    return _tonemap_hdr_scene_preview(path, target)
+        return None
+    cached = _SCENE_PREVIEW_PATH_CACHE.get(cache_key)
+    if cached is not None and cached.is_file():
+        return cached
+    generated = _tonemap_hdr_scene_preview(resolved)
+    if generated is not None:
+        for old_key in [key for key in _SCENE_PREVIEW_PATH_CACHE if key[0] == cache_key[0] and key != cache_key]:
+            _SCENE_PREVIEW_PATH_CACHE.pop(old_key, None)
+        _SCENE_PREVIEW_PATH_CACHE[cache_key] = generated
+        while len(_SCENE_PREVIEW_PATH_CACHE) > SCENE_PREVIEW_CACHE_LIMIT:
+            _SCENE_PREVIEW_PATH_CACHE.pop(next(iter(_SCENE_PREVIEW_PATH_CACHE)))
+    return generated
 
 
 def _scene_preview_path(scene: dict[str, Any], asset: dict[str, Any]) -> Path | None:
@@ -2123,7 +2271,7 @@ def _make_qwen_direct_character_reference_boards(
     character_refs: list[tuple[str, str]],
     width: int,
     height: int,
-    max_boards: int = 3,
+    max_boards: int = MULTI_REFERENCE_IMAGE_LIMIT,
     single_view_only: bool = False,
 ) -> list[tuple[str, Image.Image]]:
     grouped_refs = _group_character_refs(character_refs)
@@ -2141,12 +2289,24 @@ def _make_qwen_direct_character_reference_boards(
             view = _select_multi_character_full_body_view(character, explicit_labels)
             if view is None:
                 return []
-            image = _open_character_view_white(character, view)
-            if image is None:
-                return []
+            card_key = _character_reference_card_cache_key(
+                "qwen_single_view",
+                board_w,
+                board_h,
+                [(character, view)],
+            )
+            board = _cached_character_reference_card(card_key)
+            if board is None:
+                image = _open_character_view_white(character, view)
+                if image is None:
+                    return []
+                board = _remember_character_reference_card(
+                    card_key,
+                    _pil_fit_cell(image, board_w, board_h, contain=True, top_bias=True),
+                )
             boards.append((
                 _character_display_name(character, name),
-                _pil_fit_cell(image, board_w, board_h, contain=True, top_bias=True),
+                board,
             ))
             continue
         face_view = None
@@ -2161,20 +2321,165 @@ def _make_qwen_direct_character_reference_boards(
         body_views = _character_full_body_reference_views(character, prompt_text, explicit_labels, limit=3)
         if face_view is None and not body_views:
             return []
-        face_image = _open_character_view_white(character, face_view) if face_view is not None else None
-        body_images = [image for view in body_views if (image := _open_character_view_white(character, view)) is not None]
-        if face_image is None and not body_images:
-            return []
-        board = _make_qwen_single_character_reference_board(face_image, body_images, board_w, board_h)
+        card_key = _character_reference_card_cache_key(
+            "qwen_character_asset",
+            board_w,
+            board_h,
+            [(character, face_view), *[(character, view) for view in body_views]],
+        )
+        board = _cached_character_reference_card(card_key)
         if board is None:
-            return []
+            face_image = _open_character_view_white(character, face_view) if face_view is not None else None
+            body_images = [image for view in body_views if (image := _open_character_view_white(character, view)) is not None]
+            if face_image is None and not body_images:
+                return []
+            board = _make_qwen_single_character_reference_board(face_image, body_images, board_w, board_h)
+            if board is None:
+                return []
+            board = _remember_character_reference_card(card_key, board)
         boards.append((_character_display_name(character, name), board))
     return boards
+
+
+def _compact_character_reference_board(
+    items: list[tuple[int, str, dict[str, Any], Image.Image, list[str]]],
+    width: int,
+    height: int,
+) -> Image.Image | None:
+    """在固定参考画布中选择占用率最高的横排/网格布局。"""
+    if not items:
+        return None
+    board_w = max(256, int(width or 1024))
+    board_h = max(256, int(height or 768))
+    padding = max(8, int(round(min(board_w, board_h) * 0.018)))
+    gap = max(6, int(round(min(board_w, board_h) * 0.012)))
+    usable_w = max(1, board_w - padding * 2)
+    usable_h = max(1, board_h - padding * 2)
+    count = len(items)
+    best_layout: tuple[float, int, int, int, int] | None = None
+    for rows in range(1, min(count, 4) + 1):
+        cols = max(1, math.ceil(count / rows))
+        cell_w = max(1, (usable_w - gap * max(0, cols - 1)) // cols)
+        cell_h = max(1, (usable_h - gap * max(0, rows - 1)) // rows)
+        used_area = 0.0
+        minimum_scale = float("inf")
+        for _index, _name, _character, source, _labels in items:
+            scale = min(cell_w / max(1, source.width), cell_h / max(1, source.height))
+            minimum_scale = min(minimum_scale, scale)
+            used_area += (source.width * scale) * (source.height * scale)
+        occupancy = used_area / max(1.0, float(usable_w * usable_h))
+        empty_cells = rows * cols - count
+        score = occupancy + min(0.08, minimum_scale * 0.008) - empty_cells * 0.025
+        candidate = (score, -empty_cells, -rows, cols, rows)
+        if best_layout is None or candidate > best_layout:
+            best_layout = candidate
+    if best_layout is None:
+        return None
+    cols = best_layout[3]
+    rows = best_layout[4]
+    cell_w = max(1, (usable_w - gap * max(0, cols - 1)) // cols)
+    cell_h = max(1, (usable_h - gap * max(0, rows - 1)) // rows)
+    board = Image.new("RGBA", (board_w, board_h), (255, 255, 255, 255))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    for item_index, (_source_index, _name, _character, source, _labels) in enumerate(items):
+        row = item_index // cols
+        col = item_index % cols
+        row_count = min(cols, count - row * cols)
+        row_width = row_count * cell_w + gap * max(0, row_count - 1)
+        row_left = padding + max(0, (usable_w - row_width) // 2)
+        cell_left = row_left + col * (cell_w + gap)
+        cell_top = padding + row * (cell_h + gap)
+        image = source.convert("RGBA")
+        scale = min(cell_w / max(1, image.width), cell_h / max(1, image.height))
+        target_w = max(1, int(round(image.width * scale)))
+        target_h = max(1, int(round(image.height * scale)))
+        image = image.resize((target_w, target_h), resampling)
+        x = cell_left + (cell_w - target_w) // 2
+        y = cell_top + max(0, cell_h - target_h)
+        board.alpha_composite(image, (x, y))
+    return board.convert("RGB")
+
+
+def _smart_character_reference_board_count(character_count: int, max_boards: int) -> int:
+    count = max(0, int(character_count or 0))
+    limit = max(0, min(MULTI_REFERENCE_IMAGE_LIMIT, int(max_boards or 0)))
+    if count <= 0 or limit <= 0:
+        return 0
+    if count <= limit:
+        return count
+    preferred = math.ceil(count / SMART_REFERENCE_CHARACTERS_PER_BOARD)
+    if limit > 1:
+        preferred = max(2, preferred)
+    return max(1, min(limit, preferred))
+
+
+def _make_smart_multi_character_reference_boards(
+    prompt_text: str,
+    grouped_refs: list[tuple[str, list[str]]],
+    width: int,
+    height: int,
+    max_boards: int,
+) -> list[tuple[Image.Image, list[tuple[str, dict[str, Any]]], list[str]]]:
+    """把多人参考均衡分配到最多三张图，并保持每张图内部紧凑。"""
+    resolved: list[tuple[int, str, dict[str, Any], Image.Image, list[str]]] = []
+    for source_index, (name, explicit_labels) in enumerate(grouped_refs):
+        character = _find_character(name)
+        if not character:
+            return []
+        view = _select_multi_character_full_body_view(character, explicit_labels)
+        if view is None:
+            return []
+        image = _open_character_view_rgba(character, view, preserve_full_body=True)
+        if image is None:
+            return []
+        resolved.append((source_index, name, character, image, explicit_labels))
+    board_count = _smart_character_reference_board_count(len(resolved), max_boards)
+    if board_count <= 0:
+        return []
+    groups: list[list[tuple[int, str, dict[str, Any], Image.Image, list[str]]]] = [[] for _ in range(board_count)]
+    loads = [0.0] * board_count
+    weighted = sorted(
+        resolved,
+        key=lambda item: max(0.2, min(2.0, item[3].width / max(1, item[3].height))),
+        reverse=True,
+    )
+    for item in weighted:
+        target = min(range(board_count), key=lambda index: (loads[index], len(groups[index]), index))
+        groups[target].append(item)
+        loads[target] += max(0.2, min(2.0, item[3].width / max(1, item[3].height)))
+    results: list[tuple[Image.Image, list[tuple[str, dict[str, Any]]], list[str]]] = []
+    for group in groups:
+        group.sort(key=lambda item: item[0])
+        if len(group) == 1:
+            _source_index, name, character, _image, explicit_labels = group[0]
+            single_refs = [(name, label) for label in explicit_labels] or [(name, "")]
+            single_boards = _make_qwen_direct_character_reference_boards(
+                prompt_text,
+                single_refs,
+                width,
+                height,
+                max_boards=1,
+            )
+            board = single_boards[0][1] if single_boards else _compact_character_reference_board(group, width, height)
+        else:
+            board = _compact_character_reference_board(group, width, height)
+        if board is None:
+            return []
+        characters = [(name, character) for _source_index, name, character, _image, _labels in group]
+        display_names = [_character_display_name(character, name) for name, character in characters]
+        results.append((board, characters, display_names))
+    return results
 
 
 def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | None:
     if not images:
         return None
+    cache_key = _character_reference_tensor_cache_key(images)
+    with _CHARACTER_REFERENCE_CACHE_LOCK:
+        cached = _CHARACTER_REFERENCE_TENSOR_CACHE.get(cache_key)
+        if cached is not None:
+            _CHARACTER_REFERENCE_TENSOR_CACHE.move_to_end(cache_key)
+            return cached
     target_w = max(1, int(images[0].width))
     target_h = max(1, int(images[0].height))
     tensors: list[torch.Tensor] = []
@@ -2184,7 +2489,13 @@ def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | N
             source = _pil_fit_cell(source, target_w, target_h, contain=True, top_bias=False)
         array = np.asarray(source).astype(np.float32) / 255.0
         tensors.append(torch.from_numpy(array).unsqueeze(0))
-    return torch.cat(tensors, dim=0).contiguous()
+    result = torch.cat(tensors, dim=0).contiguous()
+    with _CHARACTER_REFERENCE_CACHE_LOCK:
+        _CHARACTER_REFERENCE_TENSOR_CACHE[cache_key] = result
+        _CHARACTER_REFERENCE_TENSOR_CACHE.move_to_end(cache_key)
+        while len(_CHARACTER_REFERENCE_TENSOR_CACHE) > CHARACTER_REFERENCE_TENSOR_CACHE_LIMIT:
+            _CHARACTER_REFERENCE_TENSOR_CACHE.popitem(last=False)
+    return result
 
 
 def _scene_reference_tensor_for_prompt(
@@ -2210,19 +2521,19 @@ def _scene_reference_tensor_for_prompt(
         if background is None:
             continue
         grouped_character_refs = _group_character_refs(character_refs)
-        direct_character_boards: list[tuple[str, Image.Image]] = []
-        direct_character_mode = use_direct_character_references and 0 < len(grouped_character_refs) <= 2
+        direct_character_boards: list[tuple[Image.Image, list[tuple[str, dict[str, Any]]], list[str]]] = []
+        direct_character_mode = use_direct_character_references and bool(grouped_character_refs)
         if direct_character_mode:
-            direct_character_boards = _make_qwen_direct_character_reference_boards(
+            direct_character_boards = _make_smart_multi_character_reference_boards(
                 prompt_text,
-                character_refs,
+                grouped_character_refs,
                 width,
                 height,
-                max_boards=2,
+                max_boards=max(0, MULTI_REFERENCE_IMAGE_LIMIT - 1),
             )
         if direct_character_boards:
             reference_images.append(background)
-            for _display_name, board in direct_character_boards[:2]:
+            for board, _characters, _display_names in direct_character_boards[:2]:
                 reference_images.append(board)
             consumed_characters = True
             display = _safe_text(scene.get("name") or scene.get("id") or scene_name).strip()
@@ -2230,13 +2541,20 @@ def _scene_reference_tensor_for_prompt(
             prompt_lines.append(
                 f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}干净背景参考，"
                 f"必须作为最终背景和空间透视来源。{anchor_rule}"
-                "image2 起是逐个角色参考拼图，每张只对应一个角色；角色拼图可以包含大头照和多张等高全身参考。"
-                "角色拼图只用于锁定该角色的脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                "image2 起是智能分组的人物参考板；单人板可包含大头照和多张等高全身参考，多人板按从上到下、每行从左到右的阅读顺序排列。"
+                "人物参考板只用于锁定各角色的脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
                 "不得复制角色参考拼图的白底、半身裁切、站姿、多视图排版或原背景。"
                 "最终动作、坐姿、举杯、背靠、人物左右位置和场景透视必须服从原始文字描述与 image1 背景。"
             )
-            for offset, (display_name, _board) in enumerate(direct_character_boards[:2], start=2):
-                prompt_lines.append(f"image{offset} 只绑定角色“{display_name}”，不要把 image{offset} 当成另一个场景或构图。")
+            for offset, (_board, _characters, display_names) in enumerate(direct_character_boards[:2], start=2):
+                names_text = "、".join(display_names)
+                if len(display_names) == 1:
+                    prompt_lines.append(f"image{offset} 只绑定角色“{names_text}”，不要把 image{offset} 当成另一个场景或构图。")
+                else:
+                    prompt_lines.append(
+                        f"image{offset} 绑定角色 {names_text}；人物板阅读顺序是从上到下、每行从左到右，"
+                        "每个名字只对应板中一个人物，严禁合并身份、交换服装或漏掉人物。"
+                    )
             continue
         use_separate_references = len(character_refs) <= 2 and (direct_character_mode or not compose_character_references)
         character_board, character_parts, character_bindings = (
@@ -2251,7 +2569,7 @@ def _scene_reference_tensor_for_prompt(
         if not character_board_is_scene_strip:
             reference_images.append(background)
         identity_names: list[str] = []
-        if include_identity_reference_board and character_board is not None and not character_board_is_scene_strip and len(reference_images) < 3:
+        if include_identity_reference_board and character_board is not None and not character_board_is_scene_strip and len(reference_images) < MULTI_REFERENCE_IMAGE_LIMIT:
             identity_board, identity_names = _make_scene_identity_reference_board(prompt_text, character_refs, width, height)
             if identity_board is not None:
                 reference_images.append(identity_board)
@@ -2537,7 +2855,7 @@ def _character_prompt_and_reference(
     grouped_refs = _group_character_refs(refs)
     qwen_multi_character = bool(qwen_reference_binding and len(grouped_refs) > 1)
     reference_tensor_override: torch.Tensor | None = None
-    qwen_direct_limit = 0 if remaining_reference_images is None else remaining_reference_images
+    qwen_direct_limit = MULTI_REFERENCE_IMAGE_LIMIT if remaining_reference_images is None else remaining_reference_images
     if include_reference_images and msr_asset_card_mode and grouped_refs:
         if len(grouped_refs) <= 2:
             direct_boards = _make_qwen_direct_character_reference_boards(
@@ -2588,82 +2906,56 @@ def _character_prompt_and_reference(
                 actor_reference_mappings.append(f"{image_ref} = {mapped_actors}")
                 image_slot += 1
                 grouped_refs = []
-    if (
-        include_reference_images
-        and qwen_reference_binding
-        and 0 < len(grouped_refs) <= max(0, int(qwen_direct_limit or 0))
-    ):
-        direct_boards = _make_qwen_direct_character_reference_boards(
-            prompt_text,
-            refs,
-            reference_width,
-            reference_height,
-                max_boards=int(qwen_direct_limit or 0),
-        )
-        if direct_boards and len(direct_boards) == len(grouped_refs):
-            reference_tensor_override = _pil_list_to_reference_tensor([board for _display_name, board in direct_boards])
-            for name, _explicit_views in grouped_refs:
-                character = _find_character(name)
-                if character:
-                    resolved_characters.append((name, character))
-            for offset, (display_name, _board) in enumerate(direct_boards, start=image_slot):
-                image_ref = reference_label(offset)
-                prompt_lines.append(
-                    f"{display_name}：{image_ref} 是“{display_name}”的角色参考拼图，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
-                    "可以包含大头照和多张等高全身参考；不要复制参考拼图白底、半身裁切、站姿、多视图排版或原背景。"
-                )
-                qwen_bindings.append(
-                    f"- {image_ref} = character \"{display_name}\" ONLY. Use this single-character reference collage for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
-                )
-                character = next((item for name, item in resolved_characters if _character_display_name(item, name) == display_name), None)
-                notes = _safe_text(character.get("notes") if character else "").strip()
-                actor_reference_mappings.append(f"{image_ref} = @{display_name}{f'（{notes}）' if notes else ''}")
-            if remaining_reference_images is not None:
-                remaining_reference_images -= len(direct_boards)
-            image_slot += len(direct_boards)
-            grouped_refs = []
-            qwen_multi_character = False
-    if (
-        include_reference_images
-        and qwen_reference_binding
-        and len(grouped_refs) > 3
-        and (remaining_reference_images is None or remaining_reference_images > 0)
-    ):
-        board, board_characters, position_lines = _make_multi_character_full_body_board(
+    if include_reference_images and qwen_reference_binding and grouped_refs and qwen_direct_limit > 0:
+        smart_boards = _make_smart_multi_character_reference_boards(
             prompt_text,
             grouped_refs,
             reference_width,
             reference_height,
+            max_boards=int(qwen_direct_limit),
         )
-        if board is not None and board_characters:
-            reference_tensor_override = _pil_list_to_reference_tensor([board])
-            resolved_characters.extend(board_characters)
-            image_ref = reference_label(image_slot)
-            role_names = "、".join(_character_display_name(character, name) for name, character in board_characters)
-            prompt_lines.append(
-                f"{image_ref} 是本格所有人物的全身站位参考板，包含 {role_names}。"
-                "参考板只用于锁定每个人的身份、服装、体型、正反面和从左到右的位置关系；"
-                "不要照搬白底，不要生成参考板边框，不要把人物拆成重复身体。"
+        if smart_boards:
+            reference_tensor_override = _pil_list_to_reference_tensor([board for board, _characters, _names in smart_boards])
+            smart_resolved: dict[str, tuple[str, dict[str, Any]]] = {}
+            for offset, (_board, board_characters, display_names) in enumerate(smart_boards, start=image_slot):
+                image_ref = reference_label(offset)
+                for name, character in board_characters:
+                    smart_resolved[name.casefold()] = (name, character)
+                if len(display_names) == 1:
+                    display_name = display_names[0]
+                    prompt_lines.append(
+                        f"{display_name}：{image_ref} 是“{display_name}”的独立角色资产卡，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                        "可以包含大头照和多张等高全身参考；不要复制白底、裁切、站姿、多视图排版或原背景。"
+                    )
+                    qwen_bindings.append(
+                        f"- {image_ref} = character \"{display_name}\" ONLY. Use this single-character asset board for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
+                    )
+                else:
+                    names_text = "、".join(display_names)
+                    prompt_lines.append(
+                        f"{image_ref} 是紧凑多人参考板，按从上到下、每行从左到右依次包含 {names_text}；"
+                        "每个名字只绑定板中一个人物，只用于锁定各自身份、脸、服装与体型。严禁合并身份、交换服装、漏人或复制白底排版。"
+                    )
+                    qwen_bindings.append(
+                        f"- {image_ref} = compact multi-character identity board. Reading order is top-to-bottom and left-to-right: "
+                        + ", ".join(display_names)
+                        + ". Each entry is one different named character; preserve every identity, do not merge people, swap clothing, or omit anyone."
+                    )
+                mapped_actors = "、".join(
+                    f"@{_character_display_name(character, name)}{f'（{_safe_text(character.get("notes")).strip()}）' if _safe_text(character.get("notes")).strip() else ''}"
+                    for name, character in board_characters
+                )
+                actor_reference_mappings.append(f"{image_ref} = {mapped_actors}")
+            resolved_characters.extend(
+                smart_resolved[name.casefold()]
+                for name, _explicit_views in grouped_refs
+                if name.casefold() in smart_resolved
             )
-            prompt_lines.append(
-                "多人物位置硬约束："
-                + "；".join(position_lines)
-                + "。最终画面必须保持这个从左到右的顺序；左/右以观众看到的最终画面屏幕坐标为准，禁止镜像或交换人物。"
-            )
-            qwen_bindings.append(
-                f"- {image_ref} = multi-character full-body lineup board. Left-to-right order is: "
-                + ", ".join(_character_display_name(character, name) for name, character in board_characters)
-                + ". Each person in this board is a different named character; preserve every identity and do not swap positions."
-            )
-            mapped_actors = "、".join(
-                f"@{_character_display_name(character, name)}{f'（{_safe_text(character.get("notes")).strip()}）' if _safe_text(character.get("notes")).strip() else ''}"
-                for name, character in board_characters
-            )
-            actor_reference_mappings.append(f"{image_ref} = {mapped_actors}")
             if remaining_reference_images is not None:
-                remaining_reference_images -= 1
-            image_slot += 1
+                remaining_reference_images -= len(smart_boards)
+            image_slot += len(smart_boards)
             grouped_refs = []
+            qwen_multi_character = False
     for name, explicit_views in grouped_refs:
         character = _find_character(name)
         if not character:
@@ -2820,7 +3112,12 @@ def _extract_costume_refs(text: str) -> list[tuple[str, str]]:
         name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
         if not name or _find_character(name):
             continue
-        costume = _find_costume(name, "clothing") or _find_costume(name, "prop") or _find_costume(name, "product")
+        # `@角色名` can be followed immediately by Chinese prose. The generic
+        # character regex may therefore capture text such as
+        # “蒂法身穿黑色背带服装站在货架旁”. Never feed that text into fuzzy
+        # costume/tag matching: a word such as “黑色” would inject an unrelated
+        # library image. Keep legacy @costume support exact-name/id only.
+        costume = _find_costume_by_explicit_name(name)
         if not costume:
             continue
         category = _safe_text(costume.get("category") or "clothing").strip().lower() or "clothing"
@@ -2949,10 +3246,25 @@ def _reference_signature(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, torch.Tensor):
-        return [str(tuple(value.shape))]
+        tensor = value.detach().contiguous().cpu()
+        try:
+            content = tensor.numpy().tobytes(order="C")
+        except Exception:
+            content = tensor.float().numpy().tobytes(order="C")
+        digest = hashlib.sha256(content).hexdigest()
+        return [f"{tuple(tensor.shape)}:{tensor.dtype}:{digest}"]
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        digest = hashlib.sha256(array.tobytes(order="C")).hexdigest()
+        return [f"{tuple(array.shape)}:{array.dtype}:{digest}"]
+    if isinstance(value, Image.Image):
+        array = np.ascontiguousarray(np.asarray(value))
+        digest = hashlib.sha256(array.tobytes(order="C")).hexdigest()
+        return [f"PIL:{value.mode}:{value.size}:{digest}"]
     if isinstance(value, dict):
         result: list[str] = []
         for key in sorted(value, key=str):
+            result.append(f"key:{key}")
             result.extend(_reference_signature(value[key]))
         return result
     if isinstance(value, (list, tuple)):
@@ -2960,7 +3272,9 @@ def _reference_signature(value: Any) -> list[str]:
         for item in value:
             result.extend(_reference_signature(item))
         return result
-    return [str(type(value).__name__)]
+    if isinstance(value, (str, int, float, bool)):
+        return [f"{type(value).__name__}:{value}"]
+    return [f"{type(value).__name__}:{value!r}"]
 
 
 def _grid_geometry(
@@ -3067,14 +3381,23 @@ def _preview_image_directories() -> dict[str, Path]:
     return directories
 
 
-def _load_storyboard_preview_cells(preview_images: Any, cell_w: int, cell_h: int) -> dict[int, torch.Tensor]:
+def _load_storyboard_preview_cells(
+    preview_images: Any,
+    cell_w: int,
+    cell_h: int,
+    expected_signatures: dict[int, str] | None = None,
+) -> dict[int, torch.Tensor]:
     text = _safe_text(preview_images).strip()
     if not text:
         return {}
     try:
-        items = json.loads(text)
+        payload = json.loads(text)
     except Exception:
         return {}
+    if isinstance(payload, dict):
+        items = payload.get("items")
+    else:
+        items = payload
     if not isinstance(items, list):
         return {}
     directories = _preview_image_directories()
@@ -3088,6 +3411,11 @@ def _load_storyboard_preview_cells(preview_images: Any, cell_w: int, cell_h: int
             continue
         if index <= 0:
             continue
+        if expected_signatures is not None:
+            expected_signature = _safe_text(expected_signatures.get(index)).strip()
+            saved_signature = _safe_text(item.get("cache_signature")).strip()
+            if expected_signature and saved_signature != expected_signature:
+                continue
         filename = _safe_text(item.get("filename")).replace("\\", "/").strip("/")
         subfolder = _safe_text(item.get("subfolder")).replace("\\", "/").strip("/")
         image_type = _safe_text(item.get("type"), "temp").strip().lower() or "temp"
@@ -3100,42 +3428,6 @@ def _load_storyboard_preview_cells(preview_images: Any, cell_w: int, cell_h: int
                 continue
             if not path.is_file():
                 continue
-            image = Image.open(path).convert("RGB")
-            array = np.asarray(image).astype(np.float32) / 255.0
-            tensor = torch.from_numpy(array).unsqueeze(0)
-            loaded[index] = _normalize_storyboard_cell(tensor, cell_w, cell_h)
-        except Exception:
-            continue
-    return loaded
-
-
-def _load_recent_storyboard_preview_cells(cell_w: int, cell_h: int, expected_count: int) -> dict[int, torch.Tensor]:
-    try:
-        directory = (Path(folder_paths.get_temp_directory()) / PREVIEW_SUBFOLDER).resolve()
-    except Exception:
-        return {}
-    if not directory.is_dir():
-        return {}
-    pattern = re.compile(r"^storyboard_[0-9a-f]+_(\d{3})\.png$", re.IGNORECASE)
-    candidates: dict[int, Path] = {}
-    mtimes: dict[int, float] = {}
-    try:
-        for path in directory.glob("storyboard_*.png"):
-            match = pattern.match(path.name)
-            if not match:
-                continue
-            index = int(match.group(1))
-            if index <= 0 or index > max(1, int(expected_count or 1)):
-                continue
-            stat = path.stat()
-            if stat.st_mtime >= mtimes.get(index, 0.0):
-                candidates[index] = path
-                mtimes[index] = stat.st_mtime
-    except Exception:
-        return {}
-    loaded: dict[int, torch.Tensor] = {}
-    for index, path in candidates.items():
-        try:
             image = Image.open(path).convert("RGB")
             array = np.asarray(image).astype(np.float32) / 255.0
             tensor = torch.from_numpy(array).unsqueeze(0)
@@ -3206,10 +3498,14 @@ def _storyboard_cache_signature(
     reference: Any,
     lora_chain_config: Any,
     lora_data: Any,
+    seed: int,
+    main_image_index: Any,
+    batch_size: int,
 ) -> str:
+    # Keep the prompt out of the shared dependency signature: prompt and seed are
+    # tracked per cell so changing one storyboard cell does not invalidate others.
     payload = {
         "cell_normalize_version": "cover_crop_v2",
-        "prompt": _safe_text(full_prompt),
         "negative_prompt": _safe_text(negative_prompt),
         "width": int(width),
         "height": int(height),
@@ -3232,11 +3528,13 @@ def _storyboard_cache_signature(
         "reference": _reference_signature(reference),
         "lora_chain_config": _safe_text(lora_chain_config),
         "lora_data": _safe_text(lora_data),
-        "characters": _character_library_signature(),
-        "scenes": _scene_library_signature(),
-        "costumes": _costume_library_signature(),
+        "main_image_index": _safe_text(main_image_index),
+        "batch_size": int(batch_size),
+        "character_library": _character_library_signature(),
+        "scene_library": _scene_library_signature(),
+        "costume_library": _costume_library_signature(),
     }
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -3533,7 +3831,7 @@ class GJJ_StoryboardGridGenerator:
     FUNCTION = "generate"
     DESCRIPTION = "分镜宫格生成器：复用懒人图文集成一键生图流程，正向提示词按场景行首标记、空行或 --- 分段生成，并智能拼接为宫格图。"
     SEARCH_ALIASES = ["分镜生成器", "智能宫格", "storyboard grid", "storyboard generator"]
-    RETURN_TYPES = ("IMAGE", MIXED_IMAGE_OUTPUT)
+    RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("智能宫格图", "分镜图片")
     OUTPUT_TOOLTIPS = (
         "按生成图片数量自动排列并拼接后的宫格图。",
@@ -3745,18 +4043,18 @@ class GJJ_StoryboardGridGenerator:
 
     @classmethod
     def IS_CHANGED(cls, scene=None, reference=None, **kwargs):
-        shapes = [*_reference_signature(scene), *_reference_signature(reference)]
-        return (
-            "|".join(str(kwargs.get(key, "")) for key in sorted(kwargs))
-            + "|"
-            + "|".join(shapes)
-            + "|characters="
-            + _character_library_signature()
-            + "|scenes="
-            + _scene_library_signature()
-            + "|costumes="
-            + _costume_library_signature()
-        )
+        tracked = {
+            key: _safe_text(_first_scalar(value))
+            for key, value in kwargs.items()
+            if key not in {"storyboard_preview_images", "prompt_graph", "extra_pnginfo", "unique_id"}
+        }
+        tracked["scene"] = _reference_signature(scene)
+        tracked["reference"] = _reference_signature(reference)
+        tracked["character_library"] = _character_library_signature()
+        tracked["scene_library"] = _scene_library_signature()
+        tracked["costume_library"] = _costume_library_signature()
+        text = json.dumps(tracked, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
@@ -3854,8 +4152,6 @@ class GJJ_StoryboardGridGenerator:
         prompts = _split_prompt_segments(prompt)
         if not prompts:
             raise RuntimeError("正向提示词为空。请填写分镜提示词；用空行、单独一行 --- 或 Scene：镜头 :: 描述 分段。")
-        full_prompt_for_cache = _safe_text(storyboard_full_prompt).strip() or prompt
-        full_prompts_for_cache = _split_prompt_segments(full_prompt_for_cache)
         selected_indices: list[int] = []
         if single_cell_total > 0:
             try:
@@ -3874,6 +4170,11 @@ class GJJ_StoryboardGridGenerator:
                         selected_indices.append(index_value)
         single_cell_mode = single_cell_index > 0 and single_cell_total > 0 and len(prompts) == 1
         selected_cell_mode = bool(selected_indices) and single_cell_total > 0 and len(prompts) == len(selected_indices)
+        full_prompt_snapshot = _safe_text(storyboard_full_prompt).strip()
+        full_prompt_for_cache = (
+            full_prompt_snapshot if (single_cell_mode or selected_cell_mode) and full_prompt_snapshot else prompt
+        )
+        full_prompts_for_cache = _split_prompt_segments(full_prompt_for_cache)
         preview_total = max(1, single_cell_total) if (single_cell_mode or selected_cell_mode) else len(prompts)
         if (single_cell_mode or selected_cell_mode) and full_prompts_for_cache:
             preview_total = max(preview_total, len(full_prompts_for_cache))
@@ -3903,12 +4204,55 @@ class GJJ_StoryboardGridGenerator:
             reference,
             lora_chain_config,
             lora_data,
+            seed,
+            main_image_index,
+            batch_size,
         )
+        cache_prompt_parts = full_prompts_for_cache if len(full_prompts_for_cache) >= geometry_count else prompts
+        cell_signatures = {
+            index: hashlib.sha256(
+                f"{cache_signature}\0{_safe_text(cache_prompt_parts[index - 1])}\0{int(seed) + index - 1}".encode("utf-8")
+            ).hexdigest()
+            for index in range(1, min(geometry_count, len(cache_prompt_parts)) + 1)
+        }
         cache_key = _safe_text(unique_id).strip() or cache_signature
         cache = self._storyboard_cell_cache.get(cache_key)
-        if not cache or cache.get("signature") != cache_signature or int(cache.get("total", 0) or 0) != geometry_count:
-            cache = {"signature": cache_signature, "total": geometry_count, "cells": {}}
+        changed_cache_indices: list[int] = []
+        if force_generate_all or not cache:
+            cache = {"signature": cache_signature, "total": geometry_count, "cell_signatures": cell_signatures, "cells": {}}
             self._storyboard_cell_cache[cache_key] = cache
+        else:
+            cached_signatures = cache.get("cell_signatures", {}) if isinstance(cache.get("cell_signatures"), dict) else {}
+            cached_cells_for_reconcile = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
+            active_cache_indices = (
+                set(selected_indices)
+                if selected_cell_mode
+                else ({single_cell_index} if single_cell_mode else set(range(1, geometry_count + 1)))
+            )
+            for cache_index in list(cached_cells_for_reconcile):
+                if cache_index > geometry_count or (
+                    cache_index in active_cache_indices
+                    and cached_signatures.get(cache_index) != cell_signatures.get(cache_index)
+                ):
+                    cached_cells_for_reconcile.pop(cache_index, None)
+                    if cache_index <= geometry_count:
+                        changed_cache_indices.append(cache_index)
+            cache["signature"] = cache_signature
+            cache["total"] = geometry_count
+            if single_cell_mode or selected_cell_mode:
+                merged_signatures = {
+                    index: signature for index, signature in cached_signatures.items() if index <= geometry_count
+                }
+                for index in active_cache_indices:
+                    if index in cell_signatures:
+                        merged_signatures[index] = cell_signatures[index]
+                cache["cell_signatures"] = merged_signatures
+            else:
+                cache["cell_signatures"] = cell_signatures
+            cache["cells"] = cached_cells_for_reconcile
+        if changed_cache_indices:
+            changed_text = "、".join(str(index) for index in sorted(changed_cache_indices))
+            _send_status(unique_id, f"第 {changed_text} 格的提示词、随机种或上游素材发生变化，仅清理对应宫格缓存。")
 
         _cols, _rows, cell_w, cell_h, _canvas_w, _canvas_h = _grid_geometry(
             geometry_count, width, height, layout_mode, gap, size_alignment
@@ -3917,17 +4261,12 @@ class GJJ_StoryboardGridGenerator:
         stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
         resume_missing_indices: set[int] = set()
         if not force_generate_all and not single_cell_mode and not selected_cell_mode:
-            cached_count_before_preview = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
-            preview_cells = _load_storyboard_preview_cells(storyboard_preview_images, cell_w, cell_h)
-            has_explicit_preview_manifest = bool(_safe_text(storyboard_preview_images).strip())
-            recent_preview_cells = (
-                {}
-                if has_explicit_preview_manifest
-                else _load_recent_storyboard_preview_cells(cell_w, cell_h, geometry_count)
+            preview_cells = _load_storyboard_preview_cells(
+                storyboard_preview_images,
+                cell_w,
+                cell_h,
+                cell_signatures,
             )
-            if cached_count_before_preview > 0 or recent_preview_cells:
-                for preview_index, preview_cell in recent_preview_cells.items():
-                    preview_cells.setdefault(preview_index, preview_cell)
             if preview_cells:
                 for preview_index, preview_cell in preview_cells.items():
                     if 1 <= preview_index <= geometry_count and not isinstance(cached_cells.get(preview_index), torch.Tensor):
@@ -3938,8 +4277,23 @@ class GJJ_StoryboardGridGenerator:
                 output_images = [
                     _normalize_storyboard_cell(item, cell_w, cell_h) for item in stitched_cells if isinstance(item, torch.Tensor)
                 ]
+                display_prompts = full_prompts_for_cache if len(full_prompts_for_cache) >= geometry_count else prompts
+                for display_index, display_image in enumerate(output_images, start=1):
+                    display_prompt = display_prompts[display_index - 1] if display_index <= len(display_prompts) else ""
+                    _send_live_preview(
+                        unique_id,
+                        display_image,
+                        display_index,
+                        geometry_count,
+                        display_prompt,
+                        cell_signatures.get(display_index, cache_signature),
+                    )
                 grid = _make_grid(output_images, width, height, layout_mode, gap, cell_fit, resize_method, size_alignment)
                 cells = torch.cat(output_images, dim=0).contiguous()
+                if int(cells.shape[0]) != geometry_count:
+                    raise RuntimeError(
+                        f"分镜批次输出数量异常：期望 {geometry_count} 张，实际 {int(cells.shape[0])} 张。"
+                    )
                 _send_status(unique_id, f"下游直接获取缓存分镜：{len(output_images)}/{geometry_count}")
                 return (grid, cells)
             cached_count = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
@@ -3994,7 +4348,7 @@ class GJJ_StoryboardGridGenerator:
                 storyboard_character_refs,
                 allow_storyboard_context=not is_next_scene_image_edit,
             )
-            image_edit_reference_slots = 3 - scene_reference_count - library_scene_reference_count - len(character_refs_for_limits)
+            image_edit_reference_slots = MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - len(character_refs_for_limits)
             effective_reference = reference
             if is_next_scene_image_edit:
                 effective_reference = _media_slice(reference, max(0, image_edit_reference_slots))
@@ -4004,7 +4358,7 @@ class GJJ_StoryboardGridGenerator:
             character_reference_start = scene_reference_count + plain_reference_count + 1
             character_reference_limit = None
             if is_next_scene_image_edit:
-                character_reference_limit = max(0, 3 - scene_reference_count - library_scene_reference_count - reference_count)
+                character_reference_limit = max(0, MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - reference_count)
             if library_scene_reference is None:
                 line = _append_scene_reference_prompt(line, scene_reference_count)
             if reference_count:
@@ -4028,7 +4382,7 @@ class GJJ_StoryboardGridGenerator:
             )
             character_reference_count = _media_count(character_reference)
             costume_reference_start = character_reference_start + character_reference_count
-            remaining_image_edit_slots = 3 - scene_reference_count - library_scene_reference_count - reference_count - character_reference_count
+            remaining_image_edit_slots = MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - reference_count - character_reference_count
             include_costume_reference = not is_next_scene_image_edit or remaining_image_edit_slots > 0
             if include_costume_reference:
                 line, costume_reference = _costume_prompt_and_reference(
@@ -4071,7 +4425,7 @@ class GJJ_StoryboardGridGenerator:
                     costume_count = _media_count(costume_reference)
                     if costume_count:
                         image_edit_parts.append(f"服装道具×{costume_count}")
-                _send_status(unique_id, f"ImageEdit 实际参考图 {image_edit_total_refs}/3：{'，'.join(image_edit_parts) if image_edit_parts else '无'}")
+                _send_status(unique_id, f"ImageEdit 实际参考图 {image_edit_total_refs}/{MULTI_REFERENCE_IMAGE_LIMIT}：{'，'.join(image_edit_parts) if image_edit_parts else '无'}")
                 _write_debug_final_prompt(unique_id, preview_index, line, negative_prompt)
             _send_status(unique_id, f"按懒人一键生图流程生成分镜 {preview_index}/{preview_total}")
             result = self._lazy.create_image(
@@ -4110,7 +4464,14 @@ class GJJ_StoryboardGridGenerator:
             generated.append(current)
             generated_positions.append(preview_index)
             cache["cells"][int(preview_index)] = current.detach().contiguous()
-            _send_live_preview(unique_id, current, preview_index, preview_total, preview_prompt_text)
+            _send_live_preview(
+                unique_id,
+                current,
+                preview_index,
+                preview_total,
+                preview_prompt_text,
+                cell_signatures.get(preview_index, cache_signature),
+            )
 
         cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
         stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
@@ -4122,13 +4483,28 @@ class GJJ_StoryboardGridGenerator:
                 display_prompts = full_prompts_for_cache if len(full_prompts_for_cache) >= geometry_count else prompts
                 for display_index, display_image in enumerate(output_images, start=1):
                     display_prompt = display_prompts[display_index - 1] if display_index <= len(display_prompts) else ""
-                    _send_live_preview(unique_id, display_image, display_index, geometry_count, display_prompt)
+                    _send_live_preview(
+                        unique_id,
+                        display_image,
+                        display_index,
+                        geometry_count,
+                        display_prompt,
+                        cell_signatures.get(display_index, cache_signature),
+                    )
             _send_status(unique_id, f"直接拼接缓存分镜：{len(output_images)}/{geometry_count}")
         else:
             output_images = [_normalize_storyboard_cell(item, cell_w, cell_h) for item in generated]
         cells = torch.cat(output_images, dim=0).contiguous()
+        if int(cells.shape[0]) != len(output_images):
+            raise RuntimeError(
+                f"分镜批次输出数量异常：期望 {len(output_images)} 张，实际 {int(cells.shape[0])} 张。"
+            )
         grid = _make_grid(output_images, width, height, layout_mode, gap, cell_fit, resize_method, size_alignment)
-        _send_status(unique_id, f"完成：生成 {len(generated)} 张，输出拼接 {len(output_images)} 张，智能宫格 {grid.shape[2]} x {grid.shape[1]}")
+        _send_status(
+            unique_id,
+            f"完成：生成 {len(generated)} 张，分镜批次输出 {int(cells.shape[0])} 张，"
+            f"智能宫格 {grid.shape[2]} x {grid.shape[1]}",
+        )
         return (grid, cells)
 
 

@@ -6,7 +6,7 @@ import shutil
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -15,6 +15,7 @@ import folder_paths
 
 
 GJJ_TEMP_SUBFOLDER = "GJJ"
+GJJ_PREVIEW_CACHE_SUBFOLDER = "GJJ/PreviewCache"
 GJJ_PREVIEW_MAX_EDGE = 512
 GJJ_PREVIEW_JPEG_QUALITY = 82
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
@@ -22,6 +23,12 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".t
 
 def gjjutils_temp_root() -> Path:
     root = Path(folder_paths.get_temp_directory()) / GJJ_TEMP_SUBFOLDER
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def gjjutils_preview_cache_root() -> Path:
+    root = Path(folder_paths.get_output_directory()) / Path(GJJ_PREVIEW_CACHE_SUBFOLDER)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -87,6 +94,42 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
             pass
 
 
+def gjjutils_temp_image_preview_filename(filename: str) -> str:
+    """返回原图对应的稳定 JPG 预览名；非 JPG 只替换扩展名。"""
+    name = Path(str(filename or "")).name
+    if not name:
+        raise ValueError("原图文件名不能为空。")
+    suffix = Path(name).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return f"{Path(name).stem}_preview.jpg"
+    return f"{Path(name).stem}.jpg"
+
+
+def _attach_jpeg_preview_metadata(
+    info: dict[str, Any],
+    preview_name: str,
+    preview_size: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    original_filename = str(info.get("original_filename") or info.get("filename") or "")
+    original_subfolder = str(info.get("original_subfolder") or info.get("subfolder") or GJJ_TEMP_SUBFOLDER)
+    original_type = str(info.get("original_type") or info.get("type") or "temp")
+    info.update(
+        {
+            "preview_filename": str(preview_name),
+            "preview_subfolder": str(info.get("subfolder") or GJJ_TEMP_SUBFOLDER),
+            "preview_type": str(info.get("type") or "temp"),
+            "preview_format": "image/jpeg",
+            "original_filename": original_filename,
+            "original_subfolder": original_subfolder,
+            "original_type": original_type,
+        }
+    )
+    if preview_size:
+        info["preview_width"] = int(preview_size[0])
+        info["preview_height"] = int(preview_size[1])
+    return info
+
+
 def _attach_jpeg_preview(info: dict[str, Any], image: Image.Image) -> dict[str, Any]:
     filename = str(info.get("filename") or "").strip()
     if not filename:
@@ -96,12 +139,7 @@ def _attach_jpeg_preview(info: dict[str, Any], image: Image.Image) -> dict[str, 
         (GJJ_PREVIEW_MAX_EDGE, GJJ_PREVIEW_MAX_EDGE),
         Image.Resampling.LANCZOS,
     )
-    original_suffix = Path(filename).suffix.lower()
-    preview_name = (
-        f"{Path(filename).stem}.jpg"
-        if original_suffix not in {".jpg", ".jpeg"}
-        else f"{Path(filename).stem}_preview.jpg"
-    )
+    preview_name = gjjutils_temp_image_preview_filename(filename)
     preview_path = gjjutils_temp_path(preview_name)
     if not preview_path.exists():
         buffer = BytesIO()
@@ -112,17 +150,39 @@ def _attach_jpeg_preview(info: dict[str, Any], image: Image.Image) -> dict[str, 
             optimize=True,
         )
         _atomic_write_bytes(preview_path, buffer.getvalue())
-    info.update(
-        {
-            "preview_filename": preview_name,
-            "preview_subfolder": str(info.get("subfolder") or GJJ_TEMP_SUBFOLDER),
-            "preview_type": str(info.get("type") or "temp"),
-            "preview_width": int(preview.width),
-            "preview_height": int(preview.height),
-            "preview_format": "image/jpeg",
-        }
-    )
-    return info
+    return _attach_jpeg_preview_metadata(info, preview_name, preview.size)
+
+
+def gjjutils_ensure_temp_image_preview(
+    info_or_filename: dict[str, Any] | str,
+    *,
+    verify_existing: bool = False,
+) -> dict[str, Any]:
+    info = dict(info_or_filename) if isinstance(info_or_filename, dict) else {"filename": str(info_or_filename or "")}
+    filename = str(info.get("filename") or "").strip()
+    if not filename:
+        raise ValueError("原图文件名不能为空。")
+    source_path = gjjutils_temp_path(filename)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"临时原图不存在：{filename}")
+    info.setdefault("subfolder", GJJ_TEMP_SUBFOLDER)
+    info.setdefault("type", "temp")
+    preview_name = gjjutils_temp_image_preview_filename(filename)
+    preview_path = gjjutils_temp_path(preview_name)
+    if preview_path.exists():
+        if not verify_existing:
+            # 内容寻址文件名不可变：JPG 已存在时直接返回路径，绝不再打开大图。
+            return _attach_jpeg_preview_metadata(info, preview_name)
+        try:
+            with Image.open(preview_path) as preview:
+                preview.load()
+                preview_size = preview.size
+            return _attach_jpeg_preview_metadata(info, preview_name, preview_size)
+        except Exception:
+            preview_path.unlink(missing_ok=True)
+    with Image.open(source_path) as source:
+        normalized = ImageOps.exif_transpose(source).copy()
+    return _attach_jpeg_preview(info, normalized)
 
 
 def gjjutils_write_temp_bytes(
@@ -186,6 +246,32 @@ def gjjutils_write_temp_file(path: str | os.PathLike[str], suffix: str | None = 
     return info
 
 
+def gjjutils_write_temp_with_writer(
+    writer: Callable[[Path], Any],
+    *,
+    suffix: str = ".bin",
+) -> dict[str, Any]:
+    """让只能写文件路径的第三方对象也统一进入内容寻址临时缓存。"""
+    if not callable(writer):
+        raise TypeError("临时文件写入器必须可调用。")
+    clean_suffix = str(suffix or ".bin").strip()
+    if not clean_suffix.startswith("."):
+        clean_suffix = f".{clean_suffix}"
+    root = gjjutils_temp_root().resolve()
+    staging_dir = (root / f".gjj_stage_{os.getpid()}_{uuid.uuid4().hex}").resolve()
+    if staging_dir.parent != root:
+        raise ValueError("临时中转目录必须位于 temp/GJJ。")
+    staging_dir.mkdir(parents=False, exist_ok=False)
+    staging_path = staging_dir / f"payload{clean_suffix.lower()}"
+    try:
+        writer(staging_path)
+        if not staging_path.is_file():
+            raise FileNotFoundError("临时文件写入器没有生成文件。")
+        return gjjutils_write_temp_file(staging_path, suffix=clean_suffix)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def gjjutils_read_temp_bytes(info_or_filename: dict[str, Any] | str) -> bytes:
     filename = (
         str(info_or_filename.get("filename") or "")
@@ -230,6 +316,55 @@ def gjjutils_write_temp_pil_image(
     )
     _attach_jpeg_preview(info, normalized)
     return info
+
+
+def gjjutils_write_persistent_pil_image(
+    image: Image.Image,
+    *,
+    format: str = "PNG",
+    suffix: str = ".png",
+    media_type: str = "image",
+) -> dict[str, Any]:
+    normalized_format = str(format or "PNG").upper()
+    digest, normalized = gjjutils_hash_pil_image(image)
+    clean_suffix = str(suffix or ".png").strip()
+    if not clean_suffix.startswith("."):
+        clean_suffix = f".{clean_suffix}"
+    filename = f"{digest}{clean_suffix.lower()}"
+    root = gjjutils_preview_cache_root()
+    path = root / filename
+    if not path.exists():
+        buffer = BytesIO()
+        normalized.save(buffer, format=normalized_format)
+        _atomic_write_bytes(path, buffer.getvalue())
+    preview = ImageOps.exif_transpose(normalized).convert("RGB")
+    preview.thumbnail((GJJ_PREVIEW_MAX_EDGE, GJJ_PREVIEW_MAX_EDGE), Image.Resampling.LANCZOS)
+    preview_name = gjjutils_temp_image_preview_filename(filename)
+    preview_path = root / preview_name
+    if not preview_path.exists():
+        buffer = BytesIO()
+        preview.save(buffer, format="JPEG", quality=GJJ_PREVIEW_JPEG_QUALITY, optimize=True)
+        _atomic_write_bytes(preview_path, buffer.getvalue())
+    return {
+        "filename": filename,
+        "subfolder": GJJ_PREVIEW_CACHE_SUBFOLDER,
+        "type": "output",
+        "hash": digest,
+        "source": "pixels",
+        "format": f"image/{normalized_format.lower()}",
+        "media_type": media_type,
+        "width": int(normalized.width),
+        "height": int(normalized.height),
+        "preview_filename": preview_name,
+        "preview_subfolder": GJJ_PREVIEW_CACHE_SUBFOLDER,
+        "preview_type": "output",
+        "preview_format": "image/jpeg",
+        "preview_width": int(preview.width),
+        "preview_height": int(preview.height),
+        "original_filename": filename,
+        "original_subfolder": GJJ_PREVIEW_CACHE_SUBFOLDER,
+        "original_type": "output",
+    }
 
 
 def gjjutils_write_temp_pil_sequence(
@@ -310,6 +445,19 @@ def gjjutils_write_temp_tensor_images(
 ) -> list[dict[str, Any]]:
     return [
         gjjutils_write_temp_pil_image(image, format=format, suffix=suffix, media_type=media_type)
+        for image in gjjutils_tensor_to_pil_images(images)
+    ]
+
+
+def gjjutils_write_persistent_tensor_images(
+    images: Any,
+    *,
+    format: str = "PNG",
+    suffix: str = ".png",
+    media_type: str = "image",
+) -> list[dict[str, Any]]:
+    return [
+        gjjutils_write_persistent_pil_image(image, format=format, suffix=suffix, media_type=media_type)
         for image in gjjutils_tensor_to_pil_images(images)
     ]
 

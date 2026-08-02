@@ -525,6 +525,65 @@ def _install_patches(ltxv):
     ltxv._prepare_positional_embeddings = types.MethodType(prepare_pe, ltxv)
     ltxv._process_output = types.MethodType(process_output, ltxv)
     ltxv._id_overlap_patched = True
+
+
+def apply_ltx_reference_latent_tokens(
+    model,
+    reference_latents,
+    *,
+    layout="overlap",
+    source_phase=0.0,
+    downscale_factor=1.0,
+):
+    """Attach clean reference latents as model-side tokens without changing the sampled latent.
+
+    This is the programmatic counterpart of :class:`GJJ_LTXIdentityOverlapConditioning`.
+    It is intended for compound nodes that already prepared their own reference video
+    latent (for example an MSR multi-reference sequence).  Reference tokens participate
+    in self-attention on every model call and are removed again before unpatchifying the
+    model output, so they can never become output video frames.
+    """
+    if torch.is_tensor(reference_latents):
+        latents = [reference_latents]
+    else:
+        latents = list(reference_latents or [])
+    if not latents:
+        return model
+
+    normalized_layout = str(layout or "overlap").strip().lower()
+    if normalized_layout not in {"overlap", "st_drc", "strata"}:
+        raise ValueError(f"Unsupported LTX reference-token layout: {layout!r}")
+
+    cloned_model = model.clone()
+    ltxv = _find_ltxv(cloned_model)
+    _install_patches(ltxv)
+
+    if isinstance(source_phase, (list, tuple)):
+        phases = [float(value) for value in source_phase]
+    else:
+        phases = [float(source_phase)] * len(latents)
+    if len(phases) != len(latents):
+        raise ValueError("source_phase count must match reference latent count.")
+
+    specs = []
+    for index, latent in enumerate(latents):
+        if not torch.is_tensor(latent) or latent.ndim != 5:
+            shape = tuple(latent.shape) if hasattr(latent, "shape") else type(latent).__name__
+            raise ValueError(f"LTX reference latent must be [B,C,T,H,W], got {shape}.")
+        specs.append({
+            "latent": latent,
+            "seg_value": phases[index],
+            "layout": normalized_layout,
+            "strata_slot": index,
+            "downscale_factor": float(downscale_factor),
+        })
+
+    cloned_model.model_options = dict(cloned_model.model_options)
+    transformer_options = dict(cloned_model.model_options.get("transformer_options", {}))
+    existing_specs = list(transformer_options.get("_id_ref_specs") or [])
+    transformer_options["_id_ref_specs"] = [*existing_specs, *specs]
+    cloned_model.model_options["transformer_options"] = transformer_options
+    return cloned_model
     log.info("LTXIdentityOverlap patches installed on %s", type(ltxv).__name__)
 
 

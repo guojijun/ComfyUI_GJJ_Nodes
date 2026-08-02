@@ -2,6 +2,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
+import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 
 (function () {
 	"use strict";
@@ -20,6 +21,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 
 	let state = {
 		scenes: [],
+		allScenes: [],
 		selectedId: "",
 		search: "",
 		type: "all",
@@ -47,6 +49,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		cameraSending: false,
 		selectedMarkId: "",
 	};
+	let sceneIndexRefreshToken = 0;
 
 	function apiUrl(path) {
 		return api?.apiURL ? api.apiURL(path) : path;
@@ -634,6 +637,31 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		refreshAnnotateButtons();
 	}
 
+	async function refreshSceneIndex() {
+		const token = ++sceneIndexRefreshToken;
+		const allScenes = [];
+		let page = 1;
+		let pageCount = 1;
+		do {
+			const params = new URLSearchParams({
+				page: String(page),
+				page_size: "80",
+				search: "",
+				type: "all",
+				sort: "updated_desc",
+			});
+			const data = await apiJson(`${ENDPOINT}/list?${params.toString()}`);
+			if (token !== sceneIndexRefreshToken) return state.allScenes;
+			allScenes.push(...(Array.isArray(data.scenes) ? data.scenes : []));
+			pageCount = Math.max(1, Number(data.page_count || 1));
+			page += 1;
+		} while (page <= pageCount);
+		if (token !== sceneIndexRefreshToken) return state.allScenes;
+		state.allScenes = allScenes;
+		globalThis.dispatchEvent(new CustomEvent("gjj_scene_library_updated", { detail: { scenes: allScenes.slice(), complete: true } }));
+		return allScenes;
+	}
+
 	async function refreshScenes(keepSelection = true) {
 		const params = new URLSearchParams({
 			page: String(state.page),
@@ -651,6 +679,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 		state.selectedId = state.scenes.some((item) => item.id === previous) ? previous : (state.scenes[0]?.id || "");
 		globalThis.dispatchEvent(new CustomEvent("gjj_scene_library_updated", { detail: { scenes: state.scenes.slice() } }));
 		renderPanel();
+		void refreshSceneIndex().catch((error) => console.warn("[GJJ SceneLibrary] 刷新完整场景索引失败。", error));
 		return state.scenes;
 	}
 
@@ -1176,22 +1205,10 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 	}
 
 	function streamSceneThumbnail(img, url) {
-		img.loading = "lazy";
+		img.loading = "eager";
 		img.decoding = "async";
-		if (!("IntersectionObserver" in window)) {
-			img.src = url;
-			return;
-		}
-		img.dataset.src = url;
-		state.thumbnailObserver ||= new IntersectionObserver((entries, observer) => {
-			for (const entry of entries) {
-				if (!entry.isIntersecting) continue;
-				observer.unobserve(entry.target);
-				entry.target.src = entry.target.dataset.src || "";
-				delete entry.target.dataset.src;
-			}
-		}, { rootMargin: "160px 0px" });
-		state.thumbnailObserver.observe(img);
+		img.fetchPriority = "high";
+		img.src = url;
 	}
 
 	function createScenePanoramaRenderer(canvas, status, onRender, onPick) {
@@ -1508,10 +1525,10 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 			const cover = document.createElement("div");
 			cover.className = "gjj-sl-cover";
 			const asset = sceneCover(scene);
-			if (asset?.preview_url && scene.thumbnail_url) {
+			if (scene.id) {
 				const img = document.createElement("img");
-				streamSceneThumbnail(img, apiUrl(scene.thumbnail_url));
-				bindSceneAssetDrag(img, scene, asset);
+				setGjjLibraryThumbnail(img, api, "scene", scene);
+				if (asset) bindSceneAssetDrag(img, scene, asset);
 				cover.appendChild(img);
 			} else {
 				const empty = document.createElement("div");
@@ -2129,7 +2146,7 @@ import { GJJ_ANY_PREVIEW_MEDIA_DRAG_MIME } from "./gjj_common_media_preview.js";
 			getPositions,
 			referenceText,
 			get scenes() {
-				return state.scenes.slice();
+				return (state.allScenes.length ? state.allScenes : state.scenes).slice();
 			},
 		};
 	}

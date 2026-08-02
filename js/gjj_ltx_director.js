@@ -2607,7 +2607,7 @@ class TimelineEditor {
       const oldText = refreshUpstreamBtn.textContent;
       refreshUpstreamBtn.textContent = "正在刷新";
       try {
-        await this.refreshUpstreamInputs();
+        await this.refreshUpstreamInputs(true);
       } finally {
         setTimeout(() => {
           refreshUpstreamBtn.textContent = oldText;
@@ -4683,7 +4683,7 @@ class TimelineEditor {
       if (!force && (!this._lastUpstreamSignature || signature === this._lastUpstreamSignature)) return false;
       this._lastUpstreamSignature = signature;
       if (!this._hasLinkedUpstreamInput()) return false;
-      const refreshed = await this.refreshUpstreamInputs();
+      const refreshed = await this.refreshUpstreamInputs(force);
       this._lastUpstreamSignature = this._buildUpstreamSignature();
       return refreshed;
     } catch (err) {
@@ -4724,8 +4724,9 @@ class TimelineEditor {
     this.timeline.segments = (this.timeline.segments || []).filter(seg => !seg.gjjPromptUpstream);
   }
 
-  _extractBestTextFromNode(sourceNode) {
-    if (!sourceNode) return "";
+  _extractBestTextFromNode(sourceNode, visited = new Set()) {
+    if (!sourceNode || visited.has(sourceNode.id)) return "";
+    visited.add(sourceNode.id);
     const candidates = [];
     for (const widget of sourceNode.widgets || []) {
       if (typeof widget?.value === "string") candidates.push(widget.value);
@@ -4738,6 +4739,18 @@ class TimelineEditor {
     for (const key of ["__gjjTextInputEditor", "__gjjTextInputPreviewText", "__gjjAnyPreviewText"]) {
       if (typeof sourceNode[key]?.value === "string") candidates.push(sourceNode[key].value);
       else if (typeof sourceNode[key] === "string") candidates.push(sourceNode[key]);
+    }
+    if (typeof sourceNode.__gjjGemmaResultPreview?.preview?.value === "string") {
+      candidates.push(sourceNode.__gjjGemmaResultPreview.preview.value);
+    }
+    // Reroute, variable and relay nodes often have no text of their own. Walk
+    // upstream so queue-time synchronization reaches the actual prompt editor.
+    for (const input of sourceNode.inputs || []) {
+      if (input?.link == null) continue;
+      const link = app.graph?.links?.[input.link];
+      const upstream = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+      const text = this._extractBestTextFromNode(upstream, visited);
+      if (text) candidates.push(text);
     }
     return candidates
       .map(value => String(value || "").trim())
@@ -4806,11 +4819,11 @@ class TimelineEditor {
     if (numbered.length) {
       for (const match of numbered) blocks.push(match[2].trim());
     } else {
-      blocks.push(...normalized.split(/\n\s*---+\s*\n|\n{2,}/).map(item => item.trim()).filter(Boolean));
+      blocks.push(...normalized.split(/\n\s*---+\s*\n|\n{2,}|\s+---+\s+/).map(item => item.trim()).filter(Boolean));
     }
     const segments = blocks.map(block => this._parsePromptTiming(block)).filter(item => item.text);
     const hasTiming = segments.some(item => item.length || item.start != null);
-    const hasDivider = /\n\s*---+\s*\n|\n{2,}/.test(normalized);
+    const hasDivider = /\n\s*---+\s*\n|\n{2,}|\s+---+\s+/.test(normalized);
     if (!numbered.length && !hasDivider && !hasTiming) return { global: source, segments: [] };
     return { global: "", segments };
   }
@@ -4881,10 +4894,22 @@ class TimelineEditor {
     this.timeline.segments.sort((a, b) => a.start - b.start);
   }
 
-  async refreshUpstreamInputs() {
-    if (this._upstreamRefreshBusy) return false;
+  async refreshUpstreamInputs(force = false) {
+    if (this._upstreamRefreshBusy) {
+      if (!force) return false;
+      await new Promise(resolve => {
+        const startedAt = Date.now();
+        const waitForRefresh = () => {
+          if (!this._upstreamRefreshBusy || Date.now() - startedAt > 10000) resolve();
+          else setTimeout(waitForRefresh, 20);
+        };
+        waitForRefresh();
+      });
+      if (this._upstreamRefreshBusy) return false;
+      return this.refreshUpstreamInputs(true);
+    }
     const now = Date.now();
-    if (this._lastUpstreamRefreshAt && now - this._lastUpstreamRefreshAt < 600) return false;
+    if (!force && this._lastUpstreamRefreshAt && now - this._lastUpstreamRefreshAt < 600) return false;
     this._lastUpstreamRefreshAt = now;
     this._upstreamRefreshBusy = true;
     try {
@@ -4926,7 +4951,7 @@ class TimelineEditor {
       this._lastUpstreamSignature = this._buildUpstreamSignature();
       return true;
     } finally {
-      setTimeout(() => { this._upstreamRefreshBusy = false; }, 600);
+      this._upstreamRefreshBusy = false;
     }
   }
 
@@ -11602,73 +11627,129 @@ class TimelineEditor {
     title.append(caption, close);
     menu.appendChild(title);
 
+    menu.style.width = `${Math.min(520, Math.max(360, window.innerWidth - 28))}px`;
+    menu.style.padding = "10px";
+    menu.style.display = "flex";
+    menu.style.flexDirection = "column";
+    menu.style.gap = "8px";
     const widget = name => this.node.widgets?.find(item => item.name === name);
     const setValue = (name, value) => {
       this._setWidgetValue(name, value);
       this.commitChanges(true);
     };
-    const numberInput = (name, step = 8) => {
-      const targetWidget = widget(name);
-      const minimum = Number.isFinite(Number(targetWidget?.options?.min)) ? Number(targetWidget.options.min) : 0;
-      const maximum = Number.isFinite(Number(targetWidget?.options?.max)) ? Number(targetWidget.options.max) : 8192;
-      const input = document.createElement("input");
-      input.type = "number";
-      input.className = "pr-settings-input";
-      input.min = String(minimum);
-      input.max = String(maximum);
-      input.step = String(step);
-      input.value = String(Number(targetWidget?.value) || minimum);
-      input.addEventListener("change", () => {
-        const value = Math.max(minimum, Math.min(maximum, Math.round(Number(input.value) || minimum)));
-        input.value = String(value);
-        setValue(name, value);
-      });
-      return input;
+    const isInputSize = () => !(Number(widget("custom_width")?.value) > 0 && Number(widget("custom_height")?.value) > 0);
+    const buttonStyle = button => {
+      button.type = "button";
+      button.style.cssText = "height:34px;min-width:0;border:1px solid #41535b;border-radius:8px;background:#11181c;color:#dce7e2;cursor:pointer;font-size:14px;font-weight:800;padding:0 6px";
+      return button;
+    };
+    const setActive = (button, active, green = false) => {
+      button.style.background = active
+        ? (green ? "linear-gradient(135deg,#047857,#16a34a)" : "linear-gradient(135deg,#075985,#0891b2)")
+        : "#11181c";
+      button.style.borderColor = active ? (green ? "#34d399" : "#22d3ee") : "#41535b";
+      button.style.color = active ? "#ecfeff" : "#dce7e2";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    };
+    const choiceRow = (icon, choices, selectedValue, onChoose, titles = {}) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:grid;grid-template-columns:34px minmax(0,1fr);gap:8px;align-items:center;width:100%;min-width:0";
+      const label = document.createElement("span");
+      label.textContent = icon;
+      label.style.cssText = "font-size:19px;text-align:center;color:#f2a3c2;user-select:none";
+      const group = document.createElement("div");
+      group.style.cssText = `display:grid;grid-template-columns:repeat(${choices.length},minmax(0,1fr));gap:7px;min-width:0`;
+      for (const [labelText, value] of choices) {
+        const button = buttonStyle(document.createElement("button"));
+        button.textContent = labelText;
+        button.title = titles[labelText] || labelText;
+        setActive(button, value === selectedValue);
+        button.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          onChoose(value);
+          for (const child of group.querySelectorAll("button")) setActive(child, child === button);
+        });
+        group.appendChild(button);
+      }
+      row.append(label, group);
+      return row;
     };
 
     const source = document.createElement("div");
-    source.className = "pr-segmented-control";
-    const sourceInput = document.createElement("div");
-    sourceInput.className = "pr-segment";
-    sourceInput.textContent = "输入尺寸";
-    const sourcePanel = document.createElement("div");
-    sourcePanel.className = "pr-segment";
-    sourcePanel.textContent = "面板尺寸";
-    const refreshSource = () => {
-      const useInput = !(Number(widget("custom_width")?.value) > 0 && Number(widget("custom_height")?.value) > 0);
-      sourceInput.classList.toggle("active", useInput);
-      sourcePanel.classList.toggle("active", !useInput);
-    };
-    sourceInput.addEventListener("click", () => {
-      setValue("custom_width", 0);
-      setValue("custom_height", 0);
-      this.dismissSettingsMenu();
-      this.showSizeMenu(anchorEl);
-    });
-    sourcePanel.addEventListener("click", () => {
-      if (!(Number(widget("custom_width")?.value) > 0)) setValue("custom_width", 1280);
-      if (!(Number(widget("custom_height")?.value) > 0)) setValue("custom_height", 720);
-      this.dismissSettingsMenu();
-      this.showSizeMenu(anchorEl);
-    });
-    source.append(sourceInput, sourcePanel);
-    refreshSource();
-    menu.appendChild(this._makeSettingRow("尺寸来源", source));
-    menu.appendChild(this._makeSettingRow("宽度", numberInput("custom_width")));
-    menu.appendChild(this._makeSettingRow("高度", numberInput("custom_height")));
-
-    const resize = document.createElement("select");
-    resize.className = "pr-settings-select";
-    for (const [value, label] of [["maintain aspect ratio", "保持比例"], ["stretch to fit", "拉伸适配"], ["pad", "黑边填充"], ["pad green", "绿边填充"], ["crop", "居中裁剪"]]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      resize.appendChild(option);
+    source.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%";
+    for (const [labelText, useInput] of [["原图尺寸", true], ["面板尺寸", false]]) {
+      const button = buttonStyle(document.createElement("button"));
+      button.textContent = labelText;
+      button.title = useInput ? "使用输入素材尺寸作为输出尺寸。" : "使用下方宽度和高度设置。";
+      setActive(button, useInput === isInputSize(), true);
+      button.addEventListener("click", () => {
+        if (useInput) {
+          setValue("custom_width", 0);
+          setValue("custom_height", 0);
+        } else {
+          if (!(Number(widget("custom_width")?.value) > 0)) setValue("custom_width", 1280);
+          if (!(Number(widget("custom_height")?.value) > 0)) setValue("custom_height", 720);
+        }
+        this.dismissSettingsMenu();
+        this.showSizeMenu(anchorEl);
+      });
+      source.appendChild(button);
     }
-    resize.value = String(widget("resize_method")?.value || "maintain aspect ratio");
-    resize.addEventListener("change", () => setValue("resize_method", resize.value));
-    menu.appendChild(this._makeSettingRow("适配方式", resize));
-    menu.appendChild(this._makeSettingRow("尺寸整除", numberInput("divisible_by", 1)));
+    menu.appendChild(source);
+
+    const method = String(widget("resize_method")?.value || "maintain aspect ratio");
+    menu.appendChild(choiceRow("🧲", [
+      ["拉伸", "stretch to fit"], ["等比", "maintain aspect ratio"], ["补边", "pad"], ["绿边", "pad green"], ["裁剪", "crop"],
+    ], method, value => setValue("resize_method", value), {
+      拉伸: "直接缩放到目标宽高，可能改变原图比例。",
+      等比: "保持比例缩放，不强制填满目标画布。",
+      补边: "保持完整画面并用黑边填充目标画布。",
+      绿边: "保持完整画面并用绿边填充目标画布。",
+      裁剪: "填满目标画布并居中裁剪超出部分。",
+    }));
+
+    const sliderRow = (name, labelText, accent = "#52c2a4") => {
+      const target = widget(name);
+      const min = Number.isFinite(Number(target?.options?.min)) ? Number(target.options.min) : 0;
+      const max = Number.isFinite(Number(target?.options?.max)) ? Number(target.options.max) : 8192;
+      const step = Math.max(1, Number(target?.options?.step) || (name === "divisible_by" ? 1 : 8));
+      const disabled = isInputSize() && (name === "custom_width" || name === "custom_height");
+      const row = document.createElement("div");
+      row.style.cssText = `display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center;opacity:${disabled ? "0.45" : "1"}`;
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      label.style.cssText = "grid-column:1;color:#9fd4c3;font-size:12px;font-weight:700";
+      const number = document.createElement("input");
+      number.type = "number";
+      number.min = String(min);
+      number.max = String(max);
+      number.step = String(step);
+      number.value = String(Number(target?.value) || min);
+      number.disabled = disabled;
+      number.style.cssText = "grid-column:2;width:74px;box-sizing:border-box;border:1px solid #41535b;border-radius:6px;background:#11181c;color:#dce7e2;padding:4px 6px;text-align:right;font-size:12px;font-weight:800";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = String(min);
+      slider.max = String(max);
+      slider.step = String(step);
+      slider.value = number.value;
+      slider.disabled = disabled;
+      slider.style.cssText = `grid-column:1 / span 2;width:100%;accent-color:${accent};cursor:${disabled ? "not-allowed" : "pointer"}`;
+      const commit = raw => {
+        const value = Math.max(min, Math.min(max, Math.round((Number(raw) || min) / step) * step));
+        number.value = String(value);
+        slider.value = String(value);
+        setValue(name, value);
+      };
+      slider.addEventListener("input", event => commit(event.target.value));
+      number.addEventListener("change", event => commit(event.target.value));
+      row.append(label, number, slider);
+      return row;
+    };
+    menu.appendChild(sliderRow("custom_width", "📐 宽度"));
+    menu.appendChild(sliderRow("custom_height", "📏 高度"));
+    menu.appendChild(sliderRow("divisible_by", "🔢 尺寸整除", "#38bdf8"));
 
     document.body.appendChild(menu);
     try { menu.showPopover?.(); } catch (_) { }

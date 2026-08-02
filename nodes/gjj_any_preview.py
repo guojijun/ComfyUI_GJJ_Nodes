@@ -7,7 +7,6 @@ import shutil
 import uuid
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 import comfy.utils
@@ -20,6 +19,7 @@ from .common_utils.temp_files import (
     gjjutils_write_temp_bytes,
     gjjutils_write_temp_file,
     gjjutils_write_temp_tensor_images,
+    gjjutils_write_temp_with_writer,
 )
 
 NODE_NAME = "GJJ_AnyPreview"
@@ -417,10 +417,10 @@ def save_3d_file_preview(value: Any) -> list[dict[str, Any]]:
         data = value.get_data()
         info = gjjutils_write_temp_bytes(data.getvalue() if hasattr(data, "getvalue") else data.read(), suffix=suffix)
     elif hasattr(value, "save_to"):
-        with TemporaryDirectory(prefix="gjj_any_preview_3d_") as tmp_dir:
-            path = Path(tmp_dir) / f"preview{suffix}"
-            value.save_to(str(path))
-            info = gjjutils_write_temp_file(path, suffix=suffix)
+        info = gjjutils_write_temp_with_writer(
+            lambda path: value.save_to(str(path)),
+            suffix=suffix,
+        )
     else:
         return []
     info.update({"format": fmt, "media_type": "3d"})
@@ -1660,10 +1660,14 @@ class GJJ_AnyPreview:
             and preview_kind in {"image", "mask"}
             and isinstance(merged, torch.Tensor)
         ):
-            preview_images = self._save_image_preview(
-                merged,
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
+            preview_images = (
+                [dict(item) for item in queue_thumbnails]
+                if queue_thumbnails and len(preview_values) == 1
+                else self._save_image_preview(
+                    merged,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                )
             )
             ui["preview_images"] = preview_images
             if not queue_thumbnails:

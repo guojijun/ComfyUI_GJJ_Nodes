@@ -5735,6 +5735,9 @@ function createLazyPreviewCard(node, item, index = 0) {
 	].join(";");
 	const image = document.createElement("img");
 	image.draggable = false;
+	image.loading = "eager";
+	image.decoding = "async";
+	image.fetchPriority = "high";
 	image.dataset.gjjCustomPreview = "true";
 	image.src = imageDataToUrl(item);
 	image.style.cssText = [
@@ -5756,6 +5759,7 @@ function createLazyPreviewCard(node, item, index = 0) {
 		if (!item.height) item.height = Number(image.naturalHeight || 0);
 		updateLazyPreviewLayout(node);
 		GJJ_Utils.refreshNode(node);
+		GJJ_Utils.scheduleRefreshNode?.(node);
 	});
 	let dragged = false;
 	card.addEventListener("dragstart", (event) => {
@@ -5800,27 +5804,61 @@ function imageDataToUrl(item, original = false) {
 	}
 	const type = String((!original && item?.preview_type) || item?.type || "output");
 	const subfolder = String((!original && item?.preview_subfolder) || item?.subfolder || "");
-	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
-	const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
+	const stableJpegPreview = !original && Boolean(item?.preview_filename);
+	const immutableMedia = stableJpegPreview || Boolean(item?.hash);
+	const previewFormat = !original && !stableJpegPreview && typeof app.getPreviewFormatParam === "function"
+		? app.getPreviewFormatParam()
+		: "";
+	const randParam = !immutableMedia && typeof app.getRandParam === "function" ? app.getRandParam() : "";
 	return api.apiURL(
 		`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${original ? "" : previewFormat}${randParam}`,
 	);
 }
 
+function normalizeLazyPreviewItems(images) {
+	let items = Array.isArray(images) ? images : [];
+	while (items.length === 1 && Array.isArray(items[0])) items = items[0];
+	return items.filter((item) => item && typeof item === "object" && item.filename);
+}
+
+function lazyPreviewItemsSignature(images) {
+	return normalizeLazyPreviewItems(images).map((item) => [
+		item.filename || "",
+		item.subfolder || "",
+		item.type || "temp",
+		item.preview_filename || "",
+		item.preview_subfolder || "",
+		item.preview_type || "temp",
+		Number(item.width || 0),
+		Number(item.height || 0),
+	].join("\u001f")).join("\u001e");
+}
+
 function updateImagePreview(node, images) {
 	const preview = node.__gjjLazyPreview;
 	if (!preview?.wrap) return;
+	const nextItems = normalizeLazyPreviewItems(images);
 
-	if (!images || !images.length) {
+	if (!nextItems.length) {
 		preview.wrap.replaceChildren();
 		preview.wrap.style.display = "none";
 		if (preview.controls) preview.controls.style.display = "none";
+		preview.items = [];
+		preview.signature = "";
 		node.__gjjLazyPreviewHeight = 0;
 		GJJ_Utils.refreshNode(node);
 		return;
 	}
 
-	preview.items = Array.isArray(images) ? images.slice() : [];
+	const signature = lazyPreviewItemsSignature(nextItems);
+	if (signature && signature === preview.signature && preview.wrap.children.length === nextItems.length) {
+		preview.items = nextItems.slice();
+		updateLazyPreviewLayout(node);
+		GJJ_Utils.refreshNode(node);
+		return;
+	}
+	preview.items = nextItems.slice();
+	preview.signature = signature;
 	preview.wrap.replaceChildren();
 	for (const [index, item] of preview.items.entries()) {
 		const card = createLazyPreviewCard(node, item, index);
@@ -5828,6 +5866,7 @@ function updateImagePreview(node, images) {
 	}
 	updateLazyPreviewLayout(node);
 	GJJ_Utils.refreshNode(node);
+	GJJ_Utils.scheduleRefreshNode?.(node);
 }
 
 function lazyPreviewHeightForNode(node, width = null) {
@@ -7464,7 +7503,7 @@ globalThis.GJJLazyImageStudioSyncImageSources = function (sourceNode) {
 	}
 };
 
-api.addEventListener("gjj_lazy_image_studio_test_preview", (event) => {
+function handleLazyImageStudioPreviewEvent(event) {
 	const detail = event?.detail || {};
 	const nodeId = String(detail.node || detail.node_id || "");
 	if (!nodeId) {
@@ -7481,7 +7520,10 @@ api.addEventListener("gjj_lazy_image_studio_test_preview", (event) => {
 			: images;
 		updateImagePreview(node, nextImages);
 	}
-});
+}
+
+api.addEventListener("gjj_lazy_image_studio_test_preview", handleLazyImageStudioPreviewEvent);
+api.addEventListener("gjj_lazy_image_studio_preview", handleLazyImageStudioPreviewEvent);
 
 app.registerExtension({
 	name: "Comfy.GJJ.LazyImageStudio",

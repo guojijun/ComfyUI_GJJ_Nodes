@@ -6,8 +6,19 @@ import {
 	gjjStyleCompactAudioPlayer,
 } from "./gjj_common_media_preview.js";
 import { queueOnlyCurrentNode } from "./gjj_utils.js";
+import { bindGjjMediaDrag, GJJ_MEDIA_DRAG_MIME } from "./gjj_media_drag.js";
+import {
+	ensureGjjTempImagePreview,
+	gjjTempImageOriginalItem,
+	gjjTempImagePreviewItem,
+	gjjPersistentPreviewCacheItem,
+	isGjjTempMediaItem,
+	loadGjjPreviewBlobUrl,
+	preloadGjjFullImage,
+} from "./gjj_temp_image_preview.js";
 
-const TARGET_NODES = new Set(["GJJ_AnyPreview"]);
+const ANY_PREVIEW_NODE_CLASS = "GJJ_AnyPreview";
+const TARGET_NODES = new Set([ANY_PREVIEW_NODE_CLASS]);
 const INPUT_PREFIX = "any_";
 const MIN_VISIBLE_INPUTS = 1;
 const ANY_INPUT_TYPE = "*";
@@ -42,7 +53,6 @@ const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
 const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
 const HELD_MEDIA_PROPERTY = "gjj_any_preview_held_media";
 const GJJ_FILE_DRAG_MIME = "application/x-gjj-file-browser-item";
-const GJJ_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
 const LAST_LINKS_PROPERTY = "gjj_any_preview_last_upstream_links";
 const TEXT_INPUT_SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
@@ -142,7 +152,9 @@ function setPreviewMotionMode(active) {
 		if (!TARGET_NODES.has(node?.comfyClass || node?.type)) continue;
 		const wrap = node.__gjjAnyPreviewWrap;
 		if (!wrap?.classList) continue;
-		wrap.classList.toggle(MOTION_CLASS, Boolean(active));
+		const kind = String(node.__gjjAnyPreviewKind || "").toLowerCase();
+		const usesLightweightImage = kind === "image" || kind === "mask" || Array.isArray(node.__gjjAnyPreviewImages);
+		wrap.classList.toggle(MOTION_CLASS, Boolean(active) && !usesLightweightImage);
 	}
 }
 
@@ -254,15 +266,139 @@ function imageDataToUrl(data) {
 	if (!data?.filename) {
 		return "";
 	}
-	const previewFormat =
-		typeof app.getPreviewFormatParam === "function"
-			? app.getPreviewFormatParam()
-			: "";
-	const randParam =
-		typeof app.getRandParam === "function" ? app.getRandParam() : "";
 	return api.apiURL(
-		`/view?filename=${encodeURIComponent(data.filename)}&type=${encodeURIComponent(data.type || "temp")}&subfolder=${encodeURIComponent(data.subfolder || "")}${previewFormat}${randParam}`,
+		`/view?filename=${encodeURIComponent(data.filename)}&type=${encodeURIComponent(data.type || "temp")}&subfolder=${encodeURIComponent(data.subfolder || "")}`,
 	);
+}
+
+function imageThumbnailDataToUrl(data) {
+	return imageDataToUrl(gjjTempImagePreviewItem(data));
+}
+
+function imageOriginalDataToUrl(data) {
+	return imageDataToUrl(gjjTempImageOriginalItem(data));
+}
+
+function imageItemWithStablePreview(item) {
+	if (!item?.filename) return item;
+	const copy = { ...item };
+	const original = gjjTempImageOriginalItem(copy);
+	copy.original_filename = String(original?.filename || copy.filename);
+	copy.original_subfolder = String(original?.subfolder ?? copy.subfolder ?? "");
+	copy.original_type = String(original?.type ?? copy.type ?? "temp");
+	if (!copy.preview_filename && !isGjjTempMediaItem(copy)) return copy;
+	const preview = gjjTempImagePreviewItem(copy);
+	if (!preview?.filename) return copy;
+	copy.preview_filename = String(preview.filename);
+	copy.preview_subfolder = String(preview.subfolder ?? copy.subfolder ?? "");
+	copy.preview_type = String(preview.type ?? copy.type ?? "temp");
+	return copy;
+}
+
+function stablePreviewImageItems(items) {
+	return normalizeMediaPayload(items).map(imageItemWithStablePreview);
+}
+
+function previewImageItemsSignature(items) {
+	return stablePreviewImageItems(items).map((item) => [
+		item.filename,
+		item.subfolder || "",
+		item.type || "temp",
+		item.preview_filename || "",
+		item.preview_subfolder || "",
+		item.preview_type || "temp",
+		Number(item.width || item.w || 0),
+		Number(item.height || item.h || 0),
+	].join("\u001f")).join("\u001e");
+}
+
+function preloadFullImage(item) {
+	const url = imageOriginalDataToUrl(item);
+	return preloadGjjFullImage(url, "low");
+}
+
+function scheduleFullImagePreload(item) {
+	const run = () => { void preloadFullImage(item); };
+	if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 800 });
+	else setTimeout(run, 0);
+}
+
+function showFullImageImmediately(image, item) {
+	if (!image) return;
+	const targetUrl = imageOriginalDataToUrl(item);
+	const thumbnailUrl = imageThumbnailDataToUrl(item);
+	const persistentUrl = imageOriginalDataToUrl(gjjPersistentPreviewCacheItem(item));
+	image.dataset.gjjFullTarget = targetUrl;
+	image.onerror = () => {
+		if (persistentUrl && image.dataset.gjjFullPersistentFallback !== persistentUrl) {
+			image.dataset.gjjFullPersistentFallback = persistentUrl;
+			image.dataset.gjjFullTarget = persistentUrl;
+			image.src = persistentUrl;
+		}
+	};
+	image.src = thumbnailUrl || targetUrl;
+	const revealOriginal = () => {
+		if (targetUrl && image.dataset.gjjFullTarget === targetUrl) image.src = targetUrl;
+	};
+	// 调用者会在当前事件栈末尾挂载 overlay；下一帧直接让真实 img 请求原图。
+	// JPG 只负责先画出弹窗首帧，绝不再等待独立 Image.decode() 决定是否切换。
+	if (typeof requestAnimationFrame === "function") requestAnimationFrame(revealOriginal);
+	else setTimeout(revealOriginal, 0);
+}
+
+function loadPreviewThumbnail(image, item, onLoad, onFailure, retryAttempt = 0) {
+	if (!image) return;
+	image.loading = "eager";
+	image.decoding = "sync";
+	image.fetchPriority = "high";
+	const originalUrl = imageOriginalDataToUrl(item);
+	const thumbnailUrl = imageThumbnailDataToUrl(item);
+	let usingOriginal = !thumbnailUrl || thumbnailUrl === originalUrl;
+	let repairAttempted = false;
+	let persistentFallbackAttempted = false;
+	const assignUrl = (url) => {
+		if (!url) return;
+		void loadGjjPreviewBlobUrl(url).then((blobUrl) => {
+			image.src = blobUrl || url;
+		});
+	};
+	image.onload = () => {
+		onLoad?.(usingOriginal);
+	};
+	image.onerror = () => {
+		if (!persistentFallbackAttempted) {
+			const persistentItem = gjjPersistentPreviewCacheItem(item);
+			const persistentUrl = imageOriginalDataToUrl(persistentItem);
+			if (persistentUrl && persistentUrl !== image.src) {
+				persistentFallbackAttempted = true;
+				usingOriginal = true;
+				assignUrl(persistentUrl);
+				return;
+			}
+		}
+		if (!usingOriginal && !repairAttempted) {
+			repairAttempted = true;
+			void ensureGjjTempImagePreview(api, item).then((repaired) => {
+				if (repaired) assignUrl(`${imageThumbnailDataToUrl({ ...item, ...repaired })}&repair=${Date.now()}`);
+				else {
+					usingOriginal = true;
+					assignUrl(originalUrl);
+				}
+			});
+			return;
+		}
+		if (!usingOriginal && originalUrl) {
+			usingOriginal = true;
+			assignUrl(originalUrl);
+			return;
+		}
+		if (retryAttempt < 1) {
+			setTimeout(() => loadPreviewThumbnail(image, item, onLoad, onFailure, retryAttempt + 1), 800);
+			return;
+		}
+		onFailure?.();
+	};
+	assignUrl(thumbnailUrl || originalUrl);
 }
 
 function closeAnyPreviewImageMenu() {
@@ -270,11 +406,12 @@ function closeAnyPreviewImageMenu() {
 }
 
 function downloadAnyPreviewImage(item) {
-	const url = imageDataToUrl(item);
+	const original = gjjTempImageOriginalItem(item);
+	const url = imageDataToUrl(original);
 	if (!url) return;
 	const link = document.createElement("a");
 	link.href = url;
-	link.download = String(item?.filename || "gjj-preview-image.png").split(/[\\/]/).pop() || "gjj-preview-image.png";
+	link.download = String(original?.filename || "gjj-preview-image.png").split(/[\\/]/).pop() || "gjj-preview-image.png";
 	link.rel = "noopener";
 	document.body.appendChild(link);
 	link.click();
@@ -312,7 +449,7 @@ function addImageMenuItem(menu, label, callback) {
 }
 
 function showAnyPreviewImageMenu(event, item) {
-	const url = imageDataToUrl(item);
+	const url = imageOriginalDataToUrl(item);
 	if (!url) return;
 	event.preventDefault();
 	event.stopPropagation();
@@ -365,7 +502,10 @@ function showAnyPreviewImageMenu(event, item) {
 
 function bindAnyPreviewImageContextMenu(image, item) {
 	if (!image?.addEventListener || !item) return;
-	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, item));
+	const currentItem = () => typeof item === "function" ? item() : item;
+	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, currentItem()));
+	image.addEventListener("pointerenter", () => scheduleFullImagePreload(currentItem()), { passive: true });
+	bindGjjMediaDrag(image, currentItem);
 }
 
 function withoutNativeImagePreview(message = {}) {
@@ -2334,7 +2474,7 @@ function anyPreviewNodeAtClientPoint(clientX, clientY) {
 	const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
 	for (let index = nodes.length - 1; index >= 0; index -= 1) {
 		const node = nodes[index];
-		if (node?.comfyClass !== "GJJ_AnyPreview") continue;
+		if (!isTargetNode(node)) continue;
 		const elements = [
 			node.__gjjAnyPreviewWrap,
 			node.__gjjAnyPreviewContainer,
@@ -2353,7 +2493,7 @@ function anyPreviewNodeAtClientPoint(clientX, clientY) {
 	const [canvasX, canvasY] = canvasPointFromClient(clientX, clientY);
 	for (let index = nodes.length - 1; index >= 0; index -= 1) {
 		const node = nodes[index];
-		if (node?.comfyClass !== "GJJ_AnyPreview") continue;
+		if (!isTargetNode(node)) continue;
 		const x = Number(node.pos?.[0] || 0);
 		const y = Number(node.pos?.[1] || 0);
 		const width = Number(node.size?.[0] || MIN_WIDTH);
@@ -2411,7 +2551,7 @@ function canvasPointFromClient(clientX, clientY) {
 
 function createAnyPreviewAtClientPoint(clientX, clientY) {
 	const graph = app.canvas?.graph || app.graph;
-	const node = globalThis.LiteGraph?.createNode?.("GJJ_AnyPreview");
+	const node = globalThis.LiteGraph?.createNode?.(ANY_PREVIEW_NODE_CLASS);
 	if (!graph || !node) return null;
 	const [x, y] = canvasPointFromClient(clientX, clientY);
 	const width = Number(node.size?.[0] || MIN_WIDTH);
@@ -2446,12 +2586,14 @@ async function importMediaPayloadIntoNode(node, payload) {
 		if (!uploaded.length) throw new Error("采样预览上传失败");
 		sourcePayload = uploaded[0];
 	}
-	const copied = await copyMediaToInput([sourcePayload]);
-	if (!copied.length) {
+	const imported = isGjjTempMediaItem(sourcePayload)
+		? [{ ...sourcePayload }]
+		: await copyMediaToInput([sourcePayload]);
+	if (!imported.length) {
 		setDropTargetActive(node, false);
 		return false;
 	}
-	const item = copied[0];
+	const item = imported[0];
 	const extension = String(item.filename || "").split(".").pop()?.toLowerCase() || "";
 	const mediaType = String(item.media_type || "").toLowerCase();
 	const kind = mediaType || (["mp4", "webm", "mov", "mkv", "avi"].includes(extension) ? "video" : "image");
@@ -2731,41 +2873,7 @@ function heldTextFromProperties(node) {
 }
 
 function heldImagesFromProperties(node) {
-	return normalizeMediaPayload(node?.properties?.[HELD_IMAGES_PROPERTY]);
-}
-
-function removeFailedHeldImage(node, failedItem) {
-	if (!node || !failedItem) {
-		return false;
-	}
-	const failedUrl = imageDataToUrl(failedItem);
-	const keepItem = (item) => imageDataToUrl(item) !== failedUrl;
-	const heldImages = heldImagesFromProperties(node);
-	const nextHeldImages = heldImages.filter(keepItem);
-	const removedHeldImage = nextHeldImages.length !== heldImages.length;
-	if (removedHeldImage) {
-		node.properties = node.properties || {};
-		if (nextHeldImages.length) {
-			node.properties[HELD_IMAGES_PROPERTY] = nextHeldImages.map((item) => ({ ...item }));
-		} else {
-			delete node.properties[HELD_IMAGES_PROPERTY];
-		}
-	}
-	if (Array.isArray(node.__gjjAnyPreviewImages)) {
-		node.__gjjAnyPreviewImages = node.__gjjAnyPreviewImages.filter(keepItem);
-	}
-	if (Array.isArray(node.__gjjAnyPreviewItems)) {
-		node.__gjjAnyPreviewItems = node.__gjjAnyPreviewItems
-			.map((item) => ({
-				...item,
-				images: normalizeMediaPayload(item?.images).filter(keepItem),
-			}))
-			.filter((item) => item.images.length || item.text || item.audio || item.video || item.files);
-	}
-	if (removedHeldImage) {
-		setDirty(node);
-	}
-	return removedHeldImage;
+	return stablePreviewImageItems(node?.properties?.[HELD_IMAGES_PROPERTY]);
 }
 
 function heldMediaFromProperties(node) {
@@ -2878,6 +2986,14 @@ function applyHeldImagePreview(node) {
 	if (!node || !images.length) {
 		return false;
 	}
+	const signature = previewImageItemsSignature(images);
+	if (
+		node.__gjjAnyPreviewHeldImageSignature === signature
+		&& node.__gjjAnyPreviewKind === "image"
+		&& node.__gjjAnyPreviewGrid?.childElementCount > 0
+	) {
+		return true;
+	}
 	node.__gjjAnyPreviewKind = "image";
 	node.__gjjAnyPreviewLiveOnly = false;
 	node.__gjjAnyPreviewText = "";
@@ -2889,6 +3005,7 @@ function applyHeldImagePreview(node) {
 	clearNativeImagePreviewState(node);
 	ensurePreviewWidget(node);
 	applyPreviewContent(node);
+	node.__gjjAnyPreviewHeldImageSignature = signature;
 	updateLayout(node);
 	scheduleLayout(node);
 	return true;
@@ -3130,7 +3247,7 @@ function rememberCurrentPreviewAsHeld(node, markDirty = true) {
 	const images = currentPreviewImages(node);
 	if (images.length) {
 		node.properties = node.properties || {};
-		node.properties[HELD_IMAGES_PROPERTY] = images.map((item) => ({ ...item }));
+		node.properties[HELD_IMAGES_PROPERTY] = stablePreviewImageItems(images);
 		delete node.properties[HELD_TEXT_PROPERTY];
 		delete node.properties[HELD_MEDIA_PROPERTY];
 		if (markDirty) setDirty(node);
@@ -3446,7 +3563,6 @@ function appendImagePreviewCards(node, parent, images) {
 		].join(";");
 
 		const image = document.createElement("img");
-		image.src = imageDataToUrl(item);
 		image.draggable = false;
 		image.style.cssText = [
 			"width:100%",
@@ -3454,8 +3570,7 @@ function appendImagePreviewCards(node, parent, images) {
 			"object-fit:cover",
 			"display:block",
 		].join(";");
-		image.onload = () => scheduleLayout(node);
-		image.onerror = () => scheduleLayout(node);
+		loadPreviewThumbnail(image, item, () => scheduleLayout(node), () => scheduleLayout(node));
 		bindAnyPreviewImageContextMenu(image, item);
 
 		const badge = document.createElement("div");
@@ -3494,7 +3609,7 @@ function appendImagePreviewCards(node, parent, images) {
 			].join(";");
 
 			const previewImg = document.createElement("img");
-			previewImg.src = imageDataToUrl(item);
+			showFullImageImmediately(previewImg, item);
 			previewImg.style.cssText = [
 				"max-width:90%",
 				"max-height:90%",
@@ -3684,7 +3799,7 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 	].join(";");
 	image.onload = () => scheduleLayout(node);
 	image.onerror = () => scheduleLayout(node);
-	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, currentItem()));
+	bindAnyPreviewImageContextMenu(image, currentItem);
 	parent.appendChild(image);
 
 	const badge = document.createElement("div");
@@ -3705,7 +3820,10 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 
 	const renderPage = () => {
 		const activeItem = currentItem();
-		image.src = imageDataToUrl(activeItem);
+		// Compact cards already have a fixed aspect ratio. Scheduling a complete
+		// layout pass from every image load rebuilds the grid while the remaining
+		// requests are in flight, repeatedly cancelling the later tiles.
+		loadPreviewThumbnail(image, activeItem);
 		if (badge.parentElement) {
 			badge.textContent = pageItems.length > 1 ? `${currentIndex + 1}/${pageItems.length}` : badgeText;
 		}
@@ -3770,7 +3888,7 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 			"white-space:nowrap",
 		].join(";");
 		const renderOverlayPage = () => {
-			previewImg.src = imageDataToUrl(pageItems[overlayIndex] || currentItem());
+			showFullImageImmediately(previewImg, pageItems[overlayIndex] || currentItem());
 		};
 		renderOverlayPage();
 		overlay.appendChild(previewImg);
@@ -4181,7 +4299,7 @@ function appendImageSequencePlayer(node, parent, images, description = "") {
 		"display:block",
 	].join(";");
 	image.onload = () => scheduleLayout(node);
-	image.addEventListener("contextmenu", (event) => showAnyPreviewImageMenu(event, frames[frameIndex % frames.length]));
+	bindAnyPreviewImageContextMenu(image, () => frames[frameIndex % frames.length]);
 
 	const badge = document.createElement("div");
 	badge.textContent = `1/${frames.length}`;
@@ -4578,7 +4696,6 @@ function applyPreviewContent(node) {
 
 			// 单图保持完整宽高比，多图缩略卡片继续铺满画布。
 			const image = document.createElement("img");
-			image.src = imageDataToUrl(item);
 			image.draggable = false;
 			image.style.cssText = [
 				"width:100%",
@@ -4588,27 +4705,28 @@ function applyPreviewContent(node) {
 			].join(";");
 
 			// 图片加载完成后更新尺寸
-			image.onload = () => {
+			const handleImageLoaded = () => {
 				if (sizeBadge) {
-					sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
+					const originalWidth = Number(item?.width || item?.w || 0);
+					const originalHeight = Number(item?.height || item?.h || 0);
+					sizeBadge.textContent = originalWidth > 0 && originalHeight > 0
+						? `${Math.round(originalWidth)}×${Math.round(originalHeight)}`
+						: "原图尺寸未知";
 				}
-				if (isSingleImage && image.naturalWidth > 0 && image.naturalHeight > 0) {
-					item.width = item.width || image.naturalWidth;
-					item.height = item.height || image.naturalHeight;
+				if (isSingleImage && Number(item?.width) > 0 && Number(item?.height) > 0) {
 					card.style.aspectRatio = `${item.width} / ${item.height}`;
 				}
 				scheduleLayout(node);
 			};
-			image.onerror = () => {
-				removeFailedHeldImage(node, item);
-				card.remove();
-				if (!grid.children.length) {
-					node.__gjjAnyPreviewKind = "";
-					node.__gjjAnyPreviewImages = [];
-					applyPreviewContent(node);
-				}
+			const handleImageFailed = () => {
+				// ComfyUI 重启时 /view 可能短暂不可用。加载失败只能影响本次
+				// 显示，不能删除工作流内仍然有效的 temp/GJJ 缓存引用。
+				card.title = "缩略图暂时无法读取；缓存引用已保留";
+				image.style.opacity = "0.35";
+				node.__gjjAnyPreviewHeldImageSignature = "";
 				scheduleLayout(node);
 			};
+			loadPreviewThumbnail(image, item, handleImageLoaded, handleImageFailed);
 			bindAnyPreviewImageContextMenu(image, item);
 
 			// 左上角：图片序号
@@ -4651,8 +4769,11 @@ function applyPreviewContent(node) {
 				"white-space:nowrap",
 			].join(";");
 
-			// 初始显示加载中
-			sizeBadge.textContent = "加载中...";
+			const originalWidth = Number(item?.width || item?.w || 0);
+			const originalHeight = Number(item?.height || item?.h || 0);
+			sizeBadge.textContent = originalWidth > 0 && originalHeight > 0
+				? `${Math.round(originalWidth)}×${Math.round(originalHeight)}`
+				: "原图尺寸未知";
 
 			// 点击图片放大查看（带滚轮缩放）
 			card.addEventListener("click", (event) => {
@@ -4674,7 +4795,7 @@ function applyPreviewContent(node) {
 				].join(";");
 
 				const previewImg = document.createElement("img");
-				previewImg.src = imageDataToUrl(item);
+				showFullImageImmediately(previewImg, item);
 				previewImg.style.cssText = [
 					"max-width:90%",
 					"max-height:90%",
@@ -4913,9 +5034,8 @@ function getLoraEffectLiveText(node) {
 function ensurePreviewWidget(node) {
 	clearNativeImagePreviewState(node);
 	if (node.__gjjAnyPreviewContainer) {
-		applyPreviewContent(node);
 		scheduleLayout(node);
-		return;
+		return false;
 	}
 
 	const container = document.createElement("div");
@@ -5342,8 +5462,8 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewEmpty = empty;
 	node.__gjjAnyPreviewDropHint = dropHint;
 	installAnyPreviewDropTarget(node, [container, previewWrap, body, grid, empty]);
-	applyPreviewContent(node);
 	scheduleLayout(node);
+	return true;
 }
 
 function stabilizeNode(node) {
@@ -5370,7 +5490,7 @@ function stabilizeNode(node) {
 		output.tooltip = resolved.tooltip;
 	}
 
-	ensurePreviewWidget(node);
+	if (ensurePreviewWidget(node)) applyPreviewContent(node);
 	scheduleLayout(node);
 }
 
@@ -5607,11 +5727,20 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const configuredWidth = serializedNodeWidth(serializedNode);
+			const serializedHeldImages = stablePreviewImageItems(serializedNode?.properties?.[HELD_IMAGES_PROPERTY]);
+			const serializedHeldText = String(serializedNode?.properties?.[HELD_TEXT_PROPERTY] || "");
+			const serializedHeldMedia = serializedNode?.properties?.[HELD_MEDIA_PROPERTY];
 			if (configuredWidth > 0) {
 				this.__gjjAnyPreviewConfiguredWidth = configuredWidth;
 				rememberNodeWidth(this, configuredWidth);
 			}
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			this.properties ||= {};
+			if (serializedHeldImages.length) this.properties[HELD_IMAGES_PROPERTY] = serializedHeldImages;
+			else if (serializedHeldText) this.properties[HELD_TEXT_PROPERTY] = serializedHeldText;
+			else if (serializedHeldMedia && typeof serializedHeldMedia === "object") {
+				this.properties[HELD_MEDIA_PROPERTY] = serializedHeldMedia;
+			}
 			if (configuredWidth > 0) {
 				this.__gjjAnyPreviewConfiguredWidth = configuredWidth;
 				rememberNodeWidth(this, configuredWidth);
@@ -5619,12 +5748,10 @@ app.registerExtension({
 			}
 			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
-			if (hasHeldPreviewProperties(this)) {
-				applyHeldPreview(this);
-			}
+			const restoredHeldPreview = hasHeldPreviewProperties(this) ? applyHeldPreview(this) : false;
 			setTimeout(() => {
 				restoreConfiguredWidth(this);
-				if (hasHeldPreviewProperties(this)) {
+				if (!restoredHeldPreview && hasHeldPreviewProperties(this)) {
 					applyHeldPreview(this);
 				}
 				stabilizeNode(this);
@@ -5638,9 +5765,20 @@ app.registerExtension({
 			if (!this.__gjjAnyPreviewInternalResize) {
 				rememberNodeWidth(this);
 			}
+			// Always capture the currently displayed preview before workflow data is
+			// serialized, including nodes that are still connected upstream.
+			rememberCurrentPreviewAsHeld(this, false);
 			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			serializedNode.properties = serializedNode.properties || {};
 			serializedNode.properties[WIDTH_PROPERTY] = preferredNodeWidth(this) || serializedNode.properties[WIDTH_PROPERTY];
+			const heldImages = stablePreviewImageItems(
+				serializedNode.properties[HELD_IMAGES_PROPERTY] || this.properties?.[HELD_IMAGES_PROPERTY],
+			);
+			if (heldImages.length) {
+				serializedNode.properties[HELD_IMAGES_PROPERTY] = heldImages;
+				this.properties ||= {};
+				this.properties[HELD_IMAGES_PROPERTY] = heldImages.map((item) => ({ ...item }));
+			}
 			return result;
 		};
 
@@ -5657,9 +5795,9 @@ app.registerExtension({
 				rememberCurrentPreviewAsHeld(this);
 			}
 			resetLivePreviewState(this);
-			if (!hasLinkedInputs(this)) {
-				applyHeldPreview(this);
-			}
+			// Connection restoration during workflow loading must not erase a held
+			// preview. A later real execution will replace it normally.
+			if (hasHeldPreviewProperties(this)) applyHeldPreview(this);
 			scheduleStabilize(this);
 			return result;
 		};
@@ -5786,7 +5924,7 @@ app.registerExtension({
 			requestAnimationFrame(() => {
 				clearNativeImagePreviewState(this);
 				applyPreviewContent(this);
-				rememberCurrentPreviewAsHeld(this, false);
+				rememberCurrentPreviewAsHeld(this, true);
 				clearNativeImagePreviewState(this);
 				updateLayout(this);
 				scheduleNativePreviewCleanup(this);

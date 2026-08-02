@@ -65,6 +65,64 @@ def _run_ltx23_multiref_video(**kwargs):
     return _runtime_module().run_ltx23_multiref_video(**kwargs)
 
 
+def _prompt_library_context(prompt_text: Any) -> str:
+    try:
+        from .gjj_storyboard_grid_generator import (
+            _character_display_name,
+            _extract_character_refs,
+            _extract_scene_refs,
+            _find_character,
+            _find_scene,
+        )
+    except Exception:
+        return ""
+    character_lines: list[str] = []
+    character_names: list[str] = []
+    seen_characters: set[str] = set()
+    for name, _view in _extract_character_refs(str(prompt_text or "")):
+        character = _find_character(name)
+        if not character:
+            continue
+        display_name = _character_display_name(character, name)
+        key = display_name.casefold()
+        if key in seen_characters:
+            continue
+        seen_characters.add(key)
+        character_names.append(f"@{display_name}")
+        notes = str(character.get("notes") or "").strip()
+        character_lines.append(f"- @{display_name}：{notes or '按角色库参考资产保持身份、外形和服装一致。'}")
+
+    scene_lines: list[str] = []
+    seen_scenes: set[str] = set()
+    for name, place in _extract_scene_refs(str(prompt_text or "")):
+        scene = _find_scene(name)
+        if not scene:
+            continue
+        display_name = str(scene.get("name") or scene.get("id") or name).strip()
+        key = display_name.casefold()
+        if key in seen_scenes:
+            continue
+        seen_scenes.add(key)
+        notes = str(scene.get("notes") or scene.get("description") or "").strip()
+        place_text = f"；指定位置：{place}" if str(place or "").strip() else ""
+        scene_lines.append(f"- {display_name}{place_text}：{notes or '按场景库参考保持空间、陈设和环境特征一致。'}")
+
+    parts: list[str] = []
+    if character_lines:
+        parts.append(
+            "【角色库设定（硬约束）】\n"
+            + "\n".join(character_lines)
+            + "\n本镜头允许出现的具名人物仅限："
+            + "、".join(character_names)
+            + "。禁止新增、猜测或虚构任何人物；除非原提示词明确要求群众，否则不得添加路人、围观者、服务员或背景人群。"
+        )
+    elif _extract_character_refs(str(prompt_text or "")):
+        parts.append("【人物约束】只使用原提示词明确写出的角色，禁止新增无关人物或背景人群。")
+    if scene_lines:
+        parts.append("【场景库设定（硬约束）】\n" + "\n".join(scene_lines) + "\n不得擅自更换地点、时代、陈设关系或场景功能。")
+    return "\n\n".join(parts)
+
+
 def _torch_module():
     try:
         return importlib.import_module("torch")
@@ -95,6 +153,18 @@ DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT = 2
 DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH = 0.55
 DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH = 0.75
 DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH = 1.0
+DEFAULT_DIALOGUE_SYSTEM_PROMPT = (
+    "你是影视分镜导演和人物台词编剧。根据剧情提示词和可选参考图，输出可直接用于视频生成的分镜说明与人物台词。"
+    "分镜说明必须包含起始景别、明确运镜、人物连续动作、环境动态和结束景别；至少使用推进、拉远、横移、环绕、摇镜或跟拍中的一种实际运镜。"
+    "不得让画面停留在参考图，不得复刻参考图的白底、转面排布或静止构图；参考图只用于理解人物身份、服装和场景。"
+    "人物台词必须符合人物身份、关系、情绪和动作，人物名必须来自输入中的 @角色名。"
+    "当前镜头必须承接上一镜头的空间方向、人物位置、连续动作、情绪和未结束语义；台词要回应上一句，禁止无故重复、跳跃或重置关系。"
+    "当前镜头结尾要自然引向下一镜头目标，但不得提前演出下一镜头画面。"
+    "严格输出两部分，不要解释、编号或 Markdown。格式必须是：\n"
+    "分镜说明：具体的动态分镜与运镜说明\n"
+    "人物台词：\n"
+    "@名字 说：“具体台词”"
+)
 SEGMENT_SAVE_PRESETS = (
     "video/GJJ_LTX多图分段",
     "video/GJJ_LTX多图分段/{date}",
@@ -1207,7 +1277,7 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
     )
     transition_prompt_models = _model_options(
         "text_encoders",
-        any_keywords=("qwen3.5", "qwen35", "qwen3vl", "gemma4"),
+        any_keywords=("qwen3.5", "qwen3_5", "qwen35", "qwen3vl", "uncensored", "gemma4"),
     )
     transition_prompt_default = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
     transition_prompt_value = next(
@@ -1338,16 +1408,16 @@ def _ltx_model_fields() -> list[dict[str, Any]]:
         },
         {
             "name": "transition_prompt_model",
-            "label": "Gemma/Qwen 过渡词模型",
+            "label": "Qwen/Gemma 反推模型",
             "folder": "text_encoders",
             "path": "models/text_encoders",
             "models": transition_prompt_models,
             "modelInfo": _category_model_info("text_encoders", transition_prompt_models),
-            "anyKeywords": ["qwen3.5", "qwen35", "qwen3vl", "gemma4"],
+            "anyKeywords": ["qwen3.5", "qwen3_5", "qwen35", "qwen3vl", "uncensored", "gemma4"],
             "fallback": transition_prompt_value,
             "filename": transition_prompt_default,
             "required": True,
-            "description": "🎬 自动分析每段首尾图并生成过渡词；与 LTX 自身的 Gemma 3 12B 文本编码器相互独立。",
+            "description": "🧠 Qwen3.5 4B Uncensored 等视觉反推模型，用于首尾帧过渡词、动态分镜说明与人物台词；与 LTX 自身文本编码器相互独立。",
             "defaultModel": transition_prompt_default,
             "missingDefault": transition_prompt_default not in transition_prompt_models,
         },
@@ -1646,6 +1716,13 @@ def _clean_config_defaults() -> dict[str, Any]:
         "vae_overlap": 64,
         "vae_temporal_size": 512,
         "vae_temporal_overlap": 4,
+        "dialogue_inference_enabled": False,
+        "dialogue_source": "提示词和参考图",
+        "dialogue_style": "自然对白",
+        "dialogue_language": "中文",
+        "dialogue_character_hint": "",
+        "dialogue_line_count": 1,
+        "dialogue_system_prompt": DEFAULT_DIALOGUE_SYSTEM_PROMPT,
     }
 
 
@@ -1800,6 +1877,17 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
         config["seed_mode"] = "固定"
     config["global_prompt"] = str(config.get("global_prompt") or "").strip()
     config["lora_slots"] = _normalize_lora_slots(config.get("lora_slots"))
+    config["dialogue_inference_enabled"] = _safe_bool(config.get("dialogue_inference_enabled"), False)
+    config["dialogue_source"] = str(config.get("dialogue_source") or "提示词和参考图").strip()
+    if config["dialogue_source"] not in ("提示词和参考图", "仅提示词", "仅参考图"):
+        config["dialogue_source"] = "提示词和参考图"
+    config["dialogue_style"] = str(config.get("dialogue_style") or "自然对白").strip()
+    config["dialogue_language"] = str(config.get("dialogue_language") or "中文").strip()
+    config["dialogue_character_hint"] = str(config.get("dialogue_character_hint") or "").strip()
+    config["dialogue_line_count"] = int(_safe_float(config.get("dialogue_line_count"), 1, 1, 8))
+    config["dialogue_system_prompt"] = str(
+        config.get("dialogue_system_prompt") or DEFAULT_DIALOGUE_SYSTEM_PROMPT
+    ).strip()
     return config
 
 
@@ -1861,7 +1949,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
     CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考；接入 MTV 人声分段列表时，按索引将每段音频与图片队列中的一张图配对生成并合并。"
+    DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。正向提示词可用 --- 分段：提示词段数=图片数时逐图配对，图片数=提示词段数+1 时按相邻首尾帧配对。人物参考只走 MSR 身份引导，不计入场景图或输出画面。"
     SEARCH_ALIASES = ["SSL","ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO", "IMAGE")
     RETURN_NAMES = ("🎬 视频生成结果", "🖼️ 视频帧序列")
@@ -1930,7 +2018,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "default": DEFAULT_PROMPT,
                         "multiline": True,
                         "display_name": "📝 正向提示词",
-                        "tooltip": "📝 正向提示词。启用转场 LoRA 的段会自动在前面补 zhuanchang；也可从字段前接入 STRING 覆盖。",
+                        "tooltip": "📝 正向提示词。多图时可用 --- 分段：段数=图片数时逐图配对；图片数=段数+1 时依次对应相邻首尾帧。人物参考不参与这里的图片计数。启用转场 LoRA 的段会自动补 zhuanchang。",
                     },
                 ),
                 "negative_prompt": (
@@ -2035,7 +2123,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     GJJ_BATCH_IMAGE_TYPE,
                     {
                         "display_name": "👤 人物参考",
-                        "tooltip": "👤 可选。接入 GJJ_LazyImageStudio 的人物参考批次；按 LTX2.3+MSR 多图参考工作流，将人物参考作为 image、当前段场景图作为 background 写入 IC-LoRA Guide，所有分段共用同一组人物特征。",
+                        "tooltip": "👤 可选。人物图只进入 LTX2.3+MSR 身份引导，所有分段共用；不会计入场景数量，不会作为首帧、尾帧或输出画面。当前段场景图仅作为 MSR background。",
                     },
                 ),
             },
@@ -2127,7 +2215,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
         scene_images, target_width, target_height = _normalize_ltx_scene_images(scene_images, target_width, target_height)
         _send_status(unique_id, f"Clean v40 输入统计：{scene_source_summary}；有效场景 {len(scene_images)} 张；重复移除 {duplicate_removed}；目标尺寸 {target_width}x{target_height}（{target_source} / 8倍数对齐 / INPUT_IS_LIST）")
         if character_reference_images:
-            _send_status(unique_id, f"Clean v40 人物参考：已接收 {len(character_reference_images)} 张，将按 MSR 工作流应用到每一段；当前段场景图作为 background。")
+            _send_status(unique_id, f"Clean v40 人物参考：已接收 {len(character_reference_images)} 张，将单独按 MSR 身份分支应用到每一段；不计入场景、首尾帧或输出画面，当前段场景图仅作为 background。")
         elif skipped_character_placeholders:
             _send_status(unique_id, "Clean v40 人物参考：仅收到空占位图，已忽略。")
         debug_parts = [f"{name}={_debug_value_signature(value)}→{_count_split_images(value)}" for name, _, value in scene_items]
@@ -2263,12 +2351,14 @@ class GJJ_LTX23ImageToVideoMultiRef:
                 _send_status(unique_id, f"LoRA 测试触发词：{test_lora_trigger}")
 
         prompt_character_references: list[Any] = []
+        prompt_library_contexts: list[str] = []
         if prompt_segments:
             try:
                 from .gjj_storyboard_grid_generator import _character_prompt_and_reference
 
                 resolved_segments: list[str] = []
                 for segment_index, segment_prompt in enumerate(prompt_segments, start=1):
+                    prompt_library_contexts.append(_prompt_library_context(segment_prompt))
                     resolved_prompt, library_reference = _character_prompt_and_reference(
                         segment_prompt,
                         contain_reference_images=True,
@@ -2300,7 +2390,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
         if has_prompt_character_assets and not source_video_detected and not has_input_audio:
             route_key = "msr_character_multiref"
             route_label = "MSR人物多图参考"
-            route_tip = "提示词命中 @角色名 并成功取得角色资产；优先走 LTX2.3+MSR 多图参考分支，不走 T2V 文生视频。"
+            route_tip = "已取得人物参考资产；人物图单独走 LTX2.3+MSR 身份分支，不计入场景图，也不会作为首尾帧或输出画面。"
         _send_status(
             unique_id,
             f"Clean v40 分支：{route_label}（{route_key}）。来源：{scene_source_summary}；有效场景 {len(scene_images)} 张。{route_tip}",
@@ -2341,6 +2431,13 @@ class GJJ_LTX23ImageToVideoMultiRef:
             auto_transition_prompt=config.get("auto_transition_prompt", False),
             transition_prompt_model=config.get("transition_prompt_model", ""),
             test_lora_name=config["test_lora_name"],
+            dialogue_inference_enabled=config.get("dialogue_inference_enabled", False),
+            dialogue_source=config.get("dialogue_source", "提示词和参考图"),
+            dialogue_style=config.get("dialogue_style", "自然对白"),
+            dialogue_language=config.get("dialogue_language", "中文"),
+            dialogue_character_hint=config.get("dialogue_character_hint", ""),
+            dialogue_line_count=config.get("dialogue_line_count", 1),
+            dialogue_system_prompt=config.get("dialogue_system_prompt", DEFAULT_DIALOGUE_SYSTEM_PROMPT),
             stage1_sampler=config["stage1_sampler"],
             stage2_sampler=config["stage2_sampler"],
             stage1_steps=config["stage1_steps"],
@@ -2376,6 +2473,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
             vocal_replace_with="",
             prompt_segments=prompt_segments if len(prompt_segments) > 1 and not is_mtv_audio_queue else None,
             prompt_character_references=prompt_character_references if len(prompt_segments) > 1 and not is_mtv_audio_queue else None,
+            prompt_library_contexts=prompt_library_contexts or None,
             prompt_segment_seconds=float(resolved_payload["segment_seconds"]),
         )
 

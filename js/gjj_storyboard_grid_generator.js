@@ -3,6 +3,9 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
 import { getModelFamilyPresets, matchModelFamilyPreset } from "./gjj_model_family_preset_table.js";
+import { bindGjjMediaDrag } from "./gjj_media_drag.js";
+import { ensureGjjTempImagePreview, gjjTempImageOriginalItem, gjjTempImagePreviewItem, loadGjjPreviewBlobUrl, preloadGjjFullImage } from "./gjj_temp_image_preview.js";
+import { gjjCharacterThumbnailPath, gjjSceneThumbnailPath, loadGjjLibraryThumbnailBlobUrl } from "./gjj_library_thumbnails.js";
 
 const TARGET_NODES = new Set(["GJJ_StoryboardGridGenerator"]);
 const SETTINGS_OPEN_PROPERTY = "gjj_storyboard_grid_settings_open_v3";
@@ -22,13 +25,18 @@ const FORCE_GENERATE_INPUT = "force_generate_all";
 const PREVIEW_IMAGES_INPUT = "storyboard_preview_images";
 const STORYBOARD_LORA_NAME = "storyboard_lora_name";
 const RECONNECT_LINKS_PROPERTY = "gjj_storyboard_grid_last_upstream_links";
+const CACHED_PREVIEW_IMAGES_PROPERTY = "gjj_storyboard_grid_cached_preview_images_v1";
+const GRID_CELLS_PROPERTY = "gjj_storyboard_grid_cells_v1";
 const DEFAULT_UNET_FILTER = "flux|f2k|edit";
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const CHARACTER_REF_PATTERN = /@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:\/([0-9A-Za-z\u4e00-\u9fff._-]+))?/g;
 const SCENE_VIEW_REF_PATTERN = /\[\s*([^\[\]/:：]+?)\s*[:：]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]/g;
-const SCENE_REF_PATTERN = /🏕️?([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
+// Upstream prompt generators and older workflows may use either the camping
+// or landscape emoji for a scene reference.  Treat both as the same syntax;
+// scene picker replacements are still normalized to the canonical 🏕️ form.
+const SCENE_REF_PATTERN = /(?:🏕️?|🏞️?|🌄️?|🌆️?)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
 const COSTUME_REF_PATTERN = /(?:💼|👗|📦)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|产品|prop|product|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set(["unet_name", "lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
@@ -60,6 +68,11 @@ const PANEL_SYNC_WIDGETS = [
 	"keep_model_loaded",
 ];
 const PREVIEW_REFRESH_WIDGETS = new Set(["width", "height", "layout_mode", "gap", "size_alignment"]);
+const CACHE_INVALIDATION_WIDGETS = new Set([
+	...PANEL_SYNC_WIDGETS.filter((name) => !["prompt", UNET_FILTER_WIDGET_NAME, "keep_model_loaded"].includes(name)),
+	"lora_data",
+]);
+const CACHE_INVALIDATION_INPUTS = new Set(["prompt", "scene", "reference", "lora_chain_config"]);
 const PARAMETER_DIALOG_GROUPS = {
 	size: {
 		title: "📐 尺寸与宫格",
@@ -185,12 +198,40 @@ function observeLinkedPromptSource(node) {
 			return result;
 		};
 	}
-	if (!sourceNode.__gjjStoryboardExecutionObserved) {
-		sourceNode.__gjjStoryboardExecutionObserved = true;
+	observeLinkedCacheSources(node);
+}
+
+function linkedInputSourceNode(node, inputName) {
+	const input = getInput(node, inputName);
+	if (input?.link == null) return null;
+	const link = getGraphLink(input.link, node?.graph || app.graph);
+	return getGraphNodeById(linkOriginId(link), node?.graph || app.graph);
+}
+
+function refreshStoryboardsFromCacheSource(sourceNode) {
+	setTimeout(() => {
+		for (const node of app.graph?._nodes || []) {
+			if (!isTarget(node)) continue;
+			const linkedNames = [...CACHE_INVALIDATION_INPUTS].filter((name) => linkedInputSourceNode(node, name) === sourceNode);
+			if (!linkedNames.length) continue;
+			const promptLinked = linkedNames.includes("prompt");
+			const nextPrompt = currentPromptText(node);
+			if (promptLinked) reconcilePreviewForPromptChange(node, nextPrompt);
+			if (promptLinked) void resolvePromptCharacters(node, nextPrompt);
+			drawPromptGridPreview(node);
+		}
+	}, 0);
+}
+
+function observeLinkedCacheSources(node) {
+	for (const inputName of CACHE_INVALIDATION_INPUTS) {
+		const sourceNode = linkedInputSourceNode(node, inputName);
+		if (!sourceNode || sourceNode.__gjjStoryboardCacheExecutionObserved) continue;
+		sourceNode.__gjjStoryboardCacheExecutionObserved = true;
 		const originalOnExecuted = sourceNode.onExecuted;
 		sourceNode.onExecuted = function (message, ...args) {
 			const result = originalOnExecuted?.apply(this, [message, ...args]);
-			refreshStoryboardsFromPromptSource(this);
+			refreshStoryboardsFromCacheSource(this);
 			return result;
 		};
 	}
@@ -849,34 +890,9 @@ function applySeedControlBeforeQueue(node) {
 		node.graph?.change?.();
 		return nextSeed;
 	}
-	const mode = seedControlMode(node);
 	const currentSeed = intValue(seedWidget.value, 0, 0, JS_SAFE_MAX_SEED_VALUE);
-	let nextSeed = currentSeed;
-	if (mode === "randomize") {
-		nextSeed = randomSeedValue();
-	} else if (mode === "increment") {
-		nextSeed = currentSeed >= JS_SAFE_MAX_SEED_VALUE ? 0 : currentSeed + 1;
-	} else if (mode === "decrement") {
-		nextSeed = currentSeed <= 0 ? JS_SAFE_MAX_SEED_VALUE : currentSeed - 1;
-	} else {
-		node.__gjjStoryboardPreparedSeed = currentSeed;
-		return currentSeed;
-	}
-	setWidgetValue(seedWidget, nextSeed);
-	node.__gjjStoryboardSeedPreparedAt = now;
-	node.__gjjStoryboardPreparedSeed = nextSeed;
-	saveParamValues(node);
-	node.setDirtyCanvas?.(true, true);
-	node.graph?.setDirtyCanvas?.(true, true);
-	node.graph?.change?.();
-	return nextSeed;
-}
-
-function prepareRandomSeedForGenerate(node) {
-	node.__gjjStoryboardRandomSeedOnce = true;
-	delete node.__gjjStoryboardPreparedSeed;
-	delete node.__gjjStoryboardSeedPreparedAt;
-	return applySeedControlBeforeQueue(node);
+	node.__gjjStoryboardPreparedSeed = currentSeed;
+	return currentSeed;
 }
 
 function syncSeedControlWidget(node) {
@@ -922,7 +938,10 @@ function patchStoryboardSeedIntoPromptData(promptData) {
 			inputs[SINGLE_CELL_INDEX_INPUT] = clampedIndices.length ? clampedIndices[0] + 1 : 0;
 			inputs[SINGLE_CELL_TOTAL_INPUT] = clampedIndices.length ? parts.length : 0;
 			inputs[SELECTED_CELL_INDICES_INPUT] = clampedIndices.length ? JSON.stringify(clampedIndices.map((value) => value + 1)) : "[]";
-			inputs[FULL_PROMPT_INPUT] = clampedIndices.length ? fullPrompt : "";
+			// Always carry the current upstream snapshot. The backend uses it when a
+			// single/multi-cell request replaces `prompt` with only the selected parts,
+			// and the completed previews then synchronize the visible grid table.
+			inputs[FULL_PROMPT_INPUT] = fullPrompt;
 			inputs[FORCE_GENERATE_INPUT] = node.__gjjStoryboardForceGenerateAll ? "true" : "false";
 			inputs[PREVIEW_IMAGES_INPUT] = JSON.stringify(storyboardPreviewImageItems(node));
 			if (clampedIndices.length) {
@@ -1173,6 +1192,31 @@ function setWidgetHidden(widget, hidden) {
 	if (widget.widget) widget.widget.style.display = "none";
 	if (widget.element) widget.element.style.display = "none";
 	if (widget.inputEl) widget.inputEl.style.display = "none";
+}
+
+function forcePromptWidgetVisible(node) {
+	const prompt = getWidget(node, "prompt");
+	if (!prompt) return;
+	prompt.hidden = false;
+	prompt.disabled = false;
+	prompt.options ||= {};
+	delete prompt.options.hidden;
+	delete prompt.options.display;
+	prompt.computeSize = (width) => [Math.max(260, Number(width || node?.size?.[0] || 420)), 120];
+	prompt.getHeight = () => 120;
+	prompt.computedHeight = 120;
+	prompt.size = [Math.max(260, Number(node?.size?.[0] || 420)), 120];
+	for (const element of [prompt.widget, prompt.element, prompt.inputEl]) {
+		if (!element?.style) continue;
+		element.style.removeProperty("display");
+		element.style.removeProperty("height");
+		element.style.removeProperty("margin");
+		element.style.removeProperty("padding");
+	}
+	if (prompt.inputEl?.style) {
+		prompt.inputEl.style.minHeight = "108px";
+		prompt.inputEl.style.display = "block";
+	}
 }
 
 function updateSettingsButtonState(node) {
@@ -2175,7 +2219,6 @@ function createButtons(node) {
 		node.__gjjStoryboardForceGenerateAll = Boolean(node.__gjjStoryboardPromptChangedSinceGenerate)
 			|| generatedCount >= promptCount;
 		try {
-			prepareRandomSeedForGenerate(node);
 			updateDiceButtonState();
 			const ok = await queueOnlyCurrentNode(node);
 			if (ok && currentPromptText(node) === effectivePrompt) {
@@ -2237,7 +2280,6 @@ function createButtons(node) {
 		node.__gjjStoryboardSingleCellIndex = selectedIndices[0];
 		node.__gjjStoryboardSingleCellIndices = selectedIndices;
 		try {
-			prepareRandomSeedForGenerate(node);
 			updateDiceButtonState();
 			const ok = await queueOnlyCurrentNode(node);
 			singleButton.textContent = ok ? (selectedIndices.length > 1 ? "✅ 多格" : "✅ 单格") : "❌ 单格";
@@ -2376,6 +2418,10 @@ function createImagePreview(node) {
 	canvas.addEventListener("mousemove", (event) => {
 		canvas.style.cursor = storyboardReferenceIconHit(node, event) ? "pointer" : "pointer";
 	});
+	canvas.addEventListener("pointerdown", (event) => {
+		const hit = storyboardCellHit(node, event);
+		if (hit >= 0 && node.__gjjStoryboardCellPreviewItems?.[hit]?.filename) setSelectedCellIndex(node, hit);
+	});
 	canvas.addEventListener("dblclick", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -2387,6 +2433,7 @@ function createImagePreview(node) {
 	});
 	const image = document.createElement("img");
 	image.alt = "Storyboard preview";
+	image.setAttribute("aria-label", "当前宫格缩略大图，点击查看原图，也可拖到画布或任意对象预览器");
 	image.style.cssText = [
 		"display:none",
 		"width:100%",
@@ -2396,8 +2443,22 @@ function createImagePreview(node) {
 		"border:1px solid #33434a",
 		"border-radius:8px",
 		"box-sizing:border-box",
+		"cursor:zoom-in",
 	].join(";");
 	image.addEventListener("load", () => GJJ_Utils.refreshNode?.(node));
+	image.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const selected = selectedCellIndex(node);
+		const item = node.__gjjStoryboardCellPreviewItems?.[selected];
+		if (item?.filename) openStoryboardFullImage(item, selected + 1);
+	});
+	image.addEventListener("pointerenter", () => {
+		const item = node.__gjjStoryboardCellPreviewItems?.[selectedCellIndex(node)];
+		if (item?.filename) void preloadStoryboardFullImage(item);
+	}, { passive: true });
+	bindGjjMediaDrag(image, () => node.__gjjStoryboardCellPreviewItems?.[selectedCellIndex(node)] || null);
+	bindGjjMediaDrag(canvas, () => node.__gjjStoryboardCellPreviewItems?.[selectedCellIndex(node)] || null);
 	container.append(status, canvas, image);
 	node.__gjjStoryboardPreviewStatus = status;
 	node.__gjjStoryboardGridCanvas = canvas;
@@ -2693,12 +2754,15 @@ function splitCharacterViewSuffix(name, characterItems = null) {
 }
 
 function sceneCoverUrl(scene) {
-	const asset = (scene?.assets || []).find((item) => item?.preview_url);
-	return asset?.preview_url || scene?.cover || "";
+	return gjjSceneThumbnailPath(scene);
 }
 
 function itemCoverUrl(item) {
 	return item?.cover || (item?.assets || []).find((asset) => asset?.preview_url)?.preview_url || "";
+}
+
+function characterCoverUrl(character) {
+	return gjjCharacterThumbnailPath(character);
 }
 
 function addUniqueReferenceIcon(icons, kind, name, url = "", fallback = "") {
@@ -2814,19 +2878,66 @@ function reconcilePreviewForPromptChange(node, nextText) {
 	const normalized = String(nextText ?? "");
 	const previous = node.__gjjStoryboardLastEffectivePromptText;
 	node.__gjjStoryboardLastEffectivePromptText = normalized;
+	if (node.__gjjStoryboardRestoringPreviewCache) return false;
 	if (previous === undefined || previous === normalized) return false;
+	const previousParts = parsePromptParts(previous);
 	const nextParts = parsePromptParts(normalized);
-	node.__gjjStoryboardCellPreviewUrls = [];
-	node.__gjjStoryboardCellPreviewImages = [];
-	node.__gjjStoryboardCellPreviewItems = [];
-	node.__gjjStoryboardActualPromptParts = [];
+	const changedIndices = [];
+	const count = Math.max(previousParts.length, nextParts.length);
+	for (let index = 0; index < count; index += 1) {
+		if (String(previousParts[index] || "") !== String(nextParts[index] || "")) {
+			changedIndices.push(index);
+		}
+	}
+	if (!changedIndices.length) return false;
+	invalidateStoryboardGeneratedCache(node, changedIndices, nextParts.length);
+	const cells = storyboardGridCells(node, normalized);
+	for (const index of changedIndices) {
+		if (!cells[index]) continue;
+		const refs = promptCellReferences(nextParts[index]);
+		cells[index].prompt = String(nextParts[index] || "");
+		cells[index].seed = cellSeed(node, index + 1);
+		cells[index].characters = refs.characters;
+		cells[index].scenes = refs.scenes;
+		cells[index].image = null;
+	}
+	saveGridCells(node, cells, true);
 	node.__gjjStoryboardActualPromptTotal = nextParts.length;
 	node.__gjjStoryboardResolvedCharacters = new Map();
 	node.__gjjStoryboardReferenceIconImages?.clear?.();
-	node.__gjjStoryboardPromptChangedSinceGenerate = true;
 	closeReferencePicker(node);
 	drawPromptGridPreview(node);
 	return true;
+}
+
+function invalidateStoryboardGeneratedCache(node, changedIndices = null, nextCount = 0) {
+	if (!node) return;
+	node.__gjjStoryboardPreviewRestoreToken = Symbol("storyboard-preview-invalidated");
+	const changed = Array.isArray(changedIndices) ? new Set(changedIndices) : null;
+	if (!changed) {
+		node.__gjjStoryboardCellPreviewUrls = [];
+		node.__gjjStoryboardCellPreviewImages = [];
+		node.__gjjStoryboardCellPreviewItems = [];
+		node.__gjjStoryboardActualPromptParts = [];
+	} else {
+		for (const index of changed) {
+			if (node.__gjjStoryboardCellPreviewUrls) node.__gjjStoryboardCellPreviewUrls[index] = "";
+			if (node.__gjjStoryboardCellPreviewImages) node.__gjjStoryboardCellPreviewImages[index] = null;
+			if (node.__gjjStoryboardCellPreviewItems) node.__gjjStoryboardCellPreviewItems[index] = null;
+			if (node.__gjjStoryboardActualPromptParts) node.__gjjStoryboardActualPromptParts[index] = undefined;
+		}
+		for (const key of ["__gjjStoryboardCellPreviewUrls", "__gjjStoryboardCellPreviewImages", "__gjjStoryboardCellPreviewItems", "__gjjStoryboardActualPromptParts"]) {
+			if (Array.isArray(node[key])) node[key].length = Math.max(0, nextCount);
+		}
+	}
+	node.__gjjStoryboardPromptChangedSinceGenerate = true;
+	node.properties ||= {};
+	const cells = storyboardGridCells(node);
+	for (const cell of cells) {
+		const index = cell.index - 1;
+		if (!changed || index >= nextCount || changed.has(index)) cell.image = null;
+	}
+	saveGridCells(node, cells);
 }
 
 function promptReferenceIcons(promptText, node = null) {
@@ -2837,27 +2948,23 @@ function promptReferenceIcons(promptText, node = null) {
 	const costumes = globalThis.GJJ_CostumeLibrary?.items || [];
 	for (const match of text.matchAll(SCENE_VIEW_REF_PATTERN)) {
 		const rawName = String(match[1] || "").trim();
-		const scene = findLibraryItem(scenes, rawName);
-		if (scene) {
-			const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
-			if (icon) icon.source = { pattern: match[0], scene, place: "" };
-		}
+		const scene = findLibraryItem(scenes, rawName) || { id: rawName, name: rawName, annotations: [] };
+		const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
+		if (icon) icon.source = { pattern: match[0], scene, place: "" };
 	}
 	for (const match of text.matchAll(SCENE_REF_PATTERN)) {
 		const rawName = match[1] || match[3] || "";
 		if (!rawName || rawName === "场景" || /[:：]/.test(rawName)) continue;
-		const scene = findLibraryItem(scenes, rawName);
-		if (scene) {
-			const place = match[2] || match[4] || "";
-			const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
-			if (icon) icon.source = { pattern: match[0], scene, place };
-		}
+		const scene = findLibraryItem(scenes, rawName) || { id: rawName, name: rawName, annotations: [] };
+		const place = match[2] || match[4] || "";
+		const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
+		if (icon) icon.source = { pattern: match[0], scene, place };
 	}
 	for (const match of text.matchAll(CHARACTER_REF_PATTERN)) {
 		const [name, suffixView] = splitCharacterViewSuffix(match[1] || "", characters);
 		const character = findExactLibraryItem(characters, name);
 		if (character) {
-			const icon = addUniqueReferenceIcon(icons, "character", character.name || character.id || name, character.cover, "👤");
+			const icon = addUniqueReferenceIcon(icons, "character", character.name || character.id || name, characterCoverUrl(character), "👤");
 			if (icon) icon.source = { pattern: match[0], character, view: match[2] || suffixView || "" };
 			continue;
 		}
@@ -2879,9 +2986,16 @@ function referenceIconImage(node, url) {
 	if (cache.has(url)) return cache.get(url);
 	const image = new Image();
 	image.crossOrigin = "anonymous";
+	image.loading = "eager";
+	image.fetchPriority = "high";
+	image.decoding = "sync";
 	image.onload = () => drawPromptGridPreview(node);
 	image.onerror = () => drawPromptGridPreview(node);
-	image.src = url;
+	const kind = String(url).includes("/scene_library/") ? "scene" : "character";
+	const id = decodeURIComponent(String(url).split("/").pop()?.replace(/\.(?:png|jpg)(?:\?.*)?$/i, "") || "");
+	void loadGjjLibraryThumbnailBlobUrl(api, kind, id).then((blobUrl) => {
+		image.src = blobUrl || url;
+	});
 	cache.set(url, image);
 	return image;
 }
@@ -2959,10 +3073,13 @@ function updateSelectedPreviewImage(node) {
 	const url = node.__gjjStoryboardCellPreviewUrls?.[selected] || "";
 	if (!url) {
 		image.removeAttribute("src");
+		image.removeAttribute("data-gjj-storyboard-cell");
 		image.style.display = "none";
 		return;
 	}
 	if ((image.getAttribute("src") || "") !== url) image.src = url;
+	image.dataset.gjjStoryboardCell = String(selected + 1);
+	image.title = `宫格 ${selected + 1} · 点击查看原图 · 可拖到空白画布或任意对象预览器`;
 	image.style.display = "block";
 }
 
@@ -3385,6 +3502,7 @@ function editStoryboardCellPrompt(node, index) {
 	title.style.cssText = "color:#e8f1ed;font:700 13px sans-serif;";
 	const area = document.createElement("textarea");
 	area.value = parts[index] || "";
+	const initialEditorValue = area.value;
 	area.readOnly = !editable;
 	area.style.cssText = "min-height:150px;resize:vertical;background:#111a1f;color:#e8f1ed;border:1px solid #34444b;border-radius:6px;padding:8px;font:13px/1.35 sans-serif;outline:none;";
 	const actions = document.createElement("div");
@@ -3406,6 +3524,10 @@ function editStoryboardCellPrompt(node, index) {
 	}
 	save.onclick = () => {
 		if (!editable) return;
+		if (area.value === initialEditorValue) {
+			overlay.remove();
+			return;
+		}
 		parts[index] = area.value.trim();
 		const serialized = serializePromptParts(parts);
 		if (sourceWidget) {
@@ -3432,21 +3554,201 @@ function editStoryboardCellPrompt(node, index) {
 	setTimeout(() => area.focus(), 0);
 }
 
-function previewImageUrl(item) {
-	if (!item?.filename) return "";
-	const path = `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
+function previewImageUrl(item, useThumbnail = false, cacheBust = "") {
+	if (!item?.filename && !item?.original_filename) return "";
+	const target = useThumbnail ? gjjTempImagePreviewItem(item) : gjjTempImageOriginalItem(item);
+	const filename = String(target?.filename || "");
+	const type = String(target?.type || "temp");
+	const subfolder = String(target?.subfolder || "");
+	const bust = cacheBust ? `&gjj_repair=${encodeURIComponent(cacheBust)}` : "";
+	const path = `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${bust}`;
 	return api?.apiURL ? api.apiURL(path) : path;
 }
 
+function preloadStoryboardFullImage(item) {
+	const url = previewImageUrl(item, false);
+	return preloadGjjFullImage(url, "high");
+}
+
+function openStoryboardFullImage(item, cellNumber = 1) {
+	const originalUrl = previewImageUrl(item, false);
+	if (!originalUrl) return;
+	const thumbnailUrl = previewImageUrl(item, true);
+	const displayNumber = Math.max(1, Number(cellNumber) || 1);
+	const overlay = document.createElement("div");
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:100000",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"overflow:hidden",
+		"background:rgba(0,0,0,.92)",
+		"backdrop-filter:blur(8px)",
+		"cursor:zoom-out",
+	].join(";");
+
+	const image = document.createElement("img");
+	image.alt = `宫格 ${displayNumber} 原图`;
+	image.dataset.gjjStoryboardFullTarget = originalUrl;
+	image.style.cssText = [
+		"max-width:94vw",
+		"max-height:94vh",
+		"object-fit:contain",
+		"border-radius:8px",
+		"box-shadow:0 14px 48px rgba(0,0,0,.55)",
+		"transform-origin:center center",
+		"transition:transform .08s ease",
+		"cursor:grab",
+	].join(";");
+	image.src = thumbnailUrl || originalUrl;
+	bindGjjMediaDrag(image, () => item);
+
+	const hint = document.createElement("div");
+	hint.style.cssText = [
+		"position:absolute",
+		"left:50%",
+		"bottom:18px",
+		"transform:translateX(-50%)",
+		"padding:5px 10px",
+		"border-radius:999px",
+		"background:rgba(0,0,0,.55)",
+		"color:#fff",
+		"font:12px/1.3 system-ui,'Microsoft YaHei',sans-serif",
+		"white-space:nowrap",
+		"pointer-events:none",
+	].join(";");
+	hint.textContent = `宫格 ${displayNumber} · 正在载入原图…`;
+
+	let scale = 1;
+	const applyScale = () => {
+		image.style.transform = `scale(${scale})`;
+		if (image.dataset.gjjStoryboardFullReady === "true") {
+			hint.textContent = scale === 1
+				? `宫格 ${displayNumber} · 原图 · 滚轮缩放 · 点击关闭`
+				: `宫格 ${displayNumber} · 原图缩放 ${Math.round(scale * 100)}% · 点击关闭`;
+		}
+	};
+	image.addEventListener("load", () => {
+		if (image.dataset.gjjStoryboardLoadingOriginal !== "true") return;
+		if (image.getAttribute("src") !== originalUrl) return;
+		delete image.dataset.gjjStoryboardLoadingOriginal;
+		image.dataset.gjjStoryboardFullReady = "true";
+		applyScale();
+	});
+	image.addEventListener("error", () => {
+		if (image.dataset.gjjStoryboardLoadingOriginal !== "true") return;
+		delete image.dataset.gjjStoryboardLoadingOriginal;
+		hint.textContent = `宫格 ${displayNumber} · 原图载入失败`;
+		if (thumbnailUrl && thumbnailUrl !== originalUrl) image.src = thumbnailUrl;
+	});
+	overlay.addEventListener("wheel", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		scale = Math.max(0.1, Math.min(10, scale * (event.deltaY > 0 ? 0.9 : 1.1)));
+		applyScale();
+	}, { passive: false });
+	const close = () => {
+		document.removeEventListener("keydown", onKeyDown, true);
+		overlay.remove();
+	};
+	const onKeyDown = (event) => {
+		if (event.key === "Escape") close();
+	};
+	overlay.addEventListener("click", close);
+	image.addEventListener("click", close);
+	document.addEventListener("keydown", onKeyDown, true);
+	overlay.append(image, hint);
+	document.body.appendChild(overlay);
+	const revealOriginal = () => {
+		if (!image.isConnected || image.dataset.gjjStoryboardFullTarget !== originalUrl) return;
+		image.dataset.gjjStoryboardLoadingOriginal = "true";
+		image.src = originalUrl;
+	};
+	if (typeof requestAnimationFrame === "function") requestAnimationFrame(revealOriginal);
+	else setTimeout(revealOriginal, 0);
+	void preloadStoryboardFullImage(item).then((entry) => {
+		if (!image.isConnected || image.dataset.gjjStoryboardFullTarget !== originalUrl) return;
+		if (!entry) {
+			if (image.dataset.gjjStoryboardFullReady !== "true") {
+				hint.textContent = `宫格 ${displayNumber} · 原图载入失败 · 点击关闭`;
+			}
+			return;
+		}
+		delete image.dataset.gjjStoryboardLoadingOriginal;
+		image.dataset.gjjStoryboardFullReady = "true";
+		if (image.getAttribute("src") !== originalUrl) image.src = originalUrl;
+		applyScale();
+	});
+}
+
+function loadStoryboardPreviewImage(item) {
+	return new Promise(async (resolve) => {
+		if (!item?.filename) {
+			resolve(null);
+			return;
+		}
+		const image = new Image();
+		image.loading = "eager";
+		image.fetchPriority = "high";
+		image.decoding = "sync";
+		const originalUrl = previewImageUrl(item, false);
+		const thumbnailUrl = previewImageUrl(item, true);
+		let usingOriginal = !thumbnailUrl || thumbnailUrl === originalUrl;
+		let repairAttempted = false;
+		image.onload = () => resolve({ item, image, url: image.src });
+		image.onerror = () => {
+			if (!usingOriginal && !repairAttempted) {
+				repairAttempted = true;
+				void ensureGjjTempImagePreview(api, item).then((repaired) => {
+					if (repaired) image.src = previewImageUrl({ ...item, ...repaired }, true, Date.now());
+					else {
+						usingOriginal = true;
+						image.src = originalUrl;
+					}
+				});
+				return;
+			}
+			if (!usingOriginal && originalUrl) {
+				usingOriginal = true;
+				image.src = originalUrl;
+				return;
+			}
+			resolve(null);
+		};
+		const requestedUrl = thumbnailUrl || originalUrl;
+		const blobUrl = await loadGjjPreviewBlobUrl(requestedUrl);
+		image.src = blobUrl || requestedUrl;
+	});
+}
+
 function storyboardPreviewImageItems(node) {
+	const tableItems = parseGridCells(node?.properties?.[GRID_CELLS_PROPERTY])
+		.filter((cell) => cell.image?.filename)
+		.map((cell) => ({ index: cell.index, ...normalizedCellImage(cell.image) }));
+	if (tableItems.length) return tableItems;
 	const items = node?.__gjjStoryboardCellPreviewItems || [];
 	const fromItems = items
-		.map((item, index) => ({
-			index: index + 1,
-			filename: String(item?.filename || ""),
-			subfolder: String(item?.subfolder || ""),
-			type: String(item?.type || "temp"),
-		}))
+		.map((item, index) => {
+			const original = gjjTempImageOriginalItem(item);
+			const preview = gjjTempImagePreviewItem(item);
+			return {
+				index: index + 1,
+				filename: String(item?.filename || ""),
+				subfolder: String(item?.subfolder || ""),
+				type: String(item?.type || "temp"),
+				preview_filename: String(item?.preview_filename || preview?.filename || ""),
+				preview_subfolder: String(item?.preview_subfolder ?? preview?.subfolder ?? item?.subfolder ?? ""),
+				preview_type: String(item?.preview_type || preview?.type || item?.type || "temp"),
+				preview_width: Number(item?.preview_width || 0),
+				preview_height: Number(item?.preview_height || 0),
+				original_filename: String(original?.filename || item?.filename || ""),
+				original_subfolder: String(original?.subfolder ?? item?.subfolder ?? ""),
+				original_type: String(original?.type || item?.type || "temp"),
+				cache_signature: String(item?.cache_signature || ""),
+			};
+		})
 		.filter((item) => item.filename);
 	if (fromItems.length) return fromItems;
 	const urls = node?.__gjjStoryboardCellPreviewUrls || [];
@@ -3458,11 +3760,233 @@ function storyboardPreviewImageItems(node) {
 				filename: parsed.searchParams.get("filename") || "",
 				subfolder: parsed.searchParams.get("subfolder") || "",
 				type: parsed.searchParams.get("type") || "temp",
+				preview_filename: "",
+				original_filename: "",
+				original_subfolder: "",
+				original_type: "temp",
+				cache_signature: "",
 			};
 		} catch (_) {
 			return { index: index + 1, filename: "", subfolder: "", type: "temp" };
 		}
 	}).filter((item) => item.filename);
+}
+
+function parseStoryboardPreviewImageItems(value) {
+	if (Array.isArray(value)) return value;
+	try {
+		const parsed = JSON.parse(String(value || "[]"));
+		return Array.isArray(parsed) ? parsed : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function promptCellReferences(promptText) {
+	const text = String(promptText || "");
+	const characters = [];
+	const scenes = [];
+	const add = (target, value) => {
+		const normalized = String(value || "").trim();
+		if (normalized && !target.includes(normalized)) target.push(normalized);
+	};
+	const characterItems = storyboardCharacterItems(null);
+	for (const match of text.matchAll(CHARACTER_REF_PATTERN)) {
+		const [name] = splitCharacterViewSuffix(match[1], characterItems);
+		add(characters, name || match[1]);
+	}
+	for (const match of text.matchAll(SCENE_REF_PATTERN)) add(scenes, match[1] || match[3]);
+	return { characters, scenes };
+}
+
+function normalizedCellImage(item) {
+	if (!item?.filename) return null;
+	const original = gjjTempImageOriginalItem(item);
+	const preview = gjjTempImagePreviewItem(item);
+	return {
+		filename: String(item.filename || ""),
+		subfolder: String(item.subfolder || ""),
+		type: String(item.type || "temp"),
+		original_filename: String(original?.filename || item.filename || ""),
+		original_subfolder: String(original?.subfolder ?? item.subfolder ?? ""),
+		original_type: String(original?.type || item.type || "temp"),
+		preview_filename: String(item.preview_filename || preview?.filename || ""),
+		preview_subfolder: String(item.preview_subfolder ?? preview?.subfolder ?? item.subfolder ?? ""),
+		preview_type: String(item.preview_type || preview?.type || item.type || "temp"),
+		preview_width: Number(item.preview_width || 0),
+		preview_height: Number(item.preview_height || 0),
+		cache_signature: String(item.cache_signature || ""),
+	};
+}
+
+function parseGridCells(value) {
+	let cells = value;
+	if (!Array.isArray(cells)) {
+		try { cells = JSON.parse(String(value || "[]")); } catch (_) { cells = []; }
+	}
+	return Array.isArray(cells) ? cells.filter((cell) => cell && Number(cell.index) > 0) : [];
+}
+
+function cellSeed(node, index) {
+	const base = intValue(node?.__gjjStoryboardPreparedSeed ?? getWidget(node, "seed")?.value, 0, 0, JS_SAFE_MAX_SEED_VALUE);
+	return Math.min(JS_SAFE_MAX_SEED_VALUE, base + Math.max(0, Number(index) - 1));
+}
+
+function storyboardGridCells(node, promptText = currentPromptText(node), legacyImages = null) {
+	node.properties ||= {};
+	const parts = parsePromptParts(promptText);
+	const existing = parseGridCells(node.properties[GRID_CELLS_PROPERTY]);
+	const legacy = legacyImages || parseStoryboardPreviewImageItems(node.properties[CACHED_PREVIEW_IMAGES_PROPERTY]);
+	const cells = parts.map((prompt, offset) => {
+		const index = offset + 1;
+		const previous = existing.find((cell) => Number(cell.index) === index) || {};
+		const refs = promptCellReferences(prompt);
+		return {
+			index,
+			prompt: String(prompt || ""),
+			seed: Number.isFinite(Number(previous.seed)) ? Number(previous.seed) : cellSeed(node, index),
+			characters: refs.characters,
+			scenes: refs.scenes,
+			image: normalizedCellImage(previous.image || legacy.find((item) => Number(item.index) === index)),
+		};
+	});
+	node.properties[GRID_CELLS_PROPERTY] = cells;
+	return cells;
+}
+
+function saveGridCells(node, cells, markDirty = false) {
+	node.properties ||= {};
+	const normalized = parseGridCells(cells).map((cell) => ({ ...cell, image: normalizedCellImage(cell.image) }));
+	node.properties[GRID_CELLS_PROPERTY] = normalized;
+	const images = normalized.filter((cell) => cell.image?.filename).map((cell) => ({ index: cell.index, ...cell.image }));
+	if (images.length) node.properties[CACHED_PREVIEW_IMAGES_PROPERTY] = images;
+	else delete node.properties[CACHED_PREVIEW_IMAGES_PROPERTY];
+	const cacheWidget = getWidget(node, PREVIEW_IMAGES_INPUT);
+	if (cacheWidget) cacheWidget.value = JSON.stringify(images);
+	if (markDirty) {
+		node.graph?.change?.();
+		node.setDirtyCanvas?.(true, true);
+	}
+	return normalized;
+}
+
+function clearGridCellsFrom(node, startIndex, promptText = currentPromptText(node)) {
+	const cells = storyboardGridCells(node, promptText);
+	const start = Math.max(1, Number(startIndex) || 1);
+	for (const cell of cells) {
+		if (cell.index >= start) cell.image = null;
+	}
+	saveGridCells(node, cells, true);
+	return cells;
+}
+
+function recoverGridImagesFromWorkflow(node, expectedCount) {
+	const graph = node?.graph || app.graph;
+	for (const candidate of graph?._nodes || []) {
+		if (candidate === node) continue;
+		const held = candidate?.properties?.gjj_any_preview_held_images;
+		const containers = Array.isArray(held) ? held : [held];
+		for (const container of containers) {
+			const frames = Array.isArray(container?.sequence_frames) ? container.sequence_frames : [];
+			if (frames.length !== expectedCount) continue;
+			return frames.map((frame, offset) => ({
+				index: offset + 1,
+				...normalizedCellImage({
+					...frame,
+					filename: String(frame.original_filename || frame.filename || ""),
+					subfolder: "GJJ/PreviewCache",
+					type: "output",
+					original_subfolder: "GJJ/PreviewCache",
+					original_type: "output",
+					preview_subfolder: "GJJ/PreviewCache",
+					preview_type: "output",
+				}),
+			}));
+		}
+	}
+	return [];
+}
+
+function cacheStoryboardPreviewImages(node, markDirty = false, preserveExisting = false) {
+	if (!node) return [];
+	node.properties ||= {};
+	const runtimeItems = storyboardPreviewImageItems(node);
+	const existingItems = parseStoryboardPreviewImageItems(node.properties[CACHED_PREVIEW_IMAGES_PROPERTY]);
+	const items = runtimeItems.length ? runtimeItems : (preserveExisting ? existingItems : []);
+	const cells = storyboardGridCells(node, currentPromptText(node), items);
+	for (const item of items) {
+		const cell = cells.find((entry) => entry.index === Number(item.index));
+		if (cell) cell.image = normalizedCellImage(item);
+	}
+	saveGridCells(node, cells, markDirty);
+	const cacheWidget = getWidget(node, PREVIEW_IMAGES_INPUT);
+	if (cacheWidget) cacheWidget.value = JSON.stringify(items);
+	return items;
+}
+
+async function restoreCachedStoryboardPreviewImages(node, cachedItems) {
+	const items = Array.isArray(cachedItems) ? cachedItems : [];
+	const normalized = items.map((item) => ({
+		index: Math.max(1, Math.round(Number(item?.index) || 1)),
+		filename: String(item?.filename || ""),
+		subfolder: String(item?.subfolder || ""),
+		type: String(item?.type || "temp"),
+		preview_filename: String(item?.preview_filename || ""),
+		preview_subfolder: String(item?.preview_subfolder ?? item?.subfolder ?? ""),
+		preview_type: String(item?.preview_type || item?.type || "temp"),
+		preview_width: Number(item?.preview_width || 0),
+		preview_height: Number(item?.preview_height || 0),
+		original_filename: String(item?.original_filename || item?.filename || ""),
+		original_subfolder: String(item?.original_subfolder ?? item?.subfolder ?? ""),
+		original_type: String(item?.original_type || item?.type || "temp"),
+		cache_signature: String(item?.cache_signature || ""),
+	})).filter((item) => item.filename);
+	if (!normalized.length) {
+		return;
+	}
+	const restoreToken = Symbol("storyboard-preview-restore");
+	node.__gjjStoryboardPreviewRestoreToken = restoreToken;
+	node.__gjjStoryboardRestoringPreviewCache = true;
+	node.__gjjStoryboardCellPreviewUrls = [];
+	node.__gjjStoryboardCellPreviewImages = [];
+	node.__gjjStoryboardCellPreviewItems = normalized.map((item) => ({ ...item }));
+	const restored = [];
+	const restoreBatchSize = 4;
+	for (let start = 0; start < normalized.length; start += restoreBatchSize) {
+		if (node.__gjjStoryboardPreviewRestoreToken !== restoreToken) {
+			delete node.__gjjStoryboardRestoringPreviewCache;
+			return;
+		}
+		const batch = normalized.slice(start, start + restoreBatchSize);
+		const entries = await Promise.all(batch.map(async (item) => {
+			const entry = await loadStoryboardPreviewImage(item);
+			if (!entry || node.__gjjStoryboardPreviewRestoreToken !== restoreToken) return null;
+			const index = entry.item.index - 1;
+			node.__gjjStoryboardCellPreviewUrls[index] = entry.url;
+			node.__gjjStoryboardCellPreviewImages[index] = entry.image;
+			return entry;
+		}));
+		restored.push(...entries);
+		const loadedCount = node.__gjjStoryboardCellPreviewImages.filter(Boolean).length;
+		if (node.__gjjStoryboardPreviewStatus) {
+			node.__gjjStoryboardPreviewStatus.textContent = `已恢复 ${loadedCount}/${normalized.length} 张宫格缓存图片`;
+		}
+		drawPromptGridPreview(node);
+		updateSelectedPreviewImage(node);
+		GJJ_Utils.refreshNode?.(node);
+	}
+	if (node.__gjjStoryboardPreviewRestoreToken !== restoreToken) {
+		delete node.__gjjStoryboardRestoringPreviewCache;
+		return;
+	}
+	delete node.__gjjStoryboardRestoringPreviewCache;
+	const validItems = restored.filter(Boolean).map((entry) => entry.item);
+	cacheStoryboardPreviewImages(node, false, true);
+	const status = node.__gjjStoryboardPreviewStatus;
+	if (status) status.textContent = `已恢复 ${validItems.length}/${normalized.length} 张宫格缓存图片`;
+	drawPromptGridPreview(node);
+	updateSelectedPreviewImage(node);
+	GJJ_Utils.refreshNode?.(node);
 }
 
 function updateLivePreview(node, detail) {
@@ -3486,17 +4010,29 @@ function updateLivePreview(node, detail) {
 	if (status) {
 		status.textContent = total > 0 ? `已生成 ${index}/${total}` : "已生成预览";
 	}
-	const url = previewImageUrl(detail?.image);
-	if (url && index > 0) {
+	const item = detail?.image;
+	if (item?.filename && index > 0) {
+		const cells = storyboardGridCells(node);
+		const cell = cells[index - 1];
+		if (cell) {
+			const refs = promptCellReferences(detail?.prompt ?? cell.prompt);
+			cell.prompt = String(detail?.prompt ?? cell.prompt ?? "");
+			cell.seed = cellSeed(node, index);
+			cell.characters = refs.characters;
+			cell.scenes = refs.scenes;
+			cell.image = normalizedCellImage(item);
+			saveGridCells(node, cells, true);
+		}
 		node.__gjjStoryboardCellPreviewUrls ||= [];
 		node.__gjjStoryboardCellPreviewImages ||= [];
 		node.__gjjStoryboardCellPreviewItems ||= [];
-		node.__gjjStoryboardCellPreviewUrls[index - 1] = url;
-		node.__gjjStoryboardCellPreviewItems[index - 1] = detail?.image || null;
-		const cellImage = new Image();
-		cellImage.onload = () => drawPromptGridPreview(node);
-		cellImage.src = url;
-		node.__gjjStoryboardCellPreviewImages[index - 1] = cellImage;
+		node.__gjjStoryboardCellPreviewItems[index - 1] = item;
+		void loadStoryboardPreviewImage(item).then((entry) => {
+			if (!entry || node.__gjjStoryboardCellPreviewItems?.[index - 1] !== item) return;
+			node.__gjjStoryboardCellPreviewUrls[index - 1] = entry.url;
+			node.__gjjStoryboardCellPreviewImages[index - 1] = entry.image;
+			drawPromptGridPreview(node);
+		});
 	}
 	drawPromptGridPreview(node);
 	updateSelectedPreviewImage(node);
@@ -3517,6 +4053,7 @@ function resetLivePreview(node, options = {}) {
 		? options.onlyIndices
 		: (Number.isInteger(options.onlyIndex) ? [options.onlyIndex] : []);
 	if (onlyIndices.length) {
+		const cells = storyboardGridCells(node);
 		node.__gjjStoryboardCellPreviewUrls ||= [];
 		node.__gjjStoryboardCellPreviewImages ||= [];
 		node.__gjjStoryboardCellPreviewItems ||= [];
@@ -3525,13 +4062,18 @@ function resetLivePreview(node, options = {}) {
 			node.__gjjStoryboardCellPreviewImages[index] = null;
 			node.__gjjStoryboardCellPreviewItems[index] = null;
 			if (node.__gjjStoryboardActualPromptParts) node.__gjjStoryboardActualPromptParts[index] = undefined;
+			if (cells[index]) cells[index].image = null;
 		}
+		saveGridCells(node, cells, true);
 	} else {
 		node.__gjjStoryboardCellPreviewUrls = [];
 		node.__gjjStoryboardCellPreviewImages = [];
 		node.__gjjStoryboardCellPreviewItems = [];
 		node.__gjjStoryboardActualPromptParts = [];
 		node.__gjjStoryboardActualPromptTotal = 0;
+		const cells = storyboardGridCells(node);
+		for (const cell of cells) cell.image = null;
+		saveGridCells(node, cells, true);
 	}
 	drawPromptGridPreview(node);
 	GJJ_Utils.refreshNode?.(node);
@@ -3619,6 +4161,12 @@ function hookPromptWidget(node) {
 	widget.callback = function (value, ...args) {
 		const result = original?.apply(this, [value, ...args]);
 		const nextPrompt = currentPromptText(node);
+		if (node.__gjjStoryboardRestoringParams) {
+			node.__gjjStoryboardLastEffectivePromptText = nextPrompt;
+			void resolvePromptCharacters(node, nextPrompt);
+			setTimeout(() => drawPromptGridPreview(node), 0);
+			return result;
+		}
 		const changed = reconcilePreviewForPromptChange(node, nextPrompt);
 		void resolvePromptCharacters(node, nextPrompt);
 		if (!changed) setTimeout(() => drawPromptGridPreview(node), 0);
@@ -3641,15 +4189,41 @@ function hookLoraDataWidget(node) {
 }
 
 function hookPreviewRefreshWidgets(node) {
-	for (const name of PREVIEW_REFRESH_WIDGETS) {
+	for (const name of CACHE_INVALIDATION_WIDGETS) {
 		const widget = getWidget(node, name);
 		if (!widget || widget.__gjjStoryboardPreviewRefreshHooked) continue;
 		widget.__gjjStoryboardPreviewRefreshHooked = true;
+		widget.__gjjStoryboardLastCacheValue = JSON.stringify(widget.value ?? null);
 		const original = widget.callback;
 		widget.callback = function (value, ...args) {
 			const result = original?.apply(this, [value, ...args]);
+			const nextValue = JSON.stringify(widget.value ?? value ?? null);
+			const changed = widget.__gjjStoryboardLastCacheValue !== nextValue;
+			widget.__gjjStoryboardLastCacheValue = nextValue;
 			saveParamValues(node);
-			setTimeout(() => drawPromptGridPreview(node), 0);
+			if (changed && name === "seed" && !node.__gjjStoryboardRestoringParams) {
+				const cells = storyboardGridCells(node);
+				const activeSingleIndices = Array.isArray(node.__gjjStoryboardSingleCellIndices)
+					? new Set(node.__gjjStoryboardSingleCellIndices)
+					: (Number.isInteger(node.__gjjStoryboardSingleCellIndex) ? new Set([node.__gjjStoryboardSingleCellIndex]) : null);
+				const changedSeedIndices = cells
+					.map((cell, index) => (
+						(!activeSingleIndices || activeSingleIndices.has(index))
+						&& Number(cell.seed) !== cellSeed(node, cell.index)
+					) ? index : -1)
+					.filter((index) => index >= 0);
+				if (changedSeedIndices.length) {
+					for (const index of changedSeedIndices) {
+						cells[index].seed = cellSeed(node, cells[index].index);
+						cells[index].image = null;
+					}
+					saveGridCells(node, cells, true);
+					invalidateStoryboardGeneratedCache(node, changedSeedIndices, cells.length);
+				}
+			}
+			if (changed || PREVIEW_REFRESH_WIDGETS.has(name)) {
+				setTimeout(() => drawPromptGridPreview(node), 0);
+			}
 			return result;
 		};
 	}
@@ -3707,6 +4281,7 @@ function patchNode(node) {
 		node.__gjjStoryboardPreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", createImagePreview(node), { serialize: false });
 	}
 	applySettingsVisibility(node);
+	forcePromptWidgetVisible(node);
 	setWidgetHidden(getWidget(node, "unet_name"), true);
 	cacheUnetOptions(node);
 	refreshUnetPickerControl(node);
@@ -3715,11 +4290,35 @@ function patchNode(node) {
 	recordCurrentStoryboardLinks(node);
 	updateReconnectButton(node);
 	observeLinkedPromptSource(node);
+	observeLinkedCacheSources(node);
 	const effectivePrompt = currentPromptText(node);
 	if (node.__gjjStoryboardLastEffectivePromptText === undefined) {
 		node.__gjjStoryboardLastEffectivePromptText = effectivePrompt;
 	}
 	void resolvePromptCharacters(node, effectivePrompt);
+	if (!parseGridCells(node?.properties?.[GRID_CELLS_PROPERTY]).some((cell) => cell.image?.filename)) {
+		const recoveredImages = recoverGridImagesFromWorkflow(node, parsePromptParts(effectivePrompt).length);
+		if (recoveredImages.length) {
+			const recoveredCells = storyboardGridCells(node, effectivePrompt, recoveredImages);
+			for (const item of recoveredImages) {
+				if (recoveredCells[item.index - 1]) recoveredCells[item.index - 1].image = normalizedCellImage(item);
+			}
+			saveGridCells(node, recoveredCells, true);
+		}
+	}
+	// onNodeCreated is deferred until after LiteGraph's initial onConfigure call.
+	// Restore persisted previews here as well so a browser refresh cannot miss the
+	// per-instance onConfigure wrapper installed below.
+	if (!node.__gjjStoryboardInitialPreviewRestoreStarted) {
+		const tableCachedImages = parseGridCells(node?.properties?.[GRID_CELLS_PROPERTY]).filter((cell) => cell.image?.filename).map((cell) => ({ index: cell.index, ...cell.image }));
+		const propertyCachedImages = tableCachedImages.length ? tableCachedImages : parseStoryboardPreviewImageItems(node?.properties?.[CACHED_PREVIEW_IMAGES_PROPERTY]);
+		const widgetCachedImages = parseStoryboardPreviewImageItems(getWidget(node, PREVIEW_IMAGES_INPUT)?.value);
+		const cachedImages = propertyCachedImages.length ? propertyCachedImages : widgetCachedImages;
+		if (cachedImages.length) {
+			node.__gjjStoryboardInitialPreviewRestoreStarted = true;
+			void restoreCachedStoryboardPreviewImages(node, cachedImages);
+		}
+	}
 	if (node.__gjjStoryboardPatched) return;
 	node.__gjjStoryboardPatched = true;
 
@@ -3729,10 +4328,15 @@ function patchNode(node) {
 		recordStoryboardLinkFromConnectionEvent(this, args);
 		updateReconnectButton(this);
 		observeLinkedPromptSource(this);
+		observeLinkedCacheSources(this);
 		const nextPrompt = currentPromptText(this);
-		const changed = reconcilePreviewForPromptChange(this, nextPrompt);
+		// LiteGraph may emit transient disconnect/reconnect callbacks while another
+		// node is queued or the graph is refreshed.  A connection event alone must
+		// never discard generated storyboards; only an effective prompt text change
+		// is a valid cache-invalidation signal.
+		reconcilePreviewForPromptChange(this, nextPrompt);
 		void resolvePromptCharacters(this, nextPrompt);
-		if (!changed) drawPromptGridPreview(this);
+		drawPromptGridPreview(this);
 		return result;
 	};
 
@@ -3741,16 +4345,41 @@ function patchNode(node) {
 		const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 		serializedNode.properties ||= {};
 		serializedNode.properties[PARAM_VALUES_PROPERTY] = saveParamValues(this);
+		// During workflow serialization the DOM/runtime image arrays can briefly be
+		// empty. Preserve the already saved manifest instead of erasing it.
+		const cachedImages = cacheStoryboardPreviewImages(this, false, true);
+		const cells = saveGridCells(this, storyboardGridCells(this));
+		serializedNode.properties[GRID_CELLS_PROPERTY] = cells;
+		if (cachedImages.length) serializedNode.properties[CACHED_PREVIEW_IMAGES_PROPERTY] = cachedImages;
+		else delete serializedNode.properties[CACHED_PREVIEW_IMAGES_PROPERTY];
 		return result;
 	};
 
 	const originalOnConfigure = node.onConfigure;
 	node.onConfigure = function (serializedNode, ...args) {
 		const values = serializedNode?.properties?.[PARAM_VALUES_PROPERTY];
+		const serializedCells = parseGridCells(serializedNode?.properties?.[GRID_CELLS_PROPERTY]);
+		const tableCachedImages = serializedCells.filter((cell) => cell.image?.filename).map((cell) => ({ index: cell.index, ...cell.image }));
+		const propertyCachedImages = tableCachedImages.length ? tableCachedImages : parseStoryboardPreviewImageItems(serializedNode?.properties?.[CACHED_PREVIEW_IMAGES_PROPERTY]);
 		const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
 		setTimeout(() => {
-			restoreParamValues(this, values);
+			if (serializedCells.length) {
+				this.properties ||= {};
+				this.properties[GRID_CELLS_PROPERTY] = serializedCells;
+			}
+			this.__gjjStoryboardRestoringParams = true;
+			try {
+				restoreParamValues(this, values);
+			} finally {
+				delete this.__gjjStoryboardRestoringParams;
+			}
 			patchNode(this);
+			const widgetCachedImages = parseStoryboardPreviewImageItems(getWidget(this, PREVIEW_IMAGES_INPUT)?.value);
+			const cachedImages = propertyCachedImages.length ? propertyCachedImages : widgetCachedImages;
+			if (cachedImages.length) {
+				this.__gjjStoryboardInitialPreviewRestoreStarted = true;
+				void restoreCachedStoryboardPreviewImages(this, cachedImages);
+			}
 		}, 0);
 		return result;
 	};

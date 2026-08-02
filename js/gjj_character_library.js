@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 
 (function () {
 	"use strict";
@@ -955,23 +956,69 @@ import { api } from "/scripts/api.js";
 		);
 		startImportProgress();
 		try {
-			const data = await apiJson(`${ENDPOINT}/generate_multiview`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					id: character.id,
-					name: character.name || character.id,
-					labels: ["三视图"],
-					prompt_labels: [CHARACTER_TRIPTYCH_PROMPT],
-					reference_label: headshotLabel,
-					split_generated_sheet: true,
-					...(regenerate ? { seed: randomSeed } : {}),
-				}),
-			});
+			let data;
+			let usedStepFallback = false;
+			try {
+				data = await apiJson(`${ENDPOINT}/generate_multiview`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						id: character.id,
+						name: character.name || character.id,
+						labels: ["三视图"],
+						prompt_labels: [CHARACTER_TRIPTYCH_PROMPT],
+						reference_label: headshotLabel,
+						split_generated_sheet: true,
+						...(regenerate ? { seed: randomSeed } : {}),
+					}),
+				});
+			} catch (error) {
+				const message = String(error?.message || error || "");
+				const splitFailed = /三视图.*(?:分割出|主体|孤岛)|至少需要\s*3\s*个/.test(message);
+				if (!splitFailed) throw error;
+				usedStepFallback = true;
+
+				const generateOneView = async (label, prompt, referenceLabel, seedOffset) => {
+					setStatus(`三视图拆分失败，正在分步生成${label}…`);
+					return apiJson(`${ENDPOINT}/generate_multiview`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							id: character.id,
+							name: character.name || character.id,
+							labels: [label],
+							prompt_labels: [prompt],
+							reference_label: referenceLabel,
+							...(regenerate ? { seed: ((randomSeed + seedOffset) % 4294967295) || seedOffset } : {}),
+						}),
+					});
+				};
+
+				data = await generateOneView(
+					"正面",
+					"<sks> 标准正面视图，人物面向镜头，全身自然站立，双臂自然下垂，头顶到双脚完整可见，白色背景",
+					headshotLabel,
+					1,
+				);
+				data = await generateOneView(
+					"侧面",
+					"<sks> 标准侧面视图，人物完整侧身，全身自然站立，保持与正面图完全一致的身份、服饰和比例，白色背景",
+					"正面",
+					2,
+				);
+				data = await generateOneView(
+					"背面",
+					"<sks> 标准背面视图，人物背对镜头，全身自然站立，保持与正面图完全一致的身份、服饰和比例，白色背景",
+					"正面",
+					3,
+				);
+			}
 			state.selectedId = data.character?.id || character.id;
 			await refreshCharacters(true);
 			finishImportProgress(true);
-			setStatus(`已生成 ${data.count || 0} 个视图：正面、侧面、背面`);
+			setStatus(usedStepFallback
+				? "三视图拆分失败后已改用分步方式生成：正面、侧面、背面"
+				: `已生成 ${data.count || 0} 个视图：正面、侧面、背面`);
 		} catch (error) {
 			finishImportProgress(false);
 			throw error;
@@ -1725,9 +1772,9 @@ import { api } from "/scripts/api.js";
 			card.title = character.name || character.id;
 			const cover = document.createElement("div");
 			cover.className = "gjj-cl-cover";
-			if (character.cover) {
+			if (character.id) {
 				const img = document.createElement("img");
-				img.src = apiUrl(character.cover);
+				setGjjLibraryThumbnail(img, api, "character", character);
 				cover.appendChild(img);
 			} else {
 				const empty = document.createElement("div");
@@ -1917,7 +1964,15 @@ import { api } from "/scripts/api.js";
 		imgBox.className = "gjj-cl-view-img";
 		imgBox.title = "点击放大";
 		const img = document.createElement("img");
-		img.src = apiUrl(view.url || "");
+		const viewUrl = apiUrl(view.url || "");
+		let retried = false;
+		img.addEventListener("error", () => {
+			if (retried || !viewUrl) return;
+			retried = true;
+			const separator = viewUrl.includes("?") ? "&" : "?";
+			setTimeout(() => { img.src = `${viewUrl}${separator}gjj_retry=${Date.now()}`; }, 180);
+		});
+		img.src = viewUrl;
 		imgBox.appendChild(img);
 		imgBox.addEventListener("click", (event) => {
 			stopBubble(event);

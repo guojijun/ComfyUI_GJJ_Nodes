@@ -263,54 +263,35 @@ def _safe_filename_list(category: str) -> list[str]:
 
 
 def _save_msr_reference_debug_images(images: Any, unique_id: Any, segment_index: int | None) -> list[str]:
-	"""把实际送入 MSR image 端口的预处理后批次逐张保存到 ComfyUI temp。"""
+	"""按像素内容保存 MSR 人物卡；相同人物卡始终复用同一个临时文件。"""
 	_ensure_runtime_dependencies()
 	if images is None:
 		return []
 	try:
-		from PIL import Image
-		batch = images.detach().float().cpu().clamp(0.0, 1.0)
-		if batch.ndim == 3:
-			batch = batch.unsqueeze(0)
-		if batch.ndim != 4:
-			return []
-		temp_root = Path(folder_paths.get_temp_directory())
-		relative_dir = Path("GJJ_LTX23_MSR_References")
-		output_dir = temp_root / relative_dir
-		output_dir.mkdir(parents=True, exist_ok=True)
-		run_key = re.sub(r"[^0-9A-Za-z_-]+", "_", str(unique_id or "run"))[:48] or "run"
-		segment_key = max(1, int(segment_index or 1))
-		stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-		saved: list[str] = []
-		for image_index, frame in enumerate(batch, start=1):
-			array = (frame.numpy() * 255.0).round().astype("uint8")
-			if array.shape[-1] == 1:
-				array = array[..., 0]
-			elif array.shape[-1] > 4:
-				array = array[..., :3]
-			filename = f"{run_key}_segment_{segment_key:02d}_character_{image_index:02d}_{stamp}.png"
-			Image.fromarray(array).save(output_dir / filename)
-			saved.append(str(relative_dir / filename).replace("\\", "/"))
-		return saved
+		from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+
+		infos = gjjutils_write_temp_tensor_images(images, format="PNG", suffix=".png", media_type="image")
+		return [
+			str(Path(str(info.get("subfolder") or "GJJ")) / str(info.get("filename") or "")).replace("\\", "/")
+			for info in infos
+			if str(info.get("filename") or "").strip()
+		]
 	except Exception as exc:
 		print(f"[GJJ LTX2.3] 保存 MSR 人物参考调试图失败：{exc}", flush=True)
 		return []
 
 
 def _save_msr_prompt_debug_text(prompt: Any, unique_id: Any, segment_index: int | None) -> str:
-	"""把实际送入 CLIPTextEncode 的最终正向提示词保存到人物参考调试目录。"""
+	"""按文本内容保存最终正向提示词；相同内容不重复落盘。"""
 	_ensure_runtime_dependencies()
 	try:
-		temp_root = Path(folder_paths.get_temp_directory())
-		relative_dir = Path("GJJ_LTX23_MSR_References")
-		output_dir = temp_root / relative_dir
-		output_dir.mkdir(parents=True, exist_ok=True)
-		run_key = re.sub(r"[^0-9A-Za-z_-]+", "_", str(unique_id or "run"))[:48] or "run"
-		segment_key = max(1, int(segment_index or 1))
-		stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-		filename = f"{run_key}_segment_{segment_key:02d}_effective_prompt_{stamp}.txt"
-		(output_dir / filename).write_text(str(prompt or ""), encoding="utf-8-sig")
-		return str(relative_dir / filename).replace("\\", "/")
+		from .common_utils.temp_files import gjjutils_write_temp_bytes
+
+		info = gjjutils_write_temp_bytes(str(prompt or "").encode("utf-8-sig"), suffix=".txt", create_preview=False)
+		filename = str(info.get("filename") or "").strip()
+		if not filename:
+			return ""
+		return str(Path(str(info.get("subfolder") or "GJJ")) / filename).replace("\\", "/")
 	except Exception as exc:
 		print(f"[GJJ LTX2.3] 保存 MSR 最终提示词失败：{exc}", flush=True)
 		return ""
@@ -590,6 +571,217 @@ def _append_ltx_transition_trigger(prompt_text: str, transition_lora_enabled: bo
 	if not text:
 		return LTX_TRANSITION_LORA_TRIGGER, True
 	return f"{LTX_TRANSITION_LORA_TRIGGER}, {text}", True
+
+
+def _dialogue_character_names(prompt_text: str, character_hint: str = "") -> list[str]:
+	"""按结构化人物说明提取 @角色名，保持输入顺序并去重。"""
+	source = "\n".join(part for part in (str(prompt_text or ""), str(character_hint or "")) if part.strip())
+	patterns = (
+		r"(?im)^\s*-\s*@([^\s：:（(]+)\s*[：:（(]",
+		r"(?im)^\s*-\s*figure\s*\d+\s*=\s*@([^\s：:（(]+)",
+		r"(?im)^\s*@([^\s：:（(]+)\s*(?:说|说道)\s*[:：]?",
+	)
+	names: list[str] = []
+	for pattern in patterns:
+		for match in re.finditer(pattern, source):
+			name = str(match.group(1) or "").strip().strip("，,。.!！?？；;、")
+			if name and name not in names:
+				names.append(name)
+	return names
+
+
+def _fallback_storyboard_description(prompt_text: str) -> str:
+	story_line = ""
+	for raw_line in str(prompt_text or "").splitlines():
+		line = raw_line.strip()
+		if not line or line.startswith("-") or re.match(r"^\[?镜头\s*\d+", line, flags=re.IGNORECASE):
+			continue
+		if re.match(r"^(?:人物说明|人物参考图|分镜说明|人物台词)\s*[:：]", line):
+			continue
+		story_line = line
+		break
+	base = f"主体动作围绕“{story_line[:220]}”连续展开；" if story_line else "主体动作连续展开；"
+	return (
+		"镜头从环境全景平稳推进到人物中景，随后跟随主体进行横移与轻微环绕；"
+		+ base
+		+ "前景和背景保持自然动态，最后收束到能够看清人物表情的稳定构图，避免静止定格。"
+	)
+
+
+def _story_context_segment_summary(prompt_text: str, max_chars: int = 240) -> str:
+	"""压缩单个镜头，只保留连续性所需的剧情和动作主干。"""
+	lines: list[str] = []
+	fallback_lines: list[str] = []
+	for raw_line in str(prompt_text or "").splitlines():
+		line = re.sub(r"\s+", " ", raw_line).strip()
+		if not line:
+			continue
+		fallback_lines.append(line)
+		if re.match(r"^(?:人物说明|人物参考图|分镜说明|人物台词)\s*[:：]", line):
+			break
+		if line.startswith("-") or re.match(r"^figure\s*\d+\s*=", line, flags=re.IGNORECASE):
+			continue
+		lines.append(line)
+	text = " ".join(lines).strip() or " ".join(fallback_lines).strip()
+	limit = max(80, int(max_chars or 240))
+	if len(text) <= limit:
+		return text
+	return text[:limit].rstrip(" ，,；;：:") + "…"
+
+
+def _build_overall_story_context(prompt_segments: Iterable[Any], max_chars: int = 1800) -> str:
+	"""把全部镜头压缩成可供每段共享的故事脉络，避免重复人物参考细节挤占文本条件。"""
+	segments = [str(item or "").strip() for item in list(prompt_segments or []) if str(item or "").strip()]
+	if not segments:
+		return ""
+	limit = max(480, int(max_chars or 1800))
+	label_budget = sum(len(f"镜头{index}：\n") for index in range(1, len(segments) + 1))
+	per_segment = max(80, min(260, (limit - label_budget) // max(1, len(segments))))
+	items = [
+		f"镜头{index}：{_story_context_segment_summary(segment, per_segment)}"
+		for index, segment in enumerate(segments, start=1)
+	]
+	context = "\n".join(items).strip()
+	if len(context) <= limit:
+		return context
+	return context[:limit].rstrip(" ，,；;：:\n") + "…"
+
+
+def _compose_contextual_render_prompt(
+	current_prompt: str,
+	overall_context: str = "",
+	previous_storyboard: str = "",
+	current_storyboard: str = "",
+	next_prompt: str = "",
+) -> str:
+	"""只生成送入视频模型的当前镜头条件；跨镜头上下文仅供上游语言模型推理。"""
+	parts = ["【当前镜头唯一画面任务】\n" + str(current_prompt or "").strip()]
+	if str(current_storyboard or "").strip():
+		parts.append("【当前动态分镜与台词】\n" + str(current_storyboard).strip())
+	return "\n\n".join(part for part in parts if part.strip())
+
+
+def _normalize_storyboard_dialogue_output(raw_text: Any, prompt_text: str, line_count: int, character_hint: str = "") -> str:
+	text = str(raw_text or "").strip()
+	text = re.sub(r"^\s*```(?:text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+	text = re.sub(r"\s*```\s*$", "", text)
+	text = re.sub(r"^\s*(?:输出结果|反推结果)\s*[:：]\s*", "", text)
+
+	shot_match = re.search(
+		r"(?:^|\n)\s*(?:分镜说明|镜头说明|运镜说明|画面说明)\s*[:：]\s*(.*?)"
+		r"(?=\n\s*(?:人物台词|台词|对白|独白|旁白)\s*[:：]|$)",
+		text,
+		flags=re.IGNORECASE | re.DOTALL,
+	)
+	shot = str(shot_match.group(1) if shot_match else "").strip()
+	shot = re.sub(r"\s*\n\s*", "；", shot)
+	shot = re.sub(r"[；;]{2,}", "；", shot).strip(" ；;")
+	if not shot:
+		shot = _fallback_storyboard_description(prompt_text)
+
+	dialogue_marker = re.search(
+		r"(?:^|\n)\s*(?:人物台词|台词|对白|独白|旁白)\s*[:：]\s*",
+		text,
+		flags=re.IGNORECASE,
+	)
+	dialogue_text = text[dialogue_marker.end():] if dialogue_marker else text
+	names = _dialogue_character_names(prompt_text, character_hint)
+	max_lines = max(1, min(8, int(line_count or 1)))
+	dialogue_lines: list[str] = []
+	for raw_line in dialogue_text.splitlines():
+		line = re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", raw_line).strip()
+		if not line or re.match(r"^(?:分镜说明|镜头说明|运镜说明|画面说明|人物台词|台词|对白)\s*[:：]?", line):
+			continue
+		match = re.match(
+			r"^@(.+?)\s*(?:说|说道)\s*[:：]?\s*[“\"']?(.*?)[”\"']?\s*$",
+			line,
+		) or re.match(
+			r"^@([^：:“”\"']+)\s*[:：]\s*[“\"']?(.*?)[”\"']?\s*$",
+			line,
+		)
+		if match:
+			name = str(match.group(1) or "").strip()
+			spoken = str(match.group(2) or "").strip().strip("“”\"'")
+		else:
+			name = names[len(dialogue_lines) % len(names)] if names else "人物"
+			spoken = line.strip().strip("“”\"'")
+		spoken = re.sub(r"^\s*(?:说|说道)\s*[:：]\s*", "", spoken).strip()
+		spoken = spoken.strip("“”\"'")
+		if not spoken:
+			continue
+		dialogue_lines.append(f"@{name} 说：“{spoken}”")
+		if len(dialogue_lines) >= max_lines:
+			break
+
+	parts = [f"分镜说明：{shot}"]
+	if dialogue_lines:
+		parts.append("人物台词：\n" + "\n".join(dialogue_lines))
+	return "\n".join(parts).strip()
+
+
+DEFAULT_DIALOGUE_SYSTEM_PROMPT = (
+	"你是影视分镜导演和人物台词编剧。根据剧情提示词和可选参考图，输出可直接用于视频生成的分镜说明与人物台词。"
+	"分镜说明必须包含起始景别、明确运镜、人物连续动作、环境动态和结束景别；至少使用推进、拉远、横移、环绕、摇镜或跟拍中的一种实际运镜。"
+	"不得让画面停留在参考图，不得复刻参考图的白底、转面排布或静止构图；参考图只用于理解人物身份、服装和场景。"
+	"人物台词必须符合人物身份、关系、情绪和动作，人物名必须来自输入中的 @角色名。"
+	"当前镜头必须承接上一镜头的空间方向、人物位置、连续动作、情绪和未结束语义；台词要回应上一句，禁止无故重复、跳跃或重置关系。"
+	"当前镜头结尾要自然引向下一镜头目标，但不得提前演出下一镜头画面。"
+	"严格输出两部分，不要解释、编号或 Markdown。格式必须是：\n"
+	"分镜说明：具体的动态分镜与运镜说明\n"
+	"人物台词：\n"
+	"@名字 说：“具体台词”"
+)
+
+
+def _infer_storyboard_and_dialogue(
+	model: str,
+	prompt_text: str,
+	reference_image: Any,
+	style: str,
+	language: str,
+	character_hint: str,
+	line_count: int,
+	unique_id: Any = None,
+	overall_context: str = "",
+	previous_context: str = "",
+	next_prompt: str = "",
+	system_instruction: str = "",
+	library_context: str = "",
+) -> str:
+	from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
+
+	system_prompt = str(system_instruction or "").strip() or DEFAULT_DIALOGUE_SYSTEM_PROMPT
+	user_parts = [
+		f"台词形式：{str(style or '自然对白').strip()}。",
+		f"输出语言：{str(language or '中文').strip()}。",
+		f"输出 {max(1, min(8, int(line_count or 1)))} 句简洁台词。",
+		"分镜必须让人物和镜头持续运动，避免参考图定格感。",
+	]
+	if str(library_context or "").strip():
+		user_parts.append(
+			"以下角色库与场景库设定是硬约束，优先级高于自由发挥；不得新增未列出人物：\n"
+			+ str(library_context).strip()
+		)
+	if str(character_hint or "").strip():
+		user_parts.append(f"人物与语气提示：{str(character_hint).strip()}。")
+	if str(overall_context or "").strip():
+		user_parts.append(f"全片故事脉络（只用于连续性）：\n{str(overall_context).strip()}")
+	if str(previous_context or "").strip():
+		user_parts.append(f"上一镜头实际分镜与台词（必须承接）：\n{str(previous_context).strip()}")
+	if str(prompt_text or "").strip():
+		user_parts.append(f"当前镜头剧情与动作任务（只生成本镜头）：\n{str(prompt_text).strip()}")
+	if str(next_prompt or "").strip():
+		user_parts.append(
+			"下一镜头目标（只用于设计当前镜头的收尾衔接，不得提前生成）：\n"
+			+ _story_context_segment_summary(next_prompt, 320)
+		)
+	result = GJJ_GemmaTextGenerate().generate(
+		str(model or "").strip(), "ideogram4", "default", "\n".join(user_parts), 512, "on", 0.7, 64, 0.95, 0.05, 1.05, 0, "0.0", False, True,
+		media=reference_image, unique_id=unique_id, system_prompt=system_prompt,
+	)
+	payload = result.get("result") if isinstance(result, dict) else result
+	text = payload[0] if isinstance(payload, (list, tuple)) and payload else payload
+	return _normalize_storyboard_dialogue_output(text, prompt_text, line_count, character_hint)
 
 
 def _apply_chain_loras(model, clip, lora_chain_config: Any = ""):
@@ -3115,12 +3307,28 @@ def run_ltx23_multiref_video(
 	prompt_segments: Any = None,
 	prompt_character_references: Any = None,
 	prompt_segment_seconds: Any = None,
+	dialogue_inference_enabled: Any = False,
+	dialogue_source: Any = "提示词和参考图",
+	dialogue_style: Any = "自然对白",
+	dialogue_language: Any = "中文",
+	dialogue_character_hint: Any = "",
+	dialogue_line_count: Any = 1,
+	dialogue_system_prompt: Any = DEFAULT_DIALOGUE_SYSTEM_PROMPT,
+	prompt_library_contexts: Any = None,
 ):
 	_ensure_runtime_dependencies()
 	run_started_at = time.perf_counter()
 	prompt_text = str(positive_prompt or "").strip() or "电影感视频，主体自然运动，镜头稳定，细节清晰。"
 	auto_transition_prompt = bool(auto_transition_prompt)
 	transition_prompt_model = str(transition_prompt_model or "").strip()
+	dialogue_inference_enabled = bool(dialogue_inference_enabled)
+	dialogue_source = str(dialogue_source or "提示词和参考图").strip()
+	dialogue_style = str(dialogue_style or "自然对白").strip()
+	dialogue_language = str(dialogue_language or "中文").strip()
+	dialogue_character_hint = str(dialogue_character_hint or "").strip()
+	dialogue_line_count = max(1, min(8, int(dialogue_line_count or 1)))
+	dialogue_system_prompt = str(dialogue_system_prompt or "").strip() or DEFAULT_DIALOGUE_SYSTEM_PROMPT
+	library_contexts = [str(item or "").strip() for item in list(prompt_library_contexts or [])]
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
 	stage1_sampler = str(stage1_sampler or DEFAULT_STAGE1_SAMPLER).strip()
@@ -3329,6 +3537,8 @@ def run_ltx23_multiref_video(
 				raise RuntimeError(f"LTX 视频重采样分支解码失败：{exc}") from exc
 
 		def _branch_kind_label(branch_kind: str) -> str:
+			if branch_kind == "first_last_msr_workflow":
+				return "首尾帧+MSR人物身份参考"
 			if branch_kind == "msr_character_multiref":
 				return "LTX2.3+MSR人物多图参考"
 			if branch_kind == "first_last_workflow":
@@ -3353,11 +3563,21 @@ def run_ltx23_multiref_video(
 			status_prefix: str = "",
 			render_prompt_override: str | None = None,
 			render_character_reference: Any = None,
+			render_story_context: str = "",
+			render_previous_storyboard: str = "",
+			render_next_prompt: str = "",
 		) -> dict[str, Any]:
 			prefix = f"{status_prefix} · " if status_prefix else ""
+			render_model = model
 			render_segment_lora_enabled = _resolve_transition_lora_switch_for_segment(segment_switch_text, render_segment_index)
 			render_segment_label = "启用" if render_segment_lora_enabled else "关闭"
 			segment_base_prompt = str(render_prompt_override or "").strip() or prompt_text
+			library_context_index = max(0, int(render_segment_index or 1) - 1)
+			render_library_context = (
+				library_contexts[library_context_index]
+				if library_context_index < len(library_contexts)
+				else (library_contexts[0] if library_contexts else "")
+			)
 			configured_find = str(prompt_replace_find or "").strip()
 			configured_replacement = str(prompt_replace_with or "")
 			replacement_candidates = [configured_find] if configured_find else []
@@ -3391,6 +3611,43 @@ def run_ltx23_multiref_video(
 				_send_status(unique_id, f"{prefix}已按 📒 面板配置替换有人声标签。")
 			render_prompt_text = segment_base_prompt
 			render_trigger_added = False
+			storyboard_dialogue_prompt = ""
+			if dialogue_inference_enabled:
+				try:
+					use_prompt = dialogue_source != "仅参考图"
+					use_reference = dialogue_source != "仅提示词"
+					dialogue_reference = render_character_reference if render_character_reference is not None else render_main_image
+					storyboard_dialogue_prompt = _infer_storyboard_and_dialogue(
+						transition_prompt_model,
+						segment_base_prompt if use_prompt else "",
+						dialogue_reference if use_reference else None,
+						dialogue_style,
+						dialogue_language,
+						dialogue_character_hint,
+						dialogue_line_count,
+						unique_id=unique_id,
+						overall_context=render_story_context,
+						previous_context=render_previous_storyboard,
+						next_prompt=render_next_prompt,
+						system_instruction=dialogue_system_prompt,
+						library_context=render_library_context,
+					)
+					if storyboard_dialogue_prompt:
+						_send_status(unique_id, f"{prefix}🎙 已反推动态分镜说明和人物台词。")
+				except Exception as exc:
+					print(f"[GJJ LTX2.3][DIALOGUE_INFERENCE_ERROR] segment={render_segment_index or 1}: {exc}", flush=True)
+			if render_story_context or render_previous_storyboard or render_next_prompt:
+				render_prompt_text = _compose_contextual_render_prompt(
+					segment_base_prompt,
+					render_story_context,
+					render_previous_storyboard,
+					storyboard_dialogue_prompt,
+					render_next_prompt,
+				)
+			elif storyboard_dialogue_prompt:
+				render_prompt_text = "\n\n".join(
+					part for part in (render_prompt_text, storyboard_dialogue_prompt) if str(part or "").strip()
+				)
 			gemma_transition_prompt = ""
 			selected_transition_prompt_model = ""
 			if auto_transition_prompt and render_main_image is not None:
@@ -3422,7 +3679,7 @@ def run_ltx23_multiref_video(
 							# Gemma 只负责补充当前首尾帧的转场描述；用户正向提示词始终是
 							# 全段主体约束，不能被自动过渡词覆盖。
 							render_prompt_text = ", ".join(
-								part for part in (segment_base_prompt, gemma_transition_prompt) if str(part or "").strip()
+								part for part in (render_prompt_text, gemma_transition_prompt) if str(part or "").strip()
 							)
 					except Exception as exc:
 						print(
@@ -3431,7 +3688,7 @@ def run_ltx23_multiref_video(
 						)
 			if transition_lora_enabled and render_segment_lora_enabled:
 				render_prompt_text, render_trigger_added = _append_ltx_transition_trigger(render_prompt_text, True)
-			if str(render_branch_kind or "") == "msr_character_multiref":
+			if str(render_branch_kind or "") in ("msr_character_multiref", "first_last_msr_workflow"):
 				debug_prompt_file = _save_msr_prompt_debug_text(
 					render_prompt_text,
 					unique_id,
@@ -3442,7 +3699,7 @@ def run_ltx23_multiref_video(
 					print(f"[GJJ LTX2.3][MSR提示词] 实际送入模型：{debug_prompt_path}", flush=True)
 					_send_status(
 						unique_id,
-						f"{prefix}最终提示词已保存到 temp/GJJ_LTX23_MSR_References：{Path(debug_prompt_file).name}",
+						f"{prefix}最终提示词已进入统一内容缓存 temp/GJJ：{Path(debug_prompt_file).name}",
 					)
 			_send_status(unique_id, f"{prefix}Clean v40 当前分支：{_branch_kind_label(str(render_branch_kind or 'default'))} / route={render_route_label}")
 			_send_status(unique_id, f"{prefix}Clean v40 转场LoRA段控制：序列={segment_switch_text or '默认全启用'}；当前段={render_segment_index or 1}；本段={render_segment_label}")
@@ -3460,6 +3717,10 @@ def run_ltx23_multiref_video(
 							"gemma_transition_prompt": gemma_transition_prompt,
 							"transition_prompt_model_requested": transition_prompt_model,
 							"transition_prompt_model_effective": selected_transition_prompt_model,
+							"storyboard_dialogue_prompt": storyboard_dialogue_prompt,
+							"continuity_context_enabled": bool(render_story_context or render_previous_storyboard or render_next_prompt),
+							"continuity_has_previous": bool(str(render_previous_storyboard or "").strip()),
+							"continuity_has_next": bool(str(render_next_prompt or "").strip()),
 							"effective_prompt": render_prompt_text,
 							"transition_trigger": LTX_TRANSITION_LORA_TRIGGER,
 							"transition_trigger_added": render_trigger_added,
@@ -3487,7 +3748,7 @@ def run_ltx23_multiref_video(
 				pass
 			original_guide_images = list(render_guide_images or [])
 			original_guide_times = list(render_guide_times or [])
-			workflow_first_last = str(render_branch_kind or "") == "first_last_workflow"
+			workflow_first_last = str(render_branch_kind or "") in ("first_last_workflow", "first_last_msr_workflow")
 			if workflow_first_last:
 				render_guide_images = original_guide_images
 				render_guide_times = original_guide_times
@@ -3693,7 +3954,7 @@ def run_ltx23_multiref_video(
 							)
 							_send_status(
 								unique_id,
-								f"{prefix}人物参考调试图已保存到 temp/GJJ_LTX23_MSR_References："
+								f"{prefix}人物参考卡已进入统一内容缓存 temp/GJJ（相同图片直接复用）："
 								+ "、".join(Path(name).name for name in debug_reference_files),
 							)
 						msr_guide_frame_count = _msr_guide_frame_count_for_latent(
@@ -3701,29 +3962,54 @@ def run_ltx23_multiref_video(
 							video_vae,
 							preferred=41,
 						)
-						positive, negative, video_latent = GJJ_AddVideoICLoRAGuide().generate(
-							positive,
-							negative,
+						msr_guide = GJJ_AddVideoICLoRAGuide()
+						msr_frames = msr_guide._build_msr_guide_frames(
+							effective_character_reference,
+							msr_background,
+							int(video_latent["samples"].shape[-1] * video_vae.downscale_index_formula[1]),
+							int(video_latent["samples"].shape[-2] * video_vae.downscale_index_formula[2]),
+							msr_guide_frame_count,
+						)
+						if msr_frames is None:
+							raise RuntimeError("MSR 人物参考序列为空。")
+						_, msr_reference_latent = msr_guide.encode(
 							video_vae,
-							video_latent,
-							image=effective_character_reference,
-							frame_idx=0,
-							strength=1.0,
-							latent_downscale_factor=1.0,
-							crop="disabled",
-							use_tiled_encode=False,
-							tile_size=256,
-							tile_overlap=64,
-							bypass=False,
-							background=msr_background,
-							frame_count=str(msr_guide_frame_count),
-							guide_mode="写入Latent",
+							int(video_latent["samples"].shape[-1]),
+							int(video_latent["samples"].shape[-2]),
+							msr_frames,
+							video_vae.downscale_index_formula,
+							1.0,
+							"disabled",
+							False,
+							256,
+							64,
+						)
+						from .gjj_ltx_identity_overlap_conditioning import apply_ltx_reference_latent_tokens
+
+						target_latent_shape = tuple(video_latent["samples"].shape)
+						render_model = apply_ltx_reference_latent_tokens(
+							render_model,
+							msr_reference_latent,
+							# 人物参考必须位于目标视频的 T/H/W 坐标范围之外。
+							# overlap 会让 MSR 转面图与第 0 帧共用坐标，模型会把整张
+							# 参考排布生成到开场画面；st_drc 仍保留全局自注意力，但
+							# 不让人物参考占用任何成片坐标。
+							layout="st_drc",
+							source_phase=0.0,
+						)
+						print(
+							"[GJJ LTX2.3][MSR独立参考分支] "
+							f"target_latent={target_latent_shape} unchanged=True; "
+							f"reference_frames={tuple(msr_frames.shape)}; "
+							f"reference_latent={tuple(msr_reference_latent.shape)}; "
+							"reference_tokens=model_side_only layout=st_drc target_overlap=False output_trimmed=True",
+							flush=True,
 						)
 						_send_status(
 							unique_id,
-							f"{prefix}人物一致性：已按 LTX2.3+MSR 工作流注入人物参考"
+							f"{prefix}人物一致性：已按 LTX2.3+MSR 独立模型分支注入人物参考"
 							f"（GJJ_BatchCropResize 16倍数预处理；image=人物参考，background={'当前场景' if msr_background is not None else '无'}，strength=1，"
-							f"frame_count={msr_guide_frame_count}）。",
+							f"frame_count={msr_guide_frame_count}；人物令牌采用时空错位坐标，不写入视频 latent，并在模型输出前裁除）。",
 						)
 					except Exception as exc:
 						raise RuntimeError(f"MSR 人物参考注入失败：{exc}") from exc
@@ -3806,7 +4092,7 @@ def run_ltx23_multiref_video(
 				except Exception:
 					pass
 				nag_model, used_real_nag = _apply_real_gjj_ltx2nag(
-					model=model,
+					model=render_model,
 					positive=raw_positive,
 					negative=raw_negative,
 					nag_scale=stage1_nag_scale,
@@ -3816,7 +4102,7 @@ def run_ltx23_multiref_video(
 				)
 				if not used_real_nag:
 					# fallback 内部等价实现：同样使用 raw_positive，严格对齐源工作流的 GJJ_LTX2NAG 输入。
-					nag_model = _apply_ltx_nag(model, raw_positive, stage1_nag_scale, stage1_nag_alpha, stage1_nag_tau, inplace=True)
+					nag_model = _apply_ltx_nag(render_model, raw_positive, stage1_nag_scale, stage1_nag_alpha, stage1_nag_tau, inplace=True)
 				try:
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] source_exact=using RAW CLIP positive as nag_cond_video, RAW CLIP negative as nag_cond_audio; used_real_node={used_real_nag}", flush=True)
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] raw_positive_type={type(raw_positive).__name__}, conditioned_positive_type={type(positive).__name__}", flush=True)
@@ -3890,7 +4176,7 @@ def run_ltx23_multiref_video(
 					)
 				av_latent_stage2 = LTXVConcatAVLatent.execute(upscaled_video_latent, audio_latent_stage1)[0]
 
-				stage2_model = nag_model if workflow_first_last else model
+				stage2_model = nag_model if workflow_first_last else render_model
 				guider_stage2 = CFGGuider.execute(stage2_model, positive_stage2, negative_stage2, cfg)[0]
 				try:
 					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output connected to Stage2 CFGGuider: using_nag_model={workflow_first_last}; model_type={type(stage2_model).__name__}", flush=True)
@@ -3970,6 +4256,8 @@ def run_ltx23_multiref_video(
 						"output_frame_count": int(output_frame_count),
 						"effective_prompt": render_prompt_text,
 						"user_positive_prompt": segment_base_prompt,
+						"storyboard_dialogue_prompt": storyboard_dialogue_prompt,
+						"continuity_context_enabled": bool(render_story_context or render_previous_storyboard or render_next_prompt),
 						"gemma_transition_prompt": gemma_transition_prompt,
 						"transition_prompt_model_effective": selected_transition_prompt_model,
 						"transition_trigger_added": render_trigger_added,
@@ -3998,6 +4286,8 @@ def run_ltx23_multiref_video(
 				"output_width": int(output_width),
 				"output_height": int(output_height),
 				"output_frame_count": int(output_frame_count),
+				"storyboard_dialogue_prompt": storyboard_dialogue_prompt,
+				"continuity_context": storyboard_dialogue_prompt or _story_context_segment_summary(segment_base_prompt, 560),
 			}
 
 		scene_images = [main_image] + [image for image in base_guide_images if image is not None] if main_image is not None else []
@@ -4025,6 +4315,18 @@ def run_ltx23_multiref_video(
 				unique_id,
 				f"MTV 分支：{len(mtv_audio_segments)} 段音频与 {len(scene_images)} 张图片按索引一一配对。",
 			)
+			if len(mtv_prompt_segments) == len(mtv_audio_segments):
+				mtv_effective_prompts = list(mtv_prompt_segments)
+			elif len(mtv_prompt_segments) == 1:
+				mtv_effective_prompts = [mtv_prompt_segments[0] for _ in mtv_audio_segments]
+			else:
+				mtv_effective_prompts = [prompt_text for _ in mtv_audio_segments]
+			mtv_story_context = _build_overall_story_context(mtv_effective_prompts)
+			previous_storyboard_context = ""
+			_send_status(
+				unique_id,
+				f"MTV 连续性：已汇总 {len(mtv_effective_prompts)} 段全片脉络；每段全部视频帧共享，并顺序承接上一段分镜与台词。",
+			)
 			segment_previews: list[dict[str, Any]] = []
 			segment_video_paths: list[str] = []
 			representative_frame: torch.Tensor | None = None
@@ -4036,10 +4338,11 @@ def run_ltx23_multiref_video(
 				segment_duration = _audio_duration_seconds(segment_audio)
 				segment_output_frames = _requested_frame_count(segment_duration, fps)
 				segment_label = f"MTV 第{segment_index}段（共{len(mtv_audio_segments)}段）"
-				segment_prompt = (
-					mtv_prompt_segments[segment_index - 1]
-					if len(mtv_prompt_segments) == len(mtv_audio_segments)
-					else (mtv_prompt_segments[0] if len(mtv_prompt_segments) == 1 else prompt_text)
+				segment_prompt = mtv_effective_prompts[segment_index - 1]
+				next_segment_prompt = (
+					mtv_effective_prompts[segment_index]
+					if segment_index < len(mtv_effective_prompts)
+					else ""
 				)
 				_send_status(
 					unique_id,
@@ -4060,7 +4363,11 @@ def run_ltx23_multiref_video(
 					render_segment_index=segment_index,
 					status_prefix=segment_label,
 					render_prompt_override=segment_prompt,
+					render_story_context=mtv_story_context,
+					render_previous_storyboard=previous_storyboard_context,
+					render_next_prompt=next_segment_prompt,
 				)
+				previous_storyboard_context = str(result.get("continuity_context") or "").strip()
 				if representative_frame is None:
 					representative_frame = result["frames"][:1].detach().float().cpu().clamp(0.0, 1.0).contiguous()
 				preview = _save_segment_video_preview(
@@ -4138,16 +4445,37 @@ def run_ltx23_multiref_video(
 		text_prompt_segments = [str(item or "").strip() for item in list(prompt_segments or []) if str(item or "").strip()]
 		if len(text_prompt_segments) > 1 and mode == MODE_GENERATED_AUDIO:
 			segment_count = len(text_prompt_segments)
+			scene_count = len(scene_images)
 			try:
 				per_segment_seconds = max(0.1, float(prompt_segment_seconds or duration_seconds or 5.0))
 			except Exception:
 				per_segment_seconds = 5.0
 			character_refs = list(prompt_character_references or [])
-			pair_scenes = len(scene_images) == segment_count
+			if scene_count == segment_count:
+				scene_prompt_mode = "indexed"
+				mapping_text = "图片与提示词按索引一一配对；每张场景图各生成一段。"
+			elif scene_count == segment_count + 1:
+				scene_prompt_mode = "adjacent"
+				mapping_text = "每段提示词依次对应相邻两图的首尾帧过渡。"
+			elif scene_count <= 1:
+				scene_prompt_mode = "shared"
+				mapping_text = "所有提示词段复用当前单图；无图时逐段走文生视频。"
+			else:
+				raise RuntimeError(
+					"--- 分段提示词与场景图片数量无法对应："
+					f"当前 {segment_count} 段提示词、{scene_count} 张场景图。"
+					"请使用同数量图片逐图配对，或使用比提示词多 1 张的图片按相邻首尾帧配对。"
+				)
 			_send_status(
 				unique_id,
-				f"提示词分段：共 {segment_count} 段，每段 {_format_seconds(per_segment_seconds)}；"
-				+ ("场景图按索引逐段配对。" if pair_scenes else "每段复用当前场景/多图参考。"),
+				f"--- 提示词分段：共 {segment_count} 段，每段 {_format_seconds(per_segment_seconds)}；{mapping_text}"
+				"人物参考不参与图片计数，只在每段单独进入 MSR 身份分支。",
+			)
+			overall_story_context = _build_overall_story_context(text_prompt_segments)
+			previous_storyboard_context = ""
+			_send_status(
+				unique_id,
+				f"连续性上下文：已汇总 {segment_count} 个镜头的全片脉络；每段全部视频帧共享，并串接上一段实际分镜与台词。",
 			)
 			segment_previews: list[dict[str, Any]] = []
 			segment_video_paths: list[str] = []
@@ -4155,11 +4483,31 @@ def run_ltx23_multiref_video(
 			segment_start_frame = 0
 			for segment_index, segment_prompt in enumerate(text_prompt_segments, start=1):
 				segment_label = f"提示词第{segment_index}段（共{segment_count}段）"
-				segment_main = scene_images[segment_index - 1] if pair_scenes else main_image
-				segment_guides = [] if pair_scenes else base_guide_images
-				segment_times = [] if pair_scenes else base_guide_times
+				next_segment_prompt = (
+					text_prompt_segments[segment_index]
+					if segment_index < segment_count
+					else ""
+				)
+				if scene_prompt_mode == "indexed":
+					segment_main = scene_images[segment_index - 1]
+					segment_guides = []
+					segment_times = []
+				elif scene_prompt_mode == "adjacent":
+					segment_main = scene_images[segment_index - 1]
+					segment_guides = [scene_images[segment_index]]
+					segment_times = [per_segment_seconds]
+				else:
+					segment_main = main_image
+					segment_guides = base_guide_images
+					segment_times = base_guide_times
 				segment_character_ref = character_refs[segment_index - 1] if segment_index <= len(character_refs) else character_reference
 				segment_uses_character_assets = segment_character_ref is not None
+				if scene_prompt_mode == "adjacent":
+					segment_branch_kind = "first_last_msr_workflow" if segment_uses_character_assets else "first_last_workflow"
+					segment_route_label = "首尾帧+MSR人物参考" if segment_uses_character_assets else "首尾帧提示词分段"
+				else:
+					segment_branch_kind = "msr_character_multiref" if segment_uses_character_assets else "default"
+					segment_route_label = "MSR人物多图参考" if segment_uses_character_assets else "提示词分段"
 				result = _render_once(
 					render_main_image=segment_main,
 					render_guide_images=segment_guides,
@@ -4169,13 +4517,17 @@ def run_ltx23_multiref_video(
 					render_input_audio=None,
 					render_seed=int(seed) + (segment_index - 1) * 2,
 					render_frame_trim_start=frame_trim_start,
-					render_route_label="MSR人物多图参考" if segment_uses_character_assets else "提示词分段",
-					render_branch_kind="msr_character_multiref" if segment_uses_character_assets else "default",
+					render_route_label=segment_route_label,
+					render_branch_kind=segment_branch_kind,
 					render_segment_index=segment_index,
 					status_prefix=segment_label,
 					render_prompt_override=segment_prompt,
 					render_character_reference=segment_character_ref,
+					render_story_context=overall_story_context,
+					render_previous_storyboard=previous_storyboard_context,
+					render_next_prompt=next_segment_prompt,
 				)
+				previous_storyboard_context = str(result.get("continuity_context") or "").strip()
 				if representative_frame is None:
 					representative_frame = result["frames"][:1].detach().float().cpu().clamp(0.0, 1.0).contiguous()
 				segment_output_frames = int(result["output_frame_count"])
@@ -4361,11 +4713,16 @@ def run_ltx23_multiref_video(
 				segment_duration = max(0.1, end_time - previous_time)
 				previous_time = end_time
 				segment_label = f"分段 第{segment_index}段（共{segment_count}段）"
-				segment_route_label = f"首尾帧分段（场景{segment_index}→场景{segment_index + 1}）"
+				segment_uses_character_assets = character_reference is not None
+				segment_route_label = (
+					f"首尾帧+MSR人物参考（场景{segment_index}→场景{segment_index + 1}）"
+					if segment_uses_character_assets
+					else f"首尾帧分段（场景{segment_index}→场景{segment_index + 1}）"
+				)
 				# Clean v40：多图分段的每一段本质都是“相邻两张图首尾帧”。
 				# 必须走 first_last_workflow，才能调用真实 GJJ_LTX_FirstLastFrame / GJJ_LTX2NAG、
 				# LTXVImgToVideoInplace、源工作流 sigmas 和自动转场 LoRA。
-				segment_branch_kind = "first_last_workflow"
+				segment_branch_kind = "first_last_msr_workflow" if segment_uses_character_assets else "first_last_workflow"
 				try:
 					print(f"[GJJ LTX2.3 Clean v40] multiframe segment {segment_index}/{segment_count}: forcing first_last_workflow + transition LoRA", flush=True)
 				except Exception:
@@ -4383,6 +4740,7 @@ def run_ltx23_multiref_video(
 					render_branch_kind=segment_branch_kind,
 					render_segment_index=segment_index,
 					status_prefix=segment_label,
+					render_character_reference=character_reference,
 				)
 				segment_frames.append(result["frames"])
 				segment_audios.append(result["audio"])
@@ -4458,7 +4816,7 @@ def run_ltx23_multiref_video(
 			}
 
 		if mode != MODE_AUDIO_CONDITIONED and visual_scene_count == 2:
-			resolved_branch_kind = "first_last_workflow"
+			resolved_branch_kind = "first_last_msr_workflow" if has_character_assets else "first_last_workflow"
 		elif mode == MODE_GENERATED_AUDIO and has_character_assets:
 			resolved_branch_kind = "msr_character_multiref"
 		else:
@@ -4478,6 +4836,7 @@ def run_ltx23_multiref_video(
 			render_frame_trim_start=frame_trim_start,
 			render_route_label=route_label,
 			render_branch_kind=resolved_branch_kind,
+			render_character_reference=character_reference,
 		)
 		if mode == MODE_AUDIO_CONDITIONED:
 			audio_label = "外部音频驱动"

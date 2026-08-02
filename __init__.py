@@ -85,6 +85,33 @@ def _register_gjj_help_api():
 	server._gjj_node_help_api_registered = True
 _register_gjj_help_api()
 
+def _register_gjj_temp_preview_api():
+	try:
+		from aiohttp import web
+		from server import PromptServer
+		from .nodes.common_utils.temp_files import gjjutils_ensure_temp_image_preview
+	except Exception as exc:
+		print(f"[GJJ] 临时缩略图接口注册失败：{exc}")
+		return
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_temp_preview_api_registered", False):
+		return
+	@server.routes.post("/gjj/temp_files/ensure_image_preview")
+	async def gjj_ensure_temp_image_preview(request):
+		try:
+			data = await request.json()
+			if str(data.get("type") or "temp") != "temp" or str(data.get("subfolder") or "GJJ") != "GJJ":
+				raise ValueError("只允许修复 GJJ 公共临时目录中的图片。")
+			item = gjjutils_ensure_temp_image_preview(
+				{"filename": str(data.get("filename") or "")},
+				verify_existing=True,
+			)
+			return web.json_response({"ok": True, "image": item})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=404)
+	server._gjj_temp_preview_api_registered = True
+_register_gjj_temp_preview_api()
+
 def _gjj_package_root():
 	from pathlib import Path
 	return Path(__file__).resolve().parent
@@ -1279,6 +1306,24 @@ def _register_gjj_character_library_api():
 				items.append(data)
 		return sorted(items, key=lambda item: (-(int(item.get("updated_at") or 0)), str(item.get("name") or "")))
 
+	def list_character_summaries() -> list[dict]:
+		items = []
+		for entry in root_dir().iterdir():
+			if not entry.is_dir():
+				continue
+			data = read_manifest(entry.name)
+			if not data.get("views") and not (entry / "manifest.json").is_file():
+				continue
+			character_id = str(data.get("id") or entry.name)
+			items.append({
+				"id": character_id,
+				"name": str(data.get("name") or character_id),
+				"notes": str(data.get("notes") or ""),
+				"updated_at": int(data.get("updated_at") or 0),
+				"cover": thumbnail_url(character_id),
+			})
+		return sorted(items, key=lambda item: (-(int(item.get("updated_at") or 0)), str(item.get("name") or "")))
+
 	def character_gender(data: dict) -> str:
 		text = f"{data.get('name') or ''} {data.get('id') or ''}"
 		if "♀" in text:
@@ -1358,17 +1403,21 @@ def _register_gjj_character_library_api():
 		text = strip_gender_prefix(str(key or "").strip().lstrip("@"))
 		if not text:
 			return None
-		for item in list_characters():
-			if text in {str(item.get("id") or ""), str(item.get("name") or ""), character_reference_name(item)}:
-				return item
 		lowered = text.lower()
-		for item in list_characters():
+		for entry in root_dir().iterdir():
+			if not entry.is_dir():
+				continue
+			try:
+				item = read_manifest(entry.name)
+			except Exception:
+				continue
 			if (
-				lowered == str(item.get("id") or "").lower()
+				text in {str(item.get("id") or ""), str(item.get("name") or ""), character_reference_name(item)}
+				or lowered == str(item.get("id") or "").lower()
 				or lowered == str(item.get("name") or "").lower()
 				or lowered == character_reference_name(item).lower()
 			):
-				return item
+				return enrich_manifest(item)
 		return None
 
 	def decode_png(value: str) -> bytes:
@@ -1896,6 +1945,12 @@ def _register_gjj_character_library_api():
 
 	@server.routes.get("/gjj/character_library/list")
 	async def gjj_character_library_list(request):
+		if str(request.query.get("summary") or "").lower() in {"1", "true", "yes"}:
+			return web.json_response({
+				"ok": True,
+				"directory": str(root_dir()),
+				"characters": list_character_summaries(),
+			})
 		if "page" in request.query or "page_size" in request.query:
 			result = list_character_page(
 				request.query.get("page") or 1,
@@ -2570,6 +2625,7 @@ def _register_gjj_character_library_api():
 	@server.routes.post("/gjj/character_library/annotate_missing")
 	async def gjj_character_library_annotate_missing(request):
 		try:
+			import asyncio
 			try:
 				data = await request.json()
 			except Exception:
@@ -2592,7 +2648,7 @@ def _register_gjj_character_library_api():
 				raise RuntimeError(f"加载 GJJ_GemmaTextGenerate 运行时失败：{exc}") from exc
 
 			model_name = clip_name or DEFAULT_CLIP_NAME
-			clip = _load_merged_clip(model_name, "ideogram4", "default")
+			clip = await asyncio.to_thread(_load_merged_clip, model_name, "ideogram4", "default")
 			processed = []
 			skipped = []
 			def name_has_gender_prefix(name: str) -> bool:
@@ -2674,7 +2730,8 @@ def _register_gjj_character_library_api():
 					except Exception:
 						pass
 				try:
-					text = _generate_text(
+					text = await asyncio.to_thread(
+						_generate_text,
 						clip,
 						_merged_generation_prompt(system_prompt, user_prompt),
 						180,
@@ -2761,7 +2818,11 @@ def _register_gjj_character_library_api():
 			path = thumbnail_path(character_id)
 			if not path.is_file():
 				return web.Response(status=404, text="not found")
-			return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+			return web.FileResponse(path, headers={
+				"Cache-Control": "public, max-age=300",
+				"Content-Type": "image/png",
+				"X-GJJ-Thumbnail-Source": "character-library-root",
+			})
 		except Exception as exc:
 			return web.Response(status=400, text=str(exc))
 
@@ -2776,7 +2837,7 @@ def _register_gjj_character_library_api():
 			path = (base / file_name).resolve()
 			if base not in path.parents or not path.is_file():
 				return web.Response(status=404, text="not found")
-			return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+			return web.FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 		except Exception as exc:
 			return web.Response(status=400, text=str(exc))
 
@@ -2928,6 +2989,52 @@ def _register_gjj_scene_library_api():
 			if not (root_dir() / candidate).exists():
 				return candidate
 		return clean_key(f"{base_id}_{uuid.uuid4().hex[:6]}", "scene")
+
+	def rename_scene_asset_files(manifest: dict, scene_name: str) -> bool:
+		scene_id = clean_key(manifest.get("id") or "", "")
+		stem = clean_key(scene_name, "场景")
+		if not scene_id or not has_chinese_text(stem):
+			return False
+		base = scene_dir(scene_id)
+		assets = manifest.get("assets") if isinstance(manifest.get("assets"), list) else []
+		id_changes = {}
+		changed = False
+		for index, asset in enumerate(assets, start=1):
+			if not isinstance(asset, dict):
+				continue
+			old_file = clean_key(asset.get("file") or "", "")
+			if not old_file:
+				continue
+			old_path = base / old_file
+			ext = old_path.suffix.lower()
+			if ext not in ASSET_EXTS or not old_path.is_file():
+				continue
+			suffix = "_360" if len(assets) == 1 else f"_{index}"
+			new_file = clean_key(f"{stem}{suffix}{ext}", f"场景{suffix}{ext}")
+			new_path = base / new_file
+			if new_path != old_path:
+				counter = 2
+				while new_path.exists():
+					new_file = clean_key(f"{stem}{suffix}_{counter}{ext}", f"场景{suffix}_{counter}{ext}")
+					new_path = base / new_file
+					counter += 1
+				old_preview = base / f"__preview_rgbe_{old_path.stem}.png"
+				new_preview = base / f"__preview_rgbe_{new_path.stem}.png"
+				old_path.rename(new_path)
+				changed = True
+				if old_preview.is_file() and not new_preview.exists():
+					old_preview.rename(new_preview)
+			old_id = str(asset.get("id") or "")
+			new_id = clean_key(Path(new_file).stem, "asset")
+			asset["file"] = new_file
+			asset["id"] = new_id
+			if old_id and old_id != new_id:
+				id_changes[old_id] = new_id
+				changed = True
+		for annotation in manifest.get("annotations") if isinstance(manifest.get("annotations"), list) else []:
+			if isinstance(annotation, dict) and str(annotation.get("asset_id") or "") in id_changes:
+				annotation["asset_id"] = id_changes[str(annotation.get("asset_id") or "")]
+		return changed
 
 	def scene_dir(scene_id: str) -> Path:
 		scene_id = clean_key(scene_id, "")
@@ -3740,7 +3847,7 @@ def _register_gjj_scene_library_api():
 		manifest["assets"].append(asset)
 		return asset
 
-	def enrich_manifest(data: dict) -> dict:
+	def enrich_manifest(data: dict, ensure_thumbnail: bool = True) -> dict:
 		scene_id = data.get("id") or ""
 		base = scene_dir(scene_id)
 		enriched_assets = []
@@ -3762,7 +3869,12 @@ def _register_gjj_scene_library_api():
 				next_item["missing"] = True
 			enriched_assets.append(next_item)
 		data["assets"] = enriched_assets
-		data["thumbnail_url"] = sync_scene_thumbnail(data)
+		if ensure_thumbnail:
+			data["thumbnail_url"] = sync_scene_thumbnail(data)
+		else:
+			thumbnail = scene_thumbnail_path(scene_id)
+			mtime = thumbnail.stat().st_mtime if thumbnail.is_file() else 0
+			data["thumbnail_url"] = scene_thumbnail_url(scene_id, mtime)
 		data["reference"] = f"@{data.get('name') or scene_id}"
 		return data
 
@@ -3804,7 +3916,15 @@ def _register_gjj_scene_library_api():
 	def list_scene_page(page: int = 1, page_size: int = 15, search: str = "", scene_type: str = "all", sort_mode: str = "updated_desc") -> dict:
 		search_text = str(search or "").strip().lower()
 		items = []
-		for data in list_scenes():
+		for entry in root_dir().iterdir():
+			if not entry.is_dir():
+				continue
+			try:
+				data = read_manifest(entry.name)
+			except Exception:
+				continue
+			if not data.get("assets") and not (entry / "manifest.json").is_file():
+				continue
 			if scene_type in SCENE_TYPES and data.get("type") != scene_type:
 				continue
 			haystack = " ".join([
@@ -3823,9 +3943,10 @@ def _register_gjj_scene_library_api():
 		page_count = max(1, (total + page_size - 1) // page_size)
 		page = max(1, min(int(page or 1), page_count))
 		start = (page - 1) * page_size
+		current = [enrich_manifest(item, ensure_thumbnail=False) for item in items[start:start + page_size]]
 		return {
 			"ok": True,
-			"scenes": items[start:start + page_size],
+			"scenes": current,
 			"total": total,
 			"page": page,
 			"page_size": page_size,
@@ -3858,6 +3979,34 @@ def _register_gjj_scene_library_api():
 				sort_mode=request.query.get("sort") or "updated_desc",
 			)
 			return web.json_response(result)
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/scene_library/thumbnail_index")
+	async def gjj_scene_library_thumbnail_index(_request):
+		try:
+			items = []
+			for entry in root_dir().iterdir():
+				if not entry.is_dir():
+					continue
+				try:
+					data = read_manifest(entry.name)
+				except Exception:
+					continue
+				scene_id = clean_key(data.get("id") or entry.name, "")
+				if not scene_id:
+					continue
+				thumbnail = scene_thumbnail_path(scene_id)
+				mtime = thumbnail.stat().st_mtime if thumbnail.is_file() else 0
+				items.append({
+					"id": scene_id,
+					"name": str(data.get("name") or scene_id),
+					"notes": str(data.get("notes") or ""),
+					"keywords": list(data.get("keywords") or []),
+					"thumbnail_url": scene_thumbnail_url(scene_id, mtime),
+				})
+			items.sort(key=lambda item: str(item.get("name") or item.get("id") or "").lower())
+			return web.json_response({"ok": True, "scenes": items, "total": len(items)})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
@@ -4103,6 +4252,7 @@ def _register_gjj_scene_library_api():
 	@server.routes.post("/gjj/scene_library/annotate_missing")
 	async def gjj_scene_library_annotate_missing(request):
 		try:
+			import asyncio
 			try:
 				data = await request.json()
 			except Exception:
@@ -4140,7 +4290,7 @@ def _register_gjj_scene_library_api():
 				raise RuntimeError(f"加载 GJJ_GemmaTextGenerate 运行时失败：{exc}") from exc
 
 			model_name = clip_name or DEFAULT_CLIP_NAME
-			clip = _load_merged_clip(model_name, "ideogram4", "default")
+			clip = await asyncio.to_thread(_load_merged_clip, model_name, "ideogram4", "default")
 			processed = []
 			skipped = []
 			skipped_details = []
@@ -4156,6 +4306,27 @@ def _register_gjj_scene_library_api():
 					continue
 				manifest = read_manifest(scene_id)
 				scene_label = str(manifest.get("name") or scene_id)
+				if not has_chinese_text(scene_id) and has_chinese_text(scene_label):
+					old_scene_id = scene_id
+					new_scene_id = unique_scene_id(scene_label, scene_id)
+					if new_scene_id != scene_id:
+						old_scene_path = scene_dir(scene_id)
+						new_scene_path = scene_dir(new_scene_id)
+						if new_scene_path.exists():
+							raise RuntimeError(f"场景中文目录已存在：{new_scene_id}")
+						old_scene_path.rename(new_scene_path)
+						manifest["id"] = new_scene_id
+						scene_id = new_scene_id
+						old_thumbnail = scene_thumbnail_path(old_scene_id)
+						new_thumbnail = scene_thumbnail_path(new_scene_id)
+						if old_thumbnail.is_file():
+							if not new_thumbnail.exists():
+								old_thumbnail.rename(new_thumbnail)
+							else:
+								old_thumbnail.unlink()
+						manifest = write_manifest(manifest)
+				if has_chinese_text(scene_label) and rename_scene_asset_files(manifest, scene_label):
+					manifest = write_manifest(manifest)
 				await send_scene_progress(scene_index - 1, total_count, f"正在分析 {scene_index}/{total_count}：{scene_label}")
 				has_annotations = bool(manifest.get("annotations"))
 				has_keywords = bool(manifest.get("keywords"))
@@ -4219,7 +4390,8 @@ def _register_gjj_scene_library_api():
 					except Exception:
 						pass
 				try:
-					text = _generate_text(
+					text = await asyncio.to_thread(
+						_generate_text,
 						clip,
 						_merged_generation_prompt(system_prompt, user_prompt),
 						420,
@@ -4277,6 +4449,7 @@ def _register_gjj_scene_library_api():
 					):
 						manifest["name"] = replacement_name[:96]
 				if not has_chinese_text(scene_id) and has_chinese_text(manifest.get("name")):
+					old_scene_id = scene_id
 					new_scene_id = unique_scene_id(str(manifest.get("name") or ""), scene_id)
 					if new_scene_id != scene_id:
 						old_scene_path = scene_dir(scene_id)
@@ -4286,6 +4459,15 @@ def _register_gjj_scene_library_api():
 						old_scene_path.rename(new_scene_path)
 						manifest["id"] = new_scene_id
 						scene_id = new_scene_id
+						old_thumbnail = scene_thumbnail_path(old_scene_id)
+						new_thumbnail = scene_thumbnail_path(new_scene_id)
+						if old_thumbnail.is_file():
+							if not new_thumbnail.exists():
+								old_thumbnail.rename(new_thumbnail)
+							else:
+								old_thumbnail.unlink()
+				if has_chinese_text(manifest.get("name")):
+					rename_scene_asset_files(manifest, str(manifest.get("name") or scene_id))
 				write_manifest(manifest)
 				processed.append({
 					"id": scene_id,
@@ -4334,7 +4516,11 @@ def _register_gjj_scene_library_api():
 			file_name = clean_key(request.match_info.get("file_name") or "", "")
 			if not file_name.lower().endswith(".jpg"):
 				raise ValueError("只能读取 JPG 场景缩略图。")
-			path = scene_thumbnail_path(Path(file_name).stem)
+			scene_id = clean_key(Path(file_name).stem, "")
+			path = scene_thumbnail_path(scene_id)
+			if not path.is_file():
+				import asyncio
+				await asyncio.to_thread(sync_scene_thumbnail, read_manifest(scene_id))
 			if not path.is_file():
 				return web.Response(status=404, text="not found")
 			return web.FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable", "Content-Type": "image/jpeg"})
@@ -5324,6 +5510,7 @@ def _register_gjj_costume_library_api():
 	@server.routes.post("/gjj/costume_library/annotate_missing")
 	async def gjj_costume_library_annotate_missing(request):
 		try:
+			import asyncio
 			try:
 				data = await request.json()
 			except Exception:
@@ -5361,7 +5548,7 @@ def _register_gjj_costume_library_api():
 				raise RuntimeError(f"加载 GJJ_GemmaTextGenerate 运行时失败：{exc}") from exc
 
 			model_name = clip_name or DEFAULT_CLIP_NAME
-			clip = _load_merged_clip(model_name, "ideogram4", "default")
+			clip = await asyncio.to_thread(_load_merged_clip, model_name, "ideogram4", "default")
 			processed = []
 			skipped = []
 			item_ids = requested_ids or [
@@ -5459,7 +5646,8 @@ def _register_gjj_costume_library_api():
 					except Exception:
 						pass
 				try:
-					text = _generate_text(
+					text = await asyncio.to_thread(
+						_generate_text,
 						clip,
 						_merged_generation_prompt(system_prompt, user_prompt),
 						260,
@@ -5585,7 +5773,7 @@ def _register_gjj_summon_model_api():
 		r")(?=$|[\s._\-/\\])"
 	)
 	QUANT_MODIFIER_PATTERN = re.compile(
-		r"(?i)(^|[\s._\-/\\])(?:input[\s._-]?)?scaled(?=$|[\s._\-/\\])"
+		r"(?i)(^|[\s._\-/\\])(?:(?:input[\s._-]?)?scaled|convrot)(?=$|[\s._\-/\\])"
 	)
 	RANK_TOKEN_PATTERN = re.compile(r"(?i)^(?:rank|dim|r)\d+$")
 	NOTE_BLOCK_PATTERN = re.compile(
@@ -5643,8 +5831,10 @@ def _register_gjj_summon_model_api():
 		for ext in sorted(KNOWN_MODEL_EXTENSIONS, key=len, reverse=True):
 			if lower.endswith(ext):
 				return value[:-len(ext)]
-		root, ext = os.path.splitext(value)
-		return root if ext and len(ext) <= 12 else value
+		# 没有真实模型扩展名时必须完整保留模型族名。模型版本号经常包含点号，
+		# 例如 qwen_2.5_vl_7b；用 splitext 会把 .5_vl_7b 误当扩展名，
+		# 最终查询只剩 qwen_2，导致磁盘中同主体的量化模型无法被召唤。
+		return value
 
 	def clean_model_key(text, basename_only=True):
 		value = str(text or "").strip().replace("\\", "/")

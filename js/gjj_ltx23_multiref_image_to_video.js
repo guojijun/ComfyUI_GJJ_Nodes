@@ -26,6 +26,8 @@ const CONVROT_INSTALL_API = "/gjj/ltx23/install_comfy_kitchen";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const SHARED_PROMPT_SECTION = "mtv_ltx_prompt_bridge";
 
+const DEFAULT_DIALOGUE_SYSTEM_PROMPT = "你是影视分镜导演和人物台词编剧。根据剧情提示词和可选参考图，输出可直接用于视频生成的分镜说明与人物台词。分镜说明必须包含起始景别、明确运镜、人物连续动作、环境动态和结束景别；至少使用推进、拉远、横移、环绕、摇镜或跟拍中的一种实际运镜。不得让画面停留在参考图，不得复刻参考图的白底、转面排布或静止构图；参考图只用于理解人物身份、服装和场景。人物台词必须符合人物身份、关系、情绪和动作，人物名必须来自输入中的 @角色名。当前镜头必须承接上一镜头的空间方向、人物位置、连续动作、情绪和未结束语义；台词要回应上一句，禁止无故重复、跳跃或重置关系。当前镜头结尾要自然引向下一镜头目标，但不得提前演出下一镜头画面。严格输出两部分，不要解释、编号或 Markdown。格式必须是：\n分镜说明：具体的动态分镜与运镜说明\n人物台词：\n@名字 说：“具体台词”";
+
 const DEFAULT_CONFIG = {
   ltx_model_name: "",
   positive_prompt: "多张参考图连续过渡，主体动作自然，镜头语言稳定，电影感光影，细节真实。",
@@ -79,6 +81,13 @@ const DEFAULT_CONFIG = {
   vae_overlap: 64,
   vae_temporal_size: 512,
   vae_temporal_overlap: 4,
+  dialogue_inference_enabled: false,
+  dialogue_source: "提示词和参考图",
+  dialogue_style: "自然对白",
+  dialogue_language: "中文",
+  dialogue_character_hint: "",
+  dialogue_line_count: 1,
+  dialogue_system_prompt: DEFAULT_DIALOGUE_SYSTEM_PROMPT,
 };
 
 const SEED_MODES = ["固定", "随机", "递增", "递减"];
@@ -929,7 +938,7 @@ function normalizeInputs(node) {
   characterReference.label = "👤 人物参考";
   characterReference.localized_name = "👤 人物参考";
   characterReference.display_name = "👤 人物参考";
-  characterReference.tooltip = "接入 GJJ_LazyImageStudio 的人物参考批次；所有视频分段共用，当前段场景图作为 MSR background。";
+  characterReference.tooltip = "人物图只走 MSR 身份引导，所有视频分段共用；不计入场景数量，不作为首帧、尾帧或输出画面。当前段场景图仅作为 MSR background。";
   setInputType(characterReference, "GJJ_BATCH_IMAGE,IMAGE");
 
   const fixed = [image, lora, audio, characterReference];
@@ -944,8 +953,8 @@ function stabilizeNumericWidgetInputs(node) {
   for (const input of node.inputs || []) {
     if (!isFpsInput(input)) continue;
     input.name = input.name || "fps";
-    input.label = input.label || "🎞️ 帧率";
-    input.localized_name = input.localized_name || "🎞️ 帧率";
+    input.label = "⏰ 帧率";
+    input.localized_name = "⏰ 帧率";
     input.type = FPS_SOCKET_TYPE;
   }
 }
@@ -1624,6 +1633,12 @@ function refreshToolbarState(node) {
       : "🎬 Gemma 首尾帧过渡词：已关闭";
     node.__gjjLtxAutoPromptButton.setAttribute("aria-pressed", enabled ? "true" : "false");
   }
+  if (node.__gjjLtxDialogueButton) {
+    const enabled = Boolean(cfg.dialogue_inference_enabled);
+    node.__gjjLtxDialogueButton.classList.toggle("active", enabled);
+    node.__gjjLtxDialogueButton.setAttribute("aria-pressed", enabled ? "true" : "false");
+    node.__gjjLtxDialogueButton.title = enabled ? "🎙 分镜与台词反推：已开启" : "🎙 分镜与台词反推：已关闭";
+  }
   if (node.__gjjLtxRunButton) {
     const running = Boolean(node.__gjjLtxRunInFlight);
     node.__gjjLtxRunButton.disabled = running;
@@ -2264,16 +2279,16 @@ function buildPanel(node) {
     body.append(panelRow("视频尺寸来源", sourceControl), widthRow, heightRow);
     syncDimensionAvailability();
   }, { width: 460 }));
-  const timingBtn = makeToolButton("🎞️", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "时长", (body) => {
+  const timingBtn = makeToolButton("⏰", "时长、帧率与降噪", (button) => showFloatingPanel(node, button, "⏰ 时长与帧率", (body) => {
     const segmentSecondsInput = configInput(node, "segment_seconds", "number", { min: 0.1, max: 600, step: 0.1 });
-    const segmentSecondsRow = panelRow("场景间隔", segmentSecondsInput);
+    const segmentSecondsRow = panelRow("⏰ 场景时长", segmentSecondsInput);
     node.__gjjLtxSegmentSecondsControl = {
       row: segmentSecondsRow,
       input: segmentSecondsInput,
     };
     body.append(
       segmentSecondsRow,
-      panelRow("帧率", configInput(node, "fps", "number", { min: 1, max: 120, step: 1 })),
+      panelRow("⏰ 帧率", configInput(node, "fps", "number", { min: 1, max: 120, step: 1 })),
       panelRow("降噪", configInput(node, "denoise_strength", "number", { min: 0, max: 1, step: 0.01 })),
     );
     syncSegmentSecondsAvailability(node);
@@ -2308,6 +2323,21 @@ function buildPanel(node) {
     });
     refreshToolbarState(node);
   });
+  const dialogueBtn = makeToolButton("🎙", "按提示词和参考图反推动态分镜与人物台词", (button) => showFloatingPanel(node, button, "🎙 分镜与台词反推", (body) => {
+    body.append(
+      panelRow("启用", configCheckbox(node, "dialogue_inference_enabled")),
+      panelRow("反推依据", configSelect(node, "dialogue_source", ["提示词和参考图", "仅提示词", "仅参考图"])),
+      panelRow("台词形式", configSelect(node, "dialogue_style", ["自然对白", "人物独白", "画外旁白", "简短回应", "自由发挥"])),
+      panelRow("输出语言", configSelect(node, "dialogue_language", ["中文", "英文", "日文", "韩文", "跟随提示词"])),
+      panelRow("角色提示", configInput(node, "dialogue_character_hint", "text", { placeholder: "可选：说话人物、身份、语气或关系" })),
+      panelRow("台词句数", configInput(node, "dialogue_line_count", "number", { min: 1, max: 8, step: 1 })),
+      panelRow("大模型指令", configInput(node, "dialogue_system_prompt", "textarea", { rows: 12, placeholder: "发送给反推大模型的系统指令" })),
+    );
+    const note = document.createElement("div");
+    note.className = "gjj-ltx-advanced-note";
+    note.textContent = "使用 🧠 面板中的 Qwen3.5 4B Uncensored 反推模型；每段会同时获得全片脉络、上一镜头实际分镜与台词、当前任务和下一镜头目标，并把连贯的动态分镜与 @人物台词加入该段全部视频帧的统一条件。参考图只用于理解身份、服装和场景。";
+    body.appendChild(note);
+  }, { width: 480 }));
   const segmentBtn = makeToolButton("🧩", "多图分段与保存", (button) => showFloatingPanel(node, button, "分段", (body) => {
     const openDirBtn = document.createElement("button");
     openDirBtn.type = "button";
@@ -2357,10 +2387,11 @@ function buildPanel(node) {
   }, { width: 480 }));
   const runBtn = makeToolButton("▶️", "只执行当前 LTX 节点，并在节点面板预览最终视频", () => runPreviewNode(node));
 
-  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, translateBtn, transitionBtn, autoPromptBtn, segmentBtn, testBtn, settingsBtn, runBtn);
+  tools.append(fileBtn, modelBtn, negativeBtn, sizeBtn, timingBtn, seedBtn, translateBtn, transitionBtn, autoPromptBtn, dialogueBtn, segmentBtn, testBtn, settingsBtn, runBtn);
   root.appendChild(tools);
   node.__gjjLtxTransitionButton = transitionBtn;
   node.__gjjLtxAutoPromptButton = autoPromptBtn;
+  node.__gjjLtxDialogueButton = dialogueBtn;
   node.__gjjLtxSegmentButton = segmentBtn;
   node.__gjjLtxFileButton = fileBtn;
   node.__gjjLtxSizeButton = sizeBtn;
