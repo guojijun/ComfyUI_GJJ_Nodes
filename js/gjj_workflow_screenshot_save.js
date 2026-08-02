@@ -3508,7 +3508,11 @@ import { api } from "/scripts/api.js";
 			const title = previewItemDisplayTitle(item);
 			closePreviewOverlay();
 			const workflow = workflowWithDisplayTitle(item.workflow, title);
-			await app.loadGraphData(workflow, true, true, cleanWorkflowDisplayTitle(title));
+			// Newer ComfyUI versions reserve the fourth argument for a Workflow object.
+			// Passing the display title there makes the workflow manager try to load a
+			// string as a workflow record, which ends in "Failed to fetch".  The title
+			// is restored explicitly below, so only pass the stable graph-load options.
+			await app.loadGraphData(workflow, true, true);
 			applyLoadedWorkflowTitle(title);
 			setTimeout(() => applyLoadedWorkflowTitle(title), 80);
 			app?.canvas?.setDirty?.(true, true);

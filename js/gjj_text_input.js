@@ -171,12 +171,11 @@ function updateReconnectButton(node) {
 
 function getPreviewText(node) {
 	const liveText = node?.__gjjTextInputLiveText;
-	if (hasLinkedTextInput(node) && liveText !== undefined && liveText !== null) {
+	if (hasLinkedTextInput(node) && liveText !== undefined && liveText !== null && String(liveText) !== "") {
 		return String(liveText);
 	}
 	if (hasLinkedTextInput(node)) {
-		const savedText = preserveSavedTextValue(node);
-		return savedText || WAITING_UPSTREAM_TEXT;
+		return preserveSavedTextValue(node);
 	}
 	return getTextValue(node);
 }
@@ -186,7 +185,7 @@ function hasReadyLinkedPreviewText(node) {
 		return false;
 	}
 	const text = String(getPreviewText(node) ?? "");
-	return text !== "" && text !== WAITING_UPSTREAM_TEXT;
+	return text !== "";
 }
 
 function getMode(node) {
@@ -742,6 +741,20 @@ function preserveSavedTextValue(node) {
 	node.properties = node.properties || {};
 	node.properties[SAVED_TEXT_PROPERTY] = value;
 	return value;
+}
+
+function persistUpstreamText(node, value) {
+	const nextValue = String(value ?? "");
+	if (!node || !nextValue || isTransientPreviewText(nextValue)) return false;
+	const previousValue = String(node?.properties?.[SAVED_TEXT_PROPERTY] ?? getTextValue(node) ?? "");
+	node.__gjjTextInputLiveText = nextValue;
+	if (previousValue === nextValue && getTextValue(node) === nextValue) return false;
+	setTextValue(node, nextValue);
+	syncSavedValue(node);
+	node.graph?.change?.();
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+	return true;
 }
 
 function setupIconButton(button, label, svg) {
@@ -1750,7 +1763,10 @@ app.registerExtension({
 		nodeType.prototype.onExecuted = function (message, ...args) {
 			const result = originalOnExecuted?.apply(this, [message, ...args]);
 			if (hasLinkedTextInput(this)) {
-				this.__gjjTextInputLiveText = firstPreviewText(message);
+				const upstreamText = firstPreviewText(message);
+				if (!persistUpstreamText(this, upstreamText)) {
+					this.__gjjTextInputLiveText = preserveSavedTextValue(this);
+				}
 			} else {
 				this.__gjjTextInputLiveText = null;
 			}
