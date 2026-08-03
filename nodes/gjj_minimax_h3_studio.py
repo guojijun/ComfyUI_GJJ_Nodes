@@ -21,6 +21,7 @@ from .gjj_bernini_studio import (
     _video_combine_result,
 )
 from .gjj_video_combine import GJJ_VideoCombine
+from .gjj_video_combine_runtime import DEFAULT_FORMAT, list_supported_formats
 from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _load_vae
 
 
@@ -62,7 +63,8 @@ def _register_upload_route() -> None:
                     while chunk := await part.read_chunk():
                         handle.write(chunk)
                 media_type = "text" if suffix in {".txt", ".md", ".prompt"} else ("image" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} else ("audio" if suffix in {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"} else "video"))
-                items.append({"filename": filename, "subfolder": "gjj_minimax_h3_studio", "type": "input", "media_type": media_type, "original_name": original})
+                preview_text = target.read_text(encoding="utf-8", errors="replace")[:1200] if media_type == "text" else ""
+                items.append({"filename": filename, "subfolder": "gjj_minimax_h3_studio", "type": "input", "media_type": media_type, "original_name": original, "preview_text": preview_text})
             return web.json_response({"ok": True, "items": items})
 
         server.routes.post(UPLOAD_ROUTE)(upload)
@@ -268,14 +270,26 @@ def _align_media(media: dict[str, list[Any]], width: int, height: int, fit_mode:
     media["videos"] = [(_resize_visual(frames, width, height, fit_mode, anchor), audio, fps) for frames, audio, fps in media["videos"]]
 
 
-def _send_status(unique_id: Any, text: str, progress: float) -> None:
+def _send_status(unique_id: Any, text: str, progress: float, extra: dict[str, Any] | None = None) -> None:
     if unique_id is None:
         return
     try:
         from server import PromptServer
-        PromptServer.instance.send_sync("gjj_node_progress", {"node": str(unique_id), "text": text, "progress": float(progress)})
+        payload = {"node": str(unique_id), "text": text, "progress": float(progress)}
+        if isinstance(extra, dict):
+            payload.update(extra)
+        PromptServer.instance.send_sync("gjj_node_progress", payload)
     except Exception:
         pass
+
+
+def _concat_audio_segments(values: list[Any]) -> Any:
+    valid = [value for value in values if isinstance(value, dict) and isinstance(value.get("waveform"), torch.Tensor)]
+    if not valid:
+        return None
+    sample_rate = int(valid[0].get("sample_rate") or 44100)
+    matching = [value["waveform"] for value in valid if int(value.get("sample_rate") or sample_rate) == sample_rate]
+    return {"waveform": torch.cat(matching, dim=-1).contiguous(), "sample_rate": sample_rate} if matching else None
 
 
 class GJJ_MiniMaxH3Studio:
@@ -299,6 +313,7 @@ class GJJ_MiniMaxH3Studio:
         audio_vaes, audio_vae_default = _choices("vae", DEFAULT_AUDIO_VAE, ("minimax_h3", "audio_vae"))
         samplers = list(comfy.samplers.KSampler.SAMPLERS)
         schedulers = list(comfy.samplers.KSampler.SCHEDULERS)
+        output_formats = list_supported_formats()
         if "res_multistep" not in samplers:
             samplers.insert(0, "res_multistep")
         if "simple" not in schedulers:
@@ -320,7 +335,7 @@ class GJJ_MiniMaxH3Studio:
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪"}),
                 "ref_image_size": (["match", "max"], {"default": "match", "display_name": "参考图尺寸"}),
                 "filename_prefix": ("STRING", {"default": "video/MiniMax_H3_Studio", "display_name": "文件名前缀"}),
-                "format_name": ("STRING", {"default": "video/h264-mp4", "display_name": "输出格式"}),
+                "format_name": (output_formats, {"default": DEFAULT_FORMAT, "display_name": "输出格式"}),
                 "fl_model": (fl_models, {"default": fl_default, "display_name": "T2V/I2V模型", "gjj_default_model": DEFAULT_FL_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_fl2va"]}),
                 "ref_model": (ref_models, {"default": ref_default, "display_name": "参考模型", "gjj_default_model": DEFAULT_REF_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_ref2va"]}),
                 "clip_name": (clips, {"default": clip_default, "display_name": "Qwen3-VL编码器", "gjj_default_model": DEFAULT_CLIP, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡"}),
@@ -338,8 +353,12 @@ class GJJ_MiniMaxH3Studio:
         }
 
     @classmethod
-    def IS_CHANGED(cls, *args, **kwargs):
-        if bool((kwargs.get("randomize_seed") or [True])[0] if isinstance(kwargs.get("randomize_seed"), list) else kwargs.get("randomize_seed", True)):
+    def IS_CHANGED(cls, **kwargs):
+        # ⚠️ 仅使用 **kwargs 按名称读取，禁止使用 *args 按索引位置传参
+        # 原因：重启 ComfyUI 后 INPUT_TYPES 中动态列表顺序变化会导致参数索引错位
+        randomize_raw = kwargs.get("randomize_seed", True)
+        randomize_val = (randomize_raw[0] if isinstance(randomize_raw, list) and randomize_raw else randomize_raw)
+        if bool(randomize_val):
             return time.time_ns()
         digest = hashlib.sha256()
         for key in sorted(kwargs):
@@ -370,10 +389,7 @@ class GJJ_MiniMaxH3Studio:
         if not any(media.values()):
             internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
             _merge_media(media, internal_media)
-        image_count = len(media["images"])
-        has_reference_av = bool(media["videos"] or media["audios"])
-        mode = "T2V" if image_count == 0 and not has_reference_av else ("I2V" if image_count == 1 and not has_reference_av else "R2V")
-        model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
+        prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
         source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
         width, height = _target_dimensions(
@@ -386,68 +402,100 @@ class GJJ_MiniMaxH3Studio:
         if bool(first("randomize_seed", True)):
             seed = int(torch.randint(0, 0x7FFFFFFF, (1,)).item())
         unique_id = first("unique_id")
-        _send_status(unique_id, f"1/5 自动模式 {mode}：加载模型...", 0.05)
-        model, clip, video_vae, audio_vae = self._load_models(
-            model_name,
-            str(first("clip_name", DEFAULT_CLIP)),
-            str(first("video_vae_name", DEFAULT_VIDEO_VAE)),
-            str(first("audio_vae_name", DEFAULT_AUDIO_VAE)),
-            bool(first("keep_model", False)),
-            unique_id,
-        )
-        prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
+        prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
+        segment_count = len(prompt_parts)
+        distribute_images = segment_count > 1 and len(media["images"]) == segment_count
+        filename_prefix = str(first("filename_prefix", "video/MiniMax_H3_Studio"))
+        requested_format = str(first("format_name", DEFAULT_FORMAT) or "").strip()
+        supported_formats = set(list_supported_formats())
+        format_name = requested_format if requested_format in supported_formats else DEFAULT_FORMAT
+        runtime_models: dict[str, tuple[Any, Any, Any, Any]] = {}
+
+        def segment_media(index: int) -> dict[str, list[Any]]:
+            return {
+                "images": [media["images"][index]] if distribute_images else list(media["images"]),
+                "videos": list(media["videos"]),
+                "audios": list(media["audios"]),
+            }
+
+        def segment_mode(segment: dict[str, list[Any]], segment_prompt: str) -> str:
+            image_count = len(segment["images"])
+            has_reference_av = bool(segment["videos"] or segment["audios"])
+            if image_count == 2 and not has_reference_av and "首尾帧" in segment_prompt:
+                return "首尾帧"
+            if image_count == 0 and not has_reference_av:
+                return "T2V"
+            if image_count == 1 and not has_reference_av:
+                return "I2V"
+            return "R2V"
+
+        def combine_segment(segment_images: torch.Tensor, segment_audio: Any, prefix: str):
+            return GJJ_VideoCombine().combine(
+                images=segment_images, frame_rate=fps, loop_count=0, filename_prefix=prefix,
+                format_name=format_name, pingpong=False, save_output=True, use_source_fps=False,
+                delete_tail_frame=False, save_metadata=True, trim_to_audio=False, pix_fmt="auto", crf="-1",
+                vae=None, audio=segment_audio, prompt=first("prompt_info"), extra_pnginfo=first("extra_pnginfo"), unique_id=unique_id,
+            )
+
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
-        if mode == "R2V":
-            ref_images = {f"ref_image_{i}": value for i, value in enumerate(media["images"][:10])}
-            ref_videos = {f"ref_video_{i}": value[0] for i, value in enumerate(media["videos"][:4])}
-            ref_video_audios = {f"ref_video_audio_{i}": value[1] for i, value in enumerate(media["videos"][:4]) if value[1] is not None}
-            ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(media["audios"][:4])}
-            positive, latent = _unwrap_node_output(MiniMaxH3ReferenceToVideo.execute(
-                clip, video_vae, audio_vae, prompt, width, height, length,
-                str(first("ref_image_size", "match")), ref_images, ref_videos, ref_video_audios, ref_audios,
-            ))[:2]
-        else:
-            first_frame = media["images"][0] if mode == "I2V" else None
-            positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
-                clip, video_vae, prompt, width, height, length, first_frame, None,
-            ))[:2]
-        _send_status(unique_id, "2/5 构建采样器...", 0.2)
         from comfy_extras.nodes_custom_sampler import BasicGuider, RandomNoise, SamplerCustomAdvanced
-        guider = _node_output_first(BasicGuider.execute(model, positive))
-        noise = _node_output_first(RandomNoise.execute(seed))
-        sampler = _ksampler(str(first("sampler_name", "res_multistep")))
-        sigmas = _basic_sigmas(model, str(first("scheduler", "simple")), int(first("steps", 20)), float(first("denoise", 1.0)))
-        _send_status(unique_id, "3/5 MiniMax H3 视频与音频联合采样...", 0.3)
-        sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(noise, guider, sampler, sigmas, latent))[0]
-        _send_status(unique_id, "4/5 解码视频与音频...", 0.85)
         import nodes
         from comfy_extras.nodes_audio import VAEDecodeAudio
-        images = nodes.VAEDecode().decode(video_vae, sampled)[0]
-        audio = _unwrap_node_output(VAEDecodeAudio.execute(audio_vae, sampled))[0]
-        combined = GJJ_VideoCombine().combine(
-            images=images,
-            frame_rate=fps,
-            loop_count=0,
-            filename_prefix=str(first("filename_prefix", "video/MiniMax_H3_Studio")),
-            format_name=str(first("format_name", "video/h264-mp4")),
-            pingpong=False,
-            save_output=True,
-            use_source_fps=False,
-            delete_tail_frame=False,
-            save_metadata=True,
-            trim_to_audio=False,
-            pix_fmt="auto",
-            crf="-1",
-            vae=None,
-            audio=audio,
-            prompt=first("prompt_info"),
-            extra_pnginfo=first("extra_pnginfo"),
-            unique_id=unique_id,
-        )
+        decoded_segments: list[torch.Tensor] = []
+        audio_segments: list[Any] = []
+        modes: list[str] = []
+        for index, segment_prompt in enumerate(prompt_parts):
+            current_media = segment_media(index)
+            mode = segment_mode(current_media, segment_prompt)
+            modes.append(mode)
+            model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
+            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode}：加载模型...", index / segment_count)
+            if model_name not in runtime_models:
+                runtime_models[model_name] = self._load_models(
+                    model_name, str(first("clip_name", DEFAULT_CLIP)), str(first("video_vae_name", DEFAULT_VIDEO_VAE)),
+                    str(first("audio_vae_name", DEFAULT_AUDIO_VAE)), bool(first("keep_model", False)), unique_id,
+                )
+            model, clip, video_vae, audio_vae = runtime_models[model_name]
+            if mode == "R2V":
+                ref_images = {f"ref_image_{i}": value for i, value in enumerate(current_media["images"][:10])}
+                ref_videos = {f"ref_video_{i}": value[0] for i, value in enumerate(current_media["videos"][:4])}
+                ref_video_audios = {f"ref_video_audio_{i}": value[1] for i, value in enumerate(current_media["videos"][:4]) if value[1] is not None}
+                ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(current_media["audios"][:4])}
+                positive, latent = _unwrap_node_output(MiniMaxH3ReferenceToVideo.execute(
+                    clip, video_vae, audio_vae, segment_prompt, width, height, length,
+                    str(first("ref_image_size", "match")), ref_images, ref_videos, ref_video_audios, ref_audios,
+                ))[:2]
+            else:
+                first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
+                last_frame = current_media["images"][1] if mode == "首尾帧" else None
+                positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
+                    clip, video_vae, segment_prompt, width, height, length, first_frame, last_frame,
+                ))[:2]
+            guider = _node_output_first(BasicGuider.execute(model, positive))
+            noise = _node_output_first(RandomNoise.execute((seed + index) % (1 << 64)))
+            sampler = _ksampler(str(first("sampler_name", "res_multistep")))
+            sigmas = _basic_sigmas(model, str(first("scheduler", "simple")), int(first("steps", 20)), float(first("denoise", 1.0)))
+            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 正在采样...", (index + 0.2) / segment_count)
+            sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(noise, guider, sampler, sigmas, latent))[0]
+            segment_images = nodes.VAEDecode().decode(video_vae, sampled)[0]
+            segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(audio_vae, sampled))[0]
+            decoded_segments.append(segment_images)
+            audio_segments.append(segment_audio)
+            if segment_count > 1:
+                segment_combined = combine_segment(segment_images, segment_audio, f"{filename_prefix}_segment_{index + 1:03d}")
+                segment_ui = dict(segment_combined.get("ui") or {}) if isinstance(segment_combined, dict) else {}
+                segment_ui.update({"segment": index + 1, "segment_count": segment_count})
+                _send_status(unique_id, f"第 {index + 1}/{segment_count} 段已完成", (index + 1) / segment_count, segment_ui)
+
+        _send_status(unique_id, "正在合并全部视频段...", 0.98)
+        images = torch.cat(decoded_segments, dim=0) if len(decoded_segments) > 1 else decoded_segments[0]
+        audio = _concat_audio_segments(audio_segments)
+        combined = combine_segment(images, audio, filename_prefix)
         video, output_path, _files = _video_combine_result(combined)
-        _send_status(unique_id, f"5/5 {mode} 完成：{length} 帧", 1.0)
+        final_mode = "队列" if segment_count > 1 else modes[0]
+        _send_status(unique_id, f"{final_mode} 完成：{length * segment_count} 帧", 1.0)
         ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
-        ui.update({"mode": [mode], "frame_count": [length], "output_path": [str(output_path or "")]})
+        ui.update({"mode": [final_mode], "frame_count": [length * segment_count], "segment_count": [segment_count], "output_path": [str(output_path or "")]})
         return {"ui": ui, "result": (video,)}
 
 
