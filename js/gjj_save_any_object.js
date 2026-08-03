@@ -1,6 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_Utils, queueCurrentNodeWithFreshAncestors } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_SaveAnyObject"]);
 const INPUT_PREFIX = "any_";
@@ -22,7 +22,7 @@ const SAVE_FORMAT_CONFIG_WIDGET = "save_format_config";
 const BROWSER_FILES_WIDGET = "browser_files";
 const BROWSER_UPLOAD_SUBFOLDER = "gjj_save_any_object";
 const SAVE_FORMAT_CONFIG_PROPERTY = "gjj_save_any_object_format_config";
-const DEFAULT_SAVE_FORMAT_CONFIG = { image_format: "PNG", audio_format: "WAV" };
+const DEFAULT_SAVE_FORMAT_CONFIG = { image_format: "JPG", audio_format: "WAV" };
 const IMAGE_FORMATS = ["PNG", "JPG", "WEBP", "BMP"];
 const AUDIO_FORMATS = ["WAV", "MP3"];
 
@@ -351,7 +351,7 @@ function normalizeSaveFormatConfig(value) {
 function saveFormatConfig(node) {
 	const widgetText = String(getWidget(node, SAVE_FORMAT_CONFIG_WIDGET)?.value || "").trim();
 	const propertyValue = node?.properties?.[SAVE_FORMAT_CONFIG_PROPERTY];
-	return normalizeSaveFormatConfig(widgetText || propertyValue || DEFAULT_SAVE_FORMAT_CONFIG);
+	return normalizeSaveFormatConfig(propertyValue || widgetText || DEFAULT_SAVE_FORMAT_CONFIG);
 }
 
 function applySaveFormatConfig(node, config) {
@@ -369,6 +369,14 @@ function syncSaveFormatConfig(node) {
 		widget.hidden = true;
 		widget.type = "hidden";
 		widget.computeSize = () => [0, -4];
+		widget.serializeValue = () => {
+			const config = normalizeSaveFormatConfig(
+				node?.properties?.[SAVE_FORMAT_CONFIG_PROPERTY] || widget.value || DEFAULT_SAVE_FORMAT_CONFIG
+			);
+			const serialized = JSON.stringify(config);
+			widget.value = serialized;
+			return serialized;
+		};
 	}
 	applySaveFormatConfig(node, saveFormatConfig(node));
 }
@@ -1032,11 +1040,36 @@ function ensureButtonWidget(node) {
 		openFormatPicker(node, formatButton);
 	});
 
+	const runButton = document.createElement("button");
+	runButton.textContent = "▶️";
+	runButton.title = "执行当前保存节点及其上游节点";
+	runButton.style.cssText = folderButton.style.cssText;
+	runButton.style.background = "#1f6b43";
+	runButton.onmouseover = () => { runButton.style.background = "#287f53"; };
+	runButton.onmouseout = () => { runButton.style.background = "#1f6b43"; };
+	protectButton(runButton);
+	runButton.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (runButton.disabled) return;
+		runButton.disabled = true;
+		runButton.textContent = "⏳";
+		try {
+			await queueCurrentNodeWithFreshAncestors(node);
+		} catch (error) {
+			console.error("[GJJ SaveAnyObject] 执行当前节点失败:", error);
+		} finally {
+			runButton.disabled = false;
+			runButton.textContent = "▶️";
+		}
+	});
+
 	container.appendChild(browserFilesButton);
 	container.appendChild(outputButton);
 	container.appendChild(variableButton);
 	container.appendChild(formatButton);
 	container.appendChild(folderButton);
+	container.appendChild(runButton);
 
 	const widget = node.addDOMWidget?.(BUTTON_WIDGET_NAME, "操作按钮", container, {
 		serialize: false,
@@ -1057,6 +1090,7 @@ function ensureButtonWidget(node) {
 	node.__gjjSaveAnyObjectVariableButton = variableButton;
 	node.__gjjSaveAnyObjectFormatButton = formatButton;
 	node.__gjjSaveAnyObjectFolderButton = folderButton;
+	node.__gjjSaveAnyObjectRunButton = runButton;
 	updateButtonState(node);
 }
 

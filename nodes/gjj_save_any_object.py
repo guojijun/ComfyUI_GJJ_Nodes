@@ -49,7 +49,7 @@ NODE_NAME = "GJJ_SaveAnyObject"
 INPUT_PREFIX = "any_"
 DEFAULT_FILENAME_PREFIX = "GJJ/工作流"
 LEGACY_FILENAME_PREFIX = "GJJ/任意对象"
-DEFAULT_SAVE_FORMAT_CONFIG = {"image_format": "PNG", "audio_format": "WAV"}
+DEFAULT_SAVE_FORMAT_CONFIG = {"image_format": "JPG", "audio_format": "WAV"}
 IMAGE_FORMATS = {"PNG", "JPG", "JPEG", "WEBP", "BMP"}
 AUDIO_FORMATS = {"WAV", "MP3"}
 BROWSER_FILES_INPUT = "browser_files"
@@ -394,14 +394,18 @@ def _save_image_tensor(
 ) -> list[str]:
     paths: list[str] = []
     frames = _split_image_tensor(value)
-    image_format = _save_format_config(save_config).get("image_format", "PNG")
+    image_format = _save_format_config(save_config).get("image_format", DEFAULT_SAVE_FORMAT_CONFIG["image_format"])
     suffix = ".jpg" if image_format in {"JPG", "JPEG"} else f".{image_format.lower()}"
     metadata = _png_metadata(prompt, extra_pnginfo) if image_format == "PNG" else None
     for frame_index, frame in enumerate(frames, start=1):
         path = _indexed_path(directory, base_name, input_index, suffix, frame_index if len(frames) > 1 else None)
         image = Image.fromarray(_tensor_to_uint8_image(frame))
         if image_format in {"JPG", "JPEG"}:
-            if image.mode not in {"RGB", "L"}:
+            if image.mode in {"RGBA", "LA"}:
+                background = Image.new("RGB", image.size, (0, 0, 0))
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode not in {"RGB", "L"}:
                 image = image.convert("RGB")
             image.save(path, format="JPEG", quality=95, subsampling=0, optimize=True)
         elif image_format == "WEBP":
