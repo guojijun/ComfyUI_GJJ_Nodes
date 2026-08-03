@@ -1037,7 +1037,7 @@ export class GJJ_Utils {
             .pop()
             .replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
             .replace(
-                /(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|scaled|mixed|convrot|w4a4|padded)(?=$|[_\-. ])/gi,
+                /(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|awq|gptq|hqq|aqlm|quip|scaled|mixed|convrot|w4a4|padded)(?=$|[_\-. ])/gi,
                 "$1",
             )
             .replace(

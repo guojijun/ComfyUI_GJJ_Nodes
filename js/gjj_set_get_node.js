@@ -1434,14 +1434,18 @@ function highLowRoleFromText(value) {
 }
 
 function outputBroadcastRole(output) {
-	return highLowRoleFromText([
+	const text = [
 		output?.gjj_slot_id,
 		output?.gjj_slot_class,
 		output?.gjj_output_kind,
 		output?.label,
 		output?.localized_name,
 		output?.name,
-	].map((item) => String(item || "")).join(" "));
+	].map((item) => String(item || "")).join(" ");
+	const lower = text.toLowerCase();
+	if (lower.includes("audio_vae") || lower.includes("音频vae")) return "audio_vae";
+	if (lower.includes("video_vae") || lower.includes("视频vae")) return "video_vae";
+	return highLowRoleFromText(text);
 }
 
 function linkOriginId(link) {
@@ -1566,6 +1570,26 @@ function roleFromSamplerStartStep(node) {
 }
 
 function targetModelBroadcastRole(node, input) {
+	const socketTypes = broadcastTypeParts(input?.type || input?.widget?.type || "");
+	const text = [
+		input?.name,
+		input?.label,
+		input?.localized_name,
+		input?.display_name,
+		node?.title,
+		node?.type,
+		node?.comfyClass,
+		node?.nodeData?.display_name,
+		node?.nodeData?.name,
+	].map((item) => String(item || "")).join(" ");
+	const lower = text.toLowerCase();
+	const isVaeSocket = socketTypes.includes("VAE") || lower.includes("vae");
+	if (isVaeSocket) {
+		if (lower.includes("audio_vae") || lower.includes("vaedecodeaudio") || lower.includes("vaeencodeaudio") || lower.includes("音频vae")) {
+			return "audio_vae";
+		}
+		return "video_vae";
+	}
 	if (!slotIsModelInput(input)) return "";
 	return highLowRoleFromText([
 		input?.name,

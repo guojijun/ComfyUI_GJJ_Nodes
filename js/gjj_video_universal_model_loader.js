@@ -494,12 +494,17 @@ function listApiFor(node) {
 	return TARGET_NODE_APIS[node?.comfyClass] || LIST_API;
 }
 
-async function refreshBackendLists(node, rerender = true) {
+async function refreshBackendLists(node, rerender = true, force = false) {
 	const state = ensureState(node);
-	if (state.loading) return;
+	if (state.loading) {
+		if (force) state.refreshAfterLoad = true;
+		return;
+	}
 	state.loading = true;
 	try {
-		const response = await fetch(listApiFor(node));
+		const separator = listApiFor(node).includes("?") ? "&" : "?";
+		const url = force ? `${listApiFor(node)}${separator}refresh=1&_=${Date.now()}` : listApiFor(node);
+		const response = await fetch(url, { cache: "no-store", headers: { "Cache-Control": "no-cache" } });
 		if (response?.ok) {
 			const payload = await response.json();
 			state.configs = payload?.configs || state.configs;
@@ -511,6 +516,10 @@ async function refreshBackendLists(node, rerender = true) {
 		console.warn("[GJJ Video Loader] 模型列表读取失败", error);
 	} finally {
 		state.loading = false;
+	}
+	if (state.refreshAfterLoad) {
+		state.refreshAfterLoad = false;
+		return refreshBackendLists(node, rerender, true);
 	}
 	if (rerender) applyConfig(node);
 }
@@ -1652,7 +1661,7 @@ function buildDom(node) {
 	refresh.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		refreshBackendLists(node, true).finally(() => refreshOpenHelpDialog(node));
+		refreshBackendLists(node, true, true).finally(() => refreshOpenHelpDialog(node));
 	});
 	top.append(configBox, refresh, createBroadcastButton(node));
 	wrap.appendChild(top);
@@ -2562,6 +2571,7 @@ function applyConfig(node, opts = {}) {
 			syncPairedLowModelFromHigh(node, cfg, slot, index, value, state);
 		}, null, {
 			placeholder: "输入关键词实时过滤",
+			filterKey: fileName,
 			title: missingModel
 				? `${label.title}\n缺失：${missingModel}\n解决方案：从统一模型地址下载后放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}`
 				: label.title,
@@ -2597,6 +2607,7 @@ function applyConfig(node, opts = {}) {
 			secondaryLabel.title = `模型分类: ${slotSearchFolderLabel(slot, folder)}\n类型: 另一个模型\n默认值: ${String(slot.secondary_name || "").trim() || "未设置"}`;
 			const secondarySelect = createSearchableSelect(node, secondaryFileName, secondaryValues, () => saveWidgetValues(node), null, {
 				placeholder: "输入关键词实时过滤",
+				filterKey: secondaryFileName,
 				title: missingSecondary
 					? `${secondaryLabel.title}\n缺失：${missingSecondary}\n解决方案：从统一模型地址下载后放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}`
 					: secondaryLabel.title,

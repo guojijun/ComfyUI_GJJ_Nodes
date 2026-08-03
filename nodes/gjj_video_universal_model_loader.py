@@ -1427,7 +1427,7 @@ def _format_slot_runtime_error(
     return RuntimeError("\n".join(lines))
 
 
-def _filename_list(kind: str) -> list[str]:
+def _filename_list(kind: str, refresh: bool = False) -> list[str]:
     def read(folder: str) -> list[str]:
         try:
             return list(folder_paths.get_filename_list(folder))
@@ -1456,11 +1456,21 @@ def _filename_list(kind: str) -> list[str]:
                     found.append(rel.replace(os.sep, "/"))
         return found
 
+    model_extensions = (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".torchscript.pt")
     if kind == "diffusion_models":
-        return _dedupe(read("unet_gguf") + read("diffusion_models") + scan_ext("diffusion_models", (".gguf",)))
+        names = read("unet_gguf") + read("diffusion_models") + scan_ext("diffusion_models", (".gguf",))
+        if refresh:
+            names += scan_ext("diffusion_models", model_extensions)
+        return _dedupe(names)
     if kind == "checkpoints":
-        return _dedupe(read("checkpoints") + scan_ext("checkpoints", (".gguf",)))
-    return read(kind)
+        names = read("checkpoints") + scan_ext("checkpoints", (".gguf",))
+        if refresh:
+            names += scan_ext("checkpoints", model_extensions)
+        return _dedupe(names)
+    names = read(kind)
+    if refresh:
+        names += scan_ext(kind, model_extensions)
+    return _dedupe(names)
 
 
 def _filename_list_for_folders(folders: list[str] | tuple[str, ...] | str) -> list[str]:
@@ -3216,12 +3226,13 @@ def _config_payload() -> dict[str, Any]:
 
 
 async def get_gjj_video_universal_loader_lists(request):
+    refresh = str(request.query.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
     return web.json_response({
         "configs": _config_payload(),
-        "folders": {folder: _filename_list(folder) for folder in FOLDERS},
+        "folders": {folder: _filename_list(folder, refresh=refresh) for folder in FOLDERS},
         "dtypes": DTYPES,
         "clip_types": CLIP_TYPES,
-    })
+    }, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
