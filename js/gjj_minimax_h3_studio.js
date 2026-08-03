@@ -5,11 +5,16 @@ import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 const NODE_TYPE = "GJJ_MiniMaxH3Studio";
 const PANEL_WIDGET = "__gjj_minimax_h3_panel";
 const STYLE_ID = "gjj-minimax-h3-studio-style";
+const MEDIA_INPUTS = ["reference_media", "reference_media_2"];
+const LINK_MEMORY_PROPERTY = "gjj_minimax_h3_media_links";
+const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const HIDDEN = new Set([
-	"prompt", "width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
+	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
 	"sampler_name", "scheduler", "denoise", "ref_image_size", "filename_prefix", "format_name",
 	"fl_model", "ref_model", "clip_name", "video_vae_name", "audio_vae_name", "keep_model",
 	"use_source_size",
+	"size_mode", "resize_fit_mode", "resize_anchor",
+	"internal_media_json",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size"]], ["输出", ["filename_prefix", "format_name"]]],
@@ -30,12 +35,13 @@ function installStyle() {
 	const style = document.createElement("style"); style.id = STYLE_ID;
 	style.textContent = `
 	.gjj-mh3-root{font:12px/1.3 system-ui;color:#dcebed;background:#10191d;border-radius:8px;padding:8px;display:grid;gap:7px}
-	.gjj-mh3-toolbar{display:flex;gap:6px;align-items:center}.gjj-mh3-btn{height:32px;min-width:40px;border:1px solid #42747d;border-radius:6px;background:#173038;color:#dff;cursor:pointer;font-weight:700}.gjj-mh3-btn:hover{filter:brightness(1.18)}.gjj-mh3-btn.active{background:#175f4d;border-color:#55d2a2}.gjj-mh3-run{min-width:118px;background:#168953;border-color:#39d789;color:white;font-weight:900}
+	.gjj-mh3-toolbar{display:flex;gap:6px;align-items:center}.gjj-mh3-btn{height:32px;min-width:40px;border:1px solid #42747d;border-radius:6px;background:#173038;color:#dff;cursor:pointer;font-weight:700}.gjj-mh3-btn:hover{filter:brightness(1.18)}.gjj-mh3-btn.active{background:#175f4d;border-color:#55d2a2}.gjj-mh3-run{min-width:40px;background:#168953;border-color:#39d789;color:white;font-weight:900}
+	.gjj-mh3-folder.loaded{background:#17614e;border-color:#55d2a2}.gjj-mh3-folder:disabled{opacity:.4;cursor:not-allowed}.gjj-mh3-link{display:none}.gjj-mh3-link.show{display:block}.gjj-mh3-link.detached{background:#6b5420;border-color:#d5a83c}
 	.gjj-mh3-label{display:flex;align-items:center;gap:6px;color:#ffd27d;font-weight:700}.gjj-mh3-mode{margin-left:auto;color:#7ed9d3;font-weight:600}
 	.gjj-mh3-prompt{box-sizing:border-box;width:100%;height:72px;min-height:58px;resize:vertical;border:1px solid #31535b;border-radius:6px;background:#091215;color:#f0f8f8;padding:7px;font:12px/1.35 ui-monospace,monospace}
 	.gjj-mh3-status{height:16px;color:#8faeb4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 	.gjj-mh3-pop{position:fixed;z-index:100000;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow:auto;display:none;background:#101a1e;color:#e2f0f1;border:1px solid #4e7d86;border-radius:10px;box-shadow:0 14px 45px #000b;padding:10px}.gjj-mh3-pop.open{display:block}.gjj-mh3-pophead{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}.gjj-mh3-close{border:1px solid #40717a;border-radius:5px;background:#173038;color:#dff;padding:5px 12px;cursor:pointer}.gjj-mh3-section{border-top:1px solid #29434a;padding-top:8px;margin-top:8px}.gjj-mh3-title{color:#7ed9d3;font-weight:800;margin-bottom:7px}.gjj-mh3-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.gjj-mh3-field{display:grid;gap:3px;color:#9eb8bd}.gjj-mh3-field.wide{grid-column:1/-1}.gjj-mh3-control{box-sizing:border-box;width:100%;min-width:0;background:#0b1316;color:#e8f5f5;border:1px solid #304e55;border-radius:5px;padding:6px}.gjj-mh3-toggle.active{background:#17614e;color:#fff}
-	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}`;
+	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-preview{display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;max-height:520px;object-fit:contain;background:#000}`;
 	document.head.appendChild(style);
 }
 function hideBackendWidgets(node) {
@@ -50,6 +56,36 @@ function choices(target) {
 	let items = target?.options?.values || target?.options?.items || target?.values;
 	if (typeof items === "function") try { items = items(); } catch (_) { items = []; }
 	return Array.isArray(items) ? items : [];
+}
+function widgetDefinitionOptions(node, target) {
+	const fieldName = String(target?.name || target?.options?.name || "").trim();
+	const input = node?.constructor?.nodeData?.input || node?.constructor?.nodeData?.inputs || node?.nodeData?.input || {};
+	for (const group of [input?.required, input?.optional]) {
+		const definition = group?.[fieldName];
+		if (Array.isArray(definition) && definition[1] && typeof definition[1] === "object") return definition[1];
+	}
+	return {};
+}
+function looksLikeModelChoice(target) {
+	return choices(target).some((item) => /\.(?:safetensors|ckpt|pt|pth|bin|gguf)(?:$|[?#])/i.test(String(item || "")));
+}
+function inferredModelFolder(fieldName) {
+	const key = String(fieldName || "").toLowerCase();
+	if (key.includes("vae")) return "vae";
+	if (key.includes("clip") || key.includes("text_encoder")) return "text_encoders";
+	if (key.includes("lora")) return "loras";
+	if (key.includes("control")) return "controlnet";
+	return "diffusion_models";
+}
+function inferredModelIcon(folder) {
+	return folder === "vae" ? "🔴" : (folder === "text_encoders" ? "🟡" : (folder === "loras" ? "🟢" : "🟣"));
+}
+function declaredKeywords(...values) {
+	for (const value of values) {
+		if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+		if (typeof value === "string" && value.trim()) return value.split(/[\s,，|]+/).map((item) => item.trim()).filter(Boolean);
+	}
+	return [];
 }
 function makeControl(node, name) {
 	const target = widget(node, name); if (!target) return null;
@@ -70,16 +106,21 @@ function makeControl(node, name) {
 	control.classList.add("gjj-mh3-control"); protect(control); return control;
 }
 function modelTreeEntries(node) {
-	return (node.widgets || []).filter((target) => String(target?.options?.gjj_model_folder || "").trim()).map((target) => {
+	return (node.widgets || []).filter((target) => {
+		const declared = widgetDefinitionOptions(node, target);
+		return Boolean(String(target?.options?.gjj_model_folder || declared?.gjj_model_folder || "").trim()) || looksLikeModelChoice(target);
+	}).map((target) => {
 		const fieldName = String(target.name || target.options?.name || "").trim();
-		const folder = String(target.options.gjj_model_folder).trim();
-		const defaultModel = String(target?.options?.gjj_default_model || target?.options?.default || "").trim();
+		const declared = widgetDefinitionOptions(node, target);
+		const folder = String(target?.options?.gjj_model_folder || declared?.gjj_model_folder || inferredModelFolder(fieldName)).trim();
+		const defaultModel = String(target?.options?.gjj_default_model || declared?.gjj_default_model || target?.options?.default || declared?.default || target?.value || "").trim();
 		return {
 			widget: fieldName,
 			folder,
-			icon: String(target.options.gjj_model_icon || "🟣"),
-			label: String(target?.options?.display_name || target?.label || fieldName),
+			icon: String(target.options?.gjj_model_icon || declared?.gjj_model_icon || inferredModelIcon(folder)),
+			label: String(target?.options?.display_name || declared?.display_name || target?.label || fieldName),
 			models: choices(target),
+			keywords: declaredKeywords(target.options?.gjj_model_keywords, declared?.gjj_model_keywords),
 			defaultModel,
 			fallback: defaultModel,
 			autoSelect: true,
@@ -101,14 +142,19 @@ function renderModelTree(node, host) {
 function createSizePanel(node) {
 	const host = document.createElement("div");
 	const tabs = document.createElement("div"); tabs.className = "gjj-mh3-size-tabs";
-	const sourceButton = document.createElement("button"); sourceButton.type = "button"; sourceButton.className = "gjj-mh3-size-choice"; sourceButton.textContent = "原图尺寸";
+	const sourceButton = document.createElement("button"); sourceButton.type = "button"; sourceButton.className = "gjj-mh3-size-choice"; sourceButton.textContent = "首图尺寸";
 	const panelButton = document.createElement("button"); panelButton.type = "button"; panelButton.className = "gjj-mh3-size-choice"; panelButton.textContent = "画板尺寸";
 	tabs.append(sourceButton, panelButton);
-	const ratios = document.createElement("div"); ratios.className = "gjj-mh3-ratios";
-	const ratioDefs = [[16, 9], [9, 16], [1, 1], [4, 3], [3, 4]];
-	const ratioButtons = ratioDefs.map(([wide, high]) => {
-		const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-size-choice"; button.textContent = `${wide}:${high}`; button.dataset.ratio = `${wide}:${high}`; ratios.appendChild(button); return button;
-	});
+	const choiceControls = new Map();
+	const makeChoiceRow = (name, icon, values) => {
+		const row = document.createElement("div"); row.className = "gjj-mh3-choice-row"; row.style.setProperty("--count", String(values.length));
+		const iconCell = document.createElement("span"); iconCell.className = "gjj-mh3-choice-icon"; iconCell.textContent = icon; row.appendChild(iconCell);
+		const buttons = values.map((item) => { const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-size-choice"; button.textContent = item; button.addEventListener("click", () => { setValue(node, name, item); sync(); }); row.appendChild(button); return button; });
+		choiceControls.set(name, { values, buttons }); return row;
+	};
+	const modeRow = makeChoiceRow("size_mode", "📐", ["宽高", "等比", "长边", "像素"]);
+	const fitRow = makeChoiceRow("resize_fit_mode", "🧲", ["拉伸", "补边", "留边", "裁剪"]);
+	const anchorRow = makeChoiceRow("resize_anchor", "📍", ["上", "下", "左", "右", "中"]);
 	const dimensions = document.createElement("div");
 	const controls = {};
 	for (const [name, icon, label] of [["width", "📐", "宽度"], ["height", "📏", "高度"]]) {
@@ -122,16 +168,12 @@ function createSizePanel(node) {
 	const sync = () => {
 		const source = Boolean(value(node, "use_source_size", true)); sourceButton.classList.toggle("active", source); panelButton.classList.toggle("active", !source); dimensions.classList.toggle("gjj-mh3-size-disabled", source);
 		for (const control of Object.values(controls)) { control.range.disabled = source; control.number.disabled = source; }
-		for (const button of ratioButtons) button.disabled = source;
+		for (const [name, group] of choiceControls) group.buttons.forEach((button, index) => button.classList.toggle("active", String(value(node, name, group.values[0])) === group.values[index]));
 		controls.width.range.value = controls.width.number.value = String(value(node, "width", 864)); controls.height.range.value = controls.height.number.value = String(value(node, "height", 480));
-		const width = Number(value(node, "width", 864)); const height = Number(value(node, "height", 480));
-		for (const button of ratioButtons) { const [wide, high] = button.dataset.ratio.split(":").map(Number); button.classList.toggle("active", !source && Math.abs(width / height - wide / high) < 0.025); }
 	};
 	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); sync(); });
-	const aligned = (name, raw) => { const target = widget(node, name); const min = Number(target?.options?.min ?? 352); const max = Number(target?.options?.max ?? 1920); const step = Number(target?.options?.step ?? 32) || 1; return Math.max(min, Math.min(max, Math.round(Number(raw) / step) * step)); };
-	ratioButtons.forEach((button, index) => button.addEventListener("click", () => { const [wide, high] = ratioDefs[index]; const edge = Math.max(Number(value(node, "width", 864)), Number(value(node, "height", 480))); if (wide >= high) { setValue(node, "width", aligned("width", edge)); setValue(node, "height", aligned("height", edge * high / wide)); } else { setValue(node, "height", aligned("height", edge)); setValue(node, "width", aligned("width", edge * wide / high)); } sync(); }));
-	for (const element of [sourceButton, panelButton, ...ratioButtons, ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
-	host.append(tabs, ratios, dimensions); host.__gjjSync = sync; sync(); return host;
+	for (const element of [sourceButton, panelButton, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
+	host.append(tabs, modeRow, fitRow, anchorRow, dimensions); host.__gjjSync = sync; sync(); return host;
 }
 function popup(node, key, title) {
 	const root = document.createElement("div"); root.className = "gjj-mh3-pop"; root.dataset.popup = key; protect(root);
@@ -172,28 +214,81 @@ function openPopup(node, key, anchor) {
 	const rect = anchor.getBoundingClientRect(); const width = Math.min(560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
 }
 function makeButton(text, title, className = "") { const button = document.createElement("button"); button.type = "button"; button.className = `gjj-mh3-btn ${className}`; button.textContent = text; button.title = title; protect(button); return button; }
+function firstPreviewItem(...values) {
+	for (const value of values) {
+		if (!value) continue;
+		if (Array.isArray(value)) { const nested = firstPreviewItem(...value); if (nested) return nested; }
+		else if (typeof value === "object" && value.filename) return value;
+	}
+	return null;
+}
+function previewItemFromPath(rawPath) {
+	const clean = String(Array.isArray(rawPath) ? rawPath[0] : rawPath || "").replaceAll("\\", "/"); if (!clean) return null;
+	const filename = clean.split("/").pop(); if (!filename) return null;
+	const marker = clean.toLowerCase().lastIndexOf("/output/"); const subfolder = marker >= 0 ? clean.slice(marker + 8, clean.length - filename.length).replace(/^\/+|\/+$/g, "") : "";
+	return { filename, subfolder, type: "output" };
+}
+function renderResultPreview(node, message = {}) {
+	const state = node.__gjjMiniMaxPanel; if (!state?.preview || !state?.video) return;
+	const output = message?.output && typeof message.output === "object" ? message.output : message;
+	const item = firstPreviewItem(output.preview_media, output.preview_video, output.gifs, output.animated, output.videos, output.video) || previewItemFromPath(output.output_path);
+	if (!item) return;
+	const query = `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
+	state.video.src = api.apiURL(query); state.preview.style.display = "block"; state.video.load(); const play = state.video.play?.(); play?.catch?.(() => {});
+	const resize = () => { const width = Math.max(420, Number(node.size?.[0] || 420)); const mediaHeight = Math.max(180, Math.round((width - 20) * Number(state.video.videoHeight || 9) / Math.max(1, Number(state.video.videoWidth || 16)))); state.preview.style.height = `${mediaHeight}px`; node.setSize?.([width, Math.max(292, Number(state.root.scrollHeight || 0) + 105)]); app.graph?.setDirtyCanvas?.(true, true); };
+	state.video.onloadedmetadata = resize; setTimeout(resize, 50);
+}
+function mediaInput(node, name) { return (node.inputs || []).find((item) => String(item?.name || "") === name); }
+function activeMediaLinks(node) { return MEDIA_INPUTS.some((name) => mediaInput(node, name)?.link != null); }
+function linkMemory(node) { node.properties ||= {}; node.properties[LINK_MEMORY_PROPERTY] ||= {}; return node.properties[LINK_MEMORY_PROPERTY]; }
+function hasRememberedLinks(node) { return Object.values(linkMemory(node)).some((item) => item && typeof item === "object"); }
+function toggleMediaLinks(node) {
+	const memory = linkMemory(node);
+	if (activeMediaLinks(node)) {
+		for (const name of MEDIA_INPUTS) { const input = mediaInput(node, name); const link = app.graph?.links?.[input?.link]; if (!input || !link) continue; memory[name] = { origin_id: link.origin_id, origin_slot: link.origin_slot }; const index = node.inputs.indexOf(input); node.disconnectInput?.(index); }
+	} else {
+		for (const name of MEDIA_INPUTS) { const record = memory[name]; const target = mediaInput(node, name); const source = app.graph?.getNodeById?.(record?.origin_id); if (!record || !target || !source?.connect) continue; source.connect(Number(record.origin_slot), node, node.inputs.indexOf(target)); }
+	}
+	node.graph?.change?.(); syncMediaToolbar(node); app.graph?.setDirtyCanvas?.(true, true);
+}
+function internalMediaItems(node) { try { const result = JSON.parse(String(value(node, "internal_media_json", "[]"))); return Array.isArray(result) ? result : []; } catch (_) { return []; } }
+function syncMediaToolbar(node) {
+	const panel = node.__gjjMiniMaxPanel; if (!panel) return;
+	const linked = activeMediaLinks(node); const remembered = hasRememberedLinks(node); const loaded = internalMediaItems(node).length > 0;
+	panel.folder.disabled = linked; panel.folder.classList.toggle("loaded", loaded && !linked); panel.folder.title = linked ? "外部媒体入口已连接，内部媒体选择已禁用" : (loaded ? `已载入 ${internalMediaItems(node).length} 个内部文件` : "打开图片、文本、音频或视频");
+	panel.link.classList.toggle("show", linked || remembered); panel.link.classList.toggle("detached", !linked && remembered); panel.link.title = linked ? "记录上游接口并断开链接" : "恢复记录的上游接口";
+}
+async function uploadInternalMedia(node, files) {
+	const form = new FormData(); for (const file of files) form.append("media", file, file.name);
+	const response = await fetch(api.apiURL(UPLOAD_ROUTE), { method: "POST", body: form }); const data = await response.json().catch(() => ({}));
+	if (!response.ok || data?.ok === false) throw new Error(data?.error || "媒体上传失败");
+	setValue(node, "internal_media_json", JSON.stringify(data.items || [])); if (node.__gjjMiniMaxPanel) node.__gjjMiniMaxPanel.status.textContent = `已载入 ${(data.items || []).length} 个内部文件`; syncMediaToolbar(node);
+}
 function cleanup(node) { closePopups(node); for (const item of Object.values(node.__gjjMiniMaxPanel?.popups || {})) item.remove(); node.__gjjMiniMaxPanel = null; }
 function createPanel(node) {
 	if (node.__gjjMiniMaxPanel) return; installStyle();
 	const root = document.createElement("div"); root.className = "gjj-mh3-root"; protect(root);
 	const toolbar = document.createElement("div"); toolbar.className = "gjj-mh3-toolbar";
-	const run = makeButton("🎬 生成视频", "只运行当前 MiniMax H3 节点", "gjj-mh3-run");
+	const folder = makeButton("📁", "打开图片、文本、音频或视频", "gjj-mh3-folder"); const link = makeButton("🔗", "记录并断开/恢复上游媒体接口", "gjj-mh3-link");
+	const file = document.createElement("input"); file.type = "file"; file.multiple = true; file.accept = "image/*,text/plain,.txt,.md,.prompt,audio/*,video/*"; file.style.display = "none"; root.appendChild(file);
+	const run = makeButton("▶️", "运行当前 MiniMax H3 节点", "gjj-mh3-run");
 	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const settings = makeButton("⚙", "生成参数");
-	toolbar.append(run, size, seed, model, settings);
-	const label = document.createElement("div"); label.className = "gjj-mh3-label"; label.textContent = "✨ 正向提示词"; const mode = document.createElement("span"); mode.className = "gjj-mh3-mode"; mode.textContent = "AUTO"; label.append(mode);
-	const prompt = document.createElement("textarea"); prompt.className = "gjj-mh3-prompt"; prompt.placeholder = "输入提示词…"; prompt.value = String(value(node, "prompt", "")); prompt.addEventListener("input", () => setValue(node, "prompt", prompt.value)); protect(prompt);
+	toolbar.append(folder, link, size, seed, model, settings, run);
 	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "无输入 T2V｜单图 I2V｜多媒体 Ref2V";
-	root.append(toolbar, label, prompt, status);
-	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.computeSize = () => [Math.max(410, node.size?.[0] || 410), 190];
-	const panel = node.__gjjMiniMaxPanel = { root, status, buttons: { size, seed, model, settings }, popups: {} };
+	const preview = document.createElement("div"); preview.className = "gjj-mh3-preview"; const video = document.createElement("video"); video.controls = true; video.loop = true; video.playsInline = true; video.preload = "metadata"; preview.appendChild(video); protect(preview);
+	root.append(toolbar, status, preview);
+	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.computeSize = () => [Math.max(410, node.size?.[0] || 410), Math.max(190, Number(root.scrollHeight || 190))];
+	const panel = node.__gjjMiniMaxPanel = { root, status, preview, video, folder, link, buttons: { size, seed, model, settings }, popups: {} };
 	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数");
 	run.addEventListener("click", async () => { closePopups(node); status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
+	folder.addEventListener("click", () => { if (!folder.disabled) file.click(); }); file.addEventListener("change", async () => { const files = Array.from(file.files || []); file.value = ""; if (!files.length) return; try { status.textContent = "正在载入媒体…"; await uploadInternalMedia(node, files); } catch (error) { status.textContent = `载入失败：${error?.message || error}`; } });
+	link.addEventListener("click", () => toggleMediaLinks(node));
 	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); settings.addEventListener("click", () => openPopup(node, "params", settings));
-	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed();
+	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed(); syncMediaToolbar(node);
 }
 function stabilize(node) {
 	if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) return;
-	node.color = "#2b727e"; node.bgcolor = "#11191d"; node.boxcolor = "#6eb6c0"; hideBackendWidgets(node); createPanel(node); node.size = [Math.max(420, Number(node.size?.[0] || 420)), 292]; app.graph?.setDirtyCanvas?.(true, true);
+	node.color = "#2b727e"; node.bgcolor = "#11191d"; node.boxcolor = "#6eb6c0"; hideBackendWidgets(node); createPanel(node); syncMediaToolbar(node); node.size = [Math.max(420, Number(node.size?.[0] || 420)), Math.max(250, Number(node.size?.[1] || 250))]; app.graph?.setDirtyCanvas?.(true, true);
 }
 app.registerExtension({
 	name: "Comfy.GJJ.MiniMaxH3Studio",
@@ -203,7 +298,7 @@ app.registerExtension({
 		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); setTimeout(() => stabilize(this), 0); setTimeout(() => stabilize(this), 100); return result; };
 		const connections = nodeType.prototype.onConnectionsChange; nodeType.prototype.onConnectionsChange = function (...args) { const result = connections?.apply(this, args); setTimeout(() => stabilize(this), 0); return result; };
 		const removed = nodeType.prototype.onRemoved; nodeType.prototype.onRemoved = function (...args) { cleanup(this); return removed?.apply(this, args); };
-		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; return result; };
+		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; renderResultPreview(this, message); return result; };
 	},
 	setup() {
 		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); });

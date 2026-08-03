@@ -1129,9 +1129,10 @@ export class GJJ_Utils {
         const filtered = all.filter((name) => {
             if (GJJ_Utils._modelTreeIsDefaultPlaceholder(entry, name)) return false;
             const key = GJJ_Utils._modelTreeKey(name);
+            const familyKey = GJJ_Utils._modelTreeKey(GJJ_Utils._modelTreeFamilyStem(name));
             if (keywords.length && !keywords.every((keyword) => key.includes(keyword))) return false;
             if (anyKeywords.length && !anyKeywords.some((keyword) => key.includes(keyword))) return false;
-            if (terms.length && !terms.every((term) => key.includes(term))) return false;
+            if (terms.length && !terms.every((term) => familyKey.includes(term) || key.includes(term))) return false;
             return true;
         });
         if (noModelMatches && noModelValue && !filtered.includes(noModelValue)) filtered.unshift(noModelValue);

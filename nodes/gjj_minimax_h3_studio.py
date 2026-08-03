@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import folder_paths
 import torch
+import torch.nn.functional as F
+import comfy.samplers
 
 from .gjj_bernini_studio import (
     _basic_sigmas,
+    _decode_video_media_frames,
     _ksampler,
     _media_components,
     _node_output_first,
@@ -20,12 +26,52 @@ from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _loa
 
 NODE_NAME = "GJJ_MiniMaxH3Studio"
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,AUDIO"
+UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload"
 
 DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_nvfp4_base.safetensors"
 DEFAULT_REF_MODEL = "minimax_h3_ref2va_pruned_nvfp4_base.safetensors"
 DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+
+
+def _register_upload_route() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+        server = PromptServer.instance
+        if not server or getattr(server, "_gjj_minimax_h3_upload_registered", False):
+            return
+
+        async def upload(request):
+            reader = await request.multipart()
+            destination = Path(folder_paths.get_input_directory()) / "gjj_minimax_h3_studio"
+            destination.mkdir(parents=True, exist_ok=True)
+            items = []
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if not getattr(part, "filename", None):
+                    continue
+                original = Path(str(part.filename)).name
+                suffix = Path(original).suffix.lower()
+                filename = f"{uuid.uuid4().hex}_{original}"
+                target = destination / filename
+                with target.open("wb") as handle:
+                    while chunk := await part.read_chunk():
+                        handle.write(chunk)
+                media_type = "text" if suffix in {".txt", ".md", ".prompt"} else ("image" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} else ("audio" if suffix in {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"} else "video"))
+                items.append({"filename": filename, "subfolder": "gjj_minimax_h3_studio", "type": "input", "media_type": media_type, "original_name": original})
+            return web.json_response({"ok": True, "items": items})
+
+        server.routes.post(UPLOAD_ROUTE)(upload)
+        server._gjj_minimax_h3_upload_registered = True
+    except Exception:
+        pass
+
+
+_register_upload_route()
 
 
 def _choices(kind: str, preferred: str, contains: tuple[str, ...]) -> tuple[list[str], str]:
@@ -99,11 +145,127 @@ def _collect_media(value: Any) -> dict[str, list[Any]]:
     return result
 
 
+def _merge_media(target: dict[str, list[Any]], source: dict[str, list[Any]]) -> None:
+    for key in target:
+        target[key].extend(source.get(key) or [])
+
+
+def _load_internal_media(raw: Any) -> tuple[dict[str, list[Any]], list[str]]:
+    media = {"images": [], "videos": [], "audios": []}
+    texts: list[str] = []
+    try:
+        items = json.loads(str(raw or "[]"))
+    except Exception:
+        items = []
+    input_root = Path(folder_paths.get_input_directory()).resolve()
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        path = (input_root / str(item.get("subfolder") or "") / Path(str(item.get("filename") or "")).name).resolve()
+        if input_root not in path.parents or not path.is_file():
+            continue
+        media_type = str(item.get("media_type") or "").lower()
+        try:
+            if media_type == "text":
+                texts.append(path.read_text(encoding="utf-8", errors="replace"))
+            elif media_type == "image":
+                import numpy as np
+                from PIL import Image, ImageOps
+                image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+                media["images"].append(torch.from_numpy(np.asarray(image).astype("float32") / 255.0).unsqueeze(0))
+            elif media_type == "audio":
+                import torchaudio
+                waveform, sample_rate = torchaudio.load(str(path))
+                media["audios"].append({"waveform": waveform.unsqueeze(0), "sample_rate": int(sample_rate)})
+            else:
+                frames, fps = _decode_video_media_frames(str(path))
+                if frames is not None:
+                    media["videos"].append((frames, None, fps))
+        except Exception as exc:
+            print(f"[GJJ MiniMaxH3Studio] 内部媒体读取失败 {path.name}: {exc}")
+    return media, texts
+
+
 def _aligned_frames(duration: float, fps: float) -> int:
     value = max(5, round(float(duration) * float(fps)))
     while value % 17 != 5:
         value += 1
     return value
+
+
+def _aligned_dimension(value: float) -> int:
+    return max(352, min(1920, round(float(value) / 32) * 32))
+
+
+def _visual_size(value: Any) -> tuple[int, int] | None:
+    if isinstance(value, torch.Tensor) and value.ndim >= 3:
+        return int(value.shape[-2]), int(value.shape[-3])
+    return None
+
+
+def _anchored_offset(space: int, anchor: str, low: str, high: str) -> int:
+    if anchor == low:
+        return 0
+    if anchor == high:
+        return max(0, space)
+    return max(0, space // 2)
+
+
+def _resize_visual(value: Any, width: int, height: int, fit_mode: str, anchor: str) -> Any:
+    if not isinstance(value, torch.Tensor) or value.ndim not in (3, 4):
+        return value
+    source = value.unsqueeze(0) if value.ndim == 3 else value
+    source_height, source_width = int(source.shape[-3]), int(source.shape[-2])
+    if source_width == width and source_height == height:
+        return value
+    channel_first = source.movedim(-1, 1)
+    if fit_mode == "拉伸":
+        result = F.interpolate(channel_first, size=(height, width), mode="bicubic", align_corners=False)
+    else:
+        scale = min(width / source_width, height / source_height)
+        if fit_mode == "裁剪":
+            scale = max(width / source_width, height / source_height)
+        elif fit_mode == "补边":
+            scale = min(1.0, scale)
+        resized_width = max(1, round(source_width * scale))
+        resized_height = max(1, round(source_height * scale))
+        resized = F.interpolate(channel_first, size=(resized_height, resized_width), mode="bicubic", align_corners=False)
+        if fit_mode == "裁剪":
+            x = _anchored_offset(resized_width - width, anchor, "左", "右")
+            y = _anchored_offset(resized_height - height, anchor, "上", "下")
+            result = resized[:, :, y:y + height, x:x + width]
+        else:
+            canvas = torch.zeros((resized.shape[0], resized.shape[1], height, width), dtype=resized.dtype, device=resized.device)
+            x = _anchored_offset(width - resized_width, anchor, "左", "右")
+            y = _anchored_offset(height - resized_height, anchor, "上", "下")
+            copy_width, copy_height = min(width, resized_width), min(height, resized_height)
+            canvas[:, :, y:y + copy_height, x:x + copy_width] = resized[:, :, :copy_height, :copy_width]
+            result = canvas
+    restored = result.movedim(1, -1).contiguous()
+    return restored[0] if value.ndim == 3 else restored
+
+
+def _target_dimensions(panel_width: int, panel_height: int, source_size: tuple[int, int] | None, use_source: bool, size_mode: str) -> tuple[int, int]:
+    if use_source and source_size:
+        return _aligned_dimension(source_size[0]), _aligned_dimension(source_size[1])
+    if not source_size or size_mode == "宽高":
+        return _aligned_dimension(panel_width), _aligned_dimension(panel_height)
+    source_width, source_height = source_size
+    ratio = source_width / max(1, source_height)
+    if size_mode == "长边":
+        edge = max(panel_width, panel_height)
+        return (_aligned_dimension(edge), _aligned_dimension(edge / ratio)) if ratio >= 1 else (_aligned_dimension(edge * ratio), _aligned_dimension(edge))
+    if size_mode == "像素":
+        area = max(1, panel_width * panel_height)
+        target_width = (area * ratio) ** 0.5
+        return _aligned_dimension(target_width), _aligned_dimension(target_width / ratio)
+    scale = min(panel_width / source_width, panel_height / source_height)
+    return _aligned_dimension(source_width * scale), _aligned_dimension(source_height * scale)
+
+
+def _align_media(media: dict[str, list[Any]], width: int, height: int, fit_mode: str, anchor: str) -> None:
+    media["images"] = [_resize_visual(item, width, height, fit_mode, anchor) for item in media["images"]]
+    media["videos"] = [(_resize_visual(frames, width, height, fit_mode, anchor), audio, fps) for frames, audio, fps in media["videos"]]
 
 
 def _send_status(unique_id: Any, text: str, progress: float) -> None:
@@ -135,11 +297,17 @@ class GJJ_MiniMaxH3Studio:
         clips, clip_default = _choices("text_encoders", DEFAULT_CLIP, ("qwen3vl_32b", "minimax_h3"))
         video_vaes, video_vae_default = _choices("vae", DEFAULT_VIDEO_VAE, ("minimax_h3", "video_vae"))
         audio_vaes, audio_vae_default = _choices("vae", DEFAULT_AUDIO_VAE, ("minimax_h3", "audio_vae"))
+        samplers = list(comfy.samplers.KSampler.SAMPLERS)
+        schedulers = list(comfy.samplers.KSampler.SCHEDULERS)
+        if "res_multistep" not in samplers:
+            samplers.insert(0, "res_multistep")
+        if "simple" not in schedulers:
+            schedulers.insert(0, "simple")
         return {
             "required": {},
             "optional": {
                 "reference_media": (MEDIA_TYPE, {"display_name": "参考媒体", "tooltip": "递归解包图片、VIDEO、音频、list/tuple/dict。未连接=T2V；单图=I2V；其它=参考生视频。"}),
-                "prompt": ("STRING", {"default": "", "multiline": True, "display_name": "提示词"}),
+                "prompt": ("STRING", {"default": "", "multiline": True, "display_name": "正向提示词"}),
                 "width": ("INT", {"default": 864, "min": 352, "max": 1920, "step": 32, "display_name": "宽度"}),
                 "height": ("INT", {"default": 480, "min": 352, "max": 1920, "step": 32, "display_name": "高度"}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 60.0, "step": 0.1, "display_name": "时长(秒)"}),
@@ -147,19 +315,24 @@ class GJJ_MiniMaxH3Studio:
                 "steps": ("INT", {"default": 20, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "种子"}),
                 "randomize_seed": ("BOOLEAN", {"default": True, "display_name": "随机种子"}),
-                "sampler_name": ("STRING", {"default": "res_multistep", "display_name": "采样器"}),
-                "scheduler": ("STRING", {"default": "simple", "display_name": "调度器"}),
+                "sampler_name": (samplers, {"default": "res_multistep", "display_name": "采样器"}),
+                "scheduler": (schedulers, {"default": "simple", "display_name": "调度器"}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪"}),
                 "ref_image_size": (["match", "max"], {"default": "match", "display_name": "参考图尺寸"}),
                 "filename_prefix": ("STRING", {"default": "video/MiniMax_H3_Studio", "display_name": "文件名前缀"}),
                 "format_name": ("STRING", {"default": "video/h264-mp4", "display_name": "输出格式"}),
-                "fl_model": (fl_models, {"default": fl_default, "display_name": "T2V/I2V模型", "gjj_default_model": DEFAULT_FL_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣"}),
-                "ref_model": (ref_models, {"default": ref_default, "display_name": "参考模型", "gjj_default_model": DEFAULT_REF_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣"}),
+                "fl_model": (fl_models, {"default": fl_default, "display_name": "T2V/I2V模型", "gjj_default_model": DEFAULT_FL_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_fl2va"]}),
+                "ref_model": (ref_models, {"default": ref_default, "display_name": "参考模型", "gjj_default_model": DEFAULT_REF_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_ref2va"]}),
                 "clip_name": (clips, {"default": clip_default, "display_name": "Qwen3-VL编码器", "gjj_default_model": DEFAULT_CLIP, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡"}),
                 "video_vae_name": (video_vaes, {"default": video_vae_default, "display_name": "视频VAE", "gjj_default_model": DEFAULT_VIDEO_VAE, "gjj_model_folder": "vae", "gjj_model_icon": "🔴"}),
                 "audio_vae_name": (audio_vaes, {"default": audio_vae_default, "display_name": "音频VAE", "gjj_default_model": DEFAULT_AUDIO_VAE, "gjj_model_folder": "vae", "gjj_model_icon": "🔴"}),
                 "keep_model": ("BOOLEAN", {"default": False, "display_name": "保持模型"}),
-                "use_source_size": ("BOOLEAN", {"default": True, "display_name": "原图尺寸"}),
+                "use_source_size": ("BOOLEAN", {"default": True, "display_name": "首图尺寸"}),
+                "size_mode": (["宽高", "等比", "长边", "像素"], {"default": "宽高", "display_name": "尺寸模式"}),
+                "resize_fit_mode": (["拉伸", "补边", "留边", "裁剪"], {"default": "裁剪", "display_name": "适配方式"}),
+                "resize_anchor": (["上", "下", "左", "右", "中"], {"default": "上", "display_name": "保留位置"}),
+                "reference_media_2": (MEDIA_TYPE, {"display_name": "参考媒体 2", "tooltip": "第二个递归媒体入口；外部链接优先于📁内部媒体。"}),
+                "internal_media_json": ("STRING", {"default": "[]", "display_name": "内部媒体记录"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -192,17 +365,21 @@ class GJJ_MiniMaxH3Studio:
             return value[0] if isinstance(value, list) and value else value
 
         media = _collect_media(kwargs.get("reference_media"))
+        _merge_media(media, _collect_media(kwargs.get("reference_media_2")))
+        internal_texts: list[str] = []
+        if not any(media.values()):
+            internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
+            _merge_media(media, internal_media)
         image_count = len(media["images"])
         has_reference_av = bool(media["videos"] or media["audios"])
         mode = "T2V" if image_count == 0 and not has_reference_av else ("I2V" if image_count == 1 and not has_reference_av else "R2V")
         model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
-        width, height = int(first("width", 864)), int(first("height", 480))
-        if bool(first("use_source_size", True)):
-            source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
-            if isinstance(source, torch.Tensor) and source.ndim >= 3:
-                source_height, source_width = int(source.shape[-3]), int(source.shape[-2])
-                width = max(352, min(1920, round(source_width / 32) * 32))
-                height = max(352, min(1920, round(source_height / 32) * 32))
+        panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
+        source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
+        width, height = _target_dimensions(
+            panel_width, panel_height, _visual_size(source), bool(first("use_source_size", True)), str(first("size_mode", "宽高")),
+        )
+        _align_media(media, width, height, str(first("resize_fit_mode", "裁剪")), str(first("resize_anchor", "上")))
         fps = float(first("frame_rate", 24.0))
         length = _aligned_frames(float(first("duration", 5.0)), fps)
         seed = int(first("seed", 42))
@@ -218,7 +395,7 @@ class GJJ_MiniMaxH3Studio:
             bool(first("keep_model", False)),
             unique_id,
         )
-        prompt = str(first("prompt", "") or "")
+        prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
         if mode == "R2V":
             ref_images = {f"ref_image_{i}": value for i, value in enumerate(media["images"][:10])}
@@ -269,8 +446,10 @@ class GJJ_MiniMaxH3Studio:
         )
         video, output_path, _files = _video_combine_result(combined)
         _send_status(unique_id, f"5/5 {mode} 完成：{length} 帧", 1.0)
-        return {"ui": {"mode": [mode], "frame_count": [length], "output_path": [str(output_path or "")]}, "result": (video,)}
+        ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
+        ui.update({"mode": [mode], "frame_count": [length], "output_path": [str(output_path or "")]})
+        return {"ui": ui, "result": (video,)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MiniMaxH3Studio}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠MiniMax H3 多模态视频工作室"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🧠多模态视频一键生成(MiniMax H3)"}
