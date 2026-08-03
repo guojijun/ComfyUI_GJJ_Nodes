@@ -407,39 +407,6 @@ class GJJ_VideoSubtitleOverlay:
                         "advanced": True,
                     },
                 ),
-                "font_size_percent": (
-                    "FLOAT",
-                    _hidden_options({
-                        "default": 5.0,
-                        "min": 0.5,
-                        "max": 20.0,
-                        "step": 0.1,
-                        "display_name": "字幕尺寸（画面高度%）",
-                        "tooltip": "字幕字号按视频高度自动换算；不同分辨率的视频保持相近视觉比例。",
-                    }),
-                ),
-                "bottom_margin_percent": (
-                    "FLOAT",
-                    _hidden_options({
-                        "default": 8.0,
-                        "min": 0.0,
-                        "max": 50.0,
-                        "step": 0.1,
-                        "display_name": "字幕距底部（画面高度%）",
-                        "tooltip": "字幕基线与视频底边的距离，按画面高度百分比计算。",
-                    }),
-                ),
-                "outline_width_percent": (
-                    "FLOAT",
-                    _hidden_options({
-                        "default": 6.0,
-                        "min": 0.0,
-                        "max": 30.0,
-                        "step": 0.25,
-                        "display_name": "描边宽度（字号%）",
-                        "tooltip": "描边宽度按换算后的字幕字号计算，随视频分辨率同步缩放。",
-                    }),
-                ),
                 "save_directory": (
                     "STRING",
                     _hidden_options({
@@ -484,6 +451,41 @@ class GJJ_VideoSubtitleOverlay:
                     _hidden_options({
                         "default": True,
                         "display_name": "保存同名 SRT",
+                    }),
+                ),
+                # Compatibility contract: percentage controls were added later,
+                # so they must remain after every pre-existing widget.
+                "font_size_percent": (
+                    "FLOAT",
+                    _hidden_options({
+                        "default": 5.0,
+                        "min": 0.5,
+                        "max": 20.0,
+                        "step": 0.1,
+                        "display_name": "字幕尺寸（画面高度%）",
+                        "tooltip": "字幕字号按视频高度自动换算；不同分辨率的视频保持相近视觉比例。",
+                    }),
+                ),
+                "bottom_margin_percent": (
+                    "FLOAT",
+                    _hidden_options({
+                        "default": 8.0,
+                        "min": 0.0,
+                        "max": 50.0,
+                        "step": 0.1,
+                        "display_name": "字幕距底部（画面高度%）",
+                        "tooltip": "字幕基线与视频底边的距离，按画面高度百分比计算。",
+                    }),
+                ),
+                "outline_width_percent": (
+                    "FLOAT",
+                    _hidden_options({
+                        "default": 6.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.25,
+                        "display_name": "描边宽度（字号%）",
+                        "tooltip": "描边宽度按换算后的字幕字号计算，随视频分辨率同步缩放。",
                     }),
                 ),
             },

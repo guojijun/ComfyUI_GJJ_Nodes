@@ -74,6 +74,7 @@ const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const MODEL_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_model_settings_open";
 const SIZE_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_size_settings_open";
 const PROMPT_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_prompt_settings_open";
+const PERFORMANCE_SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_performance_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
@@ -84,6 +85,7 @@ const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link
 const PREVIEW_LAYOUT_PROPERTY = "gjj_lazy_image_studio_preview_layout";
 const PREVIEW_PAGE_PROPERTY = "gjj_lazy_image_studio_preview_page";
 const LORA_GLOBAL_SEARCH_PROPERTY = "gjj_lazy_image_studio_lora_global_search";
+const LORA_ROW_SEARCH_PROPERTY = "gjj_lazy_image_studio_lora_search_by_row";
 const DEFAULT_IMAGE_RESIZE_CONFIG = Object.freeze({
 	mode: "宽高",
 	fit_mode: "裁剪",
@@ -1521,6 +1523,21 @@ function keepModelEnabled(node) {
 	return boolValue(params[KEEP_MODEL_WIDGET_NAME]);
 }
 
+function performanceSettingsOpen(node) {
+	return Boolean(node?.properties?.[PERFORMANCE_SETTINGS_OPEN_PROPERTY]);
+}
+
+function setPerformanceSettingsOpen(node, open) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	node.properties[PERFORMANCE_SETTINGS_OPEN_PROPERTY] = Boolean(open);
+	if (node.__gjjLazyModelOptimizationSection) {
+		node.__gjjLazyModelOptimizationSection.style.display = open ? "flex" : "none";
+	}
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
 function setKeepModelEnabled(node, enabled) {
 	if (!node) return;
 	const value = Boolean(enabled);
@@ -1947,6 +1964,9 @@ function closeLazyFloatingSurfaces(node, except = "") {
 	if (except !== "lora" && globalThis.__gjjLoraPopup?.state?.node === node) {
 		globalThis.__gjjLoraPopup.close();
 	}
+	if (except !== "lora") {
+		closeLazyFloatingLoraPreview();
+	}
 	if (except !== "unet") {
 		closeUnetModelPicker(node);
 	}
@@ -1974,6 +1994,7 @@ function floatingPanelBaseStyle() {
 		"color:#dce7e2",
 		"box-shadow:0 16px 42px rgba(0,0,0,0.45)",
 		"pointer-events:auto",
+		"transform-origin:top left",
 	].join(";");
 }
 
@@ -2570,6 +2591,8 @@ function createModelOptimizationSection(node) {
 		input?.addEventListener("input", () => section.__gjjRefresh?.());
 	}
 	section.__gjjRefresh();
+	section.style.display = performanceSettingsOpen(node) ? "flex" : "none";
+	node.__gjjLazyModelOptimizationSection = section;
 	return section;
 }
 
@@ -2664,7 +2687,7 @@ function createModelQuickToggleBar(node) {
 	const bar = document.createElement("div");
 	bar.style.cssText = [
 		"display:grid",
-		"grid-template-columns:repeat(2,minmax(0,1fr))",
+		"grid-template-columns:repeat(3,minmax(0,1fr))",
 		"gap:8px",
 		"width:100%",
 		"min-width:0",
@@ -2703,7 +2726,7 @@ function createModelQuickToggleBar(node) {
 			button.style.background = style.bg;
 			button.style.borderColor = style.border;
 			button.style.color = style.color;
-			button.setAttribute("aria-pressed", "true");
+			button.setAttribute("aria-pressed", key === "performance" ? String(performanceSettingsOpen(node)) : "true");
 		};
 		bar.appendChild(button);
 		return button;
@@ -2729,6 +2752,15 @@ function createModelQuickToggleBar(node) {
 			() => setKeepModelEnabled(node, !keepModelEnabled(node)),
 		);
 	}
+	makeButton(
+		"performance",
+		() => "💻性能",
+		() => performanceSettingsOpen(node) ? "隐藏性能优化参数。" : "显示性能优化参数。",
+		() => performanceSettingsOpen(node)
+			? { bg: "linear-gradient(135deg, #78350f, #d97706)", border: "#fbbf24", color: "#fffbeb" }
+			: { bg: "#11181c", border: "#41535b", color: "#dce7e2" },
+		() => setPerformanceSettingsOpen(node, !performanceSettingsOpen(node)),
+	);
 
 	bar.__gjjRefresh = () => {
 		for (const button of bar.querySelectorAll("button[data-toggle-key]")) {
@@ -2793,8 +2825,15 @@ function nodeScreenRect(node) {
 
 function positionFloatingPanel(node, panel, anchor) {
 	if (!panel) return;
-	const width = Math.min(520, Math.max(360, window.innerWidth - 28));
+	const rawScale = Number(app.canvas?.ds?.scale || 1);
+	const scale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
+	const availableLogicalWidth = Math.max(240, (window.innerWidth - 28) / scale);
+	const availableLogicalHeight = Math.max(180, (window.innerHeight - 32) / scale);
+	const width = Math.min(520, Math.max(240, availableLogicalWidth));
 	panel.style.width = `${width}px`;
+	panel.style.maxHeight = `${Math.min(680, availableLogicalHeight)}px`;
+	panel.style.transform = `scale(${scale})`;
+	panel.dataset.canvasScale = String(scale);
 	if (panel.__gjjManualPosition) {
 		const current = panel.getBoundingClientRect();
 		const position = clampFloatingPanelToViewport(panel, current.left, current.top);
@@ -2803,9 +2842,10 @@ function positionFloatingPanel(node, panel, anchor) {
 		return;
 	}
 	const rect = anchor?.getBoundingClientRect?.();
-	const left = Math.min(window.innerWidth - width - 14, Math.max(14, rect?.left || 80));
+	const scaledWidth = panel.getBoundingClientRect?.().width || width * scale;
+	const left = Math.min(window.innerWidth - scaledWidth - 14, Math.max(14, rect?.left || 80));
 	const panelHeight = panel.getBoundingClientRect?.().height || 120;
-	const top = Math.min(window.innerHeight - panelHeight - 14, Math.max(14, (rect?.bottom || 80) + 6));
+	const top = Math.min(window.innerHeight - panelHeight - 14, Math.max(14, (rect?.bottom || 80) + 6 * scale));
 	panel.style.left = `${Math.round(left)}px`;
 	panel.style.top = `${Math.round(Math.max(14, top))}px`;
 }
@@ -5176,6 +5216,7 @@ function createButtons(node) {
 			}
 			writeLiveParamSnapshot(node);
 			applyReferenceBrowserButtonState(node);
+			syncQwenImageModelForReferences(node);
 			await refreshLoraOptions(node, false);
 			resolveLoraRowsToAvailable(node);
 			node.properties[LAST_PRESET_KEY] = "";
@@ -5334,6 +5375,7 @@ function createButtons(node) {
 		node.properties[BATCH_SOURCE_WIDGET] = raw;
 		writeLiveParamSnapshot(node);
 		applyReferenceBrowserButtonState(node);
+		syncQwenImageModelForReferences(node);
 		node.graph?.change?.();
 		app.graph?.setDirtyCanvas?.(true, true);
 	}
@@ -6004,6 +6046,54 @@ function matchPreset(unetName) {
 	return best;
 }
 
+function hasLazyReferenceImages(node) {
+	return primaryBatchImageLinked(node) || storedReferenceImageUrls(node).length > 0;
+}
+
+function qwenImageMode(unetName) {
+	const canonical = canonicalizeText(unetName);
+	if (canonical.includes("qwenimageedit2511")) return "edit";
+	if (canonical.includes("qwenimage2512") && !canonical.includes("edit")) return "generate";
+	return "";
+}
+
+function qwenPairCandidateScore(candidate, current) {
+	const candidateText = String(candidate || "").replaceAll("\\", "/").toLowerCase();
+	const currentText = String(current || "").replaceAll("\\", "/").toLowerCase();
+	const quantTokens = [
+		"int4_convrot_padded", "int4_convrot", "int8_convrot", "nvfp4",
+		"mxfp4", "mxfp8", "fp8_e4m3fn", "fp8_scaled", "fp8", "bf16", "fp16", "gguf",
+	];
+	const currentQuant = quantTokens.find((token) => currentText.includes(token)) || "";
+	const sameQuant = currentQuant && candidateText.includes(currentQuant) ? 100 : 0;
+	const sameFolder = currentText.includes("/") && candidateText.slice(0, candidateText.lastIndexOf("/")) === currentText.slice(0, currentText.lastIndexOf("/")) ? 10 : 0;
+	return sameQuant + sameFolder - candidateText.length / 10000;
+}
+
+function syncQwenImageModelForReferences(node) {
+	if (!node || checkpointModelSourceEnabled(node)) return false;
+	const widget = getWidget(node, "unet_name");
+	const current = String(widget?.value || "");
+	const currentMode = qwenImageMode(current);
+	if (!widget || !currentMode) return false;
+
+	const desiredMode = hasLazyReferenceImages(node) ? "edit" : "generate";
+	if (currentMode === desiredMode) return false;
+	const values = Array.isArray(widget.options?.values) ? widget.options.values.map(String) : [];
+	const candidates = values.filter((value) => qwenImageMode(value) === desiredMode);
+	if (!candidates.length) return false;
+	const selected = candidates.sort((a, b) => qwenPairCandidateScore(b, current) - qwenPairCandidateScore(a, current))[0];
+	node.__gjjQwenModelSyncing = true;
+	try {
+		setWidgetValue(widget, selected);
+	} finally {
+		node.__gjjQwenModelSyncing = false;
+	}
+	writeLiveParamSnapshot(node);
+	GJJ_Utils.refreshNode(node);
+	return true;
+}
+
 function usesEqualReferenceCanvas(preset, unetName = "") {
 	const text = canonicalizeText([
 		preset?.id || "",
@@ -6238,6 +6328,9 @@ function hookUnetWidget(node) {
 	const original = widget.callback;
 	widget.callback = function (value, ...args) {
 		const result = original?.call(this, value, ...args);
+		if (!node.__gjjQwenModelSyncing && syncQwenImageModelForReferences(node)) {
+			return result;
+		}
 
 		node.properties = node.properties || {};
 		node.properties[LAST_PRESET_KEY] = "";
@@ -6257,6 +6350,9 @@ function hookModelSourceWidget(node) {
 	const original = widget.callback;
 	widget.callback = function (value, ...args) {
 		const result = original?.call(this, value, ...args);
+		if (value !== CHECKPOINT_MODEL_SOURCE_VALUE) {
+			syncQwenImageModelForReferences(node);
+		}
 		applySettingsVisibility(node);
 		writeLiveParamSnapshot(node);
 		GJJ_Utils.refreshNode(node);
@@ -6306,6 +6402,86 @@ function loraPreviewUrl(loraName, previews = {}) {
 		return String(previews[name]);
 	}
 	return `${LORA_PREVIEW_API_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function closeLazyFloatingLoraPreview() {
+	const active = globalThis.__gjjLazyFloatingLoraPreview;
+	if (!active) return;
+	globalThis.__gjjLazyFloatingLoraPreview = null;
+	active.cleanup?.();
+	active.card?.classList.remove("open", "floating");
+	active.card?.remove?.();
+	active.button?.classList.remove("open");
+}
+
+function openLazyFloatingLoraPreview(card, button, image) {
+	if (globalThis.__gjjLazyFloatingLoraPreview?.card === card) {
+		closeLazyFloatingLoraPreview();
+		return;
+	}
+	closeLazyFloatingLoraPreview();
+	if (image?.dataset?.src && !image.src) image.src = image.dataset.src;
+	card.classList.add("open", "floating");
+	button.classList.add("open");
+	document.body.appendChild(card);
+
+	const rect = button.getBoundingClientRect();
+	const width = Math.min(560, Math.max(320, window.innerWidth - 24));
+	const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+	card.style.left = `${left}px`;
+	card.style.top = "12px";
+	const cardHeight = Math.ceil(card.getBoundingClientRect().height || 160);
+	const belowTop = rect.bottom + 8;
+	const aboveTop = rect.top - cardHeight - 8;
+	card.style.top = `${Math.max(12, belowTop + cardHeight <= window.innerHeight - 12 ? belowTop : aboveTop)}px`;
+
+	const close = () => closeLazyFloatingLoraPreview();
+	const outside = (event) => {
+		if (card.contains(event.target) || button.contains(event.target)) return;
+		close();
+	};
+	const keydown = (event) => {
+		if (event.key === "Escape") close();
+	};
+	card.addEventListener("pointerleave", close);
+	window.addEventListener("blur", close);
+	window.addEventListener("resize", close);
+	document.addEventListener("pointerdown", outside, true);
+	document.addEventListener("keydown", keydown, true);
+	globalThis.__gjjLazyFloatingLoraPreview = {
+		card,
+		button,
+		cleanup: () => {
+			card.removeEventListener("pointerleave", close);
+			window.removeEventListener("blur", close);
+			window.removeEventListener("resize", close);
+			document.removeEventListener("pointerdown", outside, true);
+			document.removeEventListener("keydown", keydown, true);
+		},
+	};
+}
+
+function createLoraSourceButton(metadata, className) {
+	const source = String(metadata?.source || "").trim();
+	let sourceUrl = "";
+	try {
+		const url = new URL(source);
+		if (url.protocol === "https:") sourceUrl = url.href;
+	} catch (_) {}
+	if (!sourceUrl) return null;
+
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = className;
+	button.textContent = "🌐";
+	button.title = `打开 LoRA 网页：${sourceUrl}`;
+	button.setAttribute("aria-label", "打开 LoRA 网页");
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		window.open(sourceUrl, "_blank", "noopener,noreferrer");
+	});
+	return button;
 }
 
 function normalizeLoraKeyword(value) {
@@ -6548,13 +6724,14 @@ function ensureLoraNodeState(node) {
 		metadata: [],
 		previews: {},
 		globalSearch: String(node.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || ""),
+		searchByRow: normalizeLoraSearchByRow(node.properties?.[LORA_ROW_SEARCH_PROPERTY]),
 	};
 	return node.__gjjLoraState;
 }
 
 function updateLoraNodeHeight(node, rowCount) {
 	const baseHeight = 78;
-	const rowHeight = 64;
+	const rowHeight = 78;
 	const targetHeight = baseHeight + rowCount * rowHeight;
 	node.size = [Math.max(node.size?.[0] || 420, 420), targetHeight];
 	node.setDirtyCanvas?.(true, true);
@@ -6592,6 +6769,27 @@ function getDefaultSearchValue(index) {
 	return index === 0 ? DEFAULT_FIRST_SEARCH_TERMS : "";
 }
 
+function normalizeLoraSearchByRow(value) {
+	if (value && typeof value === "object") {
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [String(key), String(item || "")]));
+	}
+	try {
+		const parsed = JSON.parse(String(value || ""));
+		return parsed && typeof parsed === "object"
+			? Object.fromEntries(Object.entries(parsed).map(([key, item]) => [String(key), String(item || "")]))
+			: {};
+	} catch (_) {
+		return {};
+	}
+}
+
+function setLoraRowSearch(node, index, value) {
+	const state = ensureLoraNodeState(node);
+	state.searchByRow[String(index)] = String(value || "");
+	node.properties = node.properties || {};
+	node.properties[LORA_ROW_SEARCH_PROPERTY] = { ...state.searchByRow };
+}
+
 function setLoraGlobalSearch(node, value) {
 	const state = ensureLoraNodeState(node);
 	state.globalSearch = String(value || "");
@@ -6601,7 +6799,6 @@ function setLoraGlobalSearch(node, value) {
 		node.__gjjLoraGlobalSearchInput.value = state.globalSearch;
 	}
 	if (globalThis.__gjjLoraPopup?.state?.node === node) {
-		globalThis.__gjjLoraPopup.search.value = state.globalSearch;
 		globalThis.__gjjLoraPopup.render();
 	}
 }
@@ -6872,6 +7069,8 @@ function ensureGlobalLoraPopup() {
 					meta.appendChild(title);
 					meta.appendChild(trigger);
 					meta.appendChild(recommendedStrength);
+					const sourceButton = createLoraSourceButton(metadata, "gjj-lora-popup-source");
+					if (sourceButton) meta.appendChild(sourceButton);
 					meta.appendChild(previewButton);
 					item.appendChild(meta);
 					item.appendChild(previewCard);
@@ -6959,6 +7158,28 @@ function buildLoraRow(node, row, index, rowsContainer) {
 	const rowElement = document.createElement("div");
 	rowElement.className = `gjj-lora-row${row.enabled ? "" : " off"}`;
 
+	const previewUrl = loraPreviewUrl(row.name, state.previews);
+	const hasLocalPreview = Boolean(row.name && state.previews?.[String(row.name)]);
+	let thumbnailBox = null;
+	if (hasLocalPreview && previewUrl) {
+		rowElement.classList.add("with-thumbnail");
+		thumbnailBox = document.createElement("div");
+		thumbnailBox.className = "gjj-lora-row-thumb-box";
+		thumbnailBox.title = String(metadata?.title || row.name || "");
+		const rowThumbnail = document.createElement("img");
+		rowThumbnail.className = "gjj-lora-row-thumb";
+		rowThumbnail.alt = String(metadata?.title || row.name || "LoRA preview");
+		rowThumbnail.loading = "lazy";
+		rowThumbnail.decoding = "async";
+		rowThumbnail.src = previewUrl;
+		rowThumbnail.addEventListener("error", () => {
+			thumbnailBox?.remove();
+			thumbnailBox = null;
+			rowElement.classList.remove("with-thumbnail");
+		}, { once: true });
+		thumbnailBox.appendChild(rowThumbnail);
+	}
+
 	const mainColumn = document.createElement("div");
 	mainColumn.className = "gjj-lora-main";
 
@@ -7003,11 +7224,11 @@ function buildLoraRow(node, row, index, rowsContainer) {
 		popup.open({
 			node,
 			anchorEl: picker,
-			searchValue: state.globalSearch || getDefaultSearchValue(index),
-			placeholder: "全局过滤 LoRA",
-			searchTitle: "输入关键词筛选当前节点所有 LoRA 下拉选项；不区分大小写。语法：& 表示与，, 或 | 表示或。示例：flux & turbo,lightning,hyper",
+			searchValue: state.searchByRow[String(index)] ?? getDefaultSearchValue(index),
+			placeholder: "当前列表内过滤",
+			searchTitle: "仅过滤当前这一行的 LoRA 列表；会与节点顶部的全局过滤条件叠加生效。",
 			onSearchChange(searchValue) {
-				setLoraGlobalSearch(node, searchValue);
+				setLoraRowSearch(node, index, searchValue);
 			},
 			getSelectedValue() {
 				return String(state.rows[index]?.name || "");
@@ -7026,15 +7247,13 @@ function buildLoraRow(node, row, index, rowsContainer) {
 				if (state.rows[index]?.name && !options.some((option) => option.value === state.rows[index].name)) {
 					options = [...options, { value: state.rows[index].name, label: state.rows[index].name }];
 				}
-				const activeSearch = String(searchText || state.globalSearch || "");
-				if (!activeSearch) {
-					return options;
-				}
-				const expressionGroups = parseLoraSearchExpression(activeSearch);
+				const globalGroups = parseLoraSearchExpression(state.globalSearch);
+				const rowGroups = parseLoraSearchExpression(searchText);
 				return options.filter((opt) => {
 					if (!opt.value) return true;
 					const haystack = loraSearchHaystack(opt, getLoraMetadata(state, opt.value));
-					return matchesLoraSearchExpression(haystack, expressionGroups);
+					return matchesLoraSearchExpression(haystack, globalGroups)
+						&& matchesLoraSearchExpression(haystack, rowGroups);
 				});
 			},
 			onSelect(value) {
@@ -7115,7 +7334,7 @@ function buildLoraRow(node, row, index, rowsContainer) {
 
 		const recommendedStrength = document.createElement("span");
 		recommendedStrength.className = "gjj-lora-meta-strength";
-		recommendedStrength.textContent = formatStrength(metadata.strength, 1.0);
+		recommendedStrength.textContent = `建议 ${formatStrength(metadata.strength, 1.0)}`;
 
 		const previewButton = document.createElement("button");
 		previewButton.type = "button";
@@ -7157,17 +7376,14 @@ function buildLoraRow(node, row, index, rowsContainer) {
 		previewButton.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			const open = !previewCard.classList.contains("open");
-			if (open && image.dataset.src && !image.src) {
-				image.src = image.dataset.src;
-			}
-			previewCard.classList.toggle("open", open);
-			previewButton.classList.toggle("open", open);
+			openLazyFloatingLoraPreview(previewCard, previewButton, image);
 		});
 
 		meta.appendChild(title);
 		meta.appendChild(trigger);
 		meta.appendChild(recommendedStrength);
+		const sourceButton = createLoraSourceButton(metadata, "gjj-lora-source-btn");
+		if (sourceButton) meta.appendChild(sourceButton);
 		meta.appendChild(previewButton);
 		mainColumn.appendChild(meta);
 		mainColumn.appendChild(previewCard);
@@ -7178,6 +7394,7 @@ function buildLoraRow(node, row, index, rowsContainer) {
 	sideColumn.appendChild(toggleWrap);
 	sideColumn.appendChild(strength);
 
+	if (thumbnailBox) rowElement.appendChild(thumbnailBox);
 	rowElement.appendChild(mainColumn);
 	rowElement.appendChild(sideColumn);
 	rowsContainer.appendChild(rowElement);
@@ -7198,6 +7415,7 @@ function renderLoraUi(node) {
 	if (globalThis.__gjjLoraPopup?.state?.node === node) {
 		globalThis.__gjjLoraPopup.close();
 	}
+	closeLazyFloatingLoraPreview();
 
 	if (node.__gjjLoraGlobalSearchInput) {
 		node.__gjjLoraGlobalSearchInput.value = String(state.globalSearch || "");
@@ -7235,6 +7453,7 @@ function setupLoraUi(node) {
 	const state = ensureLoraNodeState(node);
 	state.rows = normalizeRows(readStoredLoraData(node));
 	state.globalSearch = String(node.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || "");
+	state.searchByRow = normalizeLoraSearchByRow(node.properties?.[LORA_ROW_SEARCH_PROPERTY]);
 
 	const container = document.createElement("div");
 	container.className = "gjj-lora-wrap";
@@ -7259,6 +7478,8 @@ function setupLoraUi(node) {
 		.gjj-lora-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-lora-row { display:flex; align-items:flex-start; gap:6px; padding:6px; border:1px solid #3c4c54; border-radius:8px; background:#172026; }
 		.gjj-lora-row.off { opacity:0.65; }
+		.gjj-lora-row-thumb-box { width:64px; height:64px; flex:0 0 64px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:7px; border:1px solid #2e4149; background:#10171b; color:#72858d; font-size:22px; box-sizing:border-box; }
+		.gjj-lora-row-thumb { width:100%; height:100%; display:block; object-fit:cover; }
 		.gjj-lora-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; position:relative; }
 		.gjj-lora-picker { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 8px; box-sizing:border-box; text-align:left; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:auto; }
 		.gjj-lora-meta { display:flex; align-items:center; gap:6px; min-height:20px; color:#b9c9cf; font-size:11px; line-height:1.25; }
@@ -7267,8 +7488,11 @@ function setupLoraUi(node) {
 		.gjj-lora-meta-strength { flex:0 0 auto; color:#d7c587; }
 		.gjj-lora-preview-btn { width:24px; height:22px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:13px; line-height:18px; padding:0; text-align:center; }
 		.gjj-lora-preview-btn:hover, .gjj-lora-preview-btn.open { border-color:#6aa6b8; background:#26363d; }
+		.gjj-lora-source-btn { width:24px; height:22px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:18px; padding:0; text-align:center; }
+		.gjj-lora-source-btn:hover { border-color:#6aa6b8; background:#26363d; }
 		.gjj-lora-preview-card { display:none; position:absolute; left:0; top:calc(100% + 6px); width:min(360px, 100%); padding:8px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-shadow:0 8px 24px rgba(0,0,0,0.38); z-index:9998; box-sizing:border-box; }
 		.gjj-lora-preview-card.open { display:grid; grid-template-columns:92px minmax(0,1fr); gap:8px; }
+		.gjj-lora-preview-card.floating { position:fixed; width:min(560px,calc(100vw - 24px)); max-height:min(520px,calc(100vh - 24px)); overflow:auto; z-index:2147483647; box-shadow:0 18px 48px rgba(0,0,0,.72); }
 		.gjj-lora-preview-card img { width:92px; height:92px; object-fit:cover; border-radius:6px; background:#172026; border:1px solid #2e4149; }
 		.gjj-lora-preview-fallback { width:92px; height:92px; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; border-radius:6px; background:#1b252b; color:#9fb0b7; border:1px solid #2e4149; font-size:11px; }
 		.gjj-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
@@ -7292,6 +7516,8 @@ function setupLoraUi(node) {
 		.gjj-lora-popup-trigger { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fd4c3; }
 		.gjj-lora-popup-strength { flex:0 0 auto; color:#d7c587; }
 		.gjj-lora-popup-preview { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:16px; padding:0; text-align:center; }
+		.gjj-lora-popup-source { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; line-height:16px; padding:0; text-align:center; }
+		.gjj-lora-popup-source:hover { border-color:#6aa6b8; background:#26363d; }
 		.gjj-lora-popup-item .gjj-lora-preview-card { position:static; width:100%; margin-top:4px; box-shadow:none; }
 		.gjj-lora-popup-item.with-thumb .gjj-lora-preview-card { grid-column:1 / -1; }
 		.gjj-lora-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
@@ -7363,6 +7589,7 @@ function setupLoraUi(node) {
 			persistLoraRows(this, ensureLoraNodeState(this).rows, serializedNode);
 			serializedNode.properties = serializedNode.properties || {};
 			serializedNode.properties[LORA_GLOBAL_SEARCH_PROPERTY] = String(ensureLoraNodeState(this).globalSearch || "");
+			serializedNode.properties[LORA_ROW_SEARCH_PROPERTY] = { ...ensureLoraNodeState(this).searchByRow };
 		}
 	};
 
@@ -7408,6 +7635,7 @@ function stabilizeNode(node, forcePreset = false) {
 	syncSeedControlWidget(node);
 
 	removeInternalInputs(node);
+	syncQwenImageModelForReferences(node);
 
 	// 彻底隐藏 batch_source_images widget
 	let batchSourceWidget = getWidget(node, BATCH_SOURCE_WIDGET);
@@ -7479,6 +7707,7 @@ globalThis.GJJLazyImageStudioSyncBatchSources = function (sourceNode) {
 		const link = app.graph.links[linkId];
 		if (link?.origin_id === sourceNode.id) {
 			syncBatchSourceWidget(node);
+			syncQwenImageModelForReferences(node);
 		}
 	}
 };
@@ -7498,6 +7727,7 @@ globalThis.GJJLazyImageStudioSyncImageSources = function (sourceNode) {
 		}
 		const link = app.graph.links[linkId];
 		if (link?.origin_id === sourceNode.id) {
+			syncQwenImageModelForReferences(node);
 			void syncSizeFromPrimaryInput(node);
 		}
 	}
@@ -7586,6 +7816,7 @@ app.registerExtension({
 					: readStoredLoraData(this, serializedNode);
 				state.rows = normalizeRows(loraData);
 				state.globalSearch = String(this.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || serializedNode?.properties?.[LORA_GLOBAL_SEARCH_PROPERTY] || "");
+				state.searchByRow = normalizeLoraSearchByRow(this.properties?.[LORA_ROW_SEARCH_PROPERTY] || serializedNode?.properties?.[LORA_ROW_SEARCH_PROPERTY]);
 				persistLoraRows(this, state.rows);
 				if (this.__gjjLoraContainer) {
 					renderLoraUi(this);
@@ -7610,6 +7841,7 @@ app.registerExtension({
 				persistLoraRows(this, ensureLoraNodeState(this).rows, serializedNode);
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[LORA_GLOBAL_SEARCH_PROPERTY] = String(ensureLoraNodeState(this).globalSearch || "");
+				serializedNode.properties[LORA_ROW_SEARCH_PROPERTY] = { ...ensureLoraNodeState(this).searchByRow };
 			}
 			return result;
 		};

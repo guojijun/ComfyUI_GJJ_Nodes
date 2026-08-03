@@ -44,7 +44,7 @@ except ImportError:
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 可视化音频分段编辑器"
-BACKEND_VERSION = "V28_SILENT_VIDEO_NO_AUDIO_TRACK"
+BACKEND_VERSION = "V31_PROPERTY_SEGMENTS_CACHE_BYPASS"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
 DEFAULT_AUDIO_URL = "https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/video/wan/wan2.2_s2v/input_audio.MP3"
@@ -906,6 +906,15 @@ class GJJ_AudioSegmentEditor:
 	@classmethod
 	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
 		# V19：稳定缓存 key。不要再 time_ns 强制重跑；否则前端刷新波形/下游预览时会不断请求上游。
+		# 新版 ComfyUI 的部分工作流不会把隐藏分段 widget 写入 API Prompt。
+		# 此时节点级缓存无法感知 properties.segments 的变化，必须进入 edit_segments；
+		# edit_segments 内部仍按源文件+精确分段缓存，相同选区不会重复裁剪。
+		prompt_node = None
+		if isinstance(prompt, dict) and unique_id is not None:
+			prompt_node = prompt.get(str(unique_id)) or prompt.get(unique_id)
+		prompt_inputs = prompt_node.get("inputs", {}) if isinstance(prompt_node, dict) else {}
+		if not isinstance(prompt_inputs, dict) or "segments_json" not in prompt_inputs:
+			return float("nan")
 		segments = _segments_for_execution(prompt, extra_pnginfo, unique_id, segments_json)
 		seg_text = _segments_cache_text(segments) if segments else str(segments_json or "[]")
 		if audio_file and audio_file != "[不加载]":

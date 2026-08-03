@@ -64,7 +64,7 @@ MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
 WEIGHT_DTYPE_CHOICES = ["default", *WEIGHT_DTYPES]
-CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"]
+CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion", "minimax"]
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft", ".gguf"}
 WAN_BASE_PRECISIONS = ["fp32", "bf16", "fp16", "fp16_fast"]
 WAN_QUANTIZATIONS = [
@@ -417,6 +417,10 @@ LTX23_GGUF_GEMMA_NAMES = ["gemma-3-12b-it-Q2_K.gguf", "gemma-3-12b-it.gguf"]
 LTX23_GGUF_TEXT_CONNECTOR_NAMES = ["ltx-2.3-22b-dev_embeddings_connectors.safetensors"]
 LTX23_GGUF_VIDEO_VAE_NAMES = ["ltx-2.3-22b-dev_video_vae.safetensors"]
 LTX23_GGUF_AUDIO_VAE_NAMES = ["ltx-2.3-22b-dev_audio_vae.safetensors"]
+MINIMAX_H3_MODEL_NAMES = ["minimax_h3_fl2va_pruned_int8_convrot.safetensors"]
+MINIMAX_H3_TEXT_ENCODER_NAMES = ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]
+MINIMAX_H3_VIDEO_VAE_NAMES = ["minimax_h3_video_vae_fp16.safetensors"]
+MINIMAX_H3_AUDIO_VAE_NAMES = ["minimax_h3_audio_vae_fp32.safetensors"]
 
 
 VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
@@ -1033,6 +1037,50 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             ),
         ],
     },
+    "minimax_h3": {
+        "label": "海螺 MiniMax H3",
+        "clip_type": "minimax",
+        "slots": [
+            S(
+                "model",
+                "MiniMax H3模型",
+                "diffusion_models",
+                "diffusion",
+                ["minimax_h3_"],
+                loader="unet",
+                preferred_name=MINIMAX_H3_MODEL_NAMES[0],
+                official_names=MINIMAX_H3_MODEL_NAMES,
+            ),
+            S(
+                "video_vae",
+                "视频VAE",
+                "vae",
+                "vae",
+                ["minimax_h3_video_vae"],
+                preferred_name=MINIMAX_H3_VIDEO_VAE_NAMES[0],
+                official_names=MINIMAX_H3_VIDEO_VAE_NAMES,
+            ),
+            S(
+                "audio_vae",
+                "音频VAE",
+                "vae",
+                "vae",
+                ["minimax_h3_audio_vae"],
+                preferred_name=MINIMAX_H3_AUDIO_VAE_NAMES[0],
+                official_names=MINIMAX_H3_AUDIO_VAE_NAMES,
+            ),
+            S(
+                "clip",
+                "Qwen3-VL 32B文本编码器",
+                "text_encoders",
+                "clip",
+                ["qwen3vl_32b_"],
+                strict=True,
+                preferred_name=MINIMAX_H3_TEXT_ENCODER_NAMES[0],
+                official_names=MINIMAX_H3_TEXT_ENCODER_NAMES,
+            ),
+        ],
+    },
 }
 
 _CONFIG_FOLDERS: list[str] = []
@@ -1466,7 +1514,7 @@ def _clean_search_token(token: str) -> str:
     value = str(token or "").strip().lower()
     if not value:
         return ""
-    if value in {"t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2"}:
+    if value in {"t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2", "32b"}:
         return value
     if value in {"wan21", "wan22"}:
         return value
@@ -2078,6 +2126,7 @@ def _clip_type_from_text(clip_type: str):
         "hunyuan_video": ["HUNYUAN_VIDEO", "hunyuan_video"],
         "flux": ["FLUX", "flux"],
         "stable_diffusion": ["STABLE_DIFFUSION", "SD1", "stable_diffusion"],
+        "minimax_h3": ["MINIMAX", "MINIMAX_H3", "MINIMAXH3", "minimax_h3"],
     }.get(raw, [raw, raw.upper()])
     for name in candidates:
         if hasattr(enum, name):

@@ -56,6 +56,7 @@ OPTIONAL_OUTPUT_DEFS = {
     "audio": {"name": "音频", "type": "AUDIO"},
     "first_last_frames": {"name": "首尾帧", "type": FIRST_LAST_FRAME_TYPE},
     "processed_video": {"name": "处理后视频", "type": "VIDEO"},
+    "original_video": {"name": "原视频", "type": "VIDEO"},
 }
 OPTIONAL_OUTPUT_KEYS = list(OPTIONAL_OUTPUT_DEFS.keys())
 
@@ -1099,6 +1100,19 @@ def _create_processed_video(frames: torch.Tensor, fps: float, audio: dict[str, A
     )
 
 
+def _create_original_video(path: Path):
+    """Return a file-backed VIDEO without decoding, resizing, slicing, or re-encoding it."""
+    try:
+        from comfy_api.latest import InputImpl
+        return InputImpl.VideoFromFile(str(path))
+    except Exception:
+        try:
+            from comfy_api.input_impl import VideoFromFile
+            return VideoFromFile(str(path))
+        except Exception as exc:
+            raise RuntimeError(f"原视频输出失败：当前 ComfyUI 缺少 VideoFromFile 接口：{exc}") from exc
+
+
 class GJJ_MultiVideoLoader:
     CATEGORY = "GJJ/🎬 视频/加载"
     FUNCTION = "load_videos"
@@ -1109,6 +1123,7 @@ class GJJ_MultiVideoLoader:
     # 否则例如“音频”落在静态 STRING 槽位时会被严格 AUDIO 输入拒绝。
     RETURN_TYPES = (
         VIDEO_FRAME_QUEUE_TYPE,  # 视频帧队列
+        any_type,
         any_type,
         any_type,
         any_type,
@@ -1136,6 +1151,7 @@ class GJJ_MultiVideoLoader:
         "音频",
         "首尾帧",
         "处理后视频",
+        "原视频",
     )
     OUTPUT_TOOLTIPS = (
         "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE,IMAGE,VIDEO，兼容 GJJ 批量帧队列、普通 IMAGE 和 VIDEO 输入口。",
@@ -1151,6 +1167,7 @@ class GJJ_MultiVideoLoader:
         "从所选视频音轨提取并按选择顺序拼接的 AUDIO；没有音轨时输出同段静音。",
         "视频序列首帧和尾帧拼成的 2 张 IMAGE 批次，类型为 GJJ_BATCH_IMAGE,IMAGE。",
         "按当前宽高、起止帧、抽帧间隔、最大帧数处理后的官方 VIDEO，包含同步裁剪/拼接后的音频。",
+        "不做缩放、裁剪、抽帧或重编码，直接输出第一个所选源文件；左侧接入 VIDEO 时直接透传原对象。",
     )
 
     @classmethod
@@ -1519,6 +1536,44 @@ class GJJ_MultiVideoLoader:
         # enabled_outputs_json 是前端通过 prompt.inputs 写入的真源（顺序与 node.outputs[] 完全一致），优先级最高
         enabled_outputs = parse_enabled_outputs(enabled_outputs_json) or recover_enabled_outputs(None, extra_pnginfo, unique_id, prompt)
         enabled_output_set = set(enabled_outputs or [])
+
+        # Pure source passthrough: when 原视频 is the only optional output, do
+        # not inspect metadata, decode frames/audio, resize, slice, build a
+        # preview, or concatenate anything. The mandatory frame output receives
+        # only a tiny placeholder because its socket always exists in this node.
+        if enabled_outputs == ["original_video"]:
+            input_is_linked = (
+                prompt_has_linked_input(prompt, unique_id, "input_frames")
+                if isinstance(prompt, dict)
+                else input_frames is not None
+            )
+            if input_is_linked:
+                if not hasattr(input_frames, "get_components"):
+                    raise RuntimeError("“原视频”纯透传要求左侧接入官方 VIDEO；图片帧队列没有原始视频对象。")
+                original_video = input_frames
+                source_label = "上游 VIDEO"
+            else:
+                if not selected:
+                    raise RuntimeError("请先选择一个源视频，或从左侧接入官方 VIDEO。")
+                source_path = resolve_input_video_path(selected[0])
+                original_video = _create_original_video(source_path)
+                source_label = source_path.name
+            print(f"[GJJ_MultiVideoLoader] 原视频纯透传旁路：{source_label}", flush=True)
+            return {
+                "ui": {
+                    "preview_images": [],
+                    "video_count": [1],
+                    "frame_count": [0],
+                    "source_fps": [0.0],
+                    "frame_rate": [0.0],
+                    "width": [0],
+                    "height": [0],
+                    "video_format": ["source"],
+                    "passthrough": [True],
+                },
+                "result": (empty_image_tensor(), original_video),
+            }
+
         audio_enabled = bool({"audio", "processed_video"} & enabled_output_set)
 
         def _safe_int(value, default=0, min_val=0, max_val=999999):
@@ -1544,11 +1599,17 @@ class GJJ_MultiVideoLoader:
         max_frames_val = _safe_int(max_frames, 240, 1, 100000)
         _ = (filter_keyword, filter_directory, refresh_interval, auto_refresh)
         first_last_frames = None
+        original_video = None
 
         external_video = self._coerce_external_video(input_frames)
         if external_video is not None and selected and isinstance(prompt, dict) and not prompt_has_linked_input(prompt, unique_id, "input_frames"):
             external_video = None
         if external_video is not None:
+            if "original_video" in enabled_output_set:
+                if hasattr(input_frames, "get_components"):
+                    original_video = input_frames
+                else:
+                    raise RuntimeError("“原视频”输出需要左侧接入官方 VIDEO；普通图片帧队列没有可直接透传的原视频对象。")
             raw_external_frames = external_video["frames"]
             source_fps = float(external_video.get("fps") or output_fps)
             output_fps = _effective_output_fps(source_fps, frame_stride_val)
@@ -1602,6 +1663,9 @@ class GJJ_MultiVideoLoader:
         else:
             if not selected:
                 raise RuntimeError("请先在 GJJ · 批量视频加载预览器里选择或导入视频，或接入左侧视频帧队列。")
+
+            if "original_video" in enabled_output_set:
+                original_video = _create_original_video(resolve_input_video_path(selected[0]))
 
             all_frames: list[torch.Tensor] = []
             audio_segments: list[dict[str, Any]] = []
@@ -1751,6 +1815,8 @@ class GJJ_MultiVideoLoader:
         }
         if "processed_video" in enabled_output_set:
             optional_values["processed_video"] = processed_video
+        if "original_video" in enabled_output_set:
+            optional_values["original_video"] = original_video
         
         # 返回真正显示的动态输出，顺序必须与前端 enabled_outputs JSON 配置一致。
         # 前端会把用户当前选择序列化为 {outputs:[{key,name,type}]}，这里只按 key 取值，

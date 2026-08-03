@@ -149,7 +149,7 @@ const SEARCH_DROP_TOKENS = new Set([
 	"e4m3", "e4m3fn", "e5m2", "gguf", "bnb4bit", "bitsandbytes", "quant", "quantized",
 	"input", "scaled", "scale", "fast", "dtype", "weight", "weights", "only",
 ]);
-const SEARCH_KEEP_TOKENS = new Set(["t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2"]);
+const SEARCH_KEEP_TOKENS = new Set(["t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2", "32b"]);
 
 function stripModelExtension(value) {
 	return String(value || "")

@@ -19,7 +19,7 @@ const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 260;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 16;
+const DOM_VERSION = 17;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FIRST_LAST_FRAME_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
@@ -107,6 +107,7 @@ const OUTPUT_DEFS = [
 	{ key: "audio", name: "音频", type: "AUDIO" },
 	{ key: "first_last_frames", name: "首尾帧", type: FIRST_LAST_FRAME_TYPE },
 	{ key: "processed_video", name: "处理后视频", type: "VIDEO" },
+	{ key: "original_video", name: "原视频", type: "VIDEO" },
 ];
 const OUTPUT_DEF_BY_KEY = new Map(OUTPUT_DEFS.map((def) => [def.key, def]));
 

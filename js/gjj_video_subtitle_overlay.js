@@ -3,6 +3,19 @@ import { api } from "/scripts/api.js";
 
 const NODE_NAME = "GJJ_VideoSubtitleOverlay";
 const OUTPUTS_PROPERTY = "gjj_subtitle_outputs_visible";
+const PARAMETER_ORDER_VERSION = "gjj_subtitle_parameter_order_version";
+const SETTINGS_PROPERTY = "gjj_subtitle_named_settings";
+const SERIALIZED_PARAMETER_ORDER = [
+	"filename_prefix", "font_name", "font_size", "font_color", "outline_color", "outline_width", "bottom_margin",
+	"save_directory", "output_format", "video_codec", "encoding_preset", "crf", "save_srt",
+	"font_size_percent", "bottom_margin_percent", "outline_width_percent",
+];
+const PARAMETER_DEFAULTS = {
+	filename_prefix: "GJJ/字幕视频", font_name: "Microsoft YaHei", font_size: 48,
+	font_color: "#FFFFFF", outline_color: "#000000", outline_width: 3, bottom_margin: 60,
+	save_directory: "", output_format: "mp4", video_codec: "H.264", encoding_preset: "medium",
+	crf: 18, save_srt: true, font_size_percent: 5, bottom_margin_percent: 8, outline_width_percent: 6,
+};
 const OUTPUT_DEFS = [
 	{ name: "字幕视频", type: "VIDEO" },
 	{ name: "同名SRT", type: "STRING" },
@@ -10,9 +23,9 @@ const OUTPUT_DEFS = [
 ];
 const PARAMETER_NAMES = [
 	"filename_prefix", "font_name", "font_size", "font_color", "outline_color",
-	"outline_width", "bottom_margin", "font_size_percent", "bottom_margin_percent",
-	"outline_width_percent", "save_directory", "output_format", "video_codec",
-	"encoding_preset", "crf", "save_srt",
+	"outline_width", "bottom_margin", "save_directory", "output_format", "video_codec",
+	"encoding_preset", "crf", "save_srt", "font_size_percent", "bottom_margin_percent",
+	"outline_width_percent",
 ];
 const PANEL_CLASS = "gjj-subtitle-floating-panel";
 
@@ -60,8 +73,80 @@ function setValue(node, name, next) {
 	if (found.inputEl) found.inputEl.value = next;
 	if (found.element && "value" in found.element) found.element.value = next;
 	found.callback?.(next);
-	node.widgets_values = node.widgets?.map((item) => item.value) || node.widgets_values;
+	node.properties ||= {};
+	node.properties[SETTINGS_PROPERTY] = {
+		...PARAMETER_DEFAULTS,
+		...(node.properties[SETTINGS_PROPERTY] || {}),
+		[name]: next,
+	};
 	node.graph?.change?.();
+}
+
+function migrateSerializedWidgetOrder(data) {
+	if (!data || !Array.isArray(data.widgets_values)) return;
+	data.properties ||= {};
+	const savedSettings = data.properties[SETTINGS_PROPERTY];
+	if (savedSettings && typeof savedSettings === "object") {
+		data.widgets_values = SERIALIZED_PARAMETER_ORDER.map((name) => savedSettings[name] ?? PARAMETER_DEFAULTS[name]);
+		data.properties[PARAMETER_ORDER_VERSION] = 3;
+		return;
+	}
+	const values = [...data.widgets_values];
+	const isFormat = (value) => ["mp4", "mkv", "webm"].includes(String(value || "").toLowerCase());
+	const isCodec = (value) => ["H.264", "H.265", "VP9"].includes(String(value || ""));
+	let migrated = values;
+
+	// Repair nodes already serialized after the old frontend rebuilt
+	// widgets_values from an incomplete widget list.
+	if (/^#[0-9a-f]{6}$/i.test(String(values[0] || "")) && isFormat(values[7]) && isCodec(values[8])) {
+		migrated = [
+			"GJJ/字幕视频", "Microsoft YaHei", 48, "#FFFFFF",
+			values[0], values[1], values[2],
+			values[6], values[7], values[8], values[9], values[10], values[11],
+			values[3], values[4], values[5],
+		];
+	// Repair the intermediate schema where the three percentage controls
+	// were inserted before the original save options.
+	} else if (values.length >= 16 && isFormat(values[11]) && isCodec(values[12])) {
+		migrated = [...values.slice(0, 7), ...values.slice(10, 16), ...values.slice(7, 10)];
+	}
+	// Some affected workflows lose one leading widget on every reload. Locate
+	// the stable output-format / codec / preset triplet and realign the whole
+	// array instead of trusting the old version marker.
+	let formatIndex = -1;
+	for (let index = 0; index + 2 < migrated.length; index += 1) {
+		if (isFormat(migrated[index]) && isCodec(migrated[index + 1]) && ["ultrafast", "fast", "medium", "slow", "veryslow"].includes(String(migrated[index + 2] || ""))) {
+			formatIndex = index;
+			break;
+		}
+	}
+	if (formatIndex >= 0 && formatIndex !== 8) {
+		const missingLeading = Math.max(0, 8 - formatIndex);
+		migrated = [
+			...SERIALIZED_PARAMETER_ORDER.slice(0, missingLeading).map((name) => PARAMETER_DEFAULTS[name]),
+			...migrated,
+		];
+	}
+	const normalized = SERIALIZED_PARAMETER_ORDER.map((name, index) => migrated[index] ?? PARAMETER_DEFAULTS[name]);
+	data.widgets_values = normalized;
+	data.properties[SETTINGS_PROPERTY] = Object.fromEntries(
+		SERIALIZED_PARAMETER_ORDER.map((name, index) => [name, normalized[index]])
+	);
+	data.properties[PARAMETER_ORDER_VERSION] = 3;
+}
+
+function restoreNamedSettings(node, serialized = null) {
+	const saved = serialized?.properties?.[SETTINGS_PROPERTY] || node.properties?.[SETTINGS_PROPERTY];
+	const settings = { ...PARAMETER_DEFAULTS, ...(saved && typeof saved === "object" ? saved : {}) };
+	node.properties ||= {};
+	node.properties[SETTINGS_PROPERTY] = settings;
+	for (const name of SERIALIZED_PARAMETER_ORDER) {
+		const found = widget(node, name);
+		if (!found) continue;
+		found.value = settings[name];
+		if (found.inputEl) found.inputEl.value = settings[name];
+		if (found.element && "value" in found.element) found.element.value = settings[name];
+	}
 }
 
 function fontDisplayName(fontValue) {
@@ -457,6 +542,7 @@ function addToolbar(node) {
 
 function normalize(node, serialized = null) {
 	injectStyle();
+	restoreNamedSettings(node, serialized);
 	hideParameters(node);
 	node.properties ||= {};
 	if (serialized) {
@@ -488,6 +574,7 @@ app.registerExtension({
 		};
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (data, ...args) {
+			migrateSerializedWidgetOrder(data);
 			const result = originalConfigure?.apply(this, [data, ...args]);
 			setTimeout(() => normalize(this, data), 0);
 			return result;
@@ -496,6 +583,11 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (...args) {
 			this.properties ||= {};
 			this.properties[OUTPUTS_PROPERTY] = Boolean(this.properties[OUTPUTS_PROPERTY]);
+			const previous = this.properties[SETTINGS_PROPERTY] || {};
+			this.properties[SETTINGS_PROPERTY] = Object.fromEntries(
+				SERIALIZED_PARAMETER_ORDER.map((name) => [name, widget(this, name)?.value ?? previous[name] ?? PARAMETER_DEFAULTS[name]])
+			);
+			this.properties[PARAMETER_ORDER_VERSION] = 3;
 			return originalSerialize?.apply(this, args);
 		};
 		const originalRemoved = nodeType.prototype.onRemoved;

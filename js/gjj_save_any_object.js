@@ -19,6 +19,8 @@ const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
 const FILENAME_VARIABLES_PROPERTY = "gjj_save_any_object_filename_prefix_variables";
 const SAVE_FORMAT_CONFIG_WIDGET = "save_format_config";
+const BROWSER_FILES_WIDGET = "browser_files";
+const BROWSER_UPLOAD_SUBFOLDER = "gjj_save_any_object";
 const SAVE_FORMAT_CONFIG_PROPERTY = "gjj_save_any_object_format_config";
 const DEFAULT_SAVE_FORMAT_CONFIG = { image_format: "PNG", audio_format: "WAV" };
 const IMAGE_FORMATS = ["PNG", "JPG", "WEBP", "BMP"];
@@ -261,6 +263,70 @@ function setWidgetValue(node, name, value) {
 	node.onWidgetChanged?.(name, value, widget, node);
 	setDirty(node);
 	return true;
+}
+
+function uploadUrl(path) {
+	try {
+		return api?.apiURL ? api.apiURL(path) : path;
+	} catch (_) {
+		return path;
+	}
+}
+
+async function uploadBrowserFile(file) {
+	const form = new FormData();
+	form.append("image", file, file.name);
+	form.append("type", "input");
+	form.append("subfolder", BROWSER_UPLOAD_SUBFOLDER);
+	form.append("overwrite", "true");
+	let lastError = null;
+	for (const endpoint of ["/upload/image", "/api/upload/image"]) {
+		try {
+			const response = await fetch(uploadUrl(endpoint), { method: "POST", body: form });
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok) {
+				lastError = new Error(data?.error || response.statusText || `HTTP ${response.status}`);
+				continue;
+			}
+			return {
+				filename: String(data?.name || data?.filename || file.name),
+				subfolder: String(data?.subfolder || BROWSER_UPLOAD_SUBFOLDER),
+				name: String(file.name || ""),
+			};
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError || new Error("文件上传失败");
+}
+
+async function pickBrowserFiles(node, button) {
+	const input = document.createElement("input");
+	input.type = "file";
+	input.multiple = true;
+	input.style.display = "none";
+	document.body.appendChild(input);
+	try {
+		const files = await new Promise((resolve) => {
+			input.addEventListener("change", () => resolve(Array.from(input.files || [])), { once: true });
+			input.click();
+		});
+		if (!files.length) return;
+		button.disabled = true;
+		button.textContent = `📂 ${files.length}`;
+		const references = [];
+		for (const file of files) references.push(await uploadBrowserFile(file));
+		setWidgetValue(node, BROWSER_FILES_WIDGET, JSON.stringify(references));
+		button.title = `已选择 ${references.length} 个文件；执行节点时保存`;
+		button.textContent = `📂 ${references.length}`;
+	} catch (error) {
+		button.title = `选择文件失败：${error?.message || error}`;
+		button.textContent = "📂";
+		console.warn("[GJJ SaveAnyObject] 浏览器文件上传失败:", error);
+	} finally {
+		button.disabled = false;
+		input.remove();
+	}
 }
 
 function normalizeSaveFormatConfig(value) {
@@ -868,7 +934,6 @@ function ensureButtonWidget(node) {
 
 	const outputButton = document.createElement("button");
 	outputButton.style.cssText = [
-		"flex:1",
 		"padding:6px 12px",
 		"background:#2a3a42",
 		"color:#d9e4df",
@@ -895,6 +960,28 @@ function ensureButtonWidget(node) {
 		}
 		updateButtonState(node);
 		setDirty(node);
+	});
+
+	const browserFilesButton = document.createElement("button");
+	browserFilesButton.textContent = "📂";
+	browserFilesButton.title = "选择一个或多个浏览器文件；执行节点时保存（可选）";
+	browserFilesButton.style.cssText = [
+		"padding:6px 12px",
+		"background:#2a3a42",
+		"color:#d9e4df",
+		"border:1px solid #33434a",
+		"border-radius:6px",
+		"cursor:pointer",
+		"font-size:14px",
+		"transition:background 0.15s",
+	].join(";");
+	browserFilesButton.onmouseover = () => { browserFilesButton.style.background = "#3a4a52"; };
+	browserFilesButton.onmouseout = () => { browserFilesButton.style.background = "#2a3a42"; };
+	protectButton(browserFilesButton);
+	browserFilesButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		pickBrowserFiles(node, browserFilesButton);
 	});
 
 	const folderButton = document.createElement("button");
@@ -945,6 +1032,7 @@ function ensureButtonWidget(node) {
 		openFormatPicker(node, formatButton);
 	});
 
+	container.appendChild(browserFilesButton);
 	container.appendChild(outputButton);
 	container.appendChild(variableButton);
 	container.appendChild(formatButton);
@@ -964,6 +1052,7 @@ function ensureButtonWidget(node) {
 	moveWidgetAfter(node, BUTTON_WIDGET_NAME, "filename_prefix");
 
 	node.__gjjSaveAnyObjectButtonContainer = container;
+	node.__gjjSaveAnyObjectBrowserFilesButton = browserFilesButton;
 	node.__gjjSaveAnyObjectButton = outputButton;
 	node.__gjjSaveAnyObjectVariableButton = variableButton;
 	node.__gjjSaveAnyObjectFormatButton = formatButton;
@@ -982,6 +1071,18 @@ function updateButtonState(node) {
 	} else {
 		button.textContent = "🔌";
 		button.style.background = "#2a3a42";
+	}
+	const browserFilesButton = node.__gjjSaveAnyObjectBrowserFilesButton;
+	if (browserFilesButton && !browserFilesButton.disabled) {
+		let count = 0;
+		try {
+			const references = JSON.parse(String(getWidget(node, BROWSER_FILES_WIDGET)?.value || "[]"));
+			count = Array.isArray(references) ? references.length : 0;
+		} catch (_) {}
+		browserFilesButton.textContent = count ? `📂 ${count}` : "📂";
+		browserFilesButton.title = count
+			? `已选择 ${count} 个浏览器文件；再次点击可重新选择`
+			: "选择一个或多个浏览器文件；执行节点时保存（可选）";
 	}
 	const variableButton = node.__gjjSaveAnyObjectVariableButton;
 	if (variableButton) {

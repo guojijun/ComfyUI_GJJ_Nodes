@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import wave
 from datetime import datetime
@@ -51,6 +52,7 @@ LEGACY_FILENAME_PREFIX = "GJJ/任意对象"
 DEFAULT_SAVE_FORMAT_CONFIG = {"image_format": "PNG", "audio_format": "WAV"}
 IMAGE_FORMATS = {"PNG", "JPG", "JPEG", "WEBP", "BMP"}
 AUDIO_FORMATS = {"WAV", "MP3"}
+BROWSER_FILES_INPUT = "browser_files"
 
 
 class AnyType(str):
@@ -679,6 +681,40 @@ def _save_any_value(
     return [str(path)]
 
 
+def _save_browser_files(value: Any, directory: Path, base_name: str) -> list[str]:
+    if not value or folder_paths is None:
+        return []
+    try:
+        references = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(references, list):
+        return []
+
+    input_root = Path(folder_paths.get_input_directory()).resolve()
+    saved_paths: list[str] = []
+    for index, reference in enumerate(references, start=1):
+        if not isinstance(reference, dict):
+            continue
+        filename = Path(str(reference.get("filename") or reference.get("name") or "")).name
+        subfolder = str(reference.get("subfolder") or "").replace("\\", "/").strip("/")
+        parts = [part for part in subfolder.split("/") if part]
+        if not filename or any(part in {".", ".."} for part in parts):
+            continue
+        source = input_root.joinpath(*parts, filename).resolve()
+        try:
+            source.relative_to(input_root)
+        except ValueError:
+            continue
+        if not source.is_file():
+            continue
+        suffix = source.suffix or ".bin"
+        target = _indexed_path(directory, base_name, index, suffix)
+        shutil.copy2(source, target)
+        saved_paths.append(str(target))
+    return saved_paths
+
+
 def _output_image_preview(path: str) -> dict[str, str | int] | None:
     file_path = Path(path)
     if file_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
@@ -878,6 +914,16 @@ class GJJ_SaveAnyObject:
                             "tooltip": "可接任意类型；连接后会自动扩展下一个输入口。",
                         },
                     ),
+                    BROWSER_FILES_INPUT: (
+                        "STRING",
+                        {
+                            "default": "",
+                            "display_name": "浏览器文件",
+                            "tooltip": "由 📂 按钮写入的可选浏览器文件列表；支持多选。",
+                            "hidden": True,
+                            "display": "hidden",
+                        },
+                    ),
                 },
             ),
             "hidden": {
@@ -887,7 +933,7 @@ class GJJ_SaveAnyObject:
             },
         }
 
-    def save(self, filename_prefix=DEFAULT_FILENAME_PREFIX, save_format_config="", prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+    def save(self, filename_prefix=DEFAULT_FILENAME_PREFIX, save_format_config="", prompt=None, extra_pnginfo=None, unique_id=None, browser_files="", **kwargs):
         save_config = _save_format_config(save_format_config)
         source_names = _resolve_input_source_names(prompt, extra_pnginfo, unique_id)
         normalized_prefix = _normalize_default_prefix(filename_prefix or "")
@@ -900,7 +946,7 @@ class GJJ_SaveAnyObject:
         if _render_filename_prefix_template is not None:
             effective_prefix = _render_filename_prefix_template(effective_prefix, prompt, extra_pnginfo=extra_pnginfo)
         directory, base_name = _resolve_prefix(effective_prefix)
-        saved_paths: list[str] = []
+        saved_paths = _save_browser_files(browser_files, directory, base_name)
         for key in sorted(kwargs.keys(), key=_extract_input_index):
             if not str(key).startswith(INPUT_PREFIX):
                 continue

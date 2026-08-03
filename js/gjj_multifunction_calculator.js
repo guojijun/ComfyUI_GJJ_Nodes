@@ -82,6 +82,16 @@ const PRESETS = [
 		showPair: false,
 	},
 	{
+		id: "minimax_frames",
+		label: "🟡 MINIMAX",
+		formula: "max(5, round(时长 * 帧率)) + (5 - (max(5, round(时长 * 帧率)) % 17)) % 17",
+		inputCount: 2,
+		title: "MINIMAX 总帧数：时长 × 帧率四舍五入且至少 5 帧，再向上对齐到 17n+5。",
+		resultName: "MINIMAX总帧数 INT",
+		resultType: "INT",
+		showPair: false,
+	},
+	{
 		id: "convert",
 		label: "🈵 转换",
 		formula: "x1",
@@ -98,6 +108,7 @@ const PRESET_BY_ID = new Map(PRESETS.map((preset) => [preset.id, preset]));
 const COMMON_FORMULAS = [
 	{ label: "🎞️ LTX帧", formula: "int((帧率*时长//8)*8+1)", title: "LTX 8n+1 对齐总帧数：(帧率 x 时长) + 1" },
 	{ label: "🎬 WAN帧", formula: "int((帧率*时长//4)*4+1)", title: "WAN 4n+1 对齐总帧数：(帧率 x 时长) + 1" },
+	{ label: "🟡 MINIMAX帧", formula: "max(5, round(时长 * 帧率)) + (5 - (max(5, round(时长 * 帧率)) % 17)) % 17", title: "MINIMAX 17n+5 对齐总帧数，最少 5 帧。" },
 	{ label: "🔢 对齐8", formula: "(x1//8)*8", title: "分辨率向下对齐到 8 的倍数。" },
 	{ label: "🔢 对齐16", formula: "(x1//16)*16", title: "分辨率向下对齐到 16 的倍数。" },
 	{ label: "🔼 上8", formula: "ceil(x1/8)*8", title: "分辨率向上对齐到 8 的倍数。" },

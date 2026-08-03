@@ -15,7 +15,8 @@ elusarcas-krea-2-smartphone-photography-slider-lora	elusarcas-krea-2-smartphone-
 krea-2-flat-illustrationanime-style	krea-2-flat-illustrationanime-style	平面插画		1	平面动漫/平面插画风格	https://civitai.com/models/2744176/krea-2-flat-illustrationanime-style
 booguimage01loravtnz4	booguimage01loravtnz4	特定人像	vtn	1	特定人像lora	https://civitai.com/models/2750370/booguimage01loravtnz4
 boogu edit_9500	boogu edit_9500	三宫格	根据图一生成三宫格叙事连贯的镜头，原图是…。后续镜头为…，随后…	1	啦啦啦的小黄瓜的三宫格分镜头
-Qwen-Image-Edit-2511-Object-Adder	Qwen-Image-Edit-2511-Object-Adder	添加对象	Add the specified objects to the image while preserving the background lighting and surrounding elements maintaining realism and original details	1	兼容2509和2511版本	https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Object-Adder
+qwen-image-edit-2511-multiple-angles-lora	qwen-image-edit-2511-multiple-angles-lora	EDIT:多角度转换	<sks> [azimuth] [elevation] [distance]	1	96个精准的相机姿势——对相机位置的精确控制	https://huggingface.co/fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA
+Qwen-Image-Edit-2511-Object-Adder	Qwen-Image-Edit-2511-Object-Adder	EDIT:添加对象	Add the specified objects to the image while preserving the background lighting and surrounding elements maintaining realism and original details	1	兼容2509和2511版本	https://huggingface.co/prithivMLmods/Qwen-Image-Edit-2511-Object-Adder
 breast_size_v2_krea2_loraholic	breast_size_v2_krea2_loraholic	胸部滑块		14	Krea2胸部大小调节，越大越趋动画风格	https://huggingface.co/Kutches/Kr3a
 360-degree-rotation-microwave-rotation-wan21-i2v-lora	360-degree-rotation-microwave-rotation-wan21-i2v-lora	360环视	r0t4tion 360 degrees rotation	1	360度旋转对象	https://civitai.com/models/1346623/360-degree-rotation-microwave-rotation-wan21-i2v-lora
 medieval-worlds-minis-boogu	medieval-worlds-minis-boogu	中世纪微缩		1	中世纪城堡地标	https://civitai.com/models/1631885/medieval-worlds-minis-sd?modelVersionId=1847094
@@ -31,7 +32,10 @@ LTX2.3-22B_IC-LoRA-CrossView-Warp	LTX2.3-22B_IC-LoRA-CrossView-Warp	LTX相机轨
 ltx-2.3-22b-ic-lora-clean-plate	ltx-2.3-22b-ic-lora-clean-plate	LTX IC 删除人物	An empty clean plate of the exact same location: identical background, environment, structures and lighting as the source video, with no people, no humans, no figures, and no body parts such as arms, hands or legs anywhere in the frame. Static photorealistic footage, natural light, high detail.	1.0	通过去除静态或移动摄像机画面中的人物、行人和车辆，同时保留静态背景（建筑、地面标记、植被、街道设施）来制作干净的视觉特效和合成背景。当周围背景足够明显时，它还会移除边缘/前景遮挡物（例如骑行者的手臂、车把或自行车）。	https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Clean-Plate
 ltx-2.3-22b-ic-lora-ingredients-0.9	ltx-2.3-22b-ic-lora-ingredients-0.9|ingredients	LTX宫格多参		1.0	用于生成短视频，以根据参考表保持角色、道具和位置的视觉一致性。	https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients
 Krea2-realism	Krea2-realism	逼真皮肤		0.5	逼真的皮肤、解剖结构和服装。这台LoRA涵盖所有种族、年龄和体型。它适用于适合适合工作内容和成人内容。权重1.0：通用。1.5到2.0：NSFW。	https://huggingface.co/RudySen/Krea2-realism-V1
-Qwen-Image-Edit-2511-Gaussian-Splash	Qwen-Image-Edit-2511-Gaussian-Splash	高斯泼溅	高斯泼溅,参考图2的场景图，修复图1的场景图透视并修复空白区域	1.0	高斯泼溅,参考图2的场景图，修复图1的场景图透视并修复空白区域	https://huggingface.co/dx8152/Qwen-Image-Edit-2511-Gaussian-Splash
+Qwen_雾山水墨动漫风格	Qwen_雾山水墨动漫风格	EDIT:雾山水墨动漫风格	transform into anime style	1.0	参考雾山五行动漫的水墨动漫风格。	https://www.runninghub.cn/model/public/2052645259674431490
+2512新中式IP手办Feel.safetensors	2512新中式IP手办Feel.safetensors	新中式IP手办	3D render, IP design, C4D style, High fidelity	1.0	本次训练的核心难点在于“风格的跨界融合”。为了获得最理想的训练集，我们没有采用常规的实拍图，而是通过 AI 合成方案 实现了画风的精准降维与重组。	https://www.runninghub.cn/model/public/2056236813752209409
+QcartoonV1_万物皆可Q	QcartoonV1_万物皆可Q	EDIT:万物皆可Q	convert to q-version cartoon figurine style	1.0	无论是写实摄影、精细动漫还是美式卡通，均能精准提取原角色的核心特征（色彩、配饰、神态），并将其重构为比例协调、质感高级的 Q 版卡通形象。这不仅能为现有 IP 快速拓展衍生形象，更能在早期设计阶段提供极具参考价值的视觉雏形。	https://www.runninghub.cn/model/public/2056232982033248258
+Qwen-Image-Edit-2511-Gaussian-Splash	Qwen-Image-Edit-2511-Gaussian-Splash	EDIT:高斯泼溅	高斯泼溅,参考图2的场景图，修复图1的场景图透视并修复空白区域	1.0	高斯泼溅,参考图2的场景图，修复图1的场景图透视并修复空白区域	https://huggingface.co/dx8152/Qwen-Image-Edit-2511-Gaussian-Splash
 coolblue	coolblue|Krea-2-LoRA-coolblue	冷蓝水彩	teal watercolor illustration style	0.8	偏冷的蓝绿色水彩插画感，适合清爽、梦幻和轻柔场景。
 darkbrush	darkbrush|Krea-2-LoRA-darkbrush	单色水墨	monochrome ink wash style	1.0	黑白水墨和浓淡笔触，适合武侠、自然和剪影场景。	https://huggingface.co/krea/Krea-2-LoRA-darkbrush
 dotmatrix	dotmatrix|Krea-2-LoRA-dotmatrix	单色点绘	Monochrome stippling style	1.0	黑白点阵/点描版画质感，适合图案化和复古印刷效果。	https://huggingface.co/krea/Krea-2-LoRA-dotmatrix
@@ -53,7 +57,7 @@ Qwen-Image-Edit-Unblur-Upscale	Qwen-Image-Edit-Unblur-Upscale	Qwen 细节/清晰
 depth-control-lora	depth-control-lora	深度控制		1	Krea2深度控制	https://huggingface.co/stabilityai/control-lora
 qwen_image_edit_2511_upscale	qwen_image_edit_2511_upscale	Qwen 细节/清晰度	Upscale this picture to 4K resolution.	1.0	Qwen 图像 LoRA：qwen image edit 2511 upscale。适合对应模型族的风格、角色、编辑或增强工作流。	https://huggingface.co/starsfriday/Qwen-Image-Edit-2511-Upscale2K
 Qwen-Image-Edit-2511-Upscale	Qwen-Image-Edit-2511-Upscale	Qwen 细节/清晰度	Upscale this picture to 4K resolution.	1.0	这是一个用于高清放大图像的模型，训练于 ，主要用于无损放大图像至约2K大小	https://huggingface.co/starsfriday/Qwen-Image-Edit-2511-Upscale2K
-qwen_edit_action	qwen_edit_action	动作人偶	action the scene	1	把任何东西变成玩具和动作人偶，配有关节、逼真的塑料材料和涂装细节	https://huggingface.co/systms/SYSTMS-ACTION-LoRA-Qwen-Image-Edit-2511
+qwen_edit_action	qwen_edit_action	EDIT:动作人偶	action the scene	1	把任何东西变成玩具和动作人偶，配有关节、逼真的塑料材料和涂装细节	https://huggingface.co/systms/SYSTMS-ACTION-LoRA-Qwen-Image-Edit-2511
 LTX2.3_Cozy_Felt_Style_LoRa	LTX2.3_Cozy_Felt_Style_LoRa	毡制剪裁电影风格	F3ltCut0u7	1.0	温馨的手工毡制剪裁电影立体模型风格，每个主题和环境看起来都是由柔软的毡布拼凑而成。场景中多层毡布、可见的缝线、绒毛纤维、绒毛质感和刺绣风格细节。结果就像一个用布料手工制作的迷你童话世界。物体、人物和景观似乎由层层毡布构成，边缘圆润，阴影柔和，触感深刻。灯光自然地突出缝合的缝线和层叠的材料，营造出温暖的电影感，同时保持手工美学。文本转视频的工作流程可以在这里找到——只需替换LoRA和提示词即可。	https://huggingface.co/vrgamedevgirl84/LTX2.3_Cozy_Felt_Style_LoRa
 LTX2.3_Cozy_Felt_Style_LoRa	LTX2.3_Cozy_Felt_Style_LoRa	毡制剪裁风格	F3ltCut0u7	1.0	温馨的手工毡制剪裁电影立体模型风格，每个主题和环境看起来都是由柔软的毡布拼凑而成。场景中多层毡布、可见的缝线、绒毛纤维、绒毛质感和刺绣风格细节。结果就像一个用布料手工制作的迷你童话世界。物体、人物和景观似乎由层层毡布构成，边缘圆润，阴影柔和，触感深刻。灯光自然地突出缝合的缝线和层叠的材料，营造出温暖的电影感，同时保持手工美学。文本转视频的工作流程可以在这里找到——只需替换LoRA和提示词即可。	https://huggingface.co/vrgamedevgirl84/LTX2.3_Cozy_Felt_Style_LoRa
 LTX_2.3_90s_Animation_Style_LoRa	LTX_2.3_90s_Animation_Style_LoRa	90年代动画风格	9o4n1m	1.0	这款文字转视频的LoRA创造出疯狂、手绘的恶心动画效果。用于训练该LoRA的数据集未使用任何IP。这是一种夸张、怪诞的卡通风格，灵感来自1990年代恶心的动画美学，而非任何电视剧或电影中的静态画面、画面或画面。制作样板视频的工作流程可以在这里找到。	https://huggingface.co/vrgamedevgirl84/LTX_2.3_90s_Animation_Style_LoRa
@@ -120,6 +124,7 @@ ltx2.3燕如嫣	ltx2.3燕如嫣|ruyan|燕如嫣	LTX 2.3 燕如嫣角色	ruyan	1.
 ltx2.3紫灵	ltx2.3紫灵|ziling|紫灵	LTX 2.3 紫灵角色	ziling	1.0	紫灵角色 LoRA，触发词 ziling，适合角色一致性视频镜头。
 ltx2.3韩立南宫婉双人	ltx2.3韩立南宫婉双人|韩立南宫婉|双人lora	LTX 2.3 韩立南宫婉双人		1.0	韩立与南宫婉双人角色 LoRA，适合双人同框和互动镜头。
 ltx2.3韩立	ltx2.3韩立|hanli|韩立	LTX 2.3 韩立角色	hanli	1.0	韩立角色 LoRA，触发词 hanli，适合角色一致性和同人视频镜头。
+Qwen-Edit-2511-Anime2real	Qwen-Edit-2511-Anime2real	EDIT:动漫转真实	Convert to realistic style	1.0	Convert to realistic style	https://huggingface.co/shadwosii/Qwen-Edit-2511-Anime2real
 ltx23_anime2real_rank64_v1_4500	ltx23_anime2real_rank64_v1_4500|anime2real|动画变真实	LTX 2.3 动画变真实		1.0	动画转写实 LoRA，适合把动漫风格画面转换为真实质感视频。
 ltx23_edit_anything_global_rank128_v1_6000steps_prodigy	ltx23_edit_anything_global_rank128_v1_6000steps_prodigy|edit_anything|通用编辑	LTX 2.3 通用编辑		1.0	通用编辑 LoRA，适合全局改图、内容替换和泛化编辑任务。
 ltx23_gydboy	ltx23_gydboy|gydboy	LTX 2.3 GYDBOY	郭一丁	1.0	GYDBOY LoRA，适合对应风格或角色体系的视频生成。
@@ -179,7 +184,10 @@ t2v_Seoullina_LOW_v2.1	t2v_Seoullina_LOW_v2.1	NSFW 成人内容		1.0	NSFW LoRA�
 wan-m4crom4sti4-i2v-106epo-k3nk	wan-m4crom4sti4-i2v-106epo-k3nk	NSFW 成人内容		1.0	NSFW LoRA：wan m4crom4sti4 i2v 106epo k3nk。适合对应模型族的风格、角色、编辑或增强工作流。
 1GIRL_QWEN_V2	1GIRL_QWEN_V2	Qwen 人物/角色		1.0	Qwen 图像 LoRA：1GIRL QWEN V2。适合对应模型族的风格、角色、编辑或增强工作流。
 251018_MICKMUMPITZ_QWEN-EDIT_360_03	251018_MICKMUMPITZ_QWEN-EDIT_360_03	Qwen 360 全景		1.0	Qwen 图像 LoRA：251018 MICKMUMPITZ QWEN EDIT 360 03。适合对应模型族的风格、角色、编辑或增强工作流。
-AnythingtoRealCharacters2511_20	AnythingtoRealCharacters2511_20	Qwen 写实增强		1.0	Qwen 图像 LoRA：AnythingtoRealCharacters2511 20。适合对应模型族的风格、角色、编辑或增强工作流。
+Any2Cosplay_25	Any2Cosplay_25	EDIT:角色扮演	图1人物cosplay图2的角色	1.0	任何人物转换成角色扮演	https://huggingface.co/WarmBloodAban/AnyoneCosplay
+Qwen_转通透动漫风格Aanima	Qwen_转通透动漫风格Aanima	EDIT:通透动漫风格	transform into anime style	1.0	将指定图像转换成二次元风格，需要后期放大处理	https://www.runninghub.cn/model/public/2051949938073976833
+3DChineseStyle_25	3DChineseStyle_25	EDIT:国漫风格	transform the image to 3D style	1.0	将各种输入风格——从逼真的照片到二维插画——转化为高保真3D美学，特点是明亮的光影和复杂的纹理。	https://huggingface.co/WarmBloodAban/Anyto3DDonghuaStyle
+AnythingtoRealCharacters2511_20	AnythingtoRealCharacters2511_20	EDIT:写实增强	transform the image to realistic photogrph,	1.0	Qwen 图像 LoRA：AnythingtoRealCharacters2511 20。适合对应模型族的风格、角色、编辑或增强工作流。	https://huggingface.co/WarmBloodAban/Anything_to_Real_Characters_2511
 FireRed-Image-Edit-1.0-Lightning-8steps-v1.1	FireRed-Image-Edit-1.0-Lightning-8steps-v1.1	Qwen 加速/蒸馏		1.0	Qwen 图像 LoRA：FireRed Image Edit 1.0 Lightning 8steps v1.1。适合对应模型族的风格、角色、编辑或增强工作流。
 FireRed-Image-Edit-Covercraft	FireRed-Image-Edit-Covercraft	Qwen 图像 LoRA		1.0	Qwen 图像 LoRA：FireRed Image Edit Covercraft。适合对应模型族的风格、角色、编辑或增强工作流。
 FireRed-Image-Edit-Makeup	FireRed-Image-Edit-Makeup	Qwen 图像 LoRA		1.0	Qwen 图像 LoRA：FireRed Image Edit Makeup。适合对应模型族的风格、角色、编辑或增强工作流。
@@ -199,9 +207,10 @@ Qwen-Image-Lightning-4steps-V2.0	Qwen-Image-Lightning-4steps-V2.0	Qwen 加速/�
 Qwen-Image-Lightning-8steps-V2.0	Qwen-Image-Lightning-8steps-V2.0	Qwen 加速/蒸馏		1.0	Qwen 图像 LoRA：Qwen Image Lightning 8steps V2.0。适合对应模型族的风格、角色、编辑或增强工作流。
 Shorty_hair-Q2512	Shorty_hair-Q2512	Qwen 人物/角色	sh0r7y_asian	1.0	Qwen 图像 LoRA：Shorty hair Q2512。适合对应模型族的风格、角色、编辑或增强工作流。
 blue_hair_q2512	blue_hair_q2512	Qwen 人物/角色	lav3nder	1.0	Qwen 图像 LoRA：blue hair q2512。适合对应模型族的风格、角色、编辑或增强工作流。
-edit_2511人景色交互20-LORA+by_xiaodu	edit_2511人景色交互20-LORA+by_xiaodu	Qwen 图像 LoRA	将画面中的人物跟背景光线场景自然融合，不改变人物特征	1.0	Qwen 图像 LoRA：edit 2511人景色交互20 LORA+by xiaodu。适合对应模型族的风格、角色、编辑或增强工作流。
+Nick_changepose_任意姿势_Qwen2511	Nick_changepose_任意姿势_Qwen2511	任意姿势	changepose	1.0	将任意人物改变固定姿势	https://www.runninghub.cn/post/2048912796779286530
+edit_2511人景色交互20-LORA+by_xiaodu	edit_2511人景色交互20-LORA+by_xiaodu	Qwen 图像 LoRA	将画面中的人物跟背景光线场景自然融合，不改变人物特征	1.0	Qwen 图像 LoRA：edit 2511人景色交互20 LORA+by xiaodu。适合对应模型族的风格、角色、编辑或增强工作流。	https://www.bilibili.com/video/BV1Sy7L6uE5G/
 edit_2511人景融合	edit_2511人景融合	Qwen 图像 LoRA	将画面中的人物跟背景光线场景自然融合，不改变人物特征	1.0	Qwen 图像 LoRA：edit 2511人景融合20。适合对应模型族的风格、角色、编辑或增强工作流。
-next-scene_lora-v2-3000	next-scene_lora-v2-3000	Qwen 图像 LoRA	下一个场景：	1.0	Qwen 图像 LoRA：next scene lora v2 3000。适合对应模型族的风格、角色、编辑或增强工作流。
+next-scene_lora-	next-scene_lora	Qwen 图像 LoRA	Next Scene: 	1.0	专门用于生成具有自然视觉进程的电影图像序列。这一模式使Qwen Image Edit能够像电影导演一样思考——理解摄像机动态、视觉构图和叙事连贯性，创造出无缝衔接的镜头。	https://huggingface.co/lovis93/next-scene-qwen-image-lora-2509
 qwen-360-diffusion-2512-int8-bf16-v2	qwen-360-diffusion-2512-int8-bf16-v2	Qwen 360 全景		1.0	Qwen 图像 LoRA：qwen 360 diffusion 2512 int8 bf16 v2。适合对应模型族的风格、角色、编辑或增强工作流。
 qwen-boreal-general-discrete-low-rank	qwen-boreal-general-discrete-low-rank	Qwen 写实增强		1.0	Qwen 图像 LoRA：qwen boreal general discrete low rank。适合对应模型族的风格、角色、编辑或增强工作流。
 qwen-edit-2511-大杂烩_20	qwen-edit-2511-大杂烩_20	Qwen 图像 LoRA		1.0	Qwen 图像 LoRA：qwen edit 2511 大杂烩 20。适合对应模型族的风格、角色、编辑或增强工作流。

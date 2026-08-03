@@ -3,10 +3,13 @@ const { app } = window.comfyAPI.app;
 const api = window.comfyAPI?.api?.api || window.api;
 
 const NODE_NAME = "GJJ_AudioTimestampEditor";
-const CANVAS_HEIGHT = 118;
+const CANVAS_HEIGHT = 134;
 const RULER_HEIGHT = 18;
 const WAVE_Y = RULER_HEIGHT + 4;
 const WAVE_H = 72;
+const PROGRESS_Y = WAVE_Y + WAVE_H + 8;
+const PROGRESS_H = 5;
+const SILENCE_SNAP_PX = 9;
 const HANDLE_HIT_PX = 7;
 const MIN_DURATION = 0.05;
 const DEFAULT_SEGMENT_DURATION = 3.0;
@@ -85,14 +88,19 @@ function hideWidget(w) {
 			mouse: w.mouse,
 		};
 	}
+	// 迁移当前页面里已经被旧版改成 hidden 的控件，无需删除并重建节点。
+	if (w.type === "hidden" && w.__gjjAudioHiddenState.type && w.__gjjAudioHiddenState.type !== "hidden") {
+		w.type = w.__gjjAudioHiddenState.type;
+	}
+	w.hidden = false;
+	w.disabled = false;
 
-	// 关键：既保留 widget.value 参与后端传参，又彻底取消绘制、命中和布局高度。
-	w.type = "hidden";
-	w.hidden = true;
-	w.disabled = true;
+	// 只取消绘制、命中和布局高度，不得把 type 改成 hidden，也不能 disabled。
+	// 新版 ComfyUI 会跳过真正 hidden/disabled 的 widget，导致 segments_json 不进入 Prompt，
+	// 面板虽已修改，后端却继续命中旧分段缓存。
 	w.advanced = true;
 	w.options = w.options || {};
-	w.options.hidden = true;
+	if (w.options.hidden === true) w.options.hidden = false;
 	w.draw = () => {};
 	w.mouse = () => false;
 	w.computeSize = () => [0, 0];
@@ -122,6 +130,28 @@ function hideInternalWidgets(node) {
 	for (const w of node.widgets) {
 		if (isHiddenWidget(w)) hideWidget(w);
 	}
+}
+
+function ensureEditorParameterWidgets(node) {
+	if (!node?.addWidget) return;
+	let segmentsWidget = node.widgets?.find(w => w?.name === "segments_json");
+	if (!segmentsWidget) {
+		const initialSegments = String(node.properties?.segments || "[]");
+		segmentsWidget = node.addWidget("text", "segments_json", initialSegments, value => {
+			node.properties ||= {};
+			node.properties.segments = String(value || "[]");
+		}, { multiline: true });
+	}
+	let durationWidget = node.widgets?.find(w => w?.name === "segment_duration");
+	if (!durationWidget) {
+		const initialDuration = Number(node.properties?.segment_duration || DEFAULT_SEGMENT_DURATION) || DEFAULT_SEGMENT_DURATION;
+		durationWidget = node.addWidget("number", "segment_duration", initialDuration, value => {
+			node.properties ||= {};
+			node.properties.segment_duration = Number(value || DEFAULT_SEGMENT_DURATION) || DEFAULT_SEGMENT_DURATION;
+		}, { min: MIN_DURATION, max: 3600, step: 0.1, precision: 3 });
+	}
+	hideWidget(segmentsWidget);
+	hideWidget(durationWidget);
 }
 
 function parseSegments(text) {
@@ -335,12 +365,16 @@ class AudioSegmentEditorWidget {
 		this.duration = 0;
 		this.sampleRate = 44100;
 		this.audioBuffer = null;
+		this._wavePeakCache = null;
+		this.silencePoints = [];
 		this.selectedIndex = 0;
 		this.hoverIndex = -1;
 		this.hoverHandle = null;
 		this.dragMode = null;
 		this.dragStart = null;
 		this.dragBaseline = null;
+		this.progressSeeking = false;
+		this._playheadFrame = 0;
 		this.loopSelection = true;
 		this.showListOutput = Boolean(node.properties?.gjj_show_segment_list);
 		this.showAllOutputs = Boolean(node.properties?.gjj_show_all_audio_outputs);
@@ -472,7 +506,7 @@ class AudioSegmentEditorWidget {
 		this.container.appendChild(this.fileInput);
 
 		this.canvas = document.createElement("canvas");
-		this.canvas.title = "拖动高亮区域改变位置；拖动左右边缘调整起止时间；点击选中分段";
+		this.canvas.title = "拖动高亮区域改变位置；拖动左右边缘调整起止时间；下方进度条可定位，黄色点为可吸附静音点";
 		this.canvas.style.cssText = `
 			width:100%; height:${CANVAS_HEIGHT}px; display:block; background:#171b1f;
 			box-sizing:border-box; border:1px solid #2e363d; border-radius:6px; cursor:default; flex-shrink:0;
@@ -560,9 +594,9 @@ class AudioSegmentEditorWidget {
 		bindRangeInput(this.endInput, "end");
 
 		this.audioPlayer.addEventListener("timeupdate", () => this.onAudioTimeUpdate());
-		this.audioPlayer.addEventListener("play", () => { this.seekToSelectedStart(); this.setButtonActive(this.playBtn, true); });
-		this.audioPlayer.addEventListener("pause", () => this.setButtonActive(this.playBtn, false));
-		this.audioPlayer.addEventListener("ended", () => this.setButtonActive(this.playBtn, false));
+		this.audioPlayer.addEventListener("play", () => { this.seekToSelectedStart(); this.setButtonActive(this.playBtn, true); this.startPlayheadAnimation(); });
+		this.audioPlayer.addEventListener("pause", () => { this.setButtonActive(this.playBtn, false); this.stopPlayheadAnimation(); this.render(); });
+		this.audioPlayer.addEventListener("ended", () => { this.setButtonActive(this.playBtn, false); this.stopPlayheadAnimation(); this.render(); });
 
 		this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
 		this.resizeObserver.observe(this.container);
@@ -578,6 +612,7 @@ class AudioSegmentEditorWidget {
 		this.canvas.height = Math.round(CANVAS_HEIGHT * dpr);
 		this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		this._cssWidth = cssW;
+		this._wavePeakCache = null;
 		this.render();
 	}
 
@@ -605,6 +640,7 @@ class AudioSegmentEditorWidget {
 	}
 
 	hitTest(mx, my) {
+		if (my >= PROGRESS_Y - 5 && my <= PROGRESS_Y + PROGRESS_H + 7) return { index: -1, handle: "progress" };
 		if (my < WAVE_Y || my > WAVE_Y + WAVE_H) return { index: -1, handle: null };
 		const rects = this.segmentRects();
 		for (let i = rects.length - 1; i >= 0; i--) {
@@ -619,6 +655,12 @@ class AudioSegmentEditorWidget {
 	onPointerDown(e) {
 		const { x, y } = this.localPos(e);
 		const hit = this.hitTest(x, y);
+		if (hit.handle === "progress") {
+			this.progressSeeking = true;
+			this.seekFromCanvasX(x);
+			try { this.canvas.setPointerCapture(e.pointerId); } catch (_) {}
+			return;
+		}
 		if (hit.index >= 0) {
 			this.selectedIndex = hit.index;
 			this.dragMode = hit.handle;
@@ -635,6 +677,10 @@ class AudioSegmentEditorWidget {
 
 	onPointerMove(e) {
 		const { x, y } = this.localPos(e);
+		if (this.progressSeeking) {
+			this.seekFromCanvasX(x);
+			return;
+		}
 		if (this.dragMode && this.selectedIndex >= 0) {
 			const pps = this.pxPerSecond();
 			const dx = (x - this.dragStart.x) / pps;
@@ -642,9 +688,9 @@ class AudioSegmentEditorWidget {
 			const base = this.dragBaseline;
 			const max = this.getMaxDuration();
 			if (this.dragMode === "left") {
-				seg.start = clamp(base.start + dx, 0, base.end - MIN_DURATION);
+				seg.start = this.snapTime(clamp(base.start + dx, 0, base.end - MIN_DURATION), base.end - MIN_DURATION);
 			} else if (this.dragMode === "right") {
-				seg.end = clamp(base.end + dx, base.start + MIN_DURATION, max);
+				seg.end = this.snapTime(clamp(base.end + dx, base.start + MIN_DURATION, max), max, base.start + MIN_DURATION);
 			} else {
 				const len = Math.max(MIN_DURATION, base.end - base.start);
 				const start = clamp(base.start + dx, 0, Math.max(0, max - len));
@@ -659,11 +705,17 @@ class AudioSegmentEditorWidget {
 		const hit = this.hitTest(x, y);
 		this.hoverIndex = hit.index;
 		this.hoverHandle = hit.handle;
-		this.canvas.style.cursor = hit.handle === "left" || hit.handle === "right" ? "ew-resize" : hit.handle === "move" ? "grab" : "default";
+		this.canvas.style.cursor = hit.handle === "progress" ? "pointer" : hit.handle === "left" || hit.handle === "right" ? "ew-resize" : hit.handle === "move" ? "grab" : "default";
 		this.render();
 	}
 
 	onPointerUp(e) {
+		if (this.progressSeeking) {
+			this.progressSeeking = false;
+			try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+			this.render();
+			return;
+		}
 		if (this.dragMode) {
 			try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
 			this.dragMode = null;
@@ -672,6 +724,57 @@ class AudioSegmentEditorWidget {
 			this.commit(true);
 			this.render();
 		}
+	}
+
+	seekFromCanvasX(x) {
+		if (!this.audioPlayer) return;
+		const time = clamp(x / Math.max(1, this._cssWidth || 1) * this.getMaxDuration(), 0, this.duration || this.getMaxDuration());
+		try { this.audioPlayer.currentTime = time; } catch (_) {}
+		this.updatePlayTimeLabel();
+		this.render();
+	}
+
+	snapTime(time, max = this.getMaxDuration(), min = 0) {
+		const threshold = SILENCE_SNAP_PX / Math.max(1, this.pxPerSecond());
+		let nearest = Number(time || 0);
+		let distance = threshold;
+		for (const point of this.silencePoints || []) {
+			const delta = Math.abs(point - time);
+			if (delta <= distance && point >= min && point <= max) {
+				nearest = point;
+				distance = delta;
+			}
+		}
+		return nearest;
+	}
+
+	detectSilencePoints(audioBuffer) {
+		if (!audioBuffer?.length || !audioBuffer?.sampleRate) return [];
+		const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, i) => audioBuffer.getChannelData(i));
+		const sampleRate = audioBuffer.sampleRate;
+		const windowSize = Math.max(1, Math.round(sampleRate * 0.02));
+		const minSilentWindows = 6; // 约 120ms
+		const threshold = Math.pow(10, -42 / 20);
+		const points = [];
+		let silentStart = -1;
+		let windowIndex = 0;
+		for (let start = 0; start < audioBuffer.length; start += windowSize, windowIndex += 1) {
+			const end = Math.min(audioBuffer.length, start + windowSize);
+			let energy = 0;
+			let count = 0;
+			for (const channel of channels) {
+				for (let i = start; i < end; i += 4) { const v = channel[i] || 0; energy += v * v; count += 1; }
+			}
+			const rms = Math.sqrt(energy / Math.max(1, count));
+			if (rms <= threshold) {
+				if (silentStart < 0) silentStart = windowIndex;
+			} else if (silentStart >= 0) {
+				if (windowIndex - silentStart >= minSilentWindows) points.push(((silentStart + windowIndex) * 0.5 * windowSize) / sampleRate);
+				silentStart = -1;
+			}
+		}
+		if (silentStart >= 0 && windowIndex - silentStart >= minSilentWindows) points.push(((silentStart + windowIndex) * 0.5 * windowSize) / sampleRate);
+		return points.filter(t => t > 0.001 && t < audioBuffer.duration - 0.001);
 	}
 
 	normalizeSegment(seg) {
@@ -827,15 +930,6 @@ class AudioSegmentEditorWidget {
 
 	toggleAllOutputs() {
 		const count = Math.max(1, this.segments?.length || 1);
-		if (count <= 1) {
-			this.showAllOutputs = false;
-			this.node.properties = this.node.properties || {};
-			this.node.properties.gjj_show_all_audio_outputs = false;
-			this.setButtonActive(this.outputBtn, false);
-			this.setStatus("ℹ️ 当前只有 1 段，没有其它音频片段输出口。先用 ➕ 添加分段，或用 ⚖️ 均分后再展开。");
-			stabilizeNode(this.node, count, this.showListOutput, false);
-			return;
-		}
 		this.showAllOutputs = !this.showAllOutputs;
 		// 多段输出时必须保留分段列表在 slot1，保证后端 result 槽位不偏移。
 		if (this.showAllOutputs) this.showListOutput = true;
@@ -894,6 +988,8 @@ class AudioSegmentEditorWidget {
 		if (!url) {
 			this.__lastAudioUrlKey = "";
 			this.audioBuffer = null;
+			this._wavePeakCache = null;
+			this.silencePoints = [];
 			this.audioPlayer.src = "";
 			this.render();
 			return;
@@ -908,6 +1004,8 @@ class AudioSegmentEditorWidget {
 		this.__lastAudioUrlKey = urlKey;
 		const finalUrl = url.includes("_t=") ? url : `${url}${url.includes("?") ? "&" : "?"}_t=${Date.now()}`;
 		this.audioBuffer = null;
+		this._wavePeakCache = null;
+		this.silencePoints = [];
 		this.render();
 		this.audioPlayer.src = finalUrl;
 		try {
@@ -923,8 +1021,10 @@ class AudioSegmentEditorWidget {
 				.then(buf => audioCtx.decodeAudioData(buf.slice(0)))
 				.then(audioBuffer => {
 					this.audioBuffer = audioBuffer;
+					this._wavePeakCache = null;
 					this.duration = audioBuffer.duration || this.duration;
 					this.sampleRate = audioBuffer.sampleRate || this.sampleRate;
+					this.silencePoints = this.detectSilencePoints(audioBuffer);
 					this.render();
 				})
 				.catch(err => {
@@ -991,6 +1091,25 @@ class AudioSegmentEditorWidget {
 			this.audioPlayer.currentTime = Number(seg.start || 0);
 			this.audioPlayer.play().catch(() => {});
 		}
+	}
+
+	startPlayheadAnimation() {
+		if (this._playheadFrame) return;
+		const tick = () => {
+			this._playheadFrame = 0;
+			if (!this.audioPlayer?.paused) {
+				this.updatePlayTimeLabel();
+				this.render();
+				this._playheadFrame = requestAnimationFrame(tick);
+			}
+		};
+		this._playheadFrame = requestAnimationFrame(tick);
+	}
+
+	stopPlayheadAnimation() {
+		if (!this._playheadFrame) return;
+		cancelAnimationFrame(this._playheadFrame);
+		this._playheadFrame = 0;
 	}
 
 	getAudioFileWidget() {
@@ -1129,6 +1248,7 @@ class AudioSegmentEditorWidget {
 		this.drawRuler(ctx, w);
 		this.drawWaveform(ctx, w);
 		this.drawSegments(ctx, w);
+		this.drawProgressAndPlayhead(ctx, w);
 	}
 
 	drawRuler(ctx, w) {
@@ -1159,25 +1279,33 @@ class AudioSegmentEditorWidget {
 			ctx.fillText("执行节点后显示波形", 8, WAVE_Y + 10);
 			return;
 		}
-		const data = this.audioBuffer.getChannelData(0);
-		const sampleRate = this.audioBuffer.sampleRate;
 		const max = this.getMaxDuration();
 		const midY = WAVE_Y + WAVE_H / 2;
 		const amp = WAVE_H / 2 - 5;
+		const pixelWidth = Math.max(1, Math.ceil(w));
+		const cacheKey = `${pixelWidth}|${max}|${this.audioBuffer.length}|${this.audioBuffer.sampleRate}`;
+		if (this._wavePeakCache?.key !== cacheKey) {
+			const data = this.audioBuffer.getChannelData(0);
+			const sampleRate = this.audioBuffer.sampleRate;
+			const peaks = new Float32Array(pixelWidth * 2);
+			for (let px = 0; px < pixelWidth; px++) {
+				const t0 = px / pixelWidth * max;
+				const t1 = (px + 1) / pixelWidth * max;
+				const s0 = clamp(Math.floor(t0 * sampleRate), 0, Math.max(0, data.length - 1));
+				const s1 = Math.min(data.length, Math.max(s0 + 1, Math.floor(t1 * sampleRate)));
+				let min = 1, maxv = -1;
+				for (let s = s0; s < s1; s++) { const v = data[s] || 0; if (v < min) min = v; if (v > maxv) maxv = v; }
+				peaks[px * 2] = min;
+				peaks[px * 2 + 1] = maxv;
+			}
+			this._wavePeakCache = { key: cacheKey, peaks };
+		}
 		ctx.strokeStyle = "rgba(120, 210, 155, 0.42)";
 		ctx.lineWidth = 0.8;
 		ctx.beginPath();
-		for (let px = 0; px < w; px++) {
-			const t0 = px / Math.max(1, w) * max;
-			const t1 = (px + 1) / Math.max(1, w) * max;
-			const s0 = clamp(Math.floor(t0 * sampleRate), 0, Math.max(0, data.length - 1));
-			const s1 = Math.min(data.length, Math.max(s0 + 1, Math.floor(t1 * sampleRate)));
-			let min = 1, maxv = -1;
-			for (let s = s0; s < s1; s++) {
-				const v = data[s] || 0;
-				if (v < min) min = v;
-				if (v > maxv) maxv = v;
-			}
+		const peaks = this._wavePeakCache.peaks;
+		for (let px = 0; px < pixelWidth; px++) {
+			const min = peaks[px * 2], maxv = peaks[px * 2 + 1];
 			ctx.moveTo(px + 0.5, midY + min * amp);
 			ctx.lineTo(px + 0.5, midY + maxv * amp);
 		}
@@ -1213,7 +1341,40 @@ class AudioSegmentEditorWidget {
 		}
 	}
 
+	drawProgressAndPlayhead(ctx, w) {
+		const max = this.getMaxDuration();
+		const current = clamp(Number(this.audioPlayer?.currentTime || 0), 0, max);
+		const progressX = current / max * w;
+		ctx.save();
+		ctx.fillStyle = "#263038";
+		ctx.fillRect(0, PROGRESS_Y, w, PROGRESS_H);
+		ctx.fillStyle = "#55b98a";
+		ctx.fillRect(0, PROGRESS_Y, progressX, PROGRESS_H);
+		for (const point of this.silencePoints || []) {
+			const x = point / max * w;
+			ctx.beginPath();
+			ctx.arc(x, PROGRESS_Y + PROGRESS_H / 2, 2.4, 0, Math.PI * 2);
+			ctx.fillStyle = "#f5d76e";
+			ctx.fill();
+			ctx.strokeStyle = "rgba(0,0,0,.75)";
+			ctx.lineWidth = 0.8;
+			ctx.stroke();
+		}
+		ctx.strokeStyle = "rgba(255,255,255,.92)";
+		ctx.lineWidth = 1;
+		ctx.beginPath();
+		ctx.moveTo(Math.round(progressX) + 0.5, RULER_HEIGHT);
+		ctx.lineTo(Math.round(progressX) + 0.5, PROGRESS_Y + PROGRESS_H + 3);
+		ctx.stroke();
+		ctx.beginPath();
+		ctx.arc(progressX, PROGRESS_Y + PROGRESS_H / 2, 3.2, 0, Math.PI * 2);
+		ctx.fillStyle = "#ffffff";
+		ctx.fill();
+		ctx.restore();
+	}
+
 	destroy() {
+		this.stopPlayheadAnimation();
 		this.resizeObserver?.disconnect();
 		clearTimeout(this._heightTimer);
 		clearTimeout(this._durationInputTimer);
@@ -1282,8 +1443,6 @@ function stabilizeNode(node, segmentCount = 1, showList = null, showAll = null) 
 	let allVisible = showAll;
 	if (allVisible === null || allVisible === undefined) allVisible = Boolean(node.properties?.gjj_show_all_audio_outputs);
 
-	// 只有 1 段时，🔌 不应该保持激活，否则看起来像按钮坏了。
-	if (count <= 1) allVisible = false;
 	// 展开多段音频时，slot1 必须是“分段列表”，否则 slot2=音频片段2 会错位成后端 result[1]。
 	if (allVisible) listVisible = true;
 
@@ -1310,11 +1469,12 @@ function stabilizeNode(node, segmentCount = 1, showList = null, showAll = null) 
 		wanted = 2;
 	}
 	if (allVisible) {
+		const expandedCount = Math.max(2, count);
 		// slot2=音频片段2，slot3=音频片段3...
-		for (let slot = 2; slot <= count; slot++) {
+		for (let slot = 2; slot <= expandedCount; slot++) {
 			setSlot(slot, `${OUTPUT_DISPLAY_PREFIX}${slot}`, "AUDIO");
 		}
-		wanted = Math.max(2, count + 1);
+		wanted = expandedCount + 1;
 	}
 
 	for (let slot = node.outputs.length - 1; slot >= wanted; slot--) {
@@ -1481,6 +1641,7 @@ app.registerExtension({
 
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
+			ensureEditorParameterWidgets(this);
 			hideInternalWidgets(this);
 			stabilizeNode(this, 1, false, false);
 			installAudioFileAutoRefresh(this);
@@ -1508,6 +1669,7 @@ app.registerExtension({
 
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			ensureEditorParameterWidgets(this);
 			hideInternalWidgets(this);
 			installAudioFileAutoRefresh(this);
 			setTimeout(() => {

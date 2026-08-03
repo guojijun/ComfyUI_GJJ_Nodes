@@ -632,6 +632,44 @@ def _format_time_array(values: list[str]) -> str:
     return "[" + ",".join(str(value).strip() for value in values if str(value).strip()) + ",]"
 
 
+def _format_srt_time(value: str) -> str:
+    total_ms = max(0, int(round(float(value) * 1000.0)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+def _format_srt(texts: list[str], starts: list[str], ends: list[str]) -> str:
+    blocks = []
+    for index, (text, start, end) in enumerate(zip(texts, starts, ends), start=1):
+        blocks.append(
+            f"{index}\n{_format_srt_time(start)} --> {_format_srt_time(end)}\n{str(text).strip()}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _segment_audio_queue(
+    waveform: np.ndarray,
+    sample_rate: int,
+    starts: list[str],
+    ends: list[str],
+) -> list[dict[str, Any]]:
+    total_samples = int(waveform.shape[-1])
+    segments = []
+    for start, end in zip(starts, ends):
+        start_sample = max(0, min(total_samples, int(round(float(start) * sample_rate))))
+        end_sample = max(start_sample, min(total_samples, int(round(float(end) * sample_rate))))
+        if end_sample <= start_sample:
+            continue
+        segment = np.ascontiguousarray(waveform[start_sample:end_sample], dtype=np.float32)
+        segments.append({
+            "waveform": torch.from_numpy(segment).unsqueeze(0).unsqueeze(0),
+            "sample_rate": int(sample_rate),
+        })
+    return segments
+
+
 def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
     result = dict(options)
     result.setdefault("hidden", True)
@@ -646,14 +684,17 @@ class GJJ_Qwen3ASRTextFormats:
     OUTPUT_NODE = True
     DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = ["qwen3 asr", "qwen asr", "语音识别", "音频转文字", "强制对齐", "字幕时间戳"]
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("时间戳表", "分段文本", "开始时间列表", "结束时间列表")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "AUDIO")
+    RETURN_NAMES = ("时间戳表", "分段文本", "开始时间列表", "结束时间列表", "标准SRT", "分段音频")
     OUTPUT_TOOLTIPS = (
         "每行输出为 Wan/LTX 常用时序提示格式：[开始s-结束s] 文本，例如 [0.4s-2.9s] 台词。",
         "每个识别片段一行，顺序与时间戳表一致。",
         "每个片段的开始时间，输出为 [1,2,] 形式的数组字符串。",
         "每个片段的结束时间，输出为 [1,2,] 形式的数组字符串。",
+        "标准 SubRip 字幕文本，可连接文本保存节点并使用 .srt 扩展名保存。",
+        "按强制对齐时间逐段裁切的 AUDIO 队列；每个字幕片段对应一段音频。",
     )
+    OUTPUT_IS_LIST = (False, False, False, False, False, True)
     GJJ_UI = {
         "toolbar": ["📁", "🧠", "📝", "🔌", "⚙️", "📋", "🎤"],
         "hidden_parameters": [
@@ -703,13 +744,17 @@ class GJJ_Qwen3ASRTextFormats:
         text_list: str,
         start_times: str,
         end_times: str,
+        srt: str,
+        segment_audio: list[dict[str, Any]],
         output_order_json: str,
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[Any, Any, Any, Any, Any, Any]:
         values = {
             "text_list": text_list,
             "timestamps": timestamps,
             "start_times": start_times,
             "end_times": end_times,
+            "srt": srt,
+            "segment_audio": segment_audio,
         }
         try:
             requested = json.loads(str(output_order_json or "[]"))
@@ -721,8 +766,8 @@ class GJJ_Qwen3ASRTextFormats:
         if not order:
             order = ["text_list"]
         result = [values[key] for key in dict.fromkeys(order)]
-        result.extend("" for _ in range(4 - len(result)))
-        return tuple(result[:4])
+        result.extend("" for _ in range(6 - len(result)))
+        return tuple(result[:6])
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -914,7 +959,7 @@ class GJJ_Qwen3ASRTextFormats:
 
             if not full_text:
                 _send_status(unique_id, f"完成：未识别到有效文本，音频时长 {duration:.2f} 秒。", 1.0)
-                return {"ui": {"text": ("", "", "", "")}, "result": self._ordered_outputs("", "", "", "", output_order_json)}
+                return {"ui": {"text": ("", "", "", "", "")}, "result": self._ordered_outputs("", "", "", "", "", [], output_order_json)}
 
             resolved_align_language = _resolve_align_language(detected_language, align_language, asr_language)
             _send_status(unique_id, f"4/5 正在执行强制对齐：{resolved_align_language}...", 0.72)
@@ -930,11 +975,13 @@ class GJJ_Qwen3ASRTextFormats:
             texts, starts, ends = _segment_alignment(align_results[0], full_text, bool(segment_by_sentence))
             _update_progress(pbar, 4, 5)
 
-            _send_status(unique_id, "5/5 正在整理四种文本输出...", 0.9)
+            _send_status(unique_id, "5/5 正在整理文本与 SRT 字幕...", 0.9)
             timestamps = _format_timestamps(texts, starts, ends)
             text_list = "\n".join(texts)
             start_times = _format_time_array(starts)
             end_times = _format_time_array(ends)
+            srt = _format_srt(texts, starts, ends)
+            segment_audio = _segment_audio_queue(waveform, sample_rate, starts, ends)
             elapsed = time.perf_counter() - started_at
             _send_status(
                 unique_id,
@@ -955,8 +1002,8 @@ class GJJ_Qwen3ASRTextFormats:
                 pass
 
             return {
-                "ui": {"text": (timestamps, text_list, start_times, end_times)},
-                "result": self._ordered_outputs(timestamps, text_list, start_times, end_times, output_order_json),
+                "ui": {"text": (timestamps, text_list, start_times, end_times, srt)},
+                "result": self._ordered_outputs(timestamps, text_list, start_times, end_times, srt, segment_audio, output_order_json),
             }
         except Exception as exc:
             report = get_report_from_exception(exc)

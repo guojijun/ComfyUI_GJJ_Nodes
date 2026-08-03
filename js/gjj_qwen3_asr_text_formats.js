@@ -12,6 +12,8 @@ const OUTPUT_DEFS = [
 	{ key: "timestamps", name: "时间戳表", type: "STRING", tip: "[开始s-结束s] 文本。" },
 	{ key: "start_times", name: "开始时间列表", type: "STRING", tip: "片段开始时间数组。" },
 	{ key: "end_times", name: "结束时间列表", type: "STRING", tip: "片段结束时间数组。" },
+	{ key: "srt", name: "标准SRT", type: "STRING", tip: "标准 SubRip 字幕，可保存为 .srt 文件。" },
+	{ key: "segment_audio", name: "分段音频", type: "AUDIO", tip: "按字幕时间裁切的 AUDIO 队列。" },
 ];
 const PARAM_GROUPS = {
 	model: ["asr_model_name", "aligner_model_name"],
@@ -62,7 +64,7 @@ function readOutputOrder(node, serialized = null) {
 		const names = (serialized.outputs || []).map((output) => output?.name);
 		const restored = names.map((name) => ({
 			"时间戳表": "timestamps", "分段文本": "text_list",
-			"开始时间列表": "start_times", "结束时间列表": "end_times",
+			"开始时间列表": "start_times", "结束时间列表": "end_times", "标准SRT": "srt", "分段音频": "segment_audio",
 		}[name])).filter(Boolean);
 		if (restored.length) order = restored;
 	}
@@ -71,6 +73,9 @@ function readOutputOrder(node, serialized = null) {
 	}
 	order = order.filter((key) => OUTPUT_DEFS.some((def) => def.key === key));
 	if (!order.length) order = ["text_list"];
+	// ComfyUI's OUTPUT_IS_LIST is positional. Keep the AUDIO queue in its fixed
+	// sixth slot so dynamically hidden text sockets cannot move the list flag.
+	if (order.includes("segment_audio")) order = OUTPUT_DEFS.map((def) => def.key);
 	node.properties[OUTPUT_PROPERTY] = [...new Set(order)];
 	return node.properties[OUTPUT_PROPERTY];
 }
@@ -236,11 +241,12 @@ function toggleOutputPopup(node) {
 		const check = document.createElement("input");
 		check.type = "checkbox";
 		check.checked = order.includes(def.key);
-		check.disabled = def.key === "text_list";
+		check.disabled = def.key === "text_list" || (order.includes("segment_audio") && def.key !== "segment_audio");
 		check.onchange = () => {
 			const current = readOutputOrder(node);
 			let next = current.filter((key) => key !== def.key);
 			if (check.checked) next.push(def.key);
+			if (def.key === "segment_audio" && check.checked) next = OUTPUT_DEFS.map((item) => item.key);
 			const removedIndex = current.indexOf(def.key);
 			const linkedAtOrAfter = (node.outputs || []).some((output, index) => index >= removedIndex && output.links?.length);
 			if (!check.checked && linkedAtOrAfter) {
