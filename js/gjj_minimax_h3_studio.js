@@ -324,9 +324,32 @@ function persistedWidgetNames(node) {
 	return Object.keys(optional).filter((name) => Boolean(widget(node, name)) && name !== PANEL_WIDGET && name !== RESULT_WIDGET);
 }
 function writeSettingsBackup(node) {
-	node.properties ||= {}; const backup = {};
-	for (const name of persistedWidgetNames(node)) { const target = widget(node, name); if (target) backup[name] = target.value; }
-	node.properties[SETTINGS_BACKUP_PROPERTY] = backup; node.properties[PROMPT_BACKUP_PROPERTY] = String(backup.prompt || ""); return backup;
+	node.properties ||= {};
+	// ⚠️ 改为合并模式：先继承已有 backup，再用当前 widget 值更新。
+	// 原因：如果 widget.value 因时机问题（如 ComfyUI 尚未恢复 widgets_values、
+	// DOM 未同步等）为空或默认值，完全覆盖会丢失用户之前保存的正确值。
+	const oldBackup = (node.properties[SETTINGS_BACKUP_PROPERTY] && typeof node.properties[SETTINGS_BACKUP_PROPERTY] === "object" && !Array.isArray(node.properties[SETTINGS_BACKUP_PROPERTY]))
+		? { ...node.properties[SETTINGS_BACKUP_PROPERTY] }
+		: {};
+	const backup = { ...oldBackup };
+	for (const name of persistedWidgetNames(node)) {
+		const target = widget(node, name);
+		if (!target) continue;
+		const currentValue = target.value;
+		// prompt 特殊保护：如果当前 widget 值为空但旧 backup 有值，保留旧值
+		// 防止 ComfyUI 恢复时序问题导致 prompt 被空值覆盖
+		if (name === "prompt") {
+			const oldVal = oldBackup[name];
+			if ((currentValue == null || String(currentValue).trim() === "") && oldVal != null && String(oldVal).trim() !== "") {
+				backup[name] = oldVal;
+				continue;
+			}
+		}
+		backup[name] = currentValue;
+	}
+	node.properties[SETTINGS_BACKUP_PROPERTY] = backup;
+	node.properties[PROMPT_BACKUP_PROPERTY] = String(backup.prompt || "");
+	return backup;
 }
 function ensureSettingsPersistence(node) {
 	node.properties ||= {}; let backup = node.properties[SETTINGS_BACKUP_PROPERTY]; const currentSchema = Number(node.properties[SETTINGS_SCHEMA_PROPERTY] || 0);
@@ -354,6 +377,19 @@ function ensureSettingsPersistence(node) {
 		// 然后立刻用 properties 按名称覆盖 widget.value，保证结果始终正确。
 		target.serialize = true;
 		target.options ||= {}; target.options.serialize = true;
+
+		// ⚠️ prompt 特殊处理：优先从 PROMPT_BACKUP_PROPERTY 恢复
+		// PROMPT_BACKUP_PROPERTY 是独立的、始终同步的 prompt 备份，
+		// 比 SETTINGS_BACKUP_PROPERTY.prompt 更可靠（不会被合并逻辑意外清空）
+		if (name === "prompt") {
+			const promptBackup = String(node.properties[PROMPT_BACKUP_PROPERTY] || "");
+			if (promptBackup) {
+				backup.prompt = promptBackup;
+			} else if (!Object.prototype.hasOwnProperty.call(backup, "prompt")) {
+				backup.prompt = String(target.value ?? "");
+			}
+		}
+
 		// ⚠️ 强制按名称从 backup 覆盖 widget.value，无论原生 widgets_values 是否错位。
 		// 这是修复「重启 ComfyUI 参数错位」的核心：原生按索引、GJJ 按名称双轨并行，
 		// 但名称映射的优先级始终高于索引数组。
@@ -413,19 +449,63 @@ function createPanel(node) {
 	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); settings.addEventListener("click", () => openPopup(node, "params", settings));
 	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed(); syncMediaToolbar(node); fitPanel(node);
 }
+// ⚠️ 关键修复：hook prompt widget 的 DOM 事件，实时同步到 properties
+// 原因：ComfyUI 原生 multiline STRING widget 用户输入时只更新 widget.value，
+// 不会触发 widget.callback，导致 ensureSettingsPersistence 中的 callback hook 永远不执行，
+// properties[SETTINGS_BACKUP_PROPERTY].prompt 不会被实时更新。
+// 虽然 onSerialize 时 writeSettingsBackup 会从 widget.value 读取，
+// 但如果存在时序问题（如 ComfyUI 延迟恢复），prompt 值就会丢失。
+// 通过 hook DOM input 事件，确保每次用户输入都实时更新 properties。
+function hookPromptWidget(node) {
+	const target = widget(node, "prompt");
+	if (!target || target.__gjjPromptHooked) return;
+	target.__gjjPromptHooked = true;
+
+	// 实时同步函数：从 DOM/widget 读取最新值并写入 properties
+	const syncToProperties = (rawValue) => {
+		const finalValue = (rawValue != null) ? String(rawValue) : String(target.value ?? "");
+		node.properties ||= {};
+		node.properties[SETTINGS_BACKUP_PROPERTY] ||= {};
+		node.properties[SETTINGS_BACKUP_PROPERTY].prompt = finalValue;
+		node.properties[PROMPT_BACKUP_PROPERTY] = finalValue;
+	};
+
+	// hook DOM 元素的 input/change/blur 事件
+	// ComfyUI STRING multiline widget 的 DOM 元素通常在 inputEl（textarea）或 element 上
+	const elements = [target.inputEl, target.element].filter(Boolean);
+	for (const el of elements) {
+		if (el.addEventListener) {
+			el.addEventListener("input", () => syncToProperties(el.value));
+			el.addEventListener("change", () => syncToProperties(el.value));
+			el.addEventListener("blur", () => syncToProperties(el.value));
+		}
+	}
+
+	// 同时保留 callback hook（覆盖式更新，防止重复 hook）
+	const originalCallback = target.callback;
+	target.callback = function (nextValue, ...args) {
+		syncToProperties(nextValue);
+		return originalCallback?.call(this, nextValue, ...args);
+	};
+}
 function stabilizeLogic(node) {
 	// ⚠️ 纯逻辑（无 DOM 依赖）：必须同步执行，确保原生 widgets_values 错位后立刻被按名称覆盖
 	if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) return;
 	node.color = "#2b727e"; node.bgcolor = "#11191d"; node.boxcolor = "#6eb6c0";
 	ensureSettingsPersistence(node);
 	repairSerializedSettings(node);
-	writeSettingsBackup(node);
+	// ⚠️ 不再调用 writeSettingsBackup！
+	// 原因：stabilizeLogic 在 onConfigure 中同步执行，此时 ComfyUI 可能尚未恢复
+	// widgets_values，widget.value 可能是默认空值。如果此时调用 writeSettingsBackup，
+	// 会用空值覆盖 properties 中之前保存的正确值（特别是 prompt 会被清空）。
+	// writeSettingsBackup 只在 onSerialize（保存工作流）时调用即可。
 }
 function stabilizeUI(node) {
 	// DOM 相关：依赖 widget/节点已挂载到画布，允许延后执行
 	if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) return;
 	hideBackendWidgets(node);
 	createPanel(node);
+	hookPromptWidget(node);   // ⚠️ 关键：hook prompt DOM 事件，实时同步到 properties
 	syncMediaToolbar(node);
 	fitPanel(node);
 }
@@ -454,8 +534,12 @@ app.registerExtension({
 			//             从而彻底消除原生按索引恢复造成的错位。
 			const result = configured?.apply(this, args);
 			stabilizeLogic(this);          // 参数修复：同步执行、立即生效、不能延后
-			setTimeout(() => stabilizeUI(this), 0);   // DOM 面板允许延后
-			setTimeout(() => stabilizeUI(this), 100); // 再执行一次，确保 widget/DOM 顺序稳定后尺寸正确
+			// ⚠️ 延迟多次恢复：某些 ComfyUI 版本会在 onConfigure 之后继续恢复 widget 值
+			// （如异步 DOM widget 同步），可能覆盖我们的恢复结果。
+			// 通过多次延迟执行 stabilizeLogic，确保最终值始终来自 properties（按名称）。
+			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 0);
+			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 50);
+			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 200);
 			return result;
 		};
 		const connections = nodeType.prototype.onConnectionsChange; nodeType.prototype.onConnectionsChange = function (...args) {
