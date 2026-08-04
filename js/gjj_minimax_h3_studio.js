@@ -11,7 +11,8 @@ const LINK_MEMORY_PROPERTY = "gjj_minimax_h3_media_links";
 const PROMPT_BACKUP_PROPERTY = "gjj_minimax_h3_prompt";
 const SETTINGS_BACKUP_PROPERTY = "gjj_minimax_h3_settings";
 const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
-const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION = 4;
+const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -20,6 +21,8 @@ const HIDDEN = new Set([
 	"use_source_size",
 	"size_mode", "resize_fit_mode", "resize_anchor",
 	"internal_media_json",
+	"image_branch",
+	"reasoning_enabled", "reasoning_model", "reasoning_system_prompt",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size"]], ["输出", ["filename_prefix", "format_name"]]],
@@ -69,6 +72,7 @@ function installStyle() {
 	.gjj-mh3-label{display:flex;align-items:center;gap:6px;color:#ffd27d;font-weight:700}.gjj-mh3-mode{margin-left:auto;color:#7ed9d3;font-weight:600}
 	.gjj-mh3-prompt{box-sizing:border-box;width:100%;height:72px;min-height:58px;resize:vertical;border:1px solid #31535b;border-radius:6px;background:#091215;color:#f0f8f8;padding:7px;font:12px/1.35 ui-monospace,monospace}
 	.gjj-mh3-status{height:16px;color:#8faeb4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+	.gjj-mh3-branches{display:flex;gap:7px;flex-wrap:wrap}.gjj-mh3-branch{min-width:64px;padding:6px 12px;border:1px solid #41666e;border-radius:7px;background:#15272d;color:#cfe3e6;cursor:pointer;font-weight:800}.gjj-mh3-branch.active{background:#137a61;border-color:#48d9a5;color:#fff}
 	.gjj-mh3-pop{position:fixed;z-index:100000;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow:auto;display:none;background:#101a1e;color:#e2f0f1;border:1px solid #4e7d86;border-radius:10px;box-shadow:0 14px 45px #000b;padding:10px}.gjj-mh3-pop.open{display:block}.gjj-mh3-pophead{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}.gjj-mh3-close{border:1px solid #40717a;border-radius:5px;background:#173038;color:#dff;padding:5px 12px;cursor:pointer}.gjj-mh3-section{border-top:1px solid #29434a;padding-top:8px;margin-top:8px}.gjj-mh3-title{color:#7ed9d3;font-weight:800;margin-bottom:7px}.gjj-mh3-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.gjj-mh3-field{display:grid;gap:3px;color:#9eb8bd}.gjj-mh3-field.wide{grid-column:1/-1}.gjj-mh3-control{box-sizing:border-box;width:100%;min-width:0;background:#0b1316;color:#e8f5f5;border:1px solid #304e55;border-radius:5px;padding:6px}.gjj-mh3-toggle.active{background:#17614e;color:#fff}
 	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-preview{display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}`;
 	document.head.appendChild(style);
@@ -131,6 +135,7 @@ function makeControl(node, name) {
 }
 function modelTreeEntries(node) {
 	return (node.widgets || []).filter((target) => {
+		if (String(target?.name || "") === "reasoning_model" && !Boolean(value(node, "reasoning_enabled", false))) return false;
 		const declared = widgetDefinitionOptions(node, target);
 		return Boolean(String(target?.options?.gjj_model_folder || declared?.gjj_model_folder || "").trim()) || looksLikeModelChoice(target);
 	}).map((target) => {
@@ -162,6 +167,25 @@ function renderModelTree(node, host) {
 	});
 	tree.style.maxHeight = "min(460px,calc(100vh - 180px))";
 	host.replaceChildren(tree);
+}
+function createReasoningPanel(node, treeHost) {
+	const section = document.createElement("section"); section.className = "gjj-mh3-section";
+	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "🧠 可选推理";
+	const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "gjj-mh3-control gjj-mh3-toggle"; protect(toggle);
+	const details = document.createElement("div"); details.className = "gjj-mh3-grid"; details.style.marginTop = "8px";
+	const promptRow = document.createElement("label"); promptRow.className = "gjj-mh3-field wide";
+	const promptLabel = document.createElement("span"); promptLabel.textContent = "推理系统提示词";
+	const prompt = document.createElement("textarea"); prompt.className = "gjj-mh3-control"; prompt.rows = 7; prompt.value = String(value(node, "reasoning_system_prompt", "")); protect(prompt);
+	prompt.addEventListener("input", () => setValue(node, "reasoning_system_prompt", prompt.value));
+	promptRow.append(promptLabel, prompt); details.appendChild(promptRow);
+	const sync = () => {
+		const enabled = Boolean(value(node, "reasoning_enabled", false));
+		toggle.textContent = enabled ? "推理已开启" : "开启推理"; toggle.classList.toggle("active", enabled);
+		details.style.display = enabled ? "grid" : "none";
+		if (enabled && document.activeElement !== prompt) prompt.value = String(value(node, "reasoning_system_prompt", ""));
+	};
+	toggle.addEventListener("click", () => { setValue(node, "reasoning_enabled", !Boolean(value(node, "reasoning_enabled", false))); sync(); renderModelTree(node, treeHost); });
+	section.append(title, toggle, details); section.__gjjSync = sync; sync(); return section;
 }
 function createSizePanel(node) {
 	const host = document.createElement("div");
@@ -210,7 +234,8 @@ function popup(node, key, title) {
 	}
 	if (key === "model") {
 		const treeHost = document.createElement("div");
-		root.appendChild(treeHost);
+		const reasoningPanel = createReasoningPanel(node, treeHost);
+		root.append(reasoningPanel, treeHost);
 		renderModelTree(node, treeHost);
 		const keepSection = document.createElement("section"); keepSection.className = "gjj-mh3-section";
 		const keepGrid = document.createElement("div"); keepGrid.className = "gjj-mh3-grid";
@@ -218,6 +243,7 @@ function popup(node, key, title) {
 		if (keepControl) { const row = document.createElement("label"); row.className = "gjj-mh3-field wide"; const label = document.createElement("span"); label.textContent = widget(node, "keep_model")?.options?.display_name || "保持模型"; row.append(label, keepControl); keepGrid.append(row); }
 		keepSection.appendChild(keepGrid); root.appendChild(keepSection);
 		root.__gjjModelTreeHost = treeHost;
+		root.__gjjReasoningPanel = reasoningPanel;
 		document.body.appendChild(root);
 		return root;
 	}
@@ -234,7 +260,7 @@ function openPopup(node, key, anchor) {
 	const panel = node.__gjjMiniMaxPanel; const target = panel?.popups?.[key]; if (!target) return;
 	const wasOpen = target.classList.contains("open"); closePopups(node); if (wasOpen) return;
 	if (key === "size") target.__gjjSizePanel?.__gjjSync?.();
-	if (key === "model" && target.__gjjModelTreeHost) renderModelTree(node, target.__gjjModelTreeHost);
+	if (key === "model" && target.__gjjModelTreeHost) { target.__gjjReasoningPanel?.__gjjSync?.(); renderModelTree(node, target.__gjjModelTreeHost); }
 	const rect = anchor.getBoundingClientRect(); const width = Math.min(560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
 }
 function makeButton(text, title, className = "") { const button = document.createElement("button"); button.type = "button"; button.className = `gjj-mh3-btn ${className}`; button.textContent = text; button.title = title; protect(button); return button; }
@@ -276,6 +302,40 @@ function toggleMediaLinks(node) {
 	node.graph?.change?.(); syncMediaToolbar(node); app.graph?.setDirtyCanvas?.(true, true);
 }
 function internalMediaItems(node) { try { const result = JSON.parse(String(value(node, "internal_media_json", "[]"))); return Array.isArray(result) ? result : []; } catch (_) { return []; } }
+function linkedImageCount(node) {
+	let count = 0;
+	for (const name of MEDIA_INPUTS) {
+		const input = mediaInput(node, name); const link = input?.link != null ? app.graph?.links?.[Array.isArray(input.link) ? input.link[0] : input.link] : null;
+		if (!link || !String(link.type || input?.type || "").toUpperCase().includes("IMAGE")) continue;
+		const source = app.graph?.getNodeById?.(link.origin_id); const state = source?.__gjjMultiImageState || source?.__gjjMultiImageLoaderState || {};
+		let selected = []; try { const parsed = JSON.parse(String(widget(source, "selected_images")?.value || source?.properties?.selected_images || "[]")); if (Array.isArray(parsed)) selected = parsed; } catch (_) {}
+		const candidates = [state.selection, state.executedImages, selected]; let found = 0;
+		for (const items of candidates) if (Array.isArray(items) && items.length) { found = items.length; break; }
+		const output = source?.outputs?.[Number(link.origin_slot)]; const outputName = String(output?.name || output?.label || "");
+		if (/(?:图片|导出图片|image)\s*0*\d+/i.test(outputName)) found = 1;
+		if (!found) found = Math.max(0, Number(source?.properties?.gjj_batch_crop_resize_media_count || source?.properties?.gjj_image_batch_multi_input_count || 0));
+		count += Math.max(1, found);
+	}
+	return count;
+}
+function currentImageCount(node) {
+	if (!activeMediaLinks(node)) return internalMediaItems(node).filter((item) => String(item?.media_type || "") === "image").length;
+	return linkedImageCount(node) || Math.max(0, Number(node.properties?.[IMAGE_COUNT_PROPERTY] || 0));
+}
+function branchChoices(count) {
+	if (count === 1) return ["参考", "首帧", "尾帧"];
+	if (count === 2) return ["参考", "首尾帧"];
+	if (count > 2) return ["参考", "分段首尾帧"];
+	return [];
+}
+function syncBranchButtons(node) {
+	const panel = node.__gjjMiniMaxPanel; if (!panel?.branches) return;
+	const count = currentImageCount(node); const items = branchChoices(count); panel.branches.replaceChildren();
+	if (!items.length) { panel.branches.style.display = "none"; return; }
+	panel.branches.style.display = "flex";
+	let selected = String(value(node, "image_branch", "参考")); if (!items.includes(selected)) { selected = "参考"; setValue(node, "image_branch", selected); }
+	for (const label of items) { const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-branch"; button.textContent = label; button.classList.toggle("active", label === selected); button.addEventListener("click", () => { setValue(node, "image_branch", label); syncBranchButtons(node); }); panel.branches.appendChild(button); }
+}
 function internalMediaUrl(item) {
 	return api.apiURL(`/view?filename=${encodeURIComponent(item?.filename || "")}&type=${encodeURIComponent(item?.type || "input")}&subfolder=${encodeURIComponent(item?.subfolder || "")}&rand=${Date.now()}`);
 }
@@ -306,7 +366,7 @@ async function uploadInternalMedia(node, files) {
 	const form = new FormData(); for (const file of files) form.append("media", file, file.name);
 	const response = await fetch(api.apiURL(UPLOAD_ROUTE), { method: "POST", body: form }); const data = await response.json().catch(() => ({}));
 	if (!response.ok || data?.ok === false) throw new Error(data?.error || "媒体上传失败");
-	setValue(node, "internal_media_json", JSON.stringify(data.items || [])); if (node.__gjjMiniMaxPanel) node.__gjjMiniMaxPanel.status.textContent = `已载入 ${(data.items || []).length} 个内部文件`; syncMediaToolbar(node);
+	setValue(node, "internal_media_json", JSON.stringify(data.items || [])); if (node.__gjjMiniMaxPanel) node.__gjjMiniMaxPanel.status.textContent = `已载入 ${(data.items || []).length} 个内部文件`; syncMediaToolbar(node); syncBranchButtons(node);
 }
 function cleanup(node) { closePopups(node); closeMediaTooltip(node); node.__gjjMiniMaxPanel?.previewObserver?.disconnect?.(); for (const item of Object.values(node.__gjjMiniMaxPanel?.popups || {})) item.remove(); node.__gjjMiniMaxPanel = null; }
 function arrangePanelWidgets(node, toolbarWidget, resultWidget) {
@@ -417,12 +477,28 @@ function fitPanel(node) {
 	node.__gjjMiniMaxFitting = true;
 	requestAnimationFrame(() => {
 		try {
+			const panel = node.__gjjMiniMaxPanel;
+			if (panel?.preview && !panel.video?.getAttribute?.("src")) {
+				panel.preview.style.display = "none";
+				panel.preview.style.height = "0";
+			}
 			const width = Math.max(280, Number(node.size?.[0] || 420));
 			if (Array.isArray(node.size)) node.size[1] = 1;
 			const computed = node.computeSize?.(); const height = Math.max(140, Number(computed?.[1] || 140));
 			node.setSize?.([width, height]); app.graph?.setDirtyCanvas?.(true, true);
 		} finally { node.__gjjMiniMaxFitting = false; }
 	});
+}
+function fitPanelOnceAfterLoad(node) {
+	if (node.__gjjMiniMaxLoadFitDone || node.__gjjMiniMaxLoadFitTimer) return;
+	node.__gjjMiniMaxLoadFitTimer = setTimeout(() => {
+		node.__gjjMiniMaxLoadFitTimer = null;
+		if (node.__gjjMiniMaxLoadFitDone) return;
+		if (!node.graph || !node.__gjjMiniMaxPanel) { fitPanelOnceAfterLoad(node); return; }
+		node.__gjjMiniMaxLoadFitDone = true;
+		syncBranchButtons(node);
+		fitPanel(node);
+	}, 300);
 }
 function createPanel(node) {
 	if (node.__gjjMiniMaxPanel) return; installStyle();
@@ -434,20 +510,26 @@ function createPanel(node) {
 	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const settings = makeButton("⚙", "生成参数");
 	toolbar.append(folder, link, size, seed, model, settings, run);
 	const resultRoot = document.createElement("div"); resultRoot.className = "gjj-mh3-root"; protect(resultRoot);
-	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "无输入 T2V｜单图 I2V｜多媒体 Ref2V";
+	const branches = document.createElement("div"); branches.className = "gjj-mh3-branches";
+	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "图片数量决定可选生成分支";
 	const preview = document.createElement("div"); preview.className = "gjj-mh3-preview"; const video = document.createElement("video"); video.controls = true; video.loop = true; video.playsInline = true; video.preload = "metadata"; preview.appendChild(video); protect(preview);
-	root.append(toolbar); resultRoot.append(status, preview);
+	root.append(toolbar); resultRoot.append(branches, status, preview);
 	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.serialize = false; dom.options ||= {}; dom.options.serialize = false; dom.computeSize = () => [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(40, Number(root.scrollHeight || 40))];
-	const resultDom = node.addDOMWidget(RESULT_WIDGET, "div", resultRoot, { serialize: false, hideOnZoom: false }); resultDom.serialize = false; resultDom.options ||= {}; resultDom.options.serialize = false; resultDom.computeSize = () => { const hasPreview = preview.style.display !== "none" && Boolean(video.getAttribute("src")); const height = hasPreview ? Number(resultRoot.scrollHeight || 24) : Number(status.offsetHeight || 16) + 16; return [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(24, height)]; };
+	const resultDom = node.addDOMWidget(RESULT_WIDGET, "div", resultRoot, { serialize: false, hideOnZoom: false }); resultDom.serialize = false; resultDom.options ||= {}; resultDom.options.serialize = false; resultDom.computeSize = () => {
+		const hasPreview = Boolean(video.getAttribute("src")) && preview.style.display !== "none";
+		const branchHeight = branches.style.display === "none" ? 0 : Number(branches.offsetHeight || 0);
+		const compactHeight = 16 + Number(status.offsetHeight || 16) + (branchHeight > 0 ? branchHeight + 7 : 0);
+		return [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(24, hasPreview ? Number(resultRoot.scrollHeight || compactHeight) : compactHeight)];
+	};
 	arrangePanelWidgets(node, dom, resultDom);
-	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, status, preview, video, folder, link, buttons: { size, seed, model, settings }, popups: {} };
+	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, folder, link, buttons: { size, seed, model, settings }, popups: {} };
 	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数");
 	run.addEventListener("click", async () => { closePopups(node); status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
 	folder.addEventListener("click", () => { if (!folder.disabled) file.click(); }); file.addEventListener("change", async () => { const files = Array.from(file.files || []); file.value = ""; if (!files.length) return; try { status.textContent = "正在载入媒体…"; await uploadInternalMedia(node, files); } catch (error) { status.textContent = `载入失败：${error?.message || error}`; } });
 	folder.addEventListener("mouseenter", () => showMediaTooltip(node)); folder.addEventListener("mouseleave", () => scheduleMediaTooltipClose(node));
 	link.addEventListener("click", () => toggleMediaLinks(node));
 	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); settings.addEventListener("click", () => openPopup(node, "params", settings));
-	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed(); syncMediaToolbar(node); fitPanel(node);
+	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed(); syncMediaToolbar(node); syncBranchButtons(node); fitPanel(node);
 }
 // ⚠️ 关键修复：hook prompt widget 的 DOM 事件，实时同步到 properties
 // 原因：ComfyUI 原生 multiline STRING widget 用户输入时只更新 widget.value，
@@ -507,7 +589,7 @@ function stabilizeUI(node) {
 	createPanel(node);
 	hookPromptWidget(node);   // ⚠️ 关键：hook prompt DOM 事件，实时同步到 properties
 	syncMediaToolbar(node);
-	fitPanel(node);
+	syncBranchButtons(node);
 }
 function stabilize(node) {
 	stabilizeLogic(node);
@@ -540,6 +622,7 @@ app.registerExtension({
 			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 0);
 			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 50);
 			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 200);
+			fitPanelOnceAfterLoad(this);
 			return result;
 		};
 		const connections = nodeType.prototype.onConnectionsChange; nodeType.prototype.onConnectionsChange = function (...args) {
@@ -548,7 +631,7 @@ app.registerExtension({
 			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 0);
 			return result;
 		};
-		const removed = nodeType.prototype.onRemoved; nodeType.prototype.onRemoved = function (...args) { cleanup(this); return removed?.apply(this, args); };
+		const removed = nodeType.prototype.onRemoved; nodeType.prototype.onRemoved = function (...args) { if (this.__gjjMiniMaxLoadFitTimer) clearTimeout(this.__gjjMiniMaxLoadFitTimer); cleanup(this); return removed?.apply(this, args); };
 		const serialized = nodeType.prototype.onSerialize; nodeType.prototype.onSerialize = function (data) {
 			// ✅ 保存时：先同步刷新一次 properties backup（按名称），确保 data.properties 中
 			// 的 SETTINGS_BACKUP_PROPERTY 是完整且按名称映射的，与节点类型解耦。
@@ -561,7 +644,7 @@ app.registerExtension({
 			data.properties[SETTINGS_SCHEMA_PROPERTY] = SETTINGS_SCHEMA_VERSION;
 			return result;
 		};
-		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; renderResultPreview(this, message); return result; };
+		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); this.properties ||= {}; this.properties[IMAGE_COUNT_PROPERTY] = Number(message?.source_image_count?.[0] || 0); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; syncBranchButtons(this); renderResultPreview(this, message); return result; };
 	},
 	setup() {
 		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) { node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); if (detail.preview_media || detail.preview_video || detail.gifs || detail.animated || detail.videos || detail.video || detail.output_path) renderResultPreview(node, detail); } });

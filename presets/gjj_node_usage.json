@@ -62,12 +62,12 @@
       "last_used": 1785488614890
     },
     "GJJ_CharacterMultiViewStudio": {
-      "use_count": 1,
-      "last_used": 1785488615782
+      "use_count": 3,
+      "last_used": 1785808474235
     },
     "GJJ_OldPhotoRestorer": {
-      "use_count": 1,
-      "last_used": 1785488616430
+      "use_count": 2,
+      "last_used": 1785808470132
     },
     "GJJ_BerniniStudio": {
       "use_count": 3,
@@ -94,8 +94,16 @@
       "last_used": 1785600665269
     },
     "GJJ_MiniMaxH3Studio": {
-      "use_count": 38,
-      "last_used": 1785774148206
+      "use_count": 40,
+      "last_used": 1785808407365
+    },
+    "GJJ_CheckpointDirectGenerator": {
+      "use_count": 1,
+      "last_used": 1785808466458
+    },
+    "GJJ_GemmaTextGenerate": {
+      "use_count": 11,
+      "last_used": 1785808494540
     }
   },
   "sort_reverse": true

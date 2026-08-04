@@ -31,9 +31,16 @@ UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload"
 
 DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_nvfp4_base.safetensors"
 DEFAULT_REF_MODEL = "minimax_h3_ref2va_pruned_nvfp4_base.safetensors"
+DEFAULT_FL_MODEL_KEYWORD = "minimax_h3_fl2va"
+DEFAULT_REF_MODEL_KEYWORD = "minimax_h3_ref2va"
 DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
+DEFAULT_REASONING_SYSTEM_PROMPT = (
+    "你是 MiniMax H3 视频提示词优化器。结合用户原始提示词与参考图片，补充清晰的主体、动作、镜头运动、"
+    "环境、光线和时间连续性描述。只输出可直接用于视频生成的最终提示词，不要解释，不要标题，不要输出思考过程。"
+)
 
 
 def _register_upload_route() -> None:
@@ -299,21 +306,32 @@ class GJJ_MiniMaxH3Studio:
     OUTPUT_NODE = True
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("生成视频",)
-    DESCRIPTION = "MiniMax H3 单节点工作室：无媒体自动 T2V；单图自动 I2V；多图、视频或音频递归解包后自动 Reference-to-Video。"
+    DESCRIPTION = "MiniMax H3 单节点工作室：按图片数量显示参考、首帧、尾帧、首尾帧或分段首尾帧分支；多图分段会按相邻图片生成并去重边界首帧。"
     SEARCH_ALIASES = ["MiniMax H3 Studio", "海螺单节点", "T2V I2V Ref2V"]
     GJJ_UI = {"style_reference": "GJJ_BerniniStudio", "model_keyword": "minimax_h3"}
     _MODEL_CACHE: dict[tuple[str, ...], tuple[Any, Any, Any, Any]] = {}
 
     @classmethod
     def INPUT_TYPES(cls):
-        fl_models, fl_default = _choices("diffusion_models", DEFAULT_FL_MODEL, ("minimax_h3", "fl2va"))
-        ref_models, ref_default = _choices("diffusion_models", DEFAULT_REF_MODEL, ("minimax_h3", "ref2va"))
+        fl_models, fl_default = _choices("diffusion_models", DEFAULT_FL_MODEL, (DEFAULT_FL_MODEL_KEYWORD,))
+        ref_models, ref_default = _choices("diffusion_models", DEFAULT_REF_MODEL, (DEFAULT_REF_MODEL_KEYWORD,))
         clips, clip_default = _choices("text_encoders", DEFAULT_CLIP, ("qwen3vl_32b", "minimax_h3"))
         video_vaes, video_vae_default = _choices("vae", DEFAULT_VIDEO_VAE, ("minimax_h3", "video_vae"))
         audio_vaes, audio_vae_default = _choices("vae", DEFAULT_AUDIO_VAE, ("minimax_h3", "audio_vae"))
         samplers = list(comfy.samplers.KSampler.SAMPLERS)
         schedulers = list(comfy.samplers.KSampler.SCHEDULERS)
         output_formats = list_supported_formats()
+        try:
+            from .gjj_gemma_text_generate import _text_encoder_options
+            reasoning_models = [str(item) for item in _text_encoder_options()]
+        except Exception:
+            reasoning_models = []
+        reasoning_models = reasoning_models or [DEFAULT_REASONING_KEYWORD]
+        normalized_keyword = DEFAULT_REASONING_KEYWORD.replace("-", "").replace("_", "")
+        reasoning_default = next(
+            (item for item in reasoning_models if normalized_keyword in item.lower().replace("-", "").replace("_", "")),
+            reasoning_models[0],
+        )
         if "res_multistep" not in samplers:
             samplers.insert(0, "res_multistep")
         if "simple" not in schedulers:
@@ -336,8 +354,8 @@ class GJJ_MiniMaxH3Studio:
                 "ref_image_size": (["match", "max"], {"default": "match", "display_name": "参考图尺寸"}),
                 "filename_prefix": ("STRING", {"default": "video/MiniMax_H3_Studio", "display_name": "文件名前缀"}),
                 "format_name": (output_formats, {"default": DEFAULT_FORMAT, "display_name": "输出格式"}),
-                "fl_model": (fl_models, {"default": fl_default, "display_name": "T2V/I2V模型", "gjj_default_model": DEFAULT_FL_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_fl2va"]}),
-                "ref_model": (ref_models, {"default": ref_default, "display_name": "参考模型", "gjj_default_model": DEFAULT_REF_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": ["minimax_h3_ref2va"]}),
+                "fl_model": (fl_models, {"default": fl_default, "display_name": "T2V/I2V模型", "gjj_default_model": DEFAULT_FL_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": [DEFAULT_FL_MODEL_KEYWORD]}),
+                "ref_model": (ref_models, {"default": ref_default, "display_name": "参考模型", "gjj_default_model": DEFAULT_REF_MODEL, "gjj_model_folder": "diffusion_models", "gjj_model_icon": "🟣", "gjj_model_keywords": [DEFAULT_REF_MODEL_KEYWORD]}),
                 "clip_name": (clips, {"default": clip_default, "display_name": "Qwen3-VL编码器", "gjj_default_model": DEFAULT_CLIP, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡"}),
                 "video_vae_name": (video_vaes, {"default": video_vae_default, "display_name": "视频VAE", "gjj_default_model": DEFAULT_VIDEO_VAE, "gjj_model_folder": "vae", "gjj_model_icon": "🔴"}),
                 "audio_vae_name": (audio_vaes, {"default": audio_vae_default, "display_name": "音频VAE", "gjj_default_model": DEFAULT_AUDIO_VAE, "gjj_model_folder": "vae", "gjj_model_icon": "🔴"}),
@@ -348,6 +366,10 @@ class GJJ_MiniMaxH3Studio:
                 "resize_anchor": (["上", "下", "左", "右", "中"], {"default": "上", "display_name": "保留位置"}),
                 "reference_media_2": (MEDIA_TYPE, {"display_name": "参考媒体 2", "tooltip": "第二个递归媒体入口；外部链接优先于📁内部媒体。"}),
                 "internal_media_json": ("STRING", {"default": "[]", "display_name": "内部媒体记录"}),
+                "image_branch": (["参考", "首帧", "尾帧", "首尾帧", "分段首尾帧"], {"default": "参考", "display_name": "图片分支", "tooltip": "由提示词下方的互斥按钮控制；实际可用选项随输入图片数量变化。"}),
+                "reasoning_enabled": ("BOOLEAN", {"default": False, "display_name": "启用推理", "tooltip": "开启后使用 GJJ_GemmaTextGenerate 在生成视频前优化提示词；关闭时不会加载推理模型。"}),
+                "reasoning_model": (reasoning_models, {"default": reasoning_default, "display_name": "推理模型", "gjj_default_model": reasoning_default, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡", "gjj_model_keywords": [DEFAULT_REASONING_KEYWORD]}),
+                "reasoning_system_prompt": ("STRING", {"default": DEFAULT_REASONING_SYSTEM_PROMPT, "multiline": True, "display_name": "推理系统提示词"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -403,26 +425,68 @@ class GJJ_MiniMaxH3Studio:
             seed = int(torch.randint(0, 0x7FFFFFFF, (1,)).item())
         unique_id = first("unique_id")
         prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
-        segment_count = len(prompt_parts)
-        distribute_images = segment_count > 1 and len(media["images"]) == segment_count
+        if bool(first("reasoning_enabled", False)):
+            from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
+
+            reasoning_media = torch.cat(media["images"], dim=0) if media["images"] else None
+            inferred_parts: list[str] = []
+            for infer_index, raw_part in enumerate(prompt_parts):
+                _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
+                generated = GJJ_GemmaTextGenerate().generate(
+                    clip_name=str(first("reasoning_model", DEFAULT_REASONING_KEYWORD)),
+                    clip_type="stable_diffusion", clip_device="default", prompt=raw_part,
+                    max_length=1024, sampling_mode="off", temperature=0.35, top_k=64,
+                    top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
+                    presence_penalty="0.0", thinking=False, use_default_template=True,
+                    media=reasoning_media, unique_id=unique_id,
+                    system_prompt=str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT)),
+                    keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
+                )
+                payload = generated.get("result") if isinstance(generated, dict) else generated
+                inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
+                inferred_parts.append(inferred or raw_part)
+            prompt_parts = inferred_parts
+        image_count = len(media["images"])
+        requested_branch = str(first("image_branch", "参考") or "参考")
+        if image_count == 1:
+            image_branch = requested_branch if requested_branch in {"参考", "首帧", "尾帧"} else "参考"
+        elif image_count == 2:
+            image_branch = requested_branch if requested_branch in {"参考", "首尾帧"} else "参考"
+        elif image_count > 2:
+            image_branch = requested_branch if requested_branch in {"参考", "分段首尾帧"} else "参考"
+        else:
+            image_branch = "参考"
+
+        jobs: list[tuple[str, dict[str, list[Any]]]] = []
+        if image_branch == "分段首尾帧":
+            for index in range(image_count - 1):
+                jobs.append((prompt_parts[min(index, len(prompt_parts) - 1)], {
+                    "images": [media["images"][index], media["images"][index + 1]],
+                    "videos": [], "audios": [],
+                }))
+        else:
+            distribute_images = len(prompt_parts) > 1 and image_count == len(prompt_parts) and image_branch != "参考"
+            for index, segment_prompt in enumerate(prompt_parts):
+                jobs.append((segment_prompt, {
+                    "images": [media["images"][index]] if distribute_images else list(media["images"]),
+                    "videos": list(media["videos"]), "audios": list(media["audios"]),
+                }))
+        segment_count = len(jobs)
         filename_prefix = str(first("filename_prefix", "video/MiniMax_H3_Studio"))
         requested_format = str(first("format_name", DEFAULT_FORMAT) or "").strip()
         supported_formats = set(list_supported_formats())
         format_name = requested_format if requested_format in supported_formats else DEFAULT_FORMAT
         runtime_models: dict[str, tuple[Any, Any, Any, Any]] = {}
 
-        def segment_media(index: int) -> dict[str, list[Any]]:
-            return {
-                "images": [media["images"][index]] if distribute_images else list(media["images"]),
-                "videos": list(media["videos"]),
-                "audios": list(media["audios"]),
-            }
-
-        def segment_mode(segment: dict[str, list[Any]], segment_prompt: str) -> str:
+        def segment_mode(segment: dict[str, list[Any]]) -> str:
             image_count = len(segment["images"])
             has_reference_av = bool(segment["videos"] or segment["audios"])
-            if image_count == 2 and not has_reference_av and "首尾帧" in segment_prompt:
+            if image_branch in {"首尾帧", "分段首尾帧"} and image_count == 2 and not has_reference_av:
                 return "首尾帧"
+            if image_branch == "参考" and image_count > 0:
+                return "R2V"
+            if image_branch == "尾帧" and image_count == 1 and not has_reference_av:
+                return "尾帧"
             if image_count == 0 and not has_reference_av:
                 return "T2V"
             if image_count == 1 and not has_reference_av:
@@ -444,9 +508,8 @@ class GJJ_MiniMaxH3Studio:
         decoded_segments: list[torch.Tensor] = []
         audio_segments: list[Any] = []
         modes: list[str] = []
-        for index, segment_prompt in enumerate(prompt_parts):
-            current_media = segment_media(index)
-            mode = segment_mode(current_media, segment_prompt)
+        for index, (segment_prompt, current_media) in enumerate(jobs):
+            mode = segment_mode(current_media)
             modes.append(mode)
             model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode}：加载模型...", index / segment_count)
@@ -467,7 +530,7 @@ class GJJ_MiniMaxH3Studio:
                 ))[:2]
             else:
                 first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
-                last_frame = current_media["images"][1] if mode == "首尾帧" else None
+                last_frame = current_media["images"][1] if mode == "首尾帧" else (current_media["images"][0] if mode == "尾帧" else None)
                 positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
                     clip, video_vae, segment_prompt, width, height, length, first_frame, last_frame,
                 ))[:2]
@@ -479,6 +542,9 @@ class GJJ_MiniMaxH3Studio:
             sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(noise, guider, sampler, sigmas, latent))[0]
             segment_images = nodes.VAEDecode().decode(video_vae, sampled)[0]
             segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(audio_vae, sampled))[0]
+            # 相邻段共享边界图；后续片段移除第 1 帧，避免拼接时重复该边界帧。
+            if image_branch == "分段首尾帧" and index > 0 and int(segment_images.shape[0]) > 1:
+                segment_images = segment_images[1:].contiguous()
             decoded_segments.append(segment_images)
             audio_segments.append(segment_audio)
             if segment_count > 1:
@@ -492,10 +558,12 @@ class GJJ_MiniMaxH3Studio:
         audio = _concat_audio_segments(audio_segments)
         combined = combine_segment(images, audio, filename_prefix)
         video, output_path, _files = _video_combine_result(combined)
-        final_mode = "队列" if segment_count > 1 else modes[0]
-        _send_status(unique_id, f"{final_mode} 完成：{length * segment_count} 帧", 1.0)
+        final_mode = image_branch if image_count else ("队列" if segment_count > 1 else modes[0])
+        frame_count = sum(int(item.shape[0]) for item in decoded_segments)
         ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
-        ui.update({"mode": [final_mode], "frame_count": [length * segment_count], "segment_count": [segment_count], "output_path": [str(output_path or "")]})
+        ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"]})
+        # 最终合并文件写出后再次推送完整预览字段，覆盖分段过程中显示的最后一段视频。
+        _send_status(unique_id, f"{final_mode} 完成：{frame_count} 帧", 1.0, ui)
         return {"ui": ui, "result": (video,)}
 
 
