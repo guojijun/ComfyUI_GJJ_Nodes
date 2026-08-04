@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -50,6 +51,7 @@ MIN_OUTPUTS = 1  # 最小输出数量
 DEFAULT_AUDIO_URL = "https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/video/wan/wan2.2_s2v/input_audio.MP3"
 AUDIO_MEDIA_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif", ".opus"}
 VIDEO_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
+STREAM_UPLOAD_ROUTE = "/gjj/audio_timestamp_editor/upload"
 DEPENDENCY_SPECS = [
 	{
 		"module_name": "soundfile",
@@ -97,6 +99,53 @@ _soundfile = None
 _RESULT_CACHE: dict[str, dict[str, Any]] = {}
 _LAST_SUCCESS_BY_NODE: dict[str, dict[str, Any]] = {}
 _MAX_RESULT_CACHE = 12
+
+
+def _register_stream_upload_route() -> None:
+	"""流式接收大媒体文件，避免 ComfyUI 通用上传接口的 100 MB 请求体限制。"""
+	try:
+		from aiohttp import web
+		from server import PromptServer
+
+		server = PromptServer.instance
+		if not server or getattr(server, "_gjj_audio_timestamp_stream_upload_registered", False):
+			return
+
+		async def upload(request):
+			reader = await request.multipart()
+			destination = Path(folder_paths.get_input_directory()) / "GJJ_AudioTimestampEditor"
+			destination.mkdir(parents=True, exist_ok=True)
+			part = await reader.next()
+			while part is not None and not getattr(part, "filename", None):
+				part = await reader.next()
+			if part is None:
+				return web.json_response({"ok": False, "error": "没有收到媒体文件"}, status=400)
+			original = Path(str(part.filename)).name
+			suffix = Path(original).suffix.lower()
+			if suffix not in AUDIO_MEDIA_EXTENSIONS | VIDEO_MEDIA_EXTENSIONS:
+				return web.json_response({"ok": False, "error": f"不支持的媒体格式：{suffix or '无扩展名'}"}, status=400)
+			filename = f"{uuid.uuid4().hex}_{original}"
+			target = destination / filename
+			try:
+				with target.open("wb") as handle:
+					while True:
+						chunk = await part.read_chunk(size=1024 * 1024)
+						if not chunk:
+							break
+						handle.write(chunk)
+			except Exception:
+				target.unlink(missing_ok=True)
+				raise
+			relative_name = (Path("GJJ_AudioTimestampEditor") / filename).as_posix()
+			return web.json_response({"ok": True, "name": relative_name, "filename": filename, "subfolder": "GJJ_AudioTimestampEditor", "type": "input", "size": target.stat().st_size})
+
+		server.routes.post(STREAM_UPLOAD_ROUTE)(upload)
+		server._gjj_audio_timestamp_stream_upload_registered = True
+	except Exception as exc:
+		print(f"[GJJ AudioTimestampEditor] 注册大文件流式上传接口失败：{exc}")
+
+
+_register_stream_upload_route()
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

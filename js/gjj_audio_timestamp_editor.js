@@ -3,6 +3,7 @@ const { app } = window.comfyAPI.app;
 const api = window.comfyAPI?.api?.api || window.api;
 
 const NODE_NAME = "GJJ_AudioTimestampEditor";
+const STREAM_UPLOAD_ROUTE = "/gjj/audio_timestamp_editor/upload";
 const CANVAS_HEIGHT = 134;
 const RULER_HEIGHT = 18;
 const WAVE_Y = RULER_HEIGHT + 4;
@@ -1143,16 +1144,13 @@ class AudioSegmentEditorWidget {
 	async uploadDiskMedia(file) {
 		if (!file) return null;
 		const form = new FormData();
-		// ComfyUI 的上传接口字段名沿用 image，但实际可以作为通用文件上传使用。
-		form.append("image", file, file.name);
-		form.append("type", "input");
-		form.append("overwrite", "true");
+		form.append("media", file, file.name);
 
 		const doFetch = async (url) => fetch(url, { method: "POST", body: form });
 		let response = null;
 		try {
-			if (api?.fetchApi) response = await api.fetchApi("/upload/image", { method: "POST", body: form });
-			else response = await doFetch("/upload/image");
+			if (api?.fetchApi) response = await api.fetchApi(STREAM_UPLOAD_ROUTE, { method: "POST", body: form });
+			else response = await doFetch(STREAM_UPLOAD_ROUTE);
 		} catch (err) {
 			throw new Error(`上传失败：${err?.message || err}`);
 		}
@@ -1165,6 +1163,7 @@ class AudioSegmentEditorWidget {
 
 		let data = null;
 		try { data = await response.json(); } catch (_) {}
+		if (data?.ok === false) throw new Error(data?.error || "上传失败");
 		return data?.name || data?.filename || file.name;
 	}
 

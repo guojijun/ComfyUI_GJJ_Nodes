@@ -28,6 +28,8 @@ function setWidgetValue(widget, value, field) {
 		const numeric = Number(value);
 		if (!Number.isFinite(numeric)) return;
 		next = numeric;
+	} else if (field?.type === "BOOLEAN") {
+		next = typeof value === "string" ? ["true", "1", "yes", "on", "是", "开启"].includes(value.trim().toLowerCase()) : Boolean(value);
 	} else {
 		next = String(value);
 	}
@@ -586,7 +588,7 @@ export function createTemplateSourceButton(node, fields, buttonStyle = []) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.textContent = "⚡";
-	button.title = "选择 GJJ_TemplateParams / GJJ_SETNODE 的宽度、高度变量";
+	button.title = "选择 GJJ_TemplateParams / GJJ_SETNODE 的参数变量";
 	button.style.cssText = [
 		...buttonStyle,
 		"width:34px",
@@ -642,7 +644,7 @@ export function updateTemplateSourcePanel(node, fields = null) {
 		iconButton.textContent = "⚡";
 		iconButton.title = active.length
 			? `已接管：${active.map((field) => field.label).join("、")}\n点击选择或清空参数变量。`
-			: "选择 GJJ_TemplateParams / GJJ_SETNODE 的宽度、高度变量";
+			: "选择 GJJ_TemplateParams / GJJ_SETNODE 的参数变量";
 		iconButton.style.borderColor = active.length ? "#f5c451" : "#d6a642";
 		iconButton.style.background = active.length ? "linear-gradient(135deg,#5a3b0f,#b7791f)" : "linear-gradient(135deg,#3b2a10,#7c4d12)";
 		iconButton.style.color = active.length ? "#fff6bf" : "#ffe8a3";

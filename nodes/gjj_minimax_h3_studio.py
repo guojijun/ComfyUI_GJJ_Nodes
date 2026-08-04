@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -29,8 +30,8 @@ NODE_NAME = "GJJ_MiniMaxH3Studio"
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,AUDIO"
 UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload"
 
-DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_nvfp4_base.safetensors"
-DEFAULT_REF_MODEL = "minimax_h3_ref2va_pruned_nvfp4_base.safetensors"
+DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_nvfp4.safetensors"
+DEFAULT_REF_MODEL = "minimax_h3_ref2va_pruned_nvfp4.safetensors"
 DEFAULT_FL_MODEL_KEYWORD = "minimax_h3_fl2va"
 DEFAULT_REF_MODEL_KEYWORD = "minimax_h3_ref2va"
 DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
@@ -299,6 +300,70 @@ def _concat_audio_segments(values: list[Any]) -> Any:
     return {"waveform": torch.cat(matching, dim=-1).contiguous(), "sample_rate": sample_rate} if matching else None
 
 
+def _library_selection_names(raw: Any) -> list[str]:
+    try:
+        items = json.loads(str(raw or "[]"))
+    except Exception:
+        items = []
+    result: list[str] = []
+    for item in items if isinstance(items, list) else []:
+        value = item.get("name") if isinstance(item, dict) else item
+        name = str(value or "").strip().lstrip("@").removeprefix("🏕️").strip()
+        if name and name.casefold() not in {entry.casefold() for entry in result}:
+            result.append(name)
+    return result
+
+
+def _prompt_library_references(prompt: str, marker: str) -> list[str]:
+    pattern = r"@([^\s,，。；;、!?！？（）()<>《》\n]+)" if marker == "@" else r"🏕️\s*([^\s,，。；;、!?！？（）()<>《》\n]+)"
+    return list(dict.fromkeys(match.strip() for match in re.findall(pattern, str(prompt or "")) if match.strip()))
+
+
+def _library_reference_assets(kind: str, names: list[str]) -> list[tuple[torch.Tensor, str, str]]:
+    root_name = "character_library" if kind == "actor" else "scene_library"
+    root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / root_name
+    if not root.is_dir() or not names:
+        return []
+    manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for path in root.glob("*/manifest.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        display_name = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(data.get("name") or data.get("id") or path.parent.name)).strip()
+        for alias in {display_name, str(data.get("id") or "").strip(), path.parent.name}:
+            if alias:
+                manifests[alias.casefold()] = (path.parent, data)
+    result: list[tuple[torch.Tensor, str, str]] = []
+    for requested in names:
+        entry = manifests.get(str(requested).casefold())
+        if not entry:
+            continue
+        directory, data = entry
+        assets = data.get("views") if kind == "actor" else data.get("assets")
+        assets = assets if isinstance(assets, list) else []
+        asset = next((item for item in assets if isinstance(item, dict) and str(item.get("file") or "").strip()), None)
+        if not asset:
+            continue
+        path = directory / Path(str(asset.get("file"))).name
+        if not path.is_file():
+            continue
+        try:
+            import numpy as np
+            from PIL import Image, ImageOps
+            image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+            tensor = torch.from_numpy(np.asarray(image).astype("float32") / 255.0).unsqueeze(0)
+        except Exception as exc:
+            print(f"[GJJ MiniMaxH3Studio] 读取{root_name}引用图失败 {path.name}: {exc}")
+            continue
+        name = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(data.get("name") or data.get("id") or requested)).strip()
+        notes = re.sub(r"\s+", " ", str(data.get("notes") or "")).strip()
+        result.append((tensor, name, notes))
+    return result
+
+
 class GJJ_MiniMaxH3Studio:
     CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
@@ -370,6 +435,9 @@ class GJJ_MiniMaxH3Studio:
                 "reasoning_enabled": ("BOOLEAN", {"default": False, "display_name": "启用推理", "tooltip": "开启后使用 GJJ_GemmaTextGenerate 在生成视频前优化提示词；关闭时不会加载推理模型。"}),
                 "reasoning_model": (reasoning_models, {"default": reasoning_default, "display_name": "推理模型", "gjj_default_model": reasoning_default, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡", "gjj_model_keywords": [DEFAULT_REASONING_KEYWORD]}),
                 "reasoning_system_prompt": ("STRING", {"default": DEFAULT_REASONING_SYSTEM_PROMPT, "multiline": True, "display_name": "推理系统提示词"}),
+                "reference_media_3": (MEDIA_TYPE, {"display_name": "参考媒体 3", "tooltip": "第三个同级递归媒体入口；所有入口依次递归解包后按图片、视频、音频分类，并保持输入顺序。"}),
+                "selected_actors_json": ("STRING", {"default": "[]", "display_name": "已选角色"}),
+                "selected_scenes_json": ("STRING", {"default": "[]", "display_name": "已选场景"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -407,11 +475,31 @@ class GJJ_MiniMaxH3Studio:
 
         media = _collect_media(kwargs.get("reference_media"))
         _merge_media(media, _collect_media(kwargs.get("reference_media_2")))
+        _merge_media(media, _collect_media(kwargs.get("reference_media_3")))
         internal_texts: list[str] = []
         if not any(media.values()):
             internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
             _merge_media(media, internal_media)
         prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
+        from .gjj_gemma_text_generate import _inject_character_notes, _inject_scene_notes
+        selected_actors = _library_selection_names(first("selected_actors_json", "[]"))
+        selected_scenes = _library_selection_names(first("selected_scenes_json", "[]"))
+        selected_actors.extend(name for name in _prompt_library_references(prompt, "@") if name.casefold() not in {item.casefold() for item in selected_actors})
+        selected_scenes.extend(name for name in _prompt_library_references(prompt, "🏕️") if name.casefold() not in {item.casefold() for item in selected_scenes})
+        prompt = _inject_character_notes(prompt, selected_actors)
+        prompt = _inject_scene_notes(prompt, selected_scenes)
+        external_image_count = len(media["images"])
+        library_assets = (
+            [("actor", *item) for item in _library_reference_assets("actor", selected_actors)]
+            + [("scene", *item) for item in _library_reference_assets("scene", selected_scenes)]
+        )[:max(0, 10 - external_image_count)]
+        picture_lines: list[str] = []
+        for offset, (kind, image, name, notes) in enumerate(library_assets, start=external_image_count + 1):
+            marker = "@" if kind == "actor" else "🏕️"
+            media["images"].append(image)
+            picture_lines.append(f"<Picture {offset}>{marker}{name}{f'（{notes}）' if notes else ''}")
+        if picture_lines:
+            prompt = ("\n".join(picture_lines) + "\n" + prompt).strip()
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
         source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
         width, height = _target_dimensions(
@@ -448,7 +536,9 @@ class GJJ_MiniMaxH3Studio:
             prompt_parts = inferred_parts
         image_count = len(media["images"])
         requested_branch = str(first("image_branch", "参考") or "参考")
-        if image_count == 1:
+        if library_assets:
+            image_branch = "参考"
+        elif image_count == 1:
             image_branch = requested_branch if requested_branch in {"参考", "首帧", "尾帧"} else "参考"
         elif image_count == 2:
             image_branch = requested_branch if requested_branch in {"参考", "首尾帧"} else "参考"
