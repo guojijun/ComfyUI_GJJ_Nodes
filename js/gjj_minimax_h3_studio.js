@@ -2,7 +2,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
-import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
+import { gjjLibraryThumbnailPath, loadGjjLibraryThumbnailBlobUrl, setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 
 const NODE_TYPE = "GJJ_MiniMaxH3Studio";
 const PANEL_WIDGET = "__gjj_minimax_h3_panel";
@@ -16,6 +16,11 @@ const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
 const SETTINGS_SCHEMA_VERSION = 5;
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
+const PROMPT_MIN_HEIGHT = 58;
+const PROMPT_DEFAULT_HEIGHT = 72;
+const SIZE_MIN = 352;
+const SIZE_MAX = 1920;
+const SIZE_STEP = 32;
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
 const SCENE_LIBRARY_ENDPOINT = "/gjj/scene_library/thumbnail_index";
 const TEMPLATE_SOURCE_PROPERTY = "gjj_generation_template_sources";
@@ -96,9 +101,13 @@ function normalizedSettingValue(node, name, current) {
 	const definition = inputDefinition(node, name); if (!definition) return current; const type = definition[0]; const options = definition[1] || {}; const items = choices(widget(node, name)); const fallback = declaredDefault(node, name);
 	if (items.length) return items.map(String).includes(String(current)) ? current : fallback;
 	if (type === "BOOLEAN") return typeof current === "boolean" ? current : fallback;
-	if (type === "INT" || type === "FLOAT") { const number = Number(current); if (!Number.isFinite(number) || (options.min != null && number < Number(options.min)) || (options.max != null && number > Number(options.max))) return fallback; return type === "INT" ? Math.round(number) : number; }
+	if (type === "INT" || type === "FLOAT") { const number = Number(current); if (!Number.isFinite(number) || (options.min != null && number < Number(options.min)) || (options.max != null && number > Number(options.max))) return fallback; if (name === "width" || name === "height") return normalizeCanvasDimension(number); return type === "INT" ? Math.round(number) : number; }
 	if (type === "STRING") return typeof current === "string" ? current : fallback;
 	return current;
+}
+function normalizeCanvasDimension(raw, fallback = 864) {
+	const numeric = Number(raw); const safe = Number.isFinite(numeric) ? numeric : Number(fallback);
+	return Math.max(SIZE_MIN, Math.min(SIZE_MAX, Math.round(safe / SIZE_STEP) * SIZE_STEP));
 }
 function repairSerializedSettings(node) {
 	for (const name of persistedWidgetNames(node)) { const target = widget(node, name); if (!target) continue; const next = normalizedSettingValue(node, name, target.value); if (next !== target.value) setValue(node, name, next); }
@@ -111,8 +120,9 @@ function installStyle() {
 	if (document.getElementById(STYLE_ID)) return;
 	const style = document.createElement("style"); style.id = STYLE_ID;
 	style.textContent = `
-	.gjj-mh3-root{font:12px/1.3 system-ui;color:#dcebed;background:#10191d;border-radius:8px;padding:8px;display:grid;gap:7px}
+	.gjj-mh3-root{font:12px/1.3 system-ui;color:#dcebed;background:#10191d;border-radius:8px;padding:8px;display:grid;gap:7px;align-content:start;grid-auto-rows:max-content}
 	.gjj-mh3-toolbar{display:flex;flex-wrap:wrap;gap:0;align-items:center;align-content:flex-start;max-width:100%;margin:0;padding:0}.gjj-mh3-btn{box-sizing:border-box;width:36px;height:32px;min-width:36px;flex:0 0 36px;margin:0;padding:0;border:1px solid #42747d;border-radius:0;background:#173038;color:#dff;cursor:pointer;font-weight:700}.gjj-mh3-toolbar>.gjj-mh3-btn:first-child{border-radius:6px 0 0 6px}.gjj-mh3-toolbar>.gjj-mh3-btn:last-child{border-radius:0 6px 6px 0}.gjj-mh3-btn:hover{filter:brightness(1.18)}.gjj-mh3-btn.active{background:#175f4d;border-color:#55d2a2}.gjj-mh3-run{background:#168953;border-color:#39d789;color:white;font-weight:900}
+	.gjj-mh3-btn.gjj-mh3-source-size{background:#695018;border-color:#f2bd3f;color:#fff4c8;box-shadow:inset 0 0 0 1px #f2bd3f55}
 	.gjj-mh3-folder.loaded{background:#17614e;border-color:#55d2a2}.gjj-mh3-folder:disabled{opacity:.4;cursor:not-allowed}.gjj-mh3-link{display:none}.gjj-mh3-link.show{display:block}.gjj-mh3-link.detached{background:#6b5420;border-color:#d5a83c}
 	.gjj-mh3-media-tip{position:fixed;z-index:100006;width:min(440px,calc(100vw - 24px));max-height:min(520px,calc(100vh - 24px));overflow:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:9px;border:1px solid #4e7d86;border-radius:9px;background:#0d161a;color:#dcebed;box-shadow:0 14px 45px #000c}.gjj-mh3-media-card{min-width:0;border:1px solid #304e55;border-radius:7px;background:#111d21;padding:6px;display:grid;gap:5px}.gjj-mh3-media-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a9c7cc}.gjj-mh3-media-card img,.gjj-mh3-media-card video{display:block;width:100%;max-height:190px;object-fit:contain;background:#000;border-radius:4px}.gjj-mh3-media-card audio{width:100%;height:34px}.gjj-mh3-media-text{max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#dce7e2;font:11px/1.4 ui-monospace,monospace}
 	.gjj-mh3-label{display:flex;align-items:center;gap:6px;color:#ffd27d;font-weight:700}.gjj-mh3-mode{margin-left:auto;color:#7ed9d3;font-weight:600}
@@ -120,9 +130,10 @@ function installStyle() {
 	.gjj-mh3-status{height:16px;color:#8faeb4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 	.gjj-mh3-branches{display:flex;gap:7px;flex-wrap:wrap}.gjj-mh3-branch{min-width:64px;padding:6px 12px;border:1px solid #41666e;border-radius:7px;background:#15272d;color:#cfe3e6;cursor:pointer;font-weight:800}.gjj-mh3-branch.active{background:#137a61;border-color:#48d9a5;color:#fff}
 	.gjj-mh3-library{position:fixed;z-index:100008;width:min(620px,calc(100vw - 28px));max-height:min(620px,calc(100vh - 32px));overflow:auto;padding:10px;border:1px solid #4e7d86;border-radius:10px;background:#0d171b;color:#e2f0f1;box-shadow:0 16px 48px #000c}.gjj-mh3-library-head{display:flex;align-items:center;gap:8px;margin-bottom:9px}.gjj-mh3-library-title{font-weight:900;color:#8de1d6}.gjj-mh3-library-search{flex:1;min-width:0;border:1px solid #365b64;border-radius:6px;background:#091215;color:#eef8f8;padding:7px}.gjj-mh3-library-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.gjj-mh3-library-card{min-width:0;border:1px solid #304e55;border-radius:8px;background:#122027;color:#dcebed;padding:6px;cursor:pointer;display:grid;gap:5px;text-align:left}.gjj-mh3-library-card.active{border-color:#4fd9a8;background:#164735}.gjj-mh3-library-card img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:5px;background:#081014}.gjj-mh3-library-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:800}.gjj-mh3-library-empty{grid-column:1/-1;padding:24px;text-align:center;color:#8faeb4}
-	.gjj-mh3-library-chips{display:none;flex-wrap:wrap;gap:5px}.gjj-mh3-library-chip{border:1px solid #456b73;border-radius:999px;background:#172a30;color:#d8eef0;padding:4px 9px;cursor:pointer;font-size:11px}.gjj-mh3-library-chip:hover{border-color:#62c9bd;background:#1d3a3d}
+	.gjj-mh3-library-chips{display:none;flex-wrap:wrap;gap:5px;align-items:flex-start;align-content:flex-start}.gjj-mh3-library-chip{border:1px solid #456b73;border-radius:999px;background:#172a30;color:#d8eef0;padding:4px 9px;cursor:pointer;font-size:11px}.gjj-mh3-library-chip:hover{border-color:#62c9bd;background:#1d3a3d}
+	.gjj-mh3-library-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 4px}.gjj-mh3-library-chip img{width:23px;height:23px;border-radius:50%;object-fit:cover;background:#081014}.gjj-mh3-library-button{position:relative;overflow:hidden}.gjj-mh3-library-button>img{display:block;width:100%;height:100%;object-fit:cover}.gjj-mh3-library-count{position:absolute;right:1px;bottom:0;min-width:13px;height:13px;border-radius:7px;background:#0b171bde;color:#fff;font:9px/13px system-ui;text-align:center}.gjj-mh3-library-preview{position:fixed;z-index:100012;width:280px;padding:7px;border:1px solid #54838b;border-radius:9px;background:#0b1418;color:#e5f1f2;box-shadow:0 16px 46px #000d}.gjj-mh3-library-preview img{display:block;width:100%;max-height:330px;object-fit:contain;border-radius:6px;background:#05090b}.gjj-mh3-library-preview div{padding:7px 3px 2px;line-height:1.4;white-space:normal}
 	.gjj-mh3-pop{position:fixed;z-index:100000;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow:auto;display:none;background:#101a1e;color:#e2f0f1;border:1px solid #4e7d86;border-radius:10px;box-shadow:0 14px 45px #000b;padding:10px}.gjj-mh3-pop.open{display:block}.gjj-mh3-pophead{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}.gjj-mh3-close{border:1px solid #40717a;border-radius:5px;background:#173038;color:#dff;padding:5px 12px;cursor:pointer}.gjj-mh3-section{border-top:1px solid #29434a;padding-top:8px;margin-top:8px}.gjj-mh3-title{color:#7ed9d3;font-weight:800;margin-bottom:7px}.gjj-mh3-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.gjj-mh3-field{display:grid;gap:3px;color:#9eb8bd}.gjj-mh3-field.wide{grid-column:1/-1}.gjj-mh3-control{box-sizing:border-box;width:100%;min-width:0;background:#0b1316;color:#e8f5f5;border:1px solid #304e55;border-radius:5px;padding:6px}.gjj-mh3-toggle.active{background:#17614e;color:#fff}
-	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-preview{display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}`;
+	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-preview{position:relative;display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}.gjj-mh3-preview-nav{position:absolute;z-index:3;left:50%;top:7px;transform:translateX(-50%);display:none;align-items:center;gap:5px;padding:3px;border:1px solid rgba(124,194,203,.65);border-radius:7px;background:rgba(5,14,18,.82);box-shadow:0 2px 10px rgba(0,0,0,.38)}.gjj-mh3-preview-nav button{width:25px;height:24px;padding:0;border:1px solid #42636b;border-radius:5px;background:#14262d;color:#eaffff;cursor:pointer;font-weight:900}.gjj-mh3-preview-nav button:disabled{opacity:.35;cursor:default}.gjj-mh3-preview-label{min-width:74px;color:#dff7f7;text-align:center;font:700 11px/1.2 system-ui,sans-serif;white-space:nowrap}`;
 	document.head.appendChild(style);
 }
 function hideBackendWidgets(node) {
@@ -258,17 +269,18 @@ function createSizePanel(node) {
 	for (const [name, icon, label] of [["width", "📐", "宽度"], ["height", "📏", "高度"]]) {
 		const target = widget(node, name); const row = document.createElement("label"); row.className = "gjj-mh3-slider-row";
 		const caption = document.createElement("span"); caption.textContent = `${icon} ${label}`;
-		const range = document.createElement("input"); range.type = "range"; range.min = String(target?.options?.min ?? 352); range.max = String(target?.options?.max ?? 1920); range.step = String(target?.options?.step ?? 32);
+		const range = document.createElement("input"); range.type = "range"; range.min = String(SIZE_MIN); range.max = String(SIZE_MAX); range.step = String(SIZE_STEP);
 		const number = document.createElement("input"); number.type = "number"; number.className = "gjj-mh3-size-number"; number.min = range.min; number.max = range.max; number.step = range.step;
-		const apply = (raw) => { const min = Number(range.min); const max = Number(range.max); const step = Number(range.step) || 1; const next = Math.max(min, Math.min(max, Math.round(Number(raw) / step) * step)); setValue(node, name, next); range.value = String(next); number.value = String(next); sync(); };
+		const apply = (raw) => { const next = normalizeCanvasDimension(raw, name === "width" ? 864 : 480); setValue(node, name, next); range.value = String(next); number.value = String(next); sync(); };
 		range.addEventListener("input", () => apply(range.value)); number.addEventListener("change", () => apply(number.value)); row.append(caption, range, number); dimensions.appendChild(row); controls[name] = { range, number };
 	}
 	const sync = () => {
 		const source = Boolean(value(node, "use_source_size", true)); sourceButton.classList.toggle("active", source); panelButton.classList.toggle("active", !source); dimensions.classList.toggle("gjj-mh3-size-disabled", source);
+		syncMainSizeButton(node);
 		const sourceBound = Boolean(boundVariable(node, "use_source_size")); sourceButton.disabled = sourceBound; panelButton.disabled = sourceBound; sourceButton.title = panelButton.title = sourceBound ? `首图尺寸已由广播变量“${boundVariable(node, "use_source_size")}”接管` : "";
 		for (const [name, control] of Object.entries(controls)) { const bound = Boolean(boundVariable(node, name)); control.range.disabled = source || bound; control.number.disabled = source || bound; const tip = bound ? `已由广播变量“${boundVariable(node, name)}”接管` : ""; control.range.title = control.number.title = tip; }
 		for (const [name, group] of choiceControls) group.buttons.forEach((button, index) => { const variableName = boundVariable(node, name); button.classList.toggle("active", String(value(node, name, group.values[0])) === group.values[index]); button.disabled = Boolean(variableName); button.style.opacity = variableName ? "0.45" : ""; button.title = variableName ? `已由广播变量“${variableName}”接管` : ""; });
-		controls.width.range.value = controls.width.number.value = String(value(node, "width", 864)); controls.height.range.value = controls.height.number.value = String(value(node, "height", 480));
+		for (const [name, fallback] of [["width", 864], ["height", 480]]) { const next = normalizeCanvasDimension(value(node, name, fallback), fallback); if (Number(value(node, name, fallback)) !== next) setValue(node, name, next); controls[name].range.value = controls[name].number.value = String(next); }
 	};
 	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); sync(); });
 	for (const element of [sourceButton, panelButton, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
@@ -329,15 +341,34 @@ function previewItemFromPath(rawPath) {
 	const marker = clean.toLowerCase().lastIndexOf("/output/"); const subfolder = marker >= 0 ? clean.slice(marker + 8, clean.length - filename.length).replace(/^\/+|\/+$/g, "") : "";
 	return { filename, subfolder, type: "output" };
 }
+function previewScalar(value, fallback = "") { return Array.isArray(value) ? (value[0] ?? fallback) : (value ?? fallback); }
+function orderedPreviewEntries(state) {
+	return Array.from(state?.previewEntries?.values?.() || []).sort((a, b) => {
+		if (a.kind === b.kind) return Number(a.segment || 0) - Number(b.segment || 0);
+		return a.kind === "segment" ? -1 : 1;
+	});
+}
+function showStoredPreview(node, key) {
+	const state = node.__gjjMiniMaxPanel; const entry = state?.previewEntries?.get?.(key); if (!entry) return;
+	state.activePreviewKey = key; const item = entry.item;
+	const query = `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
+	state.video.src = api.apiURL(query); state.preview.style.display = "block"; state.video.load(); const play = state.video.play?.(); play?.catch?.(() => {});
+	const entries = orderedPreviewEntries(state); const activeIndex = Math.max(0, entries.findIndex((candidate) => candidate.key === key));
+	if (state.previewNav) state.previewNav.style.display = entries.length > 1 ? "flex" : "none";
+	if (state.previewLabel) state.previewLabel.textContent = entry.kind === "final" ? "最终视频" : `片段 ${entry.segment}/${entry.segmentCount}`;
+	if (state.previewPrev) state.previewPrev.disabled = activeIndex <= 0;
+	if (state.previewNext) state.previewNext.disabled = activeIndex >= entries.length - 1;
+	const resize = () => { const contentWidth = Math.max(1, Number(state.preview.clientWidth || state.resultRoot?.clientWidth || node.size?.[0] - 36 || 1)); const mediaHeight = Math.max(1, Math.round(contentWidth * Number(state.video.videoHeight || 9) / Math.max(1, Number(state.video.videoWidth || 16)))); state.preview.style.height = `${mediaHeight}px`; fitPanel(node); };
+	state.video.onloadedmetadata = resize; state.previewObserver?.disconnect?.(); let lastWidth = 0; state.previewObserver = new ResizeObserver((entries) => { const width = Math.round(entries[0]?.contentRect?.width || 0); if (width > 0 && width !== lastWidth) { lastWidth = width; resize(); } }); state.previewObserver.observe(state.preview); setTimeout(resize, 50);
+}
 function renderResultPreview(node, message = {}) {
 	const state = node.__gjjMiniMaxPanel; if (!state?.preview || !state?.video) return;
 	const output = message?.output && typeof message.output === "object" ? message.output : message;
 	const item = firstPreviewItem(output.preview_media, output.preview_video, output.gifs, output.animated, output.videos, output.video) || previewItemFromPath(output.output_path);
 	if (!item) return;
-	const query = `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
-	state.video.src = api.apiURL(query); state.preview.style.display = "block"; state.video.load(); const play = state.video.play?.(); play?.catch?.(() => {});
-	const resize = () => { const contentWidth = Math.max(1, Number(state.preview.clientWidth || state.resultRoot?.clientWidth || node.size?.[0] - 36 || 1)); const mediaHeight = Math.max(1, Math.round(contentWidth * Number(state.video.videoHeight || 9) / Math.max(1, Number(state.video.videoWidth || 16)))); state.preview.style.height = `${mediaHeight}px`; fitPanel(node); };
-	state.video.onloadedmetadata = resize; state.previewObserver?.disconnect?.(); let lastWidth = 0; state.previewObserver = new ResizeObserver((entries) => { const width = Math.round(entries[0]?.contentRect?.width || 0); if (width > 0 && width !== lastWidth) { lastWidth = width; resize(); } }); state.previewObserver.observe(state.preview); setTimeout(resize, 50);
+	state.previewEntries ||= new Map(); const segment = Number(previewScalar(output.segment, 0)); const segmentCount = Number(previewScalar(output.segment_count, 1)); const scope = String(previewScalar(output.preview_scope, ""));
+	const kind = segment > 0 ? "segment" : (scope === "final" || segmentCount > 1 ? "final" : "single"); const key = kind === "segment" ? `segment:${segment}` : kind;
+	state.previewEntries.set(key, { key, kind, segment, segmentCount, item }); showStoredPreview(node, key);
 }
 function mediaInput(node, name) { return (node.inputs || []).find((item) => String(item?.name || "") === name); }
 function activeMediaLinks(node) { return MEDIA_INPUTS.some((name) => mediaInput(node, name)?.link != null); }
@@ -361,17 +392,92 @@ function saveLibrarySelection(node, kind, items) {
 	setValue(node, kind === "scene" ? "selected_scenes_json" : "selected_actors_json", JSON.stringify(items)); if (items.length) setValue(node, "image_branch", "参考"); syncLibraryButtons(node); syncBranchButtons(node);
 }
 function libraryDisplayName(item) { return String(item?.name || item?.id || "未命名").replace(/^\s*(?:♀️|♂️|♀|♂)\s*/, "").trim(); }
+let libraryIndexPromise = null;
+function escapeRegExp(text) { return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+async function promptLibraryIndex() {
+	if (libraryIndexPromise) return libraryIndexPromise;
+	libraryIndexPromise = Promise.all([
+		api.fetchApi(`${CHARACTER_LIBRARY_ENDPOINT}?summary=1`).then((response) => response.json()),
+		api.fetchApi(SCENE_LIBRARY_ENDPOINT).then((response) => response.json()),
+	]).then(([characters, scenes]) => ({
+		actor: Array.isArray(characters?.characters) ? characters.characters : [],
+		scene: Array.isArray(scenes?.scenes) ? scenes.scenes : [],
+	})).catch((error) => { libraryIndexPromise = null; throw error; });
+	return libraryIndexPromise;
+}
+function referencedLibraryItems(prompt, kind, items) {
+	const text = String(prompt || ""); if (!text || !Array.isArray(items)) return [];
+	const marker = kind === "scene" ? "🏕️?\\s*" : "@\\s*";
+	const matches = [];
+	for (const item of items) {
+		const aliases = [...new Set([libraryDisplayName(item), String(item?.id || "").trim()].filter(Boolean))].sort((a, b) => b.length - a.length);
+		for (const alias of aliases) {
+			const found = new RegExp(`${marker}${escapeRegExp(alias)}`, "iu").exec(text);
+			if (found) { matches.push({ position: found.index, length: alias.length, item }); break; }
+		}
+	}
+	matches.sort((a, b) => a.position - b.position || b.length - a.length);
+	const result = []; const seenPositions = new Set(); const seenIds = new Set();
+	for (const match of matches) {
+		if (seenPositions.has(match.position)) continue;
+		const id = String(match.item?.id || libraryDisplayName(match.item)); if (seenIds.has(id)) continue;
+		seenPositions.add(match.position); seenIds.add(id); result.push(match.item);
+	}
+	return result;
+}
+async function syncPromptLibrarySelections(node) {
+	const prompt = String(value(node, "prompt", "") || "");
+	if (node.__gjjMiniMaxParsedLibraryPrompt === prompt) return;
+	node.__gjjMiniMaxParsedLibraryPrompt = prompt;
+	if (!prompt.includes("@") && !prompt.includes("🏕")) return;
+	try {
+		const index = await promptLibraryIndex();
+		if (String(value(node, "prompt", "") || "") !== prompt) { node.__gjjMiniMaxParsedLibraryPrompt = null; return; }
+		for (const kind of ["actor", "scene"]) {
+			const markerPresent = kind === "actor" ? prompt.includes("@") : prompt.includes("🏕"); if (!markerPresent) continue;
+			const parsed = referencedLibraryItems(prompt, kind, index[kind]); if (!parsed.length) continue;
+			const currentIds = librarySelection(node, kind).map((item) => String(item?.id || libraryDisplayName(item)));
+			const parsedIds = parsed.map((item) => String(item?.id || libraryDisplayName(item)));
+			if (JSON.stringify(currentIds) !== JSON.stringify(parsedIds)) saveLibrarySelection(node, kind, parsed);
+		}
+	} catch (error) { console.warn("[GJJ_MiniMaxH3Studio] 解析提示词资料库引用失败", error); }
+}
+async function addParsedLibraryButtons(node, kind, names) {
+	const requested = new Set((Array.isArray(names) ? names : []).map((name) => String(name || "").trim().toLocaleLowerCase()).filter(Boolean));
+	if (!requested.size) return;
+	try {
+		const index = await promptLibraryIndex();
+		const parsed = index[kind].filter((item) => [libraryDisplayName(item), String(item?.id || "").trim()].some((alias) => requested.has(alias.toLocaleLowerCase())));
+		const currentIds = librarySelection(node, kind).map((item) => String(item?.id || libraryDisplayName(item)));
+		const parsedIds = parsed.map((item) => String(item?.id || libraryDisplayName(item)));
+		if (parsed.length && JSON.stringify(currentIds) !== JSON.stringify(parsedIds)) saveLibrarySelection(node, kind, parsed);
+	} catch (error) { console.warn("[GJJ_MiniMaxH3Studio] 回显提示词资料库按钮失败", error); }
+}
+function schedulePromptLibrarySync(node) {
+	const prompt = String(value(node, "prompt", "") || "");
+	if (node.__gjjMiniMaxParsedLibraryPrompt === prompt || node.__gjjMiniMaxScheduledLibraryPrompt === prompt) return;
+	clearTimeout(node.__gjjMiniMaxLibraryParseTimer);
+	node.__gjjMiniMaxScheduledLibraryPrompt = prompt;
+	node.__gjjMiniMaxLibraryParseTimer = setTimeout(() => { node.__gjjMiniMaxScheduledLibraryPrompt = null; void syncPromptLibrarySelections(node); }, 80);
+}
+let activeLibraryPreview = null;
+function closeLibraryPreview(owner = null) { if (!activeLibraryPreview || (owner && activeLibraryPreview.owner !== owner)) return; activeLibraryPreview.element.remove(); activeLibraryPreview = null; }
+function showLibraryPreview(owner, kind, item) {
+	closeLibraryPreview(); if (!owner || !item) return; const path = gjjLibraryThumbnailPath(kind === "scene" ? "scene" : "character", item); if (!path) return;
+	const preview = document.createElement("div"); preview.className = "gjj-mh3-library-preview"; const image = document.createElement("img"); const caption = document.createElement("div"); const marker = kind === "scene" ? "🏕️" : "@"; const notes = String(item?.notes || "").replace(/\s+/g, " ").trim(); caption.textContent = `${marker}${libraryDisplayName(item)}${notes ? `（${notes}）` : ""}`; preview.append(image, caption); document.body.appendChild(preview);
+	void loadGjjLibraryThumbnailBlobUrl(api, kind === "scene" ? "scene" : "character", item).then((blobUrl) => { image.src = blobUrl || api.apiURL(path); }); const rect = owner.getBoundingClientRect(); preview.style.left = `${Math.max(8, Math.min(window.innerWidth - 294, rect.right + 8))}px`; preview.style.top = `${Math.max(8, Math.min(window.innerHeight - 390, rect.top))}px`; activeLibraryPreview = { owner, element: preview };
+}
 function syncLibraryButtons(node) {
 	const panel = node.__gjjMiniMaxPanel; if (!panel) return;
 	for (const [kind, button] of [["scene", panel.sceneButton], ["actor", panel.actorButton]]) {
-		if (!button) continue; const count = librarySelection(node, kind).length; button.classList.toggle("active", count > 0); button.textContent = `${kind === "scene" ? "🏕️" : "👤"}${count ? count : ""}`; button.title = count ? `已选择 ${count} 个${kind === "scene" ? "场景" : "角色"}；点击修改` : `选择${kind === "scene" ? "场景库" : "角色库"}引用`;
+		if (!button) continue; const selected = librarySelection(node, kind); const count = selected.length; button.classList.toggle("active", count > 0); button.replaceChildren(); if (count) { const image = document.createElement("img"); setGjjLibraryThumbnail(image, api, kind === "scene" ? "scene" : "character", selected[0]); const badge = document.createElement("span"); badge.className = "gjj-mh3-library-count"; badge.textContent = String(count); button.append(image, badge); button.onmouseenter = () => showLibraryPreview(button, kind, selected[0]); button.onmouseleave = () => closeLibraryPreview(button); } else { button.textContent = kind === "scene" ? "🏕️" : "👤"; button.onmouseenter = null; button.onmouseleave = null; } button.title = count ? `已选择 ${count} 个${kind === "scene" ? "场景" : "角色"}；悬停预览，点击修改` : `选择${kind === "scene" ? "场景库" : "角色库"}引用`;
 	}
 	if (panel.libraryChips) { panel.libraryChips.replaceChildren(); const entries = [["actor", ...librarySelection(node, "actor")], ["scene", ...librarySelection(node, "scene")]];
-		for (const group of entries) { const kind = group[0]; for (const item of group.slice(1)) { const reference = `${kind === "scene" ? "🏕️" : "@"}${libraryDisplayName(item)}`; const chip = document.createElement("button"); chip.type = "button"; chip.className = "gjj-mh3-library-chip"; chip.textContent = reference; chip.title = "点击把引用加入提示词；Ctrl/Cmd+点击从选择中移除"; chip.addEventListener("click", (event) => { if (event.ctrlKey || event.metaKey) { const id = String(item?.id || item?.name); saveLibrarySelection(node, kind, librarySelection(node, kind).filter((entry) => String(entry?.id || entry?.name) !== id)); return; } const current = String(value(node, "prompt", "") || ""); if (!current.includes(reference)) setValue(node, "prompt", `${current}${current.trim() ? "\n" : ""}${reference}`); }); panel.libraryChips.appendChild(chip); } }
+		for (const group of entries) { const kind = group[0]; for (const item of group.slice(1)) { const reference = `${kind === "scene" ? "🏕️" : "@"}${libraryDisplayName(item)}`; const chip = document.createElement("button"); chip.type = "button"; chip.className = "gjj-mh3-library-chip"; const image = document.createElement("img"); setGjjLibraryThumbnail(image, api, kind === "scene" ? "scene" : "character", item); const label = document.createElement("span"); label.textContent = reference; chip.append(image, label); chip.title = "悬停预览；点击可多次追加引用；Ctrl/Cmd+点击移除"; chip.addEventListener("mouseenter", () => showLibraryPreview(chip, kind, item)); chip.addEventListener("mouseleave", () => closeLibraryPreview(chip)); chip.addEventListener("click", (event) => { closeLibraryPreview(chip); if (event.ctrlKey || event.metaKey) { const id = String(item?.id || item?.name); saveLibrarySelection(node, kind, librarySelection(node, kind).filter((entry) => String(entry?.id || entry?.name) !== id)); return; } const current = String(value(node, "prompt", "") || ""); setValue(node, "prompt", `${current}${current && !/\s$/.test(current) ? " " : ""}${reference}`); }); panel.libraryChips.appendChild(chip); } }
 		panel.libraryChips.style.display = panel.libraryChips.childElementCount ? "flex" : "none";
 	}
 }
-function closeLibraryPicker(node) { const panel = node.__gjjMiniMaxPanel; panel?.libraryPicker?.remove?.(); if (panel) panel.libraryPicker = null; panel?.sceneButton?.classList.remove("picker-open"); panel?.actorButton?.classList.remove("picker-open"); }
+function closeLibraryPicker(node) { closeLibraryPreview(); const panel = node.__gjjMiniMaxPanel; panel?.libraryPicker?.remove?.(); if (panel) panel.libraryPicker = null; panel?.sceneButton?.classList.remove("picker-open"); panel?.actorButton?.classList.remove("picker-open"); }
 async function toggleLibraryPicker(node, kind, anchor) {
 	const panel = node.__gjjMiniMaxPanel; if (!panel) return;
 	if (panel.libraryPicker?.dataset?.kind === kind) { closeLibraryPicker(node); return; }
@@ -471,8 +577,11 @@ function arrangePanelWidgets(node, toolbarWidget, resultWidget) {
 	if (promptIndex < 0) return; canonical.splice(promptIndex, 0, toolbarWidget); canonical.splice(promptIndex + 2, 0, resultWidget); node.widgets = canonical;
 }
 function persistedWidgetNames(node) {
-	const optional = node?.constructor?.nodeData?.input?.optional || node?.constructor?.nodeData?.inputs?.optional || node?.nodeData?.input?.optional || {};
-	return Object.keys(optional).filter((name) => Boolean(widget(node, name)) && name !== PANEL_WIDGET && name !== RESULT_WIDGET);
+	const input = node?.constructor?.nodeData?.input || node?.constructor?.nodeData?.inputs || node?.nodeData?.input || {};
+	// ComfyUI 会先创建 required widgets，再创建 optional widgets；按相同顺序持久化，
+	// 同时确保 required 中的 prompt 也进入按名称备份，避免重载后恢复为空。
+	return [...Object.keys(input?.required || {}), ...Object.keys(input?.optional || {})]
+		.filter((name, index, names) => names.indexOf(name) === index && Boolean(widget(node, name)) && name !== PANEL_WIDGET && name !== RESULT_WIDGET);
 }
 function writeSettingsBackup(node) {
 	node.properties ||= {};
@@ -501,6 +610,23 @@ function writeSettingsBackup(node) {
 	node.properties[SETTINGS_BACKUP_PROPERTY] = backup;
 	node.properties[PROMPT_BACKUP_PROPERTY] = String(backup.prompt || "");
 	return backup;
+}
+function serializedNamedSettings(serializedNode) {
+	const properties = serializedNode?.properties;
+	if (!properties || typeof properties !== "object" || Array.isArray(properties)) return null;
+	const result = {};
+	if (properties[SETTINGS_BACKUP_PROPERTY] && typeof properties[SETTINGS_BACKUP_PROPERTY] === "object" && !Array.isArray(properties[SETTINGS_BACKUP_PROPERTY])) {
+		result[SETTINGS_BACKUP_PROPERTY] = { ...properties[SETTINGS_BACKUP_PROPERTY] };
+	}
+	if (Object.prototype.hasOwnProperty.call(properties, PROMPT_BACKUP_PROPERTY)) result[PROMPT_BACKUP_PROPERTY] = String(properties[PROMPT_BACKUP_PROPERTY] ?? "");
+	if (Object.prototype.hasOwnProperty.call(properties, SETTINGS_SCHEMA_PROPERTY)) result[SETTINGS_SCHEMA_PROPERTY] = Number(properties[SETTINGS_SCHEMA_PROPERTY] || 0);
+	return Object.keys(result).length ? result : null;
+}
+function restoreSerializedNamedSettings(node, saved) {
+	if (!saved) return;
+	node.properties ||= {};
+	// 只按属性名恢复；禁止读取 widgets_values 或使用任何数组位置推断参数。
+	for (const [name, value] of Object.entries(saved)) node.properties[name] = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : value;
 }
 function ensureSettingsPersistence(node) {
 	node.properties ||= {}; let backup = node.properties[SETTINGS_BACKUP_PROPERTY]; const currentSchema = Number(node.properties[SETTINGS_SCHEMA_PROPERTY] || 0);
@@ -576,7 +702,8 @@ function fitPanel(node) {
 			const width = Math.max(280, Number(node.size?.[0] || 420));
 			if (Array.isArray(node.size)) node.size[1] = 1;
 			const computed = node.computeSize?.(); const height = Math.max(140, Number(computed?.[1] || 140));
-			node.setSize?.([width, height]); app.graph?.setDirtyCanvas?.(true, true);
+			node.__gjjMiniMaxFixedHeight = Math.max(0, height - Number(node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT));
+			node.setSize?.([width, height]); node.__gjjMiniMaxLastNodeHeight = height; app.graph?.setDirtyCanvas?.(true, true);
 		} finally { node.__gjjMiniMaxFitting = false; }
 	});
 }
@@ -599,6 +726,26 @@ function syncBroadcastUI(node) {
 	node.__gjjMiniMaxPanel?.popups?.size?.__gjjSizePanel?.__gjjSync?.();
 	node.__gjjMiniMaxPanel?.popups?.model?.__gjjReasoningPanel?.__gjjSync?.();
 	syncBranchButtons(node);
+	syncMainSizeButton(node);
+}
+function syncMainSizeButton(node) {
+	const button = node.__gjjMiniMaxPanel?.buttons?.size; if (!button) return;
+	const source = Boolean(value(node, "use_source_size", true)); button.classList.toggle("gjj-mh3-source-size", source);
+	button.title = source ? "尺寸参数（当前使用首图尺寸）" : "尺寸参数（当前使用画板尺寸）";
+}
+function applyPromptHeight(node, rawHeight) {
+	const target = widget(node, "prompt"); if (!target) return;
+	const height = Math.max(PROMPT_MIN_HEIGHT, Math.round(Number(rawHeight || PROMPT_DEFAULT_HEIGHT)));
+	node.__gjjMiniMaxPromptHeight = height; target.computedHeight = height; target.size = [Math.max(0, Number(node.size?.[0] || 420) - 20), height]; target.computeSize = (width) => [Math.max(0, Number(width || node.size?.[0] || 420) - 20), height]; target.getHeight = () => height;
+	const element = target.inputEl || target.element; if (element?.style) { element.style.height = `${height}px`; element.style.minHeight = `${PROMPT_MIN_HEIGHT}px`; element.style.maxHeight = "none"; }
+}
+function resizePromptOnly(node, nextSize) {
+	const nextHeight = Number(nextSize?.[1] ?? node.size?.[1]); if (!Number.isFinite(nextHeight)) return;
+	node.__gjjMiniMaxLastNodeHeight = nextHeight;
+	if (node.__gjjMiniMaxFitting) return;
+	const fixedHeight = Number(node.__gjjMiniMaxFixedHeight); if (!Number.isFinite(fixedHeight)) return;
+	const nextPromptHeight = Math.max(PROMPT_MIN_HEIGHT, nextHeight - fixedHeight); if (Math.abs(nextPromptHeight - Number(node.__gjjMiniMaxPromptHeight || 0)) < 0.5) return;
+	applyPromptHeight(node, nextPromptHeight); app.graph?.setDirtyCanvas?.(true, true);
 }
 function createPanel(node) {
 	if (node.__gjjMiniMaxPanel) return; installStyle();
@@ -608,32 +755,35 @@ function createPanel(node) {
 	const folder = makeButton("📁", "打开图片、文本、音频或视频", "gjj-mh3-folder"); const link = makeButton("🔗", "记录并断开/恢复上游媒体接口", "gjj-mh3-link");
 	const file = document.createElement("input"); file.type = "file"; file.multiple = true; file.accept = "image/*,text/plain,.txt,.md,.prompt,audio/*,video/*"; file.style.display = "none"; root.appendChild(file);
 	const run = makeButton("▶️", "运行当前 MiniMax H3 节点", "gjj-mh3-run");
-	const sceneButton = makeButton("🏕️", "选择场景库引用"); const actorButton = makeButton("👤", "选择角色库引用");
+	const sceneButton = makeButton("🏕️", "选择场景库引用", "gjj-mh3-library-button"); const actorButton = makeButton("👤", "选择角色库引用", "gjj-mh3-library-button");
 	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const settings = makeButton("⚙️", "生成参数");
 	const variables = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS); variables.classList.add("gjj-mh3-btn"); variables.style.height = "32px"; variables.style.minWidth = "36px"; variables.style.width = "36px"; variables.style.flex = "0 0 36px"; variables.style.padding = "0"; variables.style.margin = "0"; variables.style.borderRadius = "0";
 	toolbar.append(folder, link, sceneButton, actorButton, size, seed, model, variables, settings, run);
 	const resultRoot = document.createElement("div"); resultRoot.className = "gjj-mh3-root"; protect(resultRoot);
 	const branches = document.createElement("div"); branches.className = "gjj-mh3-branches";
 	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "图片数量决定可选生成分支";
-	const preview = document.createElement("div"); preview.className = "gjj-mh3-preview"; const video = document.createElement("video"); video.controls = true; video.loop = true; video.playsInline = true; video.preload = "metadata"; preview.appendChild(video); protect(preview);
+	const preview = document.createElement("div"); preview.className = "gjj-mh3-preview"; const video = document.createElement("video"); video.controls = true; video.loop = true; video.playsInline = true; video.preload = "metadata";
+	const previewNav = document.createElement("div"); previewNav.className = "gjj-mh3-preview-nav"; const previewPrev = document.createElement("button"); previewPrev.type = "button"; previewPrev.textContent = "‹"; previewPrev.title = "上一片段"; const previewLabel = document.createElement("span"); previewLabel.className = "gjj-mh3-preview-label"; const previewNext = document.createElement("button"); previewNext.type = "button"; previewNext.textContent = "›"; previewNext.title = "下一片段"; previewNav.append(previewPrev, previewLabel, previewNext); preview.append(video, previewNav); protect(preview);
 	root.append(toolbar, libraryChips); resultRoot.append(branches, status, preview);
-	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.serialize = false; dom.options ||= {}; dom.options.serialize = false; dom.computeSize = () => [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(40, Number(root.scrollHeight || 40))];
+	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.serialize = false; dom.options ||= {}; dom.options.serialize = false; dom.computeSize = () => [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(40, Number(root.scrollHeight || 40))]; dom.getHeight = () => Math.max(40, Number(root.scrollHeight || 40));
 	const resultDom = node.addDOMWidget(RESULT_WIDGET, "div", resultRoot, { serialize: false, hideOnZoom: false }); resultDom.serialize = false; resultDom.options ||= {}; resultDom.options.serialize = false; resultDom.computeSize = () => {
 		const hasPreview = Boolean(video.getAttribute("src")) && preview.style.display !== "none";
 		const branchHeight = branches.style.display === "none" ? 0 : Number(branches.offsetHeight || 0);
 		const compactHeight = 16 + Number(status.offsetHeight || 16) + (branchHeight > 0 ? branchHeight + 7 : 0);
 		return [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(24, hasPreview ? Number(resultRoot.scrollHeight || compactHeight) : compactHeight)];
-	};
+	}; resultDom.getHeight = () => Number(resultDom.computeSize?.()[1] || 24);
 	arrangePanelWidgets(node, dom, resultDom);
-	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, variables, buttons: { size, seed, model, settings }, popups: {} };
+	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, variables, buttons: { size, seed, model, settings }, popups: {} };
 	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数");
-	run.addEventListener("click", async () => { closePopups(node); status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
+	const turnPreview = (offset) => { const entries = orderedPreviewEntries(panel); const index = entries.findIndex((entry) => entry.key === panel.activePreviewKey); const target = entries[index + offset]; if (target) showStoredPreview(node, target.key); };
+	previewPrev.addEventListener("click", () => turnPreview(-1)); previewNext.addEventListener("click", () => turnPreview(1));
+	run.addEventListener("click", async () => { closePopups(node); panel.previewEntries.clear(); panel.activePreviewKey = null; previewNav.style.display = "none"; status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
 	folder.addEventListener("click", () => { if (!folder.disabled) file.click(); }); file.addEventListener("change", async () => { const files = Array.from(file.files || []); file.value = ""; if (!files.length) return; try { status.textContent = "正在载入媒体…"; await uploadInternalMedia(node, files); } catch (error) { status.textContent = `载入失败：${error?.message || error}`; } });
 	folder.addEventListener("mouseenter", () => showMediaTooltip(node)); folder.addEventListener("mouseleave", () => scheduleMediaTooltipClose(node));
 	link.addEventListener("click", () => toggleMediaLinks(node));
 	sceneButton.addEventListener("click", () => toggleLibraryPicker(node, "scene", sceneButton)); actorButton.addEventListener("click", () => toggleLibraryPicker(node, "actor", actorButton));
 	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); settings.addEventListener("click", () => openPopup(node, "params", settings));
-	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); syncSeed(); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
+	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); applyPromptHeight(node, node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT); syncSeed(); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
 }
 // ⚠️ 关键修复：hook prompt widget 的 DOM 事件，实时同步到 properties
 // 原因：ComfyUI 原生 multiline STRING widget 用户输入时只更新 widget.value，
@@ -654,6 +804,7 @@ function hookPromptWidget(node) {
 		node.properties[SETTINGS_BACKUP_PROPERTY] ||= {};
 		node.properties[SETTINGS_BACKUP_PROPERTY].prompt = finalValue;
 		node.properties[PROMPT_BACKUP_PROPERTY] = finalValue;
+		schedulePromptLibrarySync(node);
 	};
 
 	// hook DOM 元素的 input/change/blur 事件
@@ -673,6 +824,19 @@ function hookPromptWidget(node) {
 		syncToProperties(nextValue);
 		return originalCallback?.call(this, nextValue, ...args);
 	};
+}
+function syncPromptBackupFromWidget(node) {
+	const target = widget(node, "prompt"); if (!target) return;
+	const current = String(target.value ?? "");
+	node.properties ||= {}; node.properties[SETTINGS_BACKUP_PROPERTY] ||= {};
+	const saved = String(node.properties[PROMPT_BACKUP_PROPERTY] ?? node.properties[SETTINGS_BACKUP_PROPERTY].prompt ?? "");
+	// 原生 multiline widget 在部分前端版本中输入时不触发 callback；画布绘制时
+	// 对非空变化做兜底同步。空值仍由 callback/onSerialize 处理，避免加载时短暂空值覆盖备份。
+	if (current && current !== saved) {
+		node.properties[SETTINGS_BACKUP_PROPERTY].prompt = current;
+		node.properties[PROMPT_BACKUP_PROPERTY] = current;
+	}
+	schedulePromptLibrarySync(node);
 }
 function stabilizeLogic(node) {
 	// ⚠️ 纯逻辑（无 DOM 依赖）：必须同步执行，确保原生 widgets_values 错位后立刻被按名称覆盖
@@ -695,6 +859,7 @@ function stabilizeUI(node) {
 	syncMediaToolbar(node);
 	syncBranchButtons(node);
 	syncBroadcastUI(node);
+	schedulePromptLibrarySync(node);
 }
 function stabilize(node) {
 	stabilizeLogic(node);
@@ -706,27 +871,22 @@ app.registerExtension({
 		if (nodeData?.name !== NODE_TYPE) return;
 		const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function (...args) {
 			const result = created?.apply(this, args);
-			// ✅ 新节点创建：先同步执行参数逻辑（确保 writeSettingsBackup 写入正确的初始 properties）
-			stabilizeLogic(this);
+			// 新节点创建阶段不生成空的命名备份；否则加载工作流时可能先用空值覆盖保存值。
+			this.color = "#2b727e"; this.bgcolor = "#11191d"; this.boxcolor = "#6eb6c0";
 			// DOM 面板允许延后，确保节点已加入画布、尺寸可计算
 			setTimeout(() => stabilizeUI(this), 0);
 			setTimeout(() => stabilizeUI(this), 100);
 			return result;
 		};
 		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) {
-			// ⚠️ 关键修复：onConfigure 是 ComfyUI 反序列化工作流的入口。
-			// 执行顺序：ComfyUI 先按索引把 widgets_values 赋给 node.widgets[i].value（可能错位）
-			//           → 调用 onConfigure → 我们立即同步调用 stabilizeLogic，它会用
-			//             node.properties[SETTINGS_BACKUP_PROPERTY] 按名称覆盖所有 widget.value，
-			//             从而彻底消除原生按索引恢复造成的错位。
+			// 在任何原生配置代码运行前捕获工作流里的命名属性。原生 widgets_values 即使
+			// 发生错位也不会参与本节点的恢复决策。
+			const savedNamedSettings = serializedNamedSettings(args[0]);
 			const result = configured?.apply(this, args);
-			stabilizeLogic(this);          // 参数修复：同步执行、立即生效、不能延后
-			// ⚠️ 延迟多次恢复：某些 ComfyUI 版本会在 onConfigure 之后继续恢复 widget 值
-			// （如异步 DOM widget 同步），可能覆盖我们的恢复结果。
-			// 通过多次延迟执行 stabilizeLogic，确保最终值始终来自 properties（按名称）。
-			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 0);
-			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 50);
-			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 200);
+			restoreSerializedNamedSettings(this, savedNamedSettings);
+			stabilizeLogic(this);
+			// 延迟阶段仍先恢复同一份命名属性，再按变量名覆盖 widget，绝不按位置恢复。
+			for (const delay of [0, 50, 200]) setTimeout(() => { restoreSerializedNamedSettings(this, savedNamedSettings); stabilizeLogic(this); stabilizeUI(this); }, delay);
 			fitPanelOnceAfterLoad(this);
 			return result;
 		};
@@ -736,7 +896,9 @@ app.registerExtension({
 			setTimeout(() => { stabilizeLogic(this); stabilizeUI(this); }, 0);
 			return result;
 		};
-		const removed = nodeType.prototype.onRemoved; nodeType.prototype.onRemoved = function (...args) { if (this.__gjjMiniMaxLoadFitTimer) clearTimeout(this.__gjjMiniMaxLoadFitTimer); cleanup(this); return removed?.apply(this, args); };
+		const resized = nodeType.prototype.onResize; nodeType.prototype.onResize = function (size) { const result = resized?.apply(this, arguments); resizePromptOnly(this, size || this.size); return result; };
+		const drawn = nodeType.prototype.onDrawForeground; nodeType.prototype.onDrawForeground = function (...args) { syncPromptBackupFromWidget(this); return drawn?.apply(this, args); };
+		const removed = nodeType.prototype.onRemoved; nodeType.prototype.onRemoved = function (...args) { if (this.__gjjMiniMaxLoadFitTimer) clearTimeout(this.__gjjMiniMaxLoadFitTimer); if (this.__gjjMiniMaxLibraryParseTimer) clearTimeout(this.__gjjMiniMaxLibraryParseTimer); cleanup(this); return removed?.apply(this, args); };
 		const serialized = nodeType.prototype.onSerialize; nodeType.prototype.onSerialize = function (data) {
 			// ✅ 保存时：先同步刷新一次 properties backup（按名称），确保 data.properties 中
 			// 的 SETTINGS_BACKUP_PROPERTY 是完整且按名称映射的，与节点类型解耦。
@@ -749,10 +911,10 @@ app.registerExtension({
 			data.properties[SETTINGS_SCHEMA_PROPERTY] = SETTINGS_SCHEMA_VERSION;
 			return result;
 		};
-		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); this.properties ||= {}; this.properties[IMAGE_COUNT_PROPERTY] = Number(message?.source_image_count?.[0] || 0); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; syncBranchButtons(this); renderResultPreview(this, message); return result; };
+		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); this.properties ||= {}; this.properties[IMAGE_COUNT_PROPERTY] = Number(message?.source_image_count?.[0] || 0); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; void addParsedLibraryButtons(this, "actor", message?.parsed_actors); void addParsedLibraryButtons(this, "scene", message?.parsed_scenes); syncBranchButtons(this); renderResultPreview(this, message); return result; };
 	},
 	setup() {
-		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) { node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); if (detail.preview_media || detail.preview_video || detail.gifs || detail.animated || detail.videos || detail.video || detail.output_path) renderResultPreview(node, detail); } });
+		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) { node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); if (Array.isArray(detail.parsed_actors)) void addParsedLibraryButtons(node, "actor", detail.parsed_actors); if (Array.isArray(detail.parsed_scenes)) void addParsedLibraryButtons(node, "scene", detail.parsed_scenes); if (detail.preview_media || detail.preview_video || detail.gifs || detail.animated || detail.videos || detail.video || detail.output_path) renderResultPreview(node, detail); } });
 		if (!window.__gjjMiniMaxH3TemplateSourceListener) { window.__gjjMiniMaxH3TemplateSourceListener = true; const refresh = () => setTimeout(() => { for (const node of app.graph?._nodes || []) if (String(node?.comfyClass || node?.type || "") === NODE_TYPE) syncBroadcastUI(node); }, 50); window.addEventListener("gjj-generation-template-sources-updated", refresh); window.addEventListener("gjj-variable-broadcast-updated", refresh); window.addEventListener("gjj-template-params-updated", refresh); }
 		window.addEventListener("pointerdown", (event) => { if (event.target?.closest?.(".gjj-mh3-library")) return; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE) closeLibraryPicker(node); if (event.target?.closest?.(".gjj-mh3-pop,.gjj-mh3-btn")) return; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE) closePopups(node); }, true);
 	},

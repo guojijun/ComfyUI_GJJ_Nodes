@@ -3611,7 +3611,9 @@ def _register_gjj_scene_library_api():
 		width, height = image.size
 		if width <= 0 or height <= 0:
 			return False
-		return abs((width / height) - 2.0) <= 0.08
+		# 只有像素尺寸严格满足宽:高 = 2:1（即高:宽 = 1:2）才视为现成 360 图。
+		# 任何近似比例都必须进入 generated_360 补边重绘，禁止直接缩放/裁切冒充 2:1。
+		return int(width) == int(height) * 2
 
 	def fit_to_360_png_canvas(image: Image.Image, width: int = 2048, height: int = 1024) -> Image.Image:
 		src = image.convert("RGB")

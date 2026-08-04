@@ -39,9 +39,179 @@ DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
 DEFAULT_REASONING_SYSTEM_PROMPT = (
-    "你是 MiniMax H3 视频提示词优化器。结合用户原始提示词与参考图片，补充清晰的主体、动作、镜头运动、"
-    "环境、光线和时间连续性描述。只输出可直接用于视频生成的最终提示词，不要解释，不要标题，不要输出思考过程。"
+    "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
+    "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
+    "不要解释、不要分析过程、不要 Markdown 代码块。"
 )
+
+
+def _official_prompt_rewrite_rules(mode: str, duration: float, picture_count: int) -> str:
+    seconds = f"{max(0.0, float(duration)):.2f}"
+    shared = (
+        "Follow the official MiniMax H3 video prompt rules. Preserve every user-provided dialogue word and punctuation verbatim; "
+        "put dialogue only inside <d>[Language] ...</d>. Assign stable speaker IDs (S1), (S2), etc. "
+        "For every spoken line, identify the concrete speaker outside <d> and use an explicit physical speech verb such as says, "
+        "replies, asks, or exclaims. Unless the user explicitly requests voiceover or off-screen speech, keep that speaker on-screen "
+        "with the face and mouth clearly visible during the complete line, and explicitly state that the speaker naturally moves the "
+        "lips and jaw in precise synchronization with the spoken words. Immediately after the line, state that the speaker finishes "
+        "speaking and closes the mouth. Keep all other visible characters' lips closed while they listen, react, or wait for their turn. "
+        "Never turn physical dialogue into narration, internal monologue, soundtrack vocals, or off-screen voiceover merely to simplify "
+        "the shot. Give each complete line enough uninterrupted screen time to be spoken at a natural pace; use <cutoff> only when the "
+        "user intentionally requests truncated speech. Avoid poses, objects, framing, or camera moves that hide the active speaker's mouth. "
+        "Every referenced scene or environment must fill the entire target frame edge-to-edge; never preserve blank margins, white canvas, "
+        "letterboxing, reference-board borders, or unused space from a source image. "
+        "Write shot actions in playback order. [Shot 1] has no timestamp; later shots use strictly increasing "
+        "[Shot N] At MM:SS.mmm timestamps within the video duration. Express camera motion naturally with motion type, "
+        "and add amplitude/speed only when meaningful. Keep visible text verbatim in double quotes. "
+        "Do not invent extra dialogue or translate dialogue. Output only the finished prompt, without commentary or Markdown fences."
+    )
+    if mode == "R2VA":
+        return (
+            f"Task: full-reference generation, duration {seconds} seconds, {picture_count} reference picture(s). {shared} "
+            "Write all structural prose in English and use exactly these six sections in order: subject_definitions:, summary:, "
+            "retention_analysis:, detailed_description:, overall_soundscape:, non_diegetic_music:. "
+            "In subject_definitions, define reusable characters, scenes, objects, costumes, or styles as <Subject N> and cite their "
+            "source <Picture N>. Keep every existing <Picture N> index unchanged. Use [reference generation] in summary unless another "
+            "relationship is explicitly required. Use only valid retention markers: fully_preserved, partially_preserved, "
+            "attribute_transfer, weak_reference. In detailed_description, cite <Subject N> naturally where it appears. "
+            "Use 350-500 English words when content complexity warrants it."
+        )
+    instruction = {
+        "I2VA": "The first line must be: For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
+        "FL2VA": f"The first line must align Picture 1 with 0.00 seconds and Picture 2 with the {seconds}-second mark of the actual final shot, using the official first/last-frame alignment sentence.",
+        "L2VA": f"The first line must align <Picture 1> with the {seconds}-second mark of the actual final shot, using the official last-frame alignment sentence.",
+        "T2VA": "Do not add any picture-alignment instruction.",
+    }.get(mode, "")
+    path_rule = {
+        "I2VA": "Develop continuously from the first-frame anchor while preserving identity, clothing, objects, composition, and spatial relationships.",
+        "FL2VA": "Describe one continuous observable path from the first-frame state to the last-frame state; prefer a single shot unless the user explicitly requests cuts.",
+        "L2VA": "Infer a plausible earlier state and describe a continuous convergence toward the referenced final frame.",
+        "T2VA": "Construct a complete audiovisual timeline directly from the user's text.",
+    }.get(mode, "")
+    return (
+        f"Task: {mode}, duration {seconds} seconds. {shared} {instruction} {path_rule} "
+        "After the optional alignment line and one blank line, output exactly three fields: "
+        "integrated_multimodal_description:, overall_soundscape:, non_diegetic_music:. "
+        "overall_soundscape must summarize ambience, physical sounds, and non-verbal human sounds without repeating dialogue. "
+        "non_diegetic_music describes audience-only music using instrumentation, tempo, rhythm, and dynamics, or N/A when absent."
+    )
+
+
+def _spoken_language(text: str) -> str:
+    value = str(text or "")
+    if re.search(r"[\u3040-\u30ff]", value):
+        return "Japanese"
+    if re.search(r"[\uac00-\ud7af]", value):
+        return "Korean"
+    if re.search(r"[\u3400-\u9fff]", value):
+        return "Chinese"
+    return "English"
+
+
+def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: float, picture_count: int) -> str:
+    """不加载文本模型时，用确定性规则整理为 MiniMax H3 官方提示词结构。"""
+    source = str(prompt or "").strip()
+    if not source:
+        source = "A coherent cinematic scene develops naturally across the full video."
+    official_fields = ("integrated_multimodal_description:", "subject_definitions:", "detailed_description:")
+    if any(field in source for field in official_fields):
+        return source
+
+    dialogue_pattern = re.compile(
+        r"(<Picture\s+(\d+)>)\s*(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)?\s*[：:]\s*"
+        r"(.+?)(?=\s*<Picture\s+\d+>\s*(?:(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*)?[：:]|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    dialogue_matches = list(dialogue_pattern.finditer(source))
+    speaker_ids: dict[str, int] = {}
+    dialogue_actions: list[str] = []
+    for match in dialogue_matches:
+        picture_label = match.group(1)
+        picture_number = int(match.group(2))
+        spoken_text = match.group(3).strip()
+        if not spoken_text:
+            continue
+        speaker_key = picture_label.casefold()
+        if speaker_key not in speaker_ids:
+            speaker_ids[speaker_key] = len(speaker_ids) + 1
+        speaker_id = speaker_ids[speaker_key]
+        subject_label = f"<Subject {picture_number}>" if mode == "R2VA" else picture_label
+        dialogue_actions.append(
+            f"{subject_label} (S{speaker_id}) remains on-screen with the face and mouth clearly visible, turns naturally toward "
+            f"the listener, and says while the lips and jaw move in precise synchronization with the spoken words: "
+            f"<d>[{_spoken_language(spoken_text)}] {spoken_text}</d> {subject_label} (S{speaker_id}) finishes speaking and closes "
+            "the mouth while the other visible characters keep their lips closed and react naturally."
+        )
+
+    narrative = dialogue_pattern.sub(" ", source)
+    named_dialogue_pattern = re.compile(
+        r"([A-Za-z\u3400-\u9fff][A-Za-z0-9_\u3400-\u9fff·]{0,29})\s*"
+        r"(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*[：:]\s*"
+        r"(.+?)(?=\s*[A-Za-z\u3400-\u9fff][A-Za-z0-9_\u3400-\u9fff·]{0,29}\s*"
+        r"(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*[：:]|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for match in named_dialogue_pattern.finditer(narrative):
+        speaker_name = match.group(1).strip()
+        spoken_text = match.group(2).strip()
+        speaker_key = speaker_name.casefold()
+        if speaker_key not in speaker_ids:
+            speaker_ids[speaker_key] = len(speaker_ids) + 1
+        speaker_id = speaker_ids[speaker_key]
+        dialogue_actions.append(
+            f"{speaker_name} (S{speaker_id}) remains on-screen with the face and mouth clearly visible and says while the lips "
+            f"and jaw move in precise synchronization with the spoken words: <d>[{_spoken_language(spoken_text)}] {spoken_text}</d> "
+            f"{speaker_name} (S{speaker_id}) finishes speaking and closes the mouth while the other visible characters keep their "
+            "lips closed and react naturally."
+        )
+    narrative = named_dialogue_pattern.sub(" ", narrative)
+    if mode == "R2VA":
+        narrative = re.sub(
+            r"场景\s*[：:]\s*<Picture\s+(\d+)>",
+            r"The scene and environment fully reference <Subject \1> and fill the entire frame edge-to-edge without blank margins, white canvas, letterboxing, or reference-board borders.",
+            narrative,
+            flags=re.IGNORECASE,
+        )
+    narrative = re.sub(r"\s+", " ", narrative).strip(" ,，。;")
+    if mode == "R2VA":
+        narrative = re.sub(r"<Picture\s+(\d+)>", r"<Subject \1>", narrative)
+    body_parts = [part for part in (narrative, *dialogue_actions) if part]
+    body = " ".join(body_parts) or "The referenced subjects perform the requested actions in a coherent continuous scene."
+    timeline = f"[Shot 1] Cinematic, coherent audiovisual continuity for the full {max(0.0, float(duration)):.2f}-second video. {body}"
+
+    if mode == "R2VA":
+        referenced_numbers = sorted({int(number) for number in re.findall(r"<Picture\s+(\d+)>", source)})
+        if not referenced_numbers:
+            referenced_numbers = list(range(1, max(0, int(picture_count)) + 1))
+        definitions = " ".join(
+            f"<Picture {number}> defines <Subject {number}> as the corresponding reusable visual subject or environment."
+            for number in referenced_numbers
+        ) or "No reusable picture subject is defined."
+        retention = " ".join(
+            f"<Picture {number}>: fully_preserved - preserve identity, appearance, colors, clothing, objects, and spatial traits."
+            for number in referenced_numbers
+        ) or "N/A"
+        return (
+            f"subject_definitions: {definitions}\n\n"
+            "summary: [reference generation] Preserve the referenced subjects and realize the user's requested scene, actions, and dialogue.\n\n"
+            f"retention_analysis: {retention}\n\n"
+            f"detailed_description: {timeline}\n\n"
+            "overall_soundscape: Natural room tone, physical movement sounds, clothing movement, breathing, and synchronized non-verbal reactions support the visible action without repeating dialogue.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+    seconds = f"{max(0.0, float(duration)):.2f}"
+    alignment = {
+        "I2VA": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
+        "FL2VA": f"How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the {seconds}-second mark of the target video.",
+        "L2VA": f"How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the {seconds}-second mark of the target video.",
+    }.get(mode, "")
+    core = (
+        f"integrated_multimodal_description: {timeline}\n\n"
+        "overall_soundscape: Natural ambience, synchronized physical action sounds, breathing, and non-verbal reactions support the visible action without repeating dialogue.\n\n"
+        "non_diegetic_music: N/A"
+    )
+    return f"{alignment}\n\n{core}" if alignment else core
 
 
 def _register_upload_route() -> None:
@@ -315,11 +485,48 @@ def _library_selection_names(raw: Any) -> list[str]:
 
 
 def _prompt_library_references(prompt: str, marker: str) -> list[str]:
-    pattern = r"@([^\s,，。；;、!?！？（）()<>《》\n]+)" if marker == "@" else r"🏕️\s*([^\s,，。；;、!?！？（）()<>《》\n]+)"
-    return list(dict.fromkeys(match.strip() for match in re.findall(pattern, str(prompt or "")) if match.strip()))
+    root_name = "character_library" if marker == "@" else "scene_library"
+    root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / root_name
+    if not root.is_dir():
+        return []
+    candidates: list[tuple[str, str]] = []
+    for path in root.glob("*/manifest.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        canonical = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(data.get("name") or data.get("id") or path.parent.name)).strip()
+        for alias in {canonical, str(data.get("id") or "").strip(), path.parent.name}:
+            if alias:
+                candidates.append((alias, canonical))
+    marker_pattern = r"@\s*" if marker == "@" else r"🏕️?\s*"
+    matches: list[tuple[int, int, str]] = []
+    text = str(prompt or "")
+    for alias, canonical in candidates:
+        for found in re.finditer(marker_pattern + re.escape(alias), text, flags=re.IGNORECASE):
+            matches.append((found.start(), len(alias), canonical))
+    # 同一位置优先采用最长的真实库名称；不同位置按提示词出现顺序排列。
+    best_by_position: dict[int, tuple[int, str]] = {}
+    for position, length, canonical in matches:
+        current = best_by_position.get(position)
+        if current is None or length > current[0]:
+            best_by_position[position] = (length, canonical)
+    result: list[str] = []
+    seen: set[str] = set()
+    for position in sorted(best_by_position):
+        canonical = best_by_position[position][1]
+        key = canonical.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(canonical)
+    return result
 
 
-def _library_reference_assets(kind: str, names: list[str]) -> list[tuple[torch.Tensor, str, str]]:
+def _library_reference_assets(
+    kind: str, names: list[str], reference_width: int | None = None, reference_height: int | None = None,
+) -> list[tuple[torch.Tensor, str, str]]:
     root_name = "character_library" if kind == "actor" else "scene_library"
     root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / root_name
     if not root.is_dir() or not names:
@@ -354,14 +561,75 @@ def _library_reference_assets(kind: str, names: list[str]) -> list[tuple[torch.T
             import numpy as np
             from PIL import Image, ImageOps
             image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+            if kind == "actor":
+                try:
+                    from .gjj_storyboard_grid_generator import _make_qwen_direct_character_reference_boards
+
+                    board_width = max(64, int(reference_width or image.width))
+                    board_height = max(64, int(reference_height or image.height))
+                    boards = _make_qwen_direct_character_reference_boards(
+                        str(requested), [(str(requested), "")], board_width, board_height, max_boards=1, single_view_only=False,
+                    )
+                    if boards:
+                        image = boards[0][1].convert("RGB")
+                except Exception as collage_error:
+                    print(f"[GJJ MiniMaxH3Studio] 生成角色拼图失败，回退单图 {requested}: {collage_error}")
             tensor = torch.from_numpy(np.asarray(image).astype("float32") / 255.0).unsqueeze(0)
         except Exception as exc:
-            print(f"[GJJ MiniMaxH3Studio] 读取{root_name}引用图失败 {path.name}: {exc}")
+            print(f"[GJJ MiniMaxH3Studio] 读取{root_name}引用图失败 {requested}: {exc}")
             continue
         name = re.sub(r"^\s*(?:♀️|♂️|♀|♂)\s*", "", str(data.get("name") or data.get("id") or requested)).strip()
         notes = re.sub(r"\s+", " ", str(data.get("notes") or "")).strip()
         result.append((tensor, name, notes))
     return result
+
+
+def _replace_library_picture_references(
+    prompt: str, references: list[tuple[str, str, int]],
+) -> str:
+    """把正文中的角色/场景库标记替换为对应的 MiniMax 图片引用。"""
+    result = str(prompt or "")
+    # 名称按长度降序处理，避免短名称是长名称前缀时提前截断。
+    for kind, name, picture_index in sorted(references, key=lambda item: len(item[1]), reverse=True):
+        marker = r"@\s*" if kind == "actor" else r"🏕️?\s*"
+        result = re.sub(
+            marker + re.escape(str(name)),
+            f"<Picture {picture_index}>",
+            result,
+            flags=re.IGNORECASE,
+        )
+    result = re.sub(r"(<Picture \d+>)\s*说\s*[：:]", r"\1：", result)
+    if any(kind == "scene" for kind, _name, _index in references):
+        result = re.sub(
+            r"^\s*(?:<Picture \d+>\s*)+在\s*<Picture \d+>\s*对话\s*[.。]?\s*",
+            "",
+            result,
+        )
+    return result
+
+
+def _save_library_reference_debug_images(
+    images: list[torch.Tensor],
+    assets: list[tuple[str, torch.Tensor, str, str]],
+    unique_id: Any,
+) -> list[Path]:
+    if not images or not assets:
+        return []
+    try:
+        from .common_utils.temp_files import gjjutils_temp_path, gjjutils_write_temp_tensor_images
+
+        saved: list[Path] = []
+        for index, ((kind, _original, name, _notes), tensor) in enumerate(zip(assets, images), start=1):
+            infos = gjjutils_write_temp_tensor_images(tensor, format="PNG", suffix=".png", media_type="image")
+            if not infos:
+                continue
+            path = gjjutils_temp_path(str(infos[0]["filename"]))
+            saved.append(path)
+            print(f"[GJJ_MiniMaxH3Studio] 参考图 <Picture {index}> · {kind} · {name} · 节点 {unique_id}: {path}", flush=True)
+        return saved
+    except Exception as exc:
+        print(f"[GJJ_MiniMaxH3Studio] 保存角色/场景参考图到 temp 失败: {exc}", flush=True)
+        return []
 
 
 class GJJ_MiniMaxH3Studio:
@@ -481,59 +749,94 @@ class GJJ_MiniMaxH3Studio:
             internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
             _merge_media(media, internal_media)
         prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
-        from .gjj_gemma_text_generate import _inject_character_notes, _inject_scene_notes
-        selected_actors = _library_selection_names(first("selected_actors_json", "[]"))
-        selected_scenes = _library_selection_names(first("selected_scenes_json", "[]"))
-        selected_actors.extend(name for name in _prompt_library_references(prompt, "@") if name.casefold() not in {item.casefold() for item in selected_actors})
-        selected_scenes.extend(name for name in _prompt_library_references(prompt, "🏕️") if name.casefold() not in {item.casefold() for item in selected_scenes})
-        prompt = _inject_character_notes(prompt, selected_actors)
-        prompt = _inject_scene_notes(prompt, selected_scenes)
-        external_image_count = len(media["images"])
-        library_assets = (
-            [("actor", *item) for item in _library_reference_assets("actor", selected_actors)]
-            + [("scene", *item) for item in _library_reference_assets("scene", selected_scenes)]
-        )[:max(0, 10 - external_image_count)]
-        picture_lines: list[str] = []
-        for offset, (kind, image, name, notes) in enumerate(library_assets, start=external_image_count + 1):
-            marker = "@" if kind == "actor" else "🏕️"
-            media["images"].append(image)
-            picture_lines.append(f"<Picture {offset}>{marker}{name}{f'（{notes}）' if notes else ''}")
-        if picture_lines:
-            prompt = ("\n".join(picture_lines) + "\n" + prompt).strip()
+        raw_prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
+        prompt_actors = _prompt_library_references(prompt, "@")
+        prompt_scenes = _prompt_library_references(prompt, "🏕️")
+        # 提示词中出现某类资料库引用时，以提示词解析结果替换节点内该类选择。
+        selected_actors = prompt_actors or _library_selection_names(first("selected_actors_json", "[]"))
+        selected_scenes = prompt_scenes or _library_selection_names(first("selected_scenes_json", "[]"))
+        unique_id = first("unique_id")
+        _send_status(unique_id, "已解析上游角色与场景引用", 0.0, {
+            "parsed_actors": selected_actors,
+            "parsed_scenes": selected_scenes,
+        })
+        external_images = list(media["images"])
+        external_image_count = len(external_images)
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
+        pooled_assets = {
+            "scene": _library_reference_assets("scene", selected_scenes, panel_width, panel_height),
+            "actor": _library_reference_assets("actor", selected_actors, panel_width, panel_height),
+        }
+
+        def part_library_assets(kind: str, names: list[str]) -> list[tuple[str, torch.Tensor, str, str]]:
+            available = {name.casefold(): (image, name, notes) for image, name, notes in pooled_assets[kind]}
+            return [(kind, *available[name.casefold()]) for name in names if name.casefold() in available]
+
+        segmented_library_media: list[tuple[str, dict[str, list[Any]], list[tuple[str, torch.Tensor, str, str]]]] = []
+        for raw_part in raw_prompt_parts:
+            part_actors = _prompt_library_references(raw_part, "@") if prompt_actors else selected_actors
+            part_scenes = _prompt_library_references(raw_part, "🏕️") if prompt_scenes else selected_scenes
+            part_assets = (
+                part_library_assets("scene", part_scenes)
+                + part_library_assets("actor", part_actors)
+            )[:max(0, 10 - external_image_count)]
+            part_images: list[torch.Tensor] = []
+            part_references: list[tuple[str, str, int]] = []
+            scene_lines: list[str] = []
+            for picture_number, (kind, image, name, _notes) in enumerate(part_assets, start=1):
+                part_images.append(image)
+                part_references.append((kind, name, picture_number))
+                if kind == "scene":
+                    scene_lines.append(f"场景：<Picture {picture_number}>")
+            segment_prompt = _replace_library_picture_references(raw_part, part_references) if part_references else raw_part
+            if scene_lines:
+                segment_prompt = "\n".join([*scene_lines, segment_prompt]).strip()
+            segmented_library_media.append((segment_prompt, {
+                "images": part_images + list(external_images),
+                "videos": list(media["videos"]), "audios": list(media["audios"]),
+            }, part_assets))
+        library_assets = list(dict.fromkeys(
+            (asset[0], asset[2].casefold()) for _part, _part_media, assets in segmented_library_media for asset in assets
+        ))
+        media["images"] = list(segmented_library_media[0][1]["images"]) if segmented_library_media else external_images
         source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
         width, height = _target_dimensions(
             panel_width, panel_height, _visual_size(source), bool(first("use_source_size", True)), str(first("size_mode", "宽高")),
         )
-        _align_media(media, width, height, str(first("resize_fit_mode", "裁剪")), str(first("resize_anchor", "上")))
+        fit_mode = str(first("resize_fit_mode", "裁剪"))
+        resize_anchor = str(first("resize_anchor", "上"))
+        for _segment_prompt, segment_media, assets in segmented_library_media:
+            segment_media["images"] = [
+                _resize_visual(
+                    image,
+                    width,
+                    height,
+                    ("裁剪" if assets[index][0] == "scene" else "适应") if index < len(assets) else fit_mode,
+                    resize_anchor,
+                )
+                for index, image in enumerate(segment_media["images"])
+            ]
+            segment_media["videos"] = [
+                (_resize_visual(frames, width, height, fit_mode, resize_anchor), audio, source_fps)
+                for frames, audio, source_fps in segment_media["videos"]
+            ]
+        if not segmented_library_media:
+            _align_media(media, width, height, fit_mode, resize_anchor)
+        debug_assets = [
+            (kind, image, name, notes)
+            for kind in ("scene", "actor") for image, name, notes in pooled_assets[kind]
+        ]
+        _save_library_reference_debug_images(
+            [asset[1] for asset in debug_assets], debug_assets, unique_id,
+        )
         fps = float(first("frame_rate", 24.0))
-        length = _aligned_frames(float(first("duration", 5.0)), fps)
+        duration = float(first("duration", 5.0))
+        length = _aligned_frames(duration, fps)
         seed = int(first("seed", 42))
         if bool(first("randomize_seed", True)):
             seed = int(torch.randint(0, 0x7FFFFFFF, (1,)).item())
-        unique_id = first("unique_id")
-        prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
-        if bool(first("reasoning_enabled", False)):
-            from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
+        prompt_parts = [item[0] for item in segmented_library_media]
 
-            reasoning_media = torch.cat(media["images"], dim=0) if media["images"] else None
-            inferred_parts: list[str] = []
-            for infer_index, raw_part in enumerate(prompt_parts):
-                _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
-                generated = GJJ_GemmaTextGenerate().generate(
-                    clip_name=str(first("reasoning_model", DEFAULT_REASONING_KEYWORD)),
-                    clip_type="stable_diffusion", clip_device="default", prompt=raw_part,
-                    max_length=1024, sampling_mode="off", temperature=0.35, top_k=64,
-                    top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
-                    presence_penalty="0.0", thinking=False, use_default_template=True,
-                    media=reasoning_media, unique_id=unique_id,
-                    system_prompt=str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT)),
-                    keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
-                )
-                payload = generated.get("result") if isinstance(generated, dict) else generated
-                inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
-                inferred_parts.append(inferred or raw_part)
-            prompt_parts = inferred_parts
         image_count = len(media["images"])
         requested_branch = str(first("image_branch", "参考") or "参考")
         if library_assets:
@@ -547,8 +850,63 @@ class GJJ_MiniMaxH3Studio:
         else:
             image_branch = "参考"
 
+        has_reference_av = bool(media["videos"] or media["audios"])
+        if image_branch == "参考" and (image_count or has_reference_av):
+            official_prompt_mode = "R2VA"
+        elif image_branch in {"首尾帧", "分段首尾帧"}:
+            official_prompt_mode = "FL2VA"
+        elif image_branch == "尾帧":
+            official_prompt_mode = "L2VA"
+        elif image_count == 1:
+            official_prompt_mode = "I2VA"
+        elif not has_reference_av:
+            official_prompt_mode = "T2VA"
+        else:
+            official_prompt_mode = "R2VA"
+
+        if bool(first("reasoning_enabled", False)):
+            from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
+
+            configured_system_prompt = str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT) or "").strip()
+            reasoning_system_prompt = "\n\n".join(filter(None, (
+                configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
+                _official_prompt_rewrite_rules(official_prompt_mode, duration, image_count),
+            )))
+            inferred_parts: list[str] = []
+            for infer_index, raw_part in enumerate(prompt_parts):
+                reasoning_images = segmented_library_media[infer_index][1]["images"]
+                reasoning_media = torch.cat(reasoning_images, dim=0) if reasoning_images else None
+                _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
+                generated = GJJ_GemmaTextGenerate().generate(
+                    clip_name=str(first("reasoning_model", DEFAULT_REASONING_KEYWORD)),
+                    clip_type="stable_diffusion", clip_device="default", prompt=raw_part,
+                    max_length=2048, sampling_mode="off", temperature=0.35, top_k=64,
+                    top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
+                    presence_penalty="0.0", thinking=False, use_default_template=True,
+                    media=reasoning_media, unique_id=unique_id,
+                    system_prompt=reasoning_system_prompt,
+                    keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
+                )
+                payload = generated.get("result") if isinstance(generated, dict) else generated
+                inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
+                inferred_parts.append(inferred or raw_part)
+            prompt_parts = inferred_parts
+        else:
+            prompt_parts = [
+                _officialize_prompt_without_reasoning(
+                    raw_part, official_prompt_mode, duration, len(segmented_library_media[index][1]["images"]),
+                )
+                for index, raw_part in enumerate(prompt_parts)
+            ]
+
         jobs: list[tuple[str, dict[str, list[Any]]]] = []
-        if image_branch == "分段首尾帧":
+        if library_assets:
+            for index, segment_prompt in enumerate(prompt_parts):
+                segment_media = segmented_library_media[index][1]
+                jobs.append((segment_prompt, {
+                    "images": list(segment_media["images"]), "videos": list(segment_media["videos"]), "audios": list(segment_media["audios"]),
+                }))
+        elif image_branch == "分段首尾帧":
             for index in range(image_count - 1):
                 jobs.append((prompt_parts[min(index, len(prompt_parts) - 1)], {
                     "images": [media["images"][index], media["images"][index + 1]],
@@ -601,6 +959,12 @@ class GJJ_MiniMaxH3Studio:
         for index, (segment_prompt, current_media) in enumerate(jobs):
             mode = segment_mode(current_media)
             modes.append(mode)
+            print(
+                f"\n[GJJ_MiniMaxH3Studio] ===== 最终提示词 {index + 1}/{segment_count} · {mode} =====\n"
+                f"{segment_prompt}\n"
+                f"[GJJ_MiniMaxH3Studio] ===== 最终提示词结束 =====\n",
+                flush=True,
+            )
             model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode}：加载模型...", index / segment_count)
             if model_name not in runtime_models:
@@ -651,7 +1015,7 @@ class GJJ_MiniMaxH3Studio:
         final_mode = image_branch if image_count else ("队列" if segment_count > 1 else modes[0])
         frame_count = sum(int(item.shape[0]) for item in decoded_segments)
         ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
-        ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"]})
+        ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"], "parsed_actors": selected_actors, "parsed_scenes": selected_scenes})
         # 最终合并文件写出后再次推送完整预览字段，覆盖分段过程中显示的最后一段视频。
         _send_status(unique_id, f"{final_mode} 完成：{frame_count} 帧", 1.0, ui)
         return {"ui": ui, "result": (video,)}
