@@ -1044,6 +1044,7 @@ export class GJJ_Utils {
                 /(^|[_\-. ])(?:v(?:er(?:sion)?)?\d+(?:[._-]\d+){0,3}|rev(?:ision)?[_-]?\d+(?:[._-]\d+)*|release[_-]?\d+(?:[._-]\d+)*|20\d{2}(?:[._-]\d{1,2}){1,2})(?=$|[_\-. ])/gi,
                 "$1",
             )
+            .replace(/(^|[_\-. ])\d+(?:[._-]\d+)+(?:[bmk])?(?=$|[_\-. ])/gi, "$1")
             .replace(/[_\-. ]+/g, "_")
             .replace(/^_+|_+$/g, "");
     }
@@ -1154,7 +1155,7 @@ export class GJJ_Utils {
         const hasCandidates = choices.length > 0;
         const currentAvailable = Boolean(current && !isNoModel && allChoices.includes(current));
         const currentMissing = Boolean(current && !isNoModel && !currentAvailable);
-        const missingDefault = GJJ_Utils._modelTreeMissingDefault(entry) || (!hasCandidates && !!defaultModel);
+        const missingDefault = (GJJ_Utils._modelTreeMissingDefault(entry) && !hasCandidates) || (!hasCandidates && !!defaultModel);
         const missing = missingDefault || (currentMissing && !hasCandidates);
         const value = isNoModel
             ? current

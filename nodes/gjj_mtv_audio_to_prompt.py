@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import hashlib
+import json
 import math
 import re
 from typing import Any
@@ -9,7 +10,6 @@ from typing import Any
 import torch
 
 from .gjj_audio_separator import GJJ_AudioSeparator, _scan_melband_models
-from .gjj_audio_silence_trimmer import _align_audio_queue_to_8n_plus_blank
 from .gjj_gemma_text_generate import (
     GJJ_GemmaTextGenerate,
     _coerce_media_for_textgen,
@@ -20,35 +20,12 @@ from .common_utils.mtv_ltx_prompt_settings import read_mtv_ltx_prompt_settings
 
 NODE_NAME = "GJJ_MTVAudioToPrompt"
 NODE_DISPLAY_NAME = "GJJ · 🎬 MTV音频转提示词"
+MAX_VIDEO_SEGMENT_SECONDS = 15.0
+FRAME_ALIGNMENT_MODELS = ("WAN", "LTX", "MinimaxH3")
 DEFAULT_TEXT_MODEL = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
-DEFAULT_PROMPT_INSTRUCTION = """你是专业音乐视频（MTV/MV）剧情分镜导演。
-根据本段歌词的具体含义，把它改编成一幕电影化剧情画面，写一条可用于生成 MTV 参考图的中文提示词。
-人物必须在做与歌词内容直接相关的具体事情，并随歌词切换地点、行为、表情、道具、天气和叙事情境。
-必须描述：剧情事件、人物动作、具体环境、镜头景别与角度、灯光、色彩和情绪。
-这不是演唱会、舞台录像或歌手表演：除非歌词明确提到，否则禁止舞台、麦克风、乐器、观众、对镜演唱和表演手势。
-不要描写唱歌、张嘴或口型；静态参考图中的人物保持自然闭嘴。
-不要写解释、标题、序号、时间码、Markdown 或多条方案，只输出一段紧凑且可直接使用的画面提示词。"""
-DEFAULT_EMPTY_INSTRUCTION = """这是没有人声的音乐段落。请阅读随附的整首歌词，从歌词的故事、地点、时代、季节、天气、物件和情绪中选择一个无人环境，写成电影化空镜提示词。
-空镜必须属于整首歌词构建的故事世界，并能承担片头建立、段落过渡或片尾收束作用；不要脱离歌词自动生成演出现场。
-除非歌词明确出现，否则禁止舞台、聚光灯、钢琴、乐器、麦克风、指挥台、观众席、演唱会和演出空间。
-不要出现人物、人物外观、观众、歌手、舞者或动态人物剪影。
-不要写解释、标题、序号、时间码、Markdown 或多条方案，只输出一段紧凑且可直接使用的画面提示词。"""
-REFERENCE_FEATURE_INSTRUCTION = """分析所附参考图片，只提取后续生成画面时必须保持一致的人物设定。
-需要准确描述：人物数量、每个人的性别呈现与年龄段、脸型与五官、肤色、发型发色、体型，以及额头印记、痣等稳定身份标志。
-必须描述人物的固定服装设计，包括服装类型、主色、关键剪裁、固定装饰和饰品；不同视角中重复出现的服装细节应合并为一套一致设定。
-多张图片若是同一人物的不同角度，应合并成一个一致人物描述；若是不同人物，应分别编号描述。
-禁止描述人物的站姿、动作、表情，也不要描述参考图的背景、排版、构图、镜头、光线或图片质量。
-只输出一段紧凑的中文“人物与服装设定”，不要标题、解释、Markdown 或生成建议。"""
 REFERENCE_FEATURE_CACHE_VERSION = "identity_costume_v3"
 LTX_SINGING_TAG = "人物嘴巴自然闭合，面部特写。"
 STATIC_SINGLE_CENTER_TAG = ("画面中只有一位主角，面部特写。")
-STATIC_REFERENCE_CONSTRAINT = (
-    "本段将先生成静态参考图：人物嘴巴保持自然闭合或放松中性状态，"
-    "不要描写张嘴、口型、喊叫或夸张演唱表情；视频阶段的演唱动作由固定标签交给 LTX 处理。"
-    "人物参考图只用于保持主角外貌与固定服装；画面采用一位主角居中的胸像中近景或人物特写，"
-    "人物头部与上半身必须占据画面主要面积、五官清晰；禁止远景、全景、大全景、全身小人以及人物占比过小。"
-    "背景仍需铺满当前歌词对应的完整场景并具有清晰环境层次。"
-)
 REFERENCE_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 _REFERENCE_FEATURE_CACHE: OrderedDict[tuple[Any, ...], str] = OrderedDict()
 _REFERENCE_FEATURE_CACHE_MAX = 8
@@ -56,6 +33,59 @@ _PERSON_PROMPT_PATTERN = re.compile(
     r"人物|歌手|主唱|乐手|舞者|演员|男(?:人|性|生)|女(?:人|性|生)|"
     r"少年|少女|青年|中年|老人|面孔|脸部|全身|半身|人像"
 )
+
+
+def _fill_prompt_template(template: Any, **values: Any) -> str:
+    result = str(template or "")
+    for name, value in values.items():
+        result = result.replace("{" + str(name) + "}", str(value or ""))
+    return result.strip()
+
+
+def _library_items(value: Any, marker: str) -> list[dict[str, str]]:
+    try:
+        source = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source = []
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in source if isinstance(source, list) else []:
+        data = item if isinstance(item, dict) else {"name": item}
+        name = re.sub(r"^\s*[♀♂]\ufe0f?\s*", "", str(data.get("name") or data.get("id") or "")).strip().lstrip("@🏕️")
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        result.append({"name": f"{marker}{name}", "notes": re.sub(r"\s+", " ", str(data.get("notes") or "")).strip()})
+    return result
+
+
+def _assigned_items(items: list[dict[str, str]], index: int, total: int) -> list[dict[str, str]]:
+    if not items:
+        return []
+    assigned = items[index - 1::max(1, total)]
+    return assigned or [items[(index - 1) % len(items)]]
+
+
+def _storyboard_line(text: str, index: int, scene_names: list[str], actor_names: list[str]) -> str:
+    clean = re.sub(r"^```[^\n]*|```$", "", str(text or "").strip(), flags=re.I).strip()
+    clean = " ".join(line.strip() for line in clean.splitlines() if line.strip() and line.strip() != "---")
+    parts = [part.strip() for part in clean.split("||")]
+    scene_prefix = " ".join(scene_names).strip()
+    actor_prefix = " ".join(actor_names).strip()
+    if len(parts) >= 3:
+        keyframe = parts[1]
+        video = parts[2]
+    else:
+        keyframe = clean or "依据当前歌词设计的电影化关键帧"
+        video = clean or "承接相邻分镜的连贯镜头运动与人物动作"
+    if scene_prefix and not any(name in keyframe for name in scene_names):
+        keyframe = f"{scene_prefix} {keyframe}"
+    if not scene_names:
+        keyframe = keyframe.replace("🏕️", "")
+        video = video.replace("🏕️", "")
+    if actor_prefix and not any(name in f"{keyframe} {video}" for name in actor_names):
+        keyframe = f"{actor_prefix} {keyframe}"
+    return f"{index}||{keyframe}||{video}"
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -68,6 +98,21 @@ def _send_status(unique_id: Any, text: str) -> None:
             "gjj_node_progress",
             {"node": str(unique_id), "text": str(text or "")},
         )
+    except Exception:
+        pass
+
+
+def _send_prompt_preview(unique_id: Any, text: str, completed: int = 0, total: int = 0) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_sync("gjj_mtv_prompt_preview", {
+            "node": str(unique_id),
+            "text": str(text or ""),
+            "completed": int(completed),
+            "total": int(total),
+        })
     except Exception:
         pass
 
@@ -113,9 +158,10 @@ def _segment_timeline(
     vocal_threshold_db: float = -48.0,
 ) -> list[dict[str, Any]]:
     duration = max(0.001, float(duration))
-    minimum = max(0.1, float(min_seconds))
-    maximum = max(minimum, float(max_seconds))
-    # “最长分段”只是软目标，所有切点必须来自歌词边界，绝不按秒数硬切人声。
+    minimum = min(MAX_VIDEO_SEGMENT_SECONDS, max(0.1, float(min_seconds)))
+    maximum = min(MAX_VIDEO_SEGMENT_SECONDS, max(minimum, float(max_seconds)))
+    # “最长分段”是下游视频模型的硬安全上限。优先使用歌词/气口边界；
+    # 上限内没有安全边界时必须在上限处切分，避免产生几十秒 latent/attention mask。
     # 第一行开始用于分离片头空镜，最后一行结束用于分离片尾空镜；
     # 中间优先在相邻歌词之间的人声低能量气口切分。
     safe_boundaries: set[float] = set()
@@ -123,6 +169,12 @@ def _segment_timeline(
         boundary = _breath_aware_boundary(vocals, previous, following, duration)
         if boundary is not None:
             safe_boundaries.add(float(boundary))
+    # 不只依赖 SRT 气口：歌词时间可能覆盖整句，且常见的 300~900ms 停顿
+    # 不会被下方“纯音乐过门”（要求约 1 秒）识别。把人声轨上的明确静音末端
+    # 也作为安全候选，避免明明已有静音却在 max_seconds 处兜底硬切。
+    safe_boundaries.update(
+        _detect_vocal_silence_boundaries(vocals, vocal_threshold_db)
+    )
     activity_intervals = _detect_vocal_activity_intervals(vocals, vocal_threshold_db)
     if entries:
         safe_boundaries.add(max(0.0, min(duration, float(entries[0]["start"]))))
@@ -159,20 +211,14 @@ def _segment_timeline(
             if start + 1e-6 < point <= search_end
             and point not in mandatory_activity_boundaries
         ]
-        candidates_after_target = [
-            point for point in safe_boundaries
-            if point > target_end
-        ]
         if candidates_before_target:
             end = candidates_before_target[-1]
-        elif next_activity_boundary is not None:
+        elif next_activity_boundary is not None and next_activity_boundary <= target_end + 1e-6:
             # 真实人声开始/结束是强制边界，用于把中间纯音乐过门独立成无人空镜。
             end = next_activity_boundary
-        elif candidates_after_target:
-            # 当前歌词跨过最长时间时延长到下一处歌词安全边界，避免半句戛然而止。
-            end = candidates_after_target[0]
         else:
-            end = duration
+            # 单句或连续人声跨过上限时强制切分；后续淡入淡出负责抑制硬切爆音。
+            end = target_end
         if end <= start + 1e-6:
             end = duration
         lyrics = [
@@ -186,12 +232,16 @@ def _segment_timeline(
     # 强制人声边界可能产生很短的片头、过门或片尾；这些短段交给 LTX
     # 会形成不足 3 秒的视频段，并让固定长度的参考 guide 超出 latent。
     # 开头并入后一段，结尾并入前一段；中间短段优先并到不会超过
-    # “最长分段”软目标的一侧，否则选择合并后总时长较短的一侧。
+    # 硬上限内的一侧；若两侧合并都会越界，则保留该短段，绝不为满足最短值破坏上限。
     while len(segments) > 1:
         short_index = next(
             (
                 index for index, segment in enumerate(segments)
                 if float(segment["end"]) - float(segment["start"]) < minimum - 1e-6
+                and (
+                    (index > 0 and float(segment["end"]) - float(segments[index - 1]["start"]) <= maximum + 1e-6)
+                    or (index + 1 < len(segments) and float(segments[index + 1]["end"]) - float(segment["start"]) <= maximum + 1e-6)
+                )
             ),
             None,
         )
@@ -227,6 +277,118 @@ def _segment_timeline(
             str(part).strip() for part in lyric_parts if str(part or "").strip()
         )
     return segments
+
+
+def _aligned_frame_count_down(*, seconds: float, fps: float, alignment_model: str, minimum_seconds: float = 0.0) -> int:
+    """返回不超过给定时长的最大合法帧数；只向下对齐，绝不补长。"""
+    available = max(0, int(math.floor(max(0.0, float(seconds)) * max(0.01, float(fps)) + 1e-9)))
+    mode = str(alignment_model or "LTX").strip().casefold()
+    if mode == "wan":
+        modulus, remainder, minimum = 4, 1, 5
+    elif mode in {"minimax h3", "minimaxh3", "minimax"}:
+        modulus, remainder, minimum = 17, 5, 5
+    else:
+        modulus, remainder, minimum = 8, 1, 9
+    aligned = available - ((available - remainder) % modulus)
+    requested_minimum = max(minimum, int(math.ceil(max(0.0, float(minimum_seconds)) * max(0.01, float(fps)) - 1e-9)))
+    return aligned if aligned >= requested_minimum else 0
+
+
+def _align_segments_to_video_model(
+    *,
+    segments: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+    duration: float,
+    min_seconds: float,
+    max_seconds: float,
+    fps: float,
+    alignment_model: str,
+) -> list[dict[str, Any]]:
+    """在原断点范围内向短侧吸附，生成无需后补帧的连续音频段。"""
+    if not segments:
+        return []
+    maximum = min(MAX_VIDEO_SEGMENT_SECONDS, max(0.1, float(max_seconds)))
+    total = max(0.0, float(duration))
+    cursor = 0.0
+    aligned_segments: list[dict[str, Any]] = []
+    raw_ends = [float(item["end"]) for item in segments]
+    if not raw_ends or raw_ends[-1] < total - 1e-6:
+        raw_ends.append(total)
+
+    for raw_index, raw_end in enumerate(raw_ends):
+        target_end = min(total, max(cursor, raw_end))
+        is_final_target = raw_index == len(raw_ends) - 1
+        while target_end - cursor > 1e-6:
+            available = min(maximum, target_end - cursor)
+            frame_count = _aligned_frame_count_down(
+                seconds=available,
+                fps=fps,
+                alignment_model=alignment_model,
+                minimum_seconds=0.0 if is_final_target else min_seconds,
+            )
+            if frame_count <= 0:
+                break
+            end = min(target_end, cursor + frame_count / max(0.01, float(fps)))
+            lyrics = [
+                str(item["text"]).strip()
+                for item in entries
+                if item["end"] > cursor + 1e-6 and item["start"] < end - 1e-6 and str(item["text"]).strip()
+            ]
+            aligned_segments.append({"start": cursor, "end": end, "lyrics": "\n".join(lyrics)})
+            cursor = end
+            if available < maximum - 1e-6:
+                break
+        if cursor >= total - 1e-6:
+            break
+    return aligned_segments
+
+
+def _detect_vocal_silence_boundaries(
+    vocals: dict[str, Any] | None,
+    threshold_db: float,
+) -> list[float]:
+    """返回明确静音区间靠近末端的切点，给后续向下帧对齐保留余量。"""
+    if not isinstance(vocals, dict):
+        return []
+    waveform = vocals.get("waveform")
+    sample_rate = int(vocals.get("sample_rate") or 0)
+    if not isinstance(waveform, torch.Tensor) or sample_rate <= 0 or waveform.numel() <= 0:
+        return []
+    try:
+        mono = waveform.detach().float().cpu()
+        while mono.ndim > 1:
+            mono = mono.mean(dim=0)
+        window = max(32, int(round(sample_rate * 0.04)))
+        hop = max(16, int(round(sample_rate * 0.02)))
+        if mono.numel() < window:
+            return []
+        rms = torch.nn.functional.avg_pool1d(
+            mono.square().view(1, 1, -1),
+            kernel_size=window,
+            stride=hop,
+        ).sqrt().flatten()
+        if rms.numel() <= 0:
+            return []
+        absolute_threshold = 10.0 ** (float(threshold_db) / 20.0)
+        peak = float(torch.max(rms).item())
+        silence_threshold = max(absolute_threshold, peak * 0.03)
+        silent = rms < silence_threshold
+        # 至少约 360ms，既过滤字间微停顿，也足以容纳 LTX/WAN 向下帧吸附。
+        sustained = max(2, int(math.ceil(0.36 / (hop / float(sample_rate)))))
+        boundaries: list[float] = []
+        run_start: int | None = None
+        for index, is_silent in enumerate(silent.tolist() + [False]):
+            if is_silent and run_start is None:
+                run_start = index
+            elif not is_silent and run_start is not None:
+                if index - run_start >= sustained:
+                    # 取静音末端前 60ms；后续即使向较短方向对齐，仍大概率落在静音内。
+                    point = (index * hop + window) / float(sample_rate) - 0.06
+                    boundaries.append(max(0.0, min(mono.numel() / float(sample_rate), point)))
+                run_start = None
+        return boundaries
+    except Exception:
+        return []
 
 
 def _detect_vocal_activity_intervals(
@@ -414,7 +576,7 @@ def _unwrap(result: Any) -> str:
     return str(result or "").strip()
 
 
-def _reference_cache_key(reference_images: torch.Tensor, text_model: Any) -> tuple[Any, ...]:
+def _reference_cache_key(reference_images: torch.Tensor, text_model: Any, instruction: Any = "") -> tuple[Any, ...]:
     tensor = reference_images.detach().float().cpu().contiguous()
     digest = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
     return (
@@ -422,6 +584,7 @@ def _reference_cache_key(reference_images: torch.Tensor, text_model: Any) -> tup
         tuple(int(item) for item in tensor.shape),
         digest,
         str(text_model or ""),
+        hashlib.sha256(str(instruction or "").encode("utf-8")).hexdigest(),
         REFERENCE_FEATURE_CACHE_VERSION,
     )
 
@@ -466,21 +629,25 @@ class GJJ_MTVAudioToPrompt:
     OUTPUT_NODE = True
     DESCRIPTION = "将 ACE 音乐音频与歌词 SRT 自动分段，分离人声/伴奏，并用 GJJ_GemmaTextGenerate 逐段生成 MTV 参考画面与 LTX 视频提示词；可从参考图反推并缓存人物特征。"
     SEARCH_ALIASES = ["MTV", "MV", "音频转提示词", "歌词分镜", "LTX", "音乐视频提示词"]
-    RETURN_TYPES = ("AUDIO", "STRING", "AUDIO")
-    RETURN_NAMES = ("完整人声分段列表", "所有分段提示词", "整段背景音乐")
-    OUTPUT_IS_LIST = (True, False, False)
+    RETURN_TYPES = ("AUDIO", "STRING", "AUDIO", "STRING")
+    RETURN_NAMES = ("完整人声分段列表", "所有分段提示词", "整段背景音乐", "同步 SRT")
+    OUTPUT_IS_LIST = (True, False, False, False)
     OUTPUT_TOOLTIPS = (
         "一次输出按时间排序的全部 AUDIO 人声分段列表；无人声段保留为等长静音。",
         "整首音乐的所有分段提示词一次性完整输出，不受“当前分段序号”影响；段落之间以换行、---、换行分隔。",
         "人声分离后的完整背景音乐，供后期与人声合成。",
+        "最终使用的同步 SRT；既可能来自外部输入，也可能由 📁 音乐自动通过 Qwen3 ASR 与强制对齐生成。",
     )
     GJJ_UI = {
-        "toolbar": ["🧠", "⏰", "📢", "📒"],
+        "toolbar": ["📁", "👤", "🏕️", "🧠", "⏰", "📢", "📒"],
         "hidden_parameters": [
             "text_model", "separator_model", "min_segment_seconds", "max_segment_seconds",
             "vocal_threshold_db", "target_lufs", "current_segment", "fps", "max_tokens",
             "temperature", "seed", "keep_model", "prompt_instruction", "empty_prompt_instruction",
             "boundary_fade_seconds", "vocal_prompt_tag", "static_closeup_tag",
+            "media_file", "asr_model_name", "aligner_model_name",
+            "selected_actors_json", "selected_scenes_json",
+            "alignment_model",
         ],
     }
     GJJ_HELP = {
@@ -531,30 +698,38 @@ class GJJ_MTVAudioToPrompt:
     @classmethod
     def INPUT_TYPES(cls):
         text_models = _text_encoder_options()
-        text_model_choices = [DEFAULT_TEXT_MODEL] + [
-            item for item in text_models
-            if str(item).replace("\\", "/").rsplit("/", 1)[-1].lower() != DEFAULT_TEXT_MODEL.lower()
-        ]
+        text_model_choices = list(dict.fromkeys([DEFAULT_TEXT_MODEL, *text_models]))
+        text_models_missing = not bool(text_models)
         separator_models = _scan_melband_models()
-        if not separator_models or separator_models[0].startswith("["):
+        separator_models_missing = not separator_models or separator_models[0].startswith("[")
+        if separator_models_missing:
             separator_models = ["MelBandRoformer_fp16.safetensors"] + separator_models
+        from .gjj_qwen3_asr_text_formats import (
+            ALIGNER_MODEL_REPOS, ASR_MODEL_REPOS, _list_local_model_names,
+        )
+        asr_default = next(iter(ASR_MODEL_REPOS))
+        aligner_default = next(iter(ALIGNER_MODEL_REPOS))
+        local_asr_models = _list_local_model_names("asr")
+        local_aligner_models = _list_local_model_names("aligner")
+        asr_models = list(dict.fromkeys([asr_default, *local_asr_models]))
+        aligner_models = list(dict.fromkeys([aligner_default, *local_aligner_models]))
         return {
             "required": {
-                "audio": ("AUDIO", {"display_name": "音乐音频", "tooltip": "对齐 GJJ_AudioAceMusicGenerator 的“音乐音频输出”。"}),
-                "srt": ("STRING", {"forceInput": True, "multiline": True, "display_name": "歌词 SRT", "tooltip": "对齐 GJJ_AudioAceMusicGenerator 的“原歌词SRT”。"}),
                 "text_model": (text_model_choices, _hidden({
                     "default": DEFAULT_TEXT_MODEL, "display_name": "提示词反推模型",
+                    "modelTreeMissingDefault": text_models_missing,
                 })),
                 "separator_model": (separator_models, _hidden({
                     "default": separator_models[0] if separator_models else "", "display_name": "人声分离模型",
+                    "modelTreeMissingDefault": separator_models_missing,
                 })),
                 "min_segment_seconds": ("FLOAT", _hidden({
                     "default": 3.0, "min": 0.1, "max": 120.0, "step": 0.1, "display_name": "最短分段（秒）",
                 })),
                 "max_segment_seconds": ("FLOAT", _hidden({
-                    "default": 8.0, "min": 0.1, "max": 300.0, "step": 0.1,
-                    "display_name": "最长分段软目标（秒）",
-                    "tooltip": "优先在此时长内寻找歌词安全边界；一句歌词跨过该时长时会自动延长，绝不硬切人声。",
+                    "default": 8.0, "min": 0.1, "max": 15.0, "step": 0.1,
+                    "display_name": "最长分段硬上限（秒）",
+                    "tooltip": "优先在此时长内寻找歌词或气口边界；没有安全边界时也会在上限处切分，防止视频模型注意力遮罩与 latent 过长。",
                 })),
                 "vocal_threshold_db": ("FLOAT", _hidden({
                     "default": -48.0, "min": -120.0, "max": 0.0, "step": 1.0, "display_name": "人声判定阈值 dB",
@@ -579,10 +754,10 @@ class GJJ_MTVAudioToPrompt:
                 })),
                 "keep_model": ("BOOLEAN", _hidden({"default": True, "display_name": "保持提示词模型"})),
                 "prompt_instruction": ("STRING", _hidden({
-                    "default": DEFAULT_PROMPT_INSTRUCTION, "multiline": True, "display_name": "有人声提示词指令",
+                    "default": "", "multiline": True, "display_name": "有人声提示词指令",
                 })),
                 "empty_prompt_instruction": ("STRING", _hidden({
-                    "default": DEFAULT_EMPTY_INSTRUCTION, "multiline": True, "display_name": "无人声提示词指令",
+                    "default": "", "multiline": True, "display_name": "无人声提示词指令",
                 })),
                 "boundary_fade_seconds": ("FLOAT", _hidden({
                     "default": 0.05, "min": 0.0, "max": 2.0, "step": 0.01, "display_name": "分段边缘淡化（秒）",
@@ -602,6 +777,8 @@ class GJJ_MTVAudioToPrompt:
                 })),
             },
             "optional": {
+                "audio": ("AUDIO", {"display_name": "可选音乐音频", "tooltip": "未连接时使用主面板 📁 选择的音频或视频音轨。"}),
+                "srt": ("STRING", {"forceInput": True, "multiline": True, "display_name": "可选歌词 SRT", "tooltip": "留空且使用 📁 音乐时，自动通过 Qwen3 ASR 与强制对齐生成同步 SRT。"}),
                 "reference_image": (
                     REFERENCE_IMAGE_TYPE,
                     {
@@ -609,18 +786,28 @@ class GJJ_MTVAudioToPrompt:
                         "tooltip": "支持 GJJ_BATCH_IMAGE 与普通 IMAGE。接入后先反推并缓存人物身份、脸部、发型、体型和服饰特征；后续所有涉及人物的提示词必须以参考图为准。",
                     },
                 ),
+                "media_file": ("STRING", _hidden({"default": "", "display_name": "本地音频/视频素材"})),
+                "asr_model_name": (asr_models, _hidden({"default": asr_default, "display_name": "ASR 模型", "modelTreeMissingDefault": not local_asr_models})),
+                "aligner_model_name": (aligner_models, _hidden({"default": aligner_default, "display_name": "强制对齐模型", "modelTreeMissingDefault": not local_aligner_models})),
+                "selected_actors_json": ("STRING", _hidden({"default": "[]", "display_name": "选中角色库项目"})),
+                "selected_scenes_json": ("STRING", _hidden({"default": "[]", "display_name": "选中场景库项目"})),
+                "alignment_model": (FRAME_ALIGNMENT_MODELS, _hidden({
+                    "default": "LTX", "display_name": "视频模型帧对齐",
+                    "tooltip": "WAN=4n+1，LTX=8n+1，MinimaxH3=17n+5。分段断点只向较短方向吸附，不在末尾补帧。",
+                })),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
-    def IS_CHANGED(cls, *args, seed: int = 0, **kwargs):
+    def IS_CHANGED(cls, **kwargs):
+        seed = kwargs.get("seed", 0)
+        seed = seed[0] if isinstance(seed, list) and seed else seed
         return float("NaN") if int(seed or 0) == 0 else str(seed)
 
     def convert(
         self,
-        audio,
-        srt,
+        *,
         text_model,
         separator_model,
         min_segment_seconds=3.0,
@@ -633,26 +820,65 @@ class GJJ_MTVAudioToPrompt:
         temperature=0.65,
         seed=0,
         keep_model=True,
-        prompt_instruction=DEFAULT_PROMPT_INSTRUCTION,
-        empty_prompt_instruction=DEFAULT_EMPTY_INSTRUCTION,
+        prompt_instruction="",
+        empty_prompt_instruction="",
         boundary_fade_seconds=0.05,
         vocal_prompt_tag=LTX_SINGING_TAG,
         static_closeup_tag=STATIC_SINGLE_CENTER_TAG,
         unique_id=None,
         reference_image=None,
+        audio=None,
+        media_file="",
+        srt="",
+        asr_model_name=None,
+        aligner_model_name=None,
+        selected_actors_json="[]",
+        selected_scenes_json="[]",
+        alignment_model="LTX",
     ):
+        _send_prompt_preview(unique_id, "", 0, 0)
+        if audio is None:
+            if not str(media_file or "").strip():
+                raise RuntimeError("请连接可选音乐音频接口，或点击主面板 📁 选择音频/视频素材。")
+            from .gjj_audio_separator import _load_audio_from_file
+            audio = _load_audio_from_file(media_file)
+        if not str(srt or "").strip():
+            if not str(media_file or "").strip():
+                raise RuntimeError("SRT 未连接；自动生成同步 SRT 需要先用主面板 📁 打开音乐素材。")
+            _send_status(unique_id, "正在通过 Qwen3 ASR 生成同步 SRT…")
+            from .gjj_qwen3_asr_text_formats import transcribe_and_align_backend
+            asr_result = transcribe_and_align_backend(
+                audio=audio,
+                asr_model_name=asr_model_name,
+                aligner_model_name=aligner_model_name,
+                output_order_json='["srt"]',
+                unique_id=unique_id,
+            )
+            values = asr_result.get("result", ()) if isinstance(asr_result, dict) else asr_result
+            srt = str(values[0] if values else "").strip()
+            if not srt:
+                raise RuntimeError("Qwen3 ASR 未生成有效的同步 SRT。")
         shared_prompts = read_mtv_ltx_prompt_settings()
-        prompt_instruction = shared_prompts.get("prompt_instruction", prompt_instruction)
-        empty_prompt_instruction = shared_prompts.get("empty_prompt_instruction", empty_prompt_instruction)
+        # 兼容保留旧工作流参数槽位，但推理命令只从 📒 共享面板读取。
+        prompt_instruction = shared_prompts.get("prompt_instruction", "")
+        empty_prompt_instruction = shared_prompts.get("empty_prompt_instruction", "")
         vocal_image_prompt = shared_prompts.get("vocal_image_prompt", vocal_prompt_tag)
+        reference_feature_instruction = shared_prompts.get("reference_feature_instruction", "")
+        segment_request_template = shared_prompts.get("segment_request_template", "")
+        if not segment_request_template.strip():
+            raise RuntimeError("📒 提示词参数中的“分镜完整请求模板”为空。")
         generator = GJJ_GemmaTextGenerate()
+        selected_actors = _library_items(selected_actors_json, "@")
+        selected_scenes = _library_items(selected_scenes_json, "🏕️")
         reference_features = ""
         if reference_image is not None:
+            if not reference_feature_instruction.strip():
+                raise RuntimeError("📒 提示词参数中的“参考图特征提取指令”为空。")
             _send_status(unique_id, "1/5 正在读取参考图片并反推人物特征…")
             reference_images = _coerce_media_for_textgen(reference_image)
             if not isinstance(reference_images, torch.Tensor) or reference_images.ndim != 4 or not reference_images.numel():
                 raise RuntimeError("可选人物参考图片没有解析出有效的 GJJ_BATCH_IMAGE / IMAGE。")
-            reference_key = _reference_cache_key(reference_images, text_model)
+            reference_key = _reference_cache_key(reference_images, text_model, reference_feature_instruction)
             reference_features = _cached_reference_features(reference_key)
             if reference_features:
                 _send_status(unique_id, "1/5 已命中人物参考特征缓存。")
@@ -661,7 +887,7 @@ class GJJ_MTVAudioToPrompt:
                     clip_name=text_model,
                     clip_type="stable_diffusion",
                     clip_device="default",
-                    prompt=REFERENCE_FEATURE_INSTRUCTION,
+                    prompt=reference_feature_instruction,
                     max_length=max(256, int(max_tokens)),
                     sampling_mode="off",
                     temperature=0.2,
@@ -708,17 +934,29 @@ class GJJ_MTVAudioToPrompt:
             if str(item.get("text") or "").strip()
         ).strip()
         segments = _segment_timeline(
-            duration,
-            entries,
-            min_segment_seconds,
-            max_segment_seconds,
+            duration=duration,
+            entries=entries,
+            min_seconds=min_segment_seconds,
+            max_seconds=max_segment_seconds,
             vocals=vocals,
             vocal_threshold_db=vocal_threshold_db,
         )
+        segments = _align_segments_to_video_model(
+            segments=segments,
+            entries=entries,
+            duration=duration,
+            min_seconds=min_segment_seconds,
+            max_seconds=max_segment_seconds,
+            fps=fps,
+            alignment_model=alignment_model,
+        )
+        if not segments:
+            raise RuntimeError("当前音频在所选视频模型帧规则下无法形成有效分段，请增大最长分段或检查帧率。")
         _send_status(unique_id, f"{timeline_step}/{progress_total} 已按 SRT 与时间参数划分 {len(segments)} 个段落")
         generated: list[str] = []
         vocal_queue: list[dict[str, Any]] = []
         metadata: list[dict[str, Any]] = []
+        _send_prompt_preview(unique_id, "", 0, len(segments))
 
         for index, segment in enumerate(segments, start=1):
             _send_status(unique_id, f"{generation_step}/{progress_total} 正在生成第 {index}/{len(segments)} 段提示词…")
@@ -739,52 +977,69 @@ class GJJ_MTVAudioToPrompt:
             instruction = str(prompt_instruction if singing_segment else empty_prompt_instruction)
             if not singing_segment and index == 1:
                 empty_scene_role = "片头"
-                empty_scene_constraint = (
-                    "这是片头开场空镜：从整首歌词最核心的故事地点或象征物中选择无人环境，"
-                    "建立故事发生的时间、空间和情绪悬念；不要呈现结束或余韵画面。"
-                )
+                empty_scene_constraint = shared_prompts.get("silent_intro_context", "")
             elif not singing_segment and index == len(segments):
                 empty_scene_role = "片尾"
-                empty_scene_constraint = (
-                    "这是片尾收束空镜：回到整首歌词中的关键地点或象征物，用环境变化表现故事结束后的余韵；"
-                    "必须与片头采用不同的场景、布景、镜头机位、景别、构图和灯光状态，禁止重复片头画面。"
-                )
+                empty_scene_constraint = shared_prompts.get("silent_outro_context", "")
             elif not singing_segment:
                 empty_scene_role = "过场"
-                empty_scene_constraint = (
-                    "这是中段过场空镜：从整首歌词的故事地点、物件或自然环境中选择无人画面，"
-                    "使用与片头、片尾不同的环境细节和镜头构图承接剧情与音乐节奏。"
-                )
+                empty_scene_constraint = shared_prompts.get("silent_transition_context", "")
             else:
                 empty_scene_role = "歌词剧情"
                 empty_scene_constraint = ""
             vocal_performance_constraint = (
-                f"\n静态参考图约束：{STATIC_REFERENCE_CONSTRAINT}\n"
+                shared_prompts.get("singing_segment_context", "")
                 if singing_segment else
-                "\n硬性空镜约束：本段没有有效歌词，只生成无人空镜；"
-                "不要出现人物、人物参考特征、观众、歌手、演唱、舞蹈或人物剪影。"
-                f"{empty_scene_constraint}\n"
+                _fill_prompt_template(
+                    shared_prompts.get("silent_segment_context", ""),
+                    silent_role_context=empty_scene_constraint,
+                )
             )
             lyric_context = segment["lyrics"] or (
-                "（本段无人声；以下为整首歌词，仅用于确定空镜的故事世界）\n"
-                + (full_lyrics_context or "（没有可用歌词）")
+                _fill_prompt_template(
+                    shared_prompts.get("silent_lyrics_context", ""),
+                    full_lyrics=full_lyrics_context,
+                )
             )
+            assigned_actors = _assigned_items(selected_actors, index, len(segments))
+            assigned_scenes = _assigned_items(selected_scenes, index, len(segments))
+            actor_default_notes = shared_prompts.get("actor_default_notes", "")
+            scene_default_notes = shared_prompts.get("scene_default_notes", "")
+            actor_lines = "\n".join(f"- {item['name']}：{item['notes'] or actor_default_notes}" for item in selected_actors)
+            scene_lines = "\n".join(f"- {item['name']}：{item['notes'] or scene_default_notes}" for item in selected_scenes)
+            assigned_actor_names = [item["name"] for item in assigned_actors]
+            assigned_scene_names = [item["name"] for item in assigned_scenes]
+            scene_marker_rule = (
+                shared_prompts.get("selected_scene_rule", "")
+                if selected_scenes else
+                shared_prompts.get("unselected_scene_rule", "")
+            )
+            next_scenes = _assigned_items(selected_scenes, index + 1, len(segments)) if index < len(segments) else []
+            next_actors = _assigned_items(selected_actors, index + 1, len(segments)) if index < len(segments) else []
             reference_constraint = (
-                f"内部固定人物与服装设定（后处理会统一添加，禁止在正文中复述或改写）：{reference_features}\n"
-                "只用这份设定确认主角的外貌和固定服装，正文统一称为“主角”，不要另行描述、修改或替换服装。"
-                "只设计一位主角居中的独立画面，以胸像中近景或人物特写为主，人物头部与上半身占据画面主要面积、五官清晰；"
-                "禁止远景、全景、大全景、全身小人以及人物在画面中占比过小；"
-                "背景必须铺满画面，并根据本段歌词设计完整环境、前后景层次和丰富细节。\n"
+                _fill_prompt_template(
+                    shared_prompts.get("reference_identity_context", ""),
+                    reference_features=reference_features,
+                )
                 if reference_features and singing_segment else ""
             )
-            request = (
-                f"{instruction}\n\n"
-                f"段落时间：{segment['start']:.3f}s - {segment['end']:.3f}s\n"
-                f"歌词：\n{lyric_context}\n"
-                f"{reference_constraint}"
-                f"{vocal_performance_constraint}"
-                "请优先依据歌词语义设计具体剧情事件、人物行为和对应场景；"
-                "音频只用于判断节奏、情绪和动作强弱，不要把有人声自动理解成舞台演唱。"
+            request = _fill_prompt_template(
+                segment_request_template,
+                instruction=instruction,
+                start=f"{segment['start']:.3f}",
+                end=f"{segment['end']:.3f}",
+                duration=f"{segment['end'] - segment['start']:.3f}",
+                lyrics=lyric_context,
+                reference_context=reference_constraint,
+                segment_context=vocal_performance_constraint,
+                actor_library=actor_lines,
+                scene_library=scene_lines,
+                assigned_scenes="、".join(assigned_scene_names),
+                assigned_actors="、".join(assigned_actor_names),
+                previous_storyboard=generated[-1] if generated else "",
+                next_scenes="、".join(item["name"] for item in next_scenes),
+                next_actors="、".join(item["name"] for item in next_actors),
+                scene_marker_rule=scene_marker_rule,
             )
             text = _unwrap(generator.generate(
                 clip_name=text_model,
@@ -814,16 +1069,9 @@ class GJJ_MTVAudioToPrompt:
                     if singing_segment else
                     "无人的空舞台建立镜头，舞台灯光随音乐节奏缓慢流动，电影感构图，细腻氛围，平稳推进镜头。"
                 )
-            if singing_segment:
-                text = _apply_reference_identity(text, reference_features, "")
-                text = f"{str(vocal_image_prompt or '').strip()}{text}"
-            elif empty_scene_role == "片头":
-                text = f"片头开场空镜，与片尾使用不同场景和构图。{text}"
-            elif empty_scene_role == "片尾":
-                text = f"片尾收束空镜，必须与片头使用不同场景、布景、机位和构图。{text}"
-            else:
-                text = f"中段过场空镜。{text}"
+            text = _storyboard_line(text, index, assigned_scene_names, assigned_actor_names)
             generated.append(text)
+            _send_prompt_preview(unique_id, "\n---\n".join(generated), index, len(segments))
             metadata.append({
                 "segment": index,
                 "start": round(segment["start"], 3),
@@ -835,9 +1083,6 @@ class GJJ_MTVAudioToPrompt:
                 "prompt": text,
             })
 
-        # 与 GJJ_AudioSilenceTrimmer 保持一致：只在每段末尾补静音到 8n+1 帧，
-        # 不拉伸或重采样人声主体，方便直接驱动 LTX 视频。
-        vocal_queue = _align_audio_queue_to_8n_plus_blank(vocal_queue, float(fps))
         selected = max(1, min(int(current_segment), len(vocal_queue))) - 1
         # 人声输出始终返回完整 AUDIO 列表；current_segment 仅兼容既有工作流，
         # 不再筛选人声输出。提示词同样始终聚合完整分段列表。
@@ -861,6 +1106,7 @@ class GJJ_MTVAudioToPrompt:
                 vocal_queue,
                 prompt_text,
                 background,
+                str(srt or ""),
             ),
         }
 

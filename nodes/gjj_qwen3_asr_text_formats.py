@@ -873,6 +873,7 @@ class GJJ_Qwen3ASRTextFormats:
         output_order_json='["text_list"]',
         unique_id=None,
         extra_pnginfo=None,
+        emit_frontend_events=True,
     ):
         # 从 properties 读取 Boolean 值（通过 extra_pnginfo + unique_id）
         props = {}
@@ -993,11 +994,12 @@ class GJJ_Qwen3ASRTextFormats:
             # 发送生成的文本到前端显示（通过 custom event）
             try:
                 from server import PromptServer
-                PromptServer.instance.send_sync("gjj_qwen3_text_generated", {
-                    "node": str(unique_id),
-                    "text_list": text_list,
-                    "timestamps": timestamps,
-                })
+                if emit_frontend_events:
+                    PromptServer.instance.send_sync("gjj_qwen3_text_generated", {
+                        "node": str(unique_id),
+                        "text_list": text_list,
+                        "timestamps": timestamps,
+                    })
             except Exception:
                 pass
 
@@ -1059,6 +1061,13 @@ class GJJ_Qwen3ASRTextFormats:
                 )
                 _send_error_to_frontend(unique_id, detailed_error)
                 raise RuntimeError(detailed_error) from exc
+
+
+def transcribe_and_align_backend(**kwargs):
+    """供其它节点复用 ASR/对齐运行时，不触发 Qwen 节点专属前端面板事件。"""
+    return GJJ_Qwen3ASRTextFormats().transcribe_and_align(
+        **{**kwargs, "emit_frontend_events": False},
+    )
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Qwen3ASRTextFormats}

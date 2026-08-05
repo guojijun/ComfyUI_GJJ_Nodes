@@ -427,11 +427,11 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) if (node.comfyClass === TARGET) patchNode(node);
 		api.addEventListener("gjj_node_progress", (event) => {
 			const data = event.detail || {};
-			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) setStatus(node, data.text || "", data.progress);
+			for (const node of app.graph?._nodes || []) if (node.comfyClass === TARGET && String(node.id) === String(data.node)) setStatus(node, data.text || "", data.progress);
 		});
 		api.addEventListener("gjj_qwen3_text_generated", (event) => {
 			const data = event.detail || {};
-			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) {
+			for (const node of app.graph?._nodes || []) if (node.comfyClass === TARGET && String(node.id) === String(data.node)) {
 				const state = ensurePanel(node);
 				state.textDisplay.textContent = data.text_list || EMPTY_TEXT;
 				state.textDisplay.style.display = data.text_list ? "block" : "none";
@@ -440,7 +440,7 @@ app.registerExtension({
 		});
 		api.addEventListener("gjj_qwen3_error", (event) => {
 			const data = event.detail || {};
-			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) {
+			for (const node of app.graph?._nodes || []) if (node.comfyClass === TARGET && String(node.id) === String(data.node)) {
 				const state = ensurePanel(node);
 				state.textDisplay.textContent = EMPTY_TEXT;
 				state.textDisplay.style.display = "none";

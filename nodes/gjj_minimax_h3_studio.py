@@ -24,6 +24,8 @@ from .gjj_bernini_studio import (
 from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_combine_runtime import DEFAULT_FORMAT, list_supported_formats
 from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _load_vae
+from .gjj_model_patch_bundle import GJJ_ModelPatchBundle, MISSING_SAGE_HANDLING_MODES, SAGE_ATTENTION_MODES
+from .gjj_spectrum_apply_minimax_h3 import GJJ_SpectrumApplyMiniMaxH3
 
 
 NODE_NAME = "GJJ_MiniMaxH3Studio"
@@ -38,6 +40,7 @@ DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
+MAX_AUDIO_DRIVEN_DURATION = 15.0
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
     "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
@@ -60,20 +63,28 @@ def _official_prompt_rewrite_rules(mode: str, duration: float, picture_count: in
         "user intentionally requests truncated speech. Avoid poses, objects, framing, or camera moves that hide the active speaker's mouth. "
         "Every referenced scene or environment must fill the entire target frame edge-to-edge; never preserve blank margins, white canvas, "
         "letterboxing, reference-board borders, or unused space from a source image. "
+        "Treat every repeated occurrence of the same character <Picture N> tag as the same single persistent on-screen individual, "
+        "never as a new instance. Keep exactly one instance of each referenced character unless the user explicitly requests duplicates; "
+        "never clone, duplicate, mirror, replace, or add a look-alike copy of a referenced character. "
         "Write shot actions in playback order. [Shot 1] has no timestamp; later shots use strictly increasing "
         "[Shot N] At MM:SS.mmm timestamps within the video duration. Express camera motion naturally with motion type, "
         "and add amplitude/speed only when meaningful. Keep visible text verbatim in double quotes. "
         "Do not invent extra dialogue or translate dialogue. Output only the finished prompt, without commentary or Markdown fences."
+        " Preserve every supplied <Audio N> tag exactly. Treat each 'Reference voice assignments' entry as an official MiniMax H3 "
+        "standalone reference-audio binding: the named character or referenced picture must use that <Audio N> voice identity for all "
+        "of its spoken lines. Treat the recording only as a voice-identity/timbre reference: never copy, replay, continue, quote, or "
+        "output its spoken content, performance timing, or waveform. Never renumber, remove, swap, or assign that timbre to another speaker."
     )
     if mode == "R2VA":
         return (
             f"Task: full-reference generation, duration {seconds} seconds, {picture_count} reference picture(s). {shared} "
             "Write all structural prose in English and use exactly these six sections in order: subject_definitions:, summary:, "
             "retention_analysis:, detailed_description:, overall_soundscape:, non_diegetic_music:. "
-            "In subject_definitions, define reusable characters, scenes, objects, costumes, or styles as <Subject N> and cite their "
-            "source <Picture N>. Keep every existing <Picture N> index unchanged. Use [reference generation] in summary unless another "
+            "In subject_definitions, describe reusable characters, scenes, objects, costumes, or styles directly with their existing "
+            "<Picture N> tags. Never create or use <Subject N> aliases. Keep every existing <Picture N> index unchanged. Use "
+            "[reference generation] in summary unless another "
             "relationship is explicitly required. Use only valid retention markers: fully_preserved, partially_preserved, "
-            "attribute_transfer, weak_reference. In detailed_description, cite <Subject N> naturally where it appears. "
+            "attribute_transfer, weak_reference. In detailed_description, cite <Picture N> directly wherever it appears. "
             "Use 350-500 English words when content complexity warrants it."
         )
     instruction = {
@@ -135,7 +146,7 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
         if speaker_key not in speaker_ids:
             speaker_ids[speaker_key] = len(speaker_ids) + 1
         speaker_id = speaker_ids[speaker_key]
-        subject_label = f"<Subject {picture_number}>" if mode == "R2VA" else picture_label
+        subject_label = picture_label
         dialogue_actions.append(
             f"{subject_label} (S{speaker_id}) remains on-screen with the face and mouth clearly visible, turns naturally toward "
             f"the listener, and says while the lips and jaw move in precise synchronization with the spoken words: "
@@ -168,13 +179,11 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
     if mode == "R2VA":
         narrative = re.sub(
             r"场景\s*[：:]\s*<Picture\s+(\d+)>",
-            r"The scene and environment fully reference <Subject \1> and fill the entire frame edge-to-edge without blank margins, white canvas, letterboxing, or reference-board borders.",
+            r"The scene and environment fully reference <Picture \1> and fill the entire frame edge-to-edge without blank margins, white canvas, letterboxing, or reference-board borders.",
             narrative,
             flags=re.IGNORECASE,
         )
     narrative = re.sub(r"\s+", " ", narrative).strip(" ,，。;")
-    if mode == "R2VA":
-        narrative = re.sub(r"<Picture\s+(\d+)>", r"<Subject \1>", narrative)
     body_parts = [part for part in (narrative, *dialogue_actions) if part]
     body = " ".join(body_parts) or "The referenced subjects perform the requested actions in a coherent continuous scene."
     timeline = f"[Shot 1] Cinematic, coherent audiovisual continuity for the full {max(0.0, float(duration)):.2f}-second video. {body}"
@@ -184,7 +193,7 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
         if not referenced_numbers:
             referenced_numbers = list(range(1, max(0, int(picture_count)) + 1))
         definitions = " ".join(
-            f"<Picture {number}> defines <Subject {number}> as the corresponding reusable visual subject or environment."
+            f"<Picture {number}> is the corresponding reusable visual character, scene, object, costume, or style reference."
             for number in referenced_numbers
         ) or "No reusable picture subject is defined."
         retention = " ".join(
@@ -212,6 +221,28 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
         "non_diegetic_music: N/A"
     )
     return f"{alignment}\n\n{core}" if alignment else core
+
+
+def _apply_prompt_book(
+    *,
+    prompt: str,
+    global_prompt: str,
+    negative_prompt: str,
+    prompt_replace_find: str,
+    prompt_replace_with: str,
+) -> str:
+    """按替换、全局、负面约束的顺序整理单个分段提示词。"""
+    result = str(prompt or "").strip()
+    find_text = str(prompt_replace_find or "")
+    if find_text:
+        result = re.sub(re.escape(find_text), lambda _: str(prompt_replace_with or ""), result, flags=re.IGNORECASE)
+
+    global_text = str(global_prompt or "").strip()
+    negative_text = str(negative_prompt or "").strip()
+    parts = [part for part in (global_text, result) if part]
+    if negative_text:
+        parts.append(f"Negative constraints (must not appear): {negative_text}")
+    return "\n\n".join(parts)
 
 
 def _register_upload_route() -> None:
@@ -373,6 +404,40 @@ def _aligned_frames(duration: float, fps: float) -> int:
     return value
 
 
+def _audio_duration_seconds(value: Any) -> float | None:
+    if not _is_audio(value):
+        return None
+    waveform = value.get("waveform")
+    sample_rate = int(value.get("sample_rate") or 0)
+    if not isinstance(waveform, torch.Tensor) or waveform.ndim < 1 or sample_rate <= 0:
+        return None
+    samples = int(waveform.shape[-1])
+    return float(samples) / float(sample_rate) if samples > 0 else None
+
+
+def _release_vram_before_sampling() -> None:
+    try:
+        from .gjj_gemma_text_generate import _clear_clip_cache
+        _clear_clip_cache()
+    except Exception:
+        pass
+    try:
+        import comfy.model_management as model_management
+        model_management.unload_all_models()
+        model_management.soft_empty_cache()
+    except Exception:
+        pass
+
+
+def _audio_to_cpu(value: Any) -> Any:
+    if not _is_audio(value):
+        return value
+    return {
+        **value,
+        "waveform": value["waveform"].detach().to(device="cpu").contiguous(),
+    }
+
+
 def _aligned_dimension(value: float) -> int:
     return max(352, min(1920, round(float(value) / 32) * 32))
 
@@ -428,19 +493,9 @@ def _resize_visual(value: Any, width: int, height: int, fit_mode: str, anchor: s
 def _target_dimensions(panel_width: int, panel_height: int, source_size: tuple[int, int] | None, use_source: bool, size_mode: str) -> tuple[int, int]:
     if use_source and source_size:
         return _aligned_dimension(source_size[0]), _aligned_dimension(source_size[1])
-    if not source_size or size_mode == "宽高":
-        return _aligned_dimension(panel_width), _aligned_dimension(panel_height)
-    source_width, source_height = source_size
-    ratio = source_width / max(1, source_height)
-    if size_mode == "长边":
-        edge = max(panel_width, panel_height)
-        return (_aligned_dimension(edge), _aligned_dimension(edge / ratio)) if ratio >= 1 else (_aligned_dimension(edge * ratio), _aligned_dimension(edge))
-    if size_mode == "像素":
-        area = max(1, panel_width * panel_height)
-        target_width = (area * ratio) ** 0.5
-        return _aligned_dimension(target_width), _aligned_dimension(target_width / ratio)
-    scale = min(panel_width / source_width, panel_height / source_height)
-    return _aligned_dimension(source_width * scale), _aligned_dimension(source_height * scale)
+    # MiniMax H3 的目标生成尺寸必须由画板宽高直接决定；参考图比例只由后续
+    # 拉伸/补边/留边/裁剪处理，不能再次改写 latent 的宽高。
+    return _aligned_dimension(panel_width), _aligned_dimension(panel_height)
 
 
 def _align_media(media: dict[str, list[Any]], width: int, height: int, fit_mode: str, anchor: str) -> None:
@@ -484,7 +539,7 @@ def _library_selection_names(raw: Any) -> list[str]:
     return result
 
 
-def _prompt_library_references(prompt: str, marker: str) -> list[str]:
+def _prompt_library_references(prompt: str, marker: str, *, require_marker: bool = True) -> list[str]:
     root_name = "character_library" if marker == "@" else "scene_library"
     root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / root_name
     if not root.is_dir():
@@ -501,7 +556,7 @@ def _prompt_library_references(prompt: str, marker: str) -> list[str]:
         for alias in {canonical, str(data.get("id") or "").strip(), path.parent.name}:
             if alias:
                 candidates.append((alias, canonical))
-    marker_pattern = r"@\s*" if marker == "@" else r"🏕️?\s*"
+    marker_pattern = (r"@\s*" if marker == "@" else r"🏕️?\s*") if require_marker else ""
     matches: list[tuple[int, int, str]] = []
     text = str(prompt or "")
     for alias, canonical in candidates:
@@ -584,10 +639,93 @@ def _library_reference_assets(
     return result
 
 
+def _library_reference_voices(names: list[str]) -> list[tuple[Any, str]]:
+    """读取角色库绑定音色；返回顺序与角色引用顺序一致的 MiniMax 参考音频。"""
+    character_root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / "character_library"
+    voice_root = (Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / "wav").resolve()
+    if not character_root.is_dir() or not voice_root.is_dir() or not names:
+        return []
+    manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for manifest_path in character_root.glob("*/manifest.json"):
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        display_name = re.sub(
+            r"^\s*(?:♀️|♂️|♀|♂)\s*", "",
+            str(data.get("name") or data.get("id") or manifest_path.parent.name),
+        ).strip()
+        for alias in {display_name, str(data.get("id") or "").strip(), manifest_path.parent.name}:
+            if alias:
+                manifests[alias.casefold()] = (manifest_path.parent, data)
+
+    result: list[tuple[Any, str]] = []
+    for requested in names:
+        entry = manifests.get(str(requested).casefold())
+        if not entry:
+            continue
+        _directory, data = entry
+        canonical = re.sub(
+            r"^\s*(?:♀️|♂️|♀|♂)\s*", "",
+            str(data.get("name") or data.get("id") or requested),
+        ).strip()
+        relative = str(data.get("voice_path") or data.get("voice") or "").strip().replace("\\", "/").lstrip("/")
+        candidates = [relative] if relative else []
+        if not candidates:
+            for stem in (canonical, str(data.get("id") or "").strip(), entry[0].name):
+                clean_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip("._- ")
+                if clean_stem:
+                    candidates.extend((f"{clean_stem}.wav", f"{clean_stem}.mp3"))
+        voice_path = None
+        for candidate in candidates:
+            if Path(candidate).suffix.lower() not in {".wav", ".mp3"}:
+                continue
+            resolved = (voice_root / candidate).resolve()
+            if (resolved == voice_root or voice_root in resolved.parents) and resolved.is_file():
+                voice_path = resolved
+                break
+        if voice_path is None:
+            continue
+        try:
+            from comfy_extras.nodes_audio import load as load_comfy_audio
+            waveform, sample_rate = load_comfy_audio(str(voice_path))
+            result.append(({"waveform": waveform.unsqueeze(0), "sample_rate": int(sample_rate)}, canonical))
+        except Exception as exc:
+            print(f"[GJJ MiniMaxH3Studio] 读取角色音色失败 {canonical}: {exc}")
+    return result
+
+
+def _attach_official_voice_references(prompt: str, media: dict[str, list[Any]]) -> str:
+    """用 ComfyUI MiniMax H3 官方 <Audio N> 标签声明角色与参考音色关系。"""
+    voices = list(media.get("voice_audios") or [])
+    if not voices:
+        return str(prompt or "")
+    video_audio_count = sum(1 for value in media.get("videos", []) if len(value) > 1 and value[1] is not None)
+    standalone_count = len(media.get("audios", []))
+    available = max(0, 4 - standalone_count)
+    lines: list[str] = []
+    for offset, item in enumerate(voices[:available], start=1):
+        audio_number = video_audio_count + standalone_count + offset
+        character_name = str(item.get("name") or "").strip()
+        picture_number = int(item.get("picture_index") or 0)
+        subject = f"<Picture {picture_number}>" if picture_number > 0 else character_name
+        lines.append(
+            f"<Audio {audio_number}> is the official reference voice/timbre for {subject}"
+            f" ({character_name}). Whenever this character speaks, preserve the voice identity from "
+            f"<Audio {audio_number}> and keep the assigned speaker ID consistent. Use it only as a timbre reference; "
+            "never copy, replay, continue, quote, or output the reference recording's words, performance, timing, or waveform."
+        )
+    if not lines:
+        return str(prompt or "")
+    return "\n".join(("Reference voice assignments:", *lines, str(prompt or "").strip())).strip()
+
+
 def _replace_library_picture_references(
     prompt: str, references: list[tuple[str, str, int]],
 ) -> str:
-    """把正文中的角色/场景库标记替换为对应的 MiniMax 图片引用。"""
+    """把正文中的资料库标记及已引用角色裸名替换为 MiniMax 图片引用。"""
     result = str(prompt or "")
     # 名称按长度降序处理，避免短名称是长名称前缀时提前截断。
     for kind, name, picture_index in sorted(references, key=lambda item: len(item[1]), reverse=True):
@@ -598,6 +736,34 @@ def _replace_library_picture_references(
             result,
             flags=re.IGNORECASE,
         )
+    actor_references = [item for item in references if item[0] == "actor" and str(item[1]).strip()]
+    if actor_references:
+        picture_by_name = {str(name).casefold(): picture_index for _kind, name, picture_index in actor_references}
+        names_pattern = "|".join(re.escape(str(name)) for _kind, name, _index in sorted(actor_references, key=lambda item: len(item[1]), reverse=True))
+        protected = re.compile(r"(<d>.*?</d>|“[^”]*”|\"[^\"]*\")", flags=re.IGNORECASE | re.DOTALL)
+        chunks = protected.split(result)
+        for index in range(0, len(chunks), 2):
+            chunks[index] = re.sub(
+                names_pattern,
+                lambda match: f"<Picture {picture_by_name[match.group(0).casefold()]}>",
+                chunks[index],
+                flags=re.IGNORECASE,
+            )
+        result = "".join(chunks)
+        unique_actor_pictures = list(dict.fromkeys(
+            int(picture_index)
+            for _kind, _name, picture_index in sorted(actor_references, key=lambda item: item[2])
+        ))
+        actor_tags = ", ".join(f"<Picture {picture_index}>" for picture_index in unique_actor_pictures)
+        result = "\n".join((
+            "CAST IDENTITY AND COUNT LOCK — mandatory: "
+            f"The scene contains exactly {len(unique_actor_pictures)} referenced cast individual(s): {actor_tags}. "
+            "Each tag represents exactly one persistent physical person throughout the complete shot. Every repeated "
+            "mention of the same tag refers to that same person already present in the frame. Never create a second "
+            "instance, clone, twin, duplicate, mirrored copy, stand-in, background copy, or look-alike of any referenced "
+            "person. Do not add extra people unless the visual description explicitly requests them.",
+            result,
+        ))
     result = re.sub(r"(<Picture \d+>)\s*说\s*[：:]", r"\1：", result)
     if any(kind == "scene" for kind, _name, _index in references):
         result = re.sub(
@@ -606,6 +772,95 @@ def _replace_library_picture_references(
             result,
         )
     return result
+
+
+def _mentioned_library_names(text: str, names: list[str]) -> list[str]:
+    """按候选角色顺序返回当前分段正文实际提到的资料库名称。"""
+    source = str(text or "")
+    return [name for name in names if name and re.search(re.escape(str(name)), source, flags=re.IGNORECASE)]
+
+
+def _speaking_library_names(text: str, names: list[str]) -> list[str]:
+    """只识别明确位于对白冒号前的角色；普通画面提及不加载其参考音色。"""
+    source = str(text or "")
+    result: list[str] = []
+    for name in names:
+        pattern = rf"@\s*{re.escape(str(name))}\s*(?:(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*)?[：:]"
+        if re.search(pattern, source, flags=re.IGNORECASE):
+            result.append(name)
+    return result
+
+
+def _normalize_storyboard_segment(prompt: str) -> str:
+    """把“序号||场景||动作||台词”转换成不会混淆画面与对白的明确结构。"""
+    text = str(prompt or "").strip()
+    if "||" not in text:
+        return text
+
+    fields = [field.strip() for field in text.split("||", 3)]
+    if len(fields) != 4:
+        return text
+
+    segment_number, scene_description, action_description, dialogue = fields
+    if not re.fullmatch(r"\d+", segment_number):
+        return text
+
+    parts = [
+        (
+            "VISUAL SCENE DESCRIPTION ONLY — never speak, narrate, quote, lip-sync, or turn any words "
+            f"from this field into audio: {scene_description}"
+        ),
+        (
+            "VISUAL ACTION AND CAMERA DIRECTION ONLY — never speak, narrate, quote, lip-sync, or turn any "
+            f"words from this field into audio: {action_description}"
+        ),
+    ]
+    if dialogue:
+        parts.append(f"THE ONLY SPOKEN DIALOGUE IN THIS SEGMENT: {dialogue}")
+    else:
+        parts.append("THIS SEGMENT HAS NO SPOKEN DIALOGUE.")
+    return "\n".join(parts)
+
+
+def _strip_library_manifest_payloads(prompt: str) -> str:
+    """移除误混入正文的角色/场景库 JSON；这些内部元数据绝不能发送给模型。"""
+    text = str(prompt or "")
+    decoder = json.JSONDecoder()
+    cursor = 0
+    cleaned: list[str] = []
+    while cursor < len(text):
+        start = min((pos for pos in (text.find("[{", cursor), text.find("{", cursor)) if pos >= 0), default=-1)
+        if start < 0:
+            cleaned.append(text[cursor:])
+            break
+        cleaned.append(text[cursor:start])
+        try:
+            payload, consumed = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            cleaned.append(text[start])
+            cursor = start + 1
+            continue
+        entries = payload if isinstance(payload, list) else [payload]
+        is_library_payload = bool(entries) and all(
+            isinstance(item, dict)
+            and bool({"id", "name"} & set(item))
+            and bool({"notes", "keywords", "thumbnail_url", "voice", "views", "assets"} & set(item))
+            for item in entries
+        )
+        if is_library_payload:
+            cursor = start + consumed
+            continue
+        cleaned.append(text[start:start + consumed])
+        cursor = start + consumed
+    result = re.sub(r"[ \t]+\n", "\n", "".join(cleaned))
+    # 上游分镜节点的栏目名只用于界面排版，不属于画面、对白或旁白内容。
+    result = re.sub(r"(?im)(?<![\w])(?:视频提示词|镜头提示词|画面提示词)\s*[：:]\s*", "", result)
+    return result.strip()
+
+
+def _normalize_picture_reference_tags(prompt: str) -> str:
+    """MiniMax H3 直接使用 Picture 引用；拒绝推理模型额外创造 Subject 别名。"""
+    return re.sub(r"<Subject\s+(\d+)>", r"<Picture \1>", str(prompt or ""), flags=re.IGNORECASE)
 
 
 def _save_library_reference_debug_images(
@@ -706,6 +961,30 @@ class GJJ_MiniMaxH3Studio:
                 "reference_media_3": (MEDIA_TYPE, {"display_name": "参考媒体 3", "tooltip": "第三个同级递归媒体入口；所有入口依次递归解包后按图片、视频、音频分类，并保持输入顺序。"}),
                 "selected_actors_json": ("STRING", {"default": "[]", "display_name": "已选角色"}),
                 "selected_scenes_json": ("STRING", {"default": "[]", "display_name": "已选场景"}),
+                "global_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "全局提示词"}),
+                "negative_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "负面提示词"}),
+                "prompt_replace_find": ("STRING", {"default": "", "multiline": True, "display_name": "查找提示词"}),
+                "prompt_replace_with": ("STRING", {"default": "", "multiline": True, "display_name": "替换为"}),
+                "patch_enable_sage_attention": ("BOOLEAN", {"default": False, "display_name": "启用SageAttention"}),
+                "patch_sage_attention_mode": (SAGE_ATTENTION_MODES, {"default": "自动", "display_name": "SageAttention模式"}),
+                "patch_allow_sage_compile": ("BOOLEAN", {"default": False, "display_name": "允许Sage编译"}),
+                "patch_enable_fp16_accumulation": ("BOOLEAN", {"default": False, "display_name": "启用FP16累积设置"}),
+                "patch_fp16_accumulation": ("BOOLEAN", {"default": True, "display_name": "FP16累积"}),
+                "patch_enable_ltxv_feedforward_chunk": ("BOOLEAN", {"default": False, "display_name": "启用LTXV前馈分块"}),
+                "patch_feedforward_chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "分块数量"}),
+                "patch_feedforward_threshold": ("INT", {"default": 4096, "min": 0, "max": 16384, "step": 256, "display_name": "分块阈值"}),
+                "patch_missing_sage_handling": (MISSING_SAGE_HANDLING_MODES, {"default": "自动跳过SageAttention继续运行", "display_name": "缺SageAttention处理"}),
+                "spectrum_enabled": ("BOOLEAN", {"default": False, "display_name": "启用 Spectrum", "tooltip": "启用后在采样前应用 GJJ_SpectrumApplyMiniMaxH3 频谱预测加速。"}),
+                "spectrum_blend_weight": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "频谱混合权重", "tooltip": "0 为纯线性外推，1 为纯频谱预测。"}),
+                "spectrum_degree": ("INT", {"default": 4, "min": 1, "max": 16, "step": 1, "display_name": "多项式阶数"}),
+                "spectrum_ridge_lambda": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 10.0, "step": 0.01, "display_name": "岭回归强度"}),
+                "spectrum_window_size": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 16.0, "step": 0.05, "display_name": "预测窗口"}),
+                "spectrum_flex_window": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 8.0, "step": 0.05, "display_name": "自适应窗口增量"}),
+                "spectrum_warmup_steps": ("INT", {"default": 5, "min": 0, "max": 64, "step": 1, "display_name": "预热实算步数"}),
+                "spectrum_tail_actual_steps": ("INT", {"default": 1, "min": 0, "max": 64, "step": 1, "display_name": "末尾实算步数"}),
+                "spectrum_max_history": ("INT", {"default": 8, "min": 2, "max": 64, "step": 1, "display_name": "最大历史数量", "tooltip": "必须不少于多项式阶数加一。"}),
+                "spectrum_debug": ("BOOLEAN", {"default": False, "display_name": "调试日志"}),
+                "spectrum_history_storage": (["系统内存（RAM）", "显存（VRAM）"], {"default": "系统内存（RAM）", "display_name": "历史存储位置"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -723,7 +1002,7 @@ class GJJ_MiniMaxH3Studio:
             digest.update(f"{key}={kwargs[key]}|".encode("utf-8", errors="replace"))
         return digest.hexdigest()
 
-    def _load_models(self, model_name: str, clip_name: str, video_vae_name: str, audio_vae_name: str, keep: bool, unique_id: Any):
+    def _load_models(self, *, model_name: str, clip_name: str, video_vae_name: str, audio_vae_name: str, keep: bool, unique_id: Any):
         key = (model_name, clip_name, video_vae_name, audio_vae_name)
         if keep and key in self._MODEL_CACHE:
             return self._MODEL_CACHE[key]
@@ -748,12 +1027,17 @@ class GJJ_MiniMaxH3Studio:
         if not any(media.values()):
             internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
             _merge_media(media, internal_media)
-        prompt = "\n\n".join(part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part)
+        prompt = _strip_library_manifest_payloads("\n\n".join(
+            part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part
+        ))
         raw_prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
         prompt_actors = _prompt_library_references(prompt, "@")
+        bare_prompt_actors = _prompt_library_references(prompt, "@", require_marker=False)
         prompt_scenes = _prompt_library_references(prompt, "🏕️")
+        configured_actors = _library_selection_names(first("selected_actors_json", "[]"))
+        actor_candidates = list(dict.fromkeys([*prompt_actors, *bare_prompt_actors, *configured_actors]))
         # 提示词中出现某类资料库引用时，以提示词解析结果替换节点内该类选择。
-        selected_actors = prompt_actors or _library_selection_names(first("selected_actors_json", "[]"))
+        selected_actors = list(dict.fromkeys([*prompt_actors, *bare_prompt_actors])) or configured_actors
         selected_scenes = prompt_scenes or _library_selection_names(first("selected_scenes_json", "[]"))
         unique_id = first("unique_id")
         _send_status(unique_id, "已解析上游角色与场景引用", 0.0, {
@@ -765,7 +1049,7 @@ class GJJ_MiniMaxH3Studio:
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
         pooled_assets = {
             "scene": _library_reference_assets("scene", selected_scenes, panel_width, panel_height),
-            "actor": _library_reference_assets("actor", selected_actors, panel_width, panel_height),
+            "actor": _library_reference_assets("actor", actor_candidates, panel_width, panel_height),
         }
 
         def part_library_assets(kind: str, names: list[str]) -> list[tuple[str, torch.Tensor, str, str]]:
@@ -774,7 +1058,13 @@ class GJJ_MiniMaxH3Studio:
 
         segmented_library_media: list[tuple[str, dict[str, list[Any]], list[tuple[str, torch.Tensor, str, str]]]] = []
         for raw_part in raw_prompt_parts:
-            part_actors = _prompt_library_references(raw_part, "@") if prompt_actors else selected_actors
+            speaking_actors = _speaking_library_names(raw_part, actor_candidates)
+            if prompt_actors or bare_prompt_actors:
+                explicit_actors = _prompt_library_references(raw_part, "@")
+                mentioned_actors = _mentioned_library_names(raw_part, actor_candidates)
+                part_actors = list(dict.fromkeys([*explicit_actors, *mentioned_actors]))
+            else:
+                part_actors = selected_actors
             part_scenes = _prompt_library_references(raw_part, "🏕️") if prompt_scenes else selected_scenes
             part_assets = (
                 part_library_assets("scene", part_scenes)
@@ -788,16 +1078,32 @@ class GJJ_MiniMaxH3Studio:
                 part_references.append((kind, name, picture_number))
                 if kind == "scene":
                     scene_lines.append(f"场景：<Picture {picture_number}>")
-            segment_prompt = _replace_library_picture_references(raw_part, part_references) if part_references else raw_part
+            actor_picture_numbers = {
+                name.casefold(): picture_number
+                for kind, name, picture_number in part_references
+                if kind == "actor"
+            }
+            voice_audios = [
+                {
+                    "audio": audio,
+                    "name": name,
+                    "picture_index": actor_picture_numbers.get(name.casefold(), 0),
+                }
+                for audio, name in _library_reference_voices(speaking_actors)
+            ]
+            structured_part = _normalize_storyboard_segment(raw_part)
+            segment_prompt = _replace_library_picture_references(structured_part, part_references) if part_references else structured_part
             if scene_lines:
                 segment_prompt = "\n".join([*scene_lines, segment_prompt]).strip()
             segmented_library_media.append((segment_prompt, {
                 "images": part_images + list(external_images),
                 "videos": list(media["videos"]), "audios": list(media["audios"]),
+                "voice_audios": voice_audios,
             }, part_assets))
         library_assets = list(dict.fromkeys(
             (asset[0], asset[2].casefold()) for _part, _part_media, assets in segmented_library_media for asset in assets
         ))
+        has_library_voices = any(segment_media.get("voice_audios") for _part, segment_media, _assets in segmented_library_media)
         media["images"] = list(segmented_library_media[0][1]["images"]) if segmented_library_media else external_images
         source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
         width, height = _target_dimensions(
@@ -831,15 +1137,27 @@ class GJJ_MiniMaxH3Studio:
         )
         fps = float(first("frame_rate", 24.0))
         duration = float(first("duration", 5.0))
-        length = _aligned_frames(duration, fps)
         seed = int(first("seed", 42))
         if bool(first("randomize_seed", True)):
             seed = int(torch.randint(0, 0x7FFFFFFF, (1,)).item())
         prompt_parts = [item[0] for item in segmented_library_media]
+        prompt_parts = [
+            _attach_official_voice_references(
+                _strip_library_manifest_payloads(_apply_prompt_book(
+                        prompt=raw_part,
+                        global_prompt=str(first("global_prompt", "") or ""),
+                        negative_prompt=str(first("negative_prompt", "") or ""),
+                        prompt_replace_find=str(first("prompt_replace_find", "") or ""),
+                        prompt_replace_with=str(first("prompt_replace_with", "") or ""),
+                    )),
+                segmented_library_media[index][1],
+            )
+            for index, raw_part in enumerate(prompt_parts)
+        ]
 
         image_count = len(media["images"])
         requested_branch = str(first("image_branch", "参考") or "参考")
-        if library_assets:
+        if library_assets or has_library_voices:
             image_branch = "参考"
         elif image_count == 1:
             image_branch = requested_branch if requested_branch in {"参考", "首帧", "尾帧"} else "参考"
@@ -850,7 +1168,7 @@ class GJJ_MiniMaxH3Studio:
         else:
             image_branch = "参考"
 
-        has_reference_av = bool(media["videos"] or media["audios"])
+        has_reference_av = bool(media["videos"] or media["audios"] or has_library_voices)
         if image_branch == "参考" and (image_count or has_reference_av):
             official_prompt_mode = "R2VA"
         elif image_branch in {"首尾帧", "分段首尾帧"}:
@@ -870,7 +1188,7 @@ class GJJ_MiniMaxH3Studio:
             configured_system_prompt = str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT) or "").strip()
             reasoning_system_prompt = "\n\n".join(filter(None, (
                 configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
-                _official_prompt_rewrite_rules(official_prompt_mode, duration, image_count),
+                _official_prompt_rewrite_rules(mode=official_prompt_mode, duration=duration, picture_count=image_count),
             )))
             inferred_parts: list[str] = []
             for infer_index, raw_part in enumerate(prompt_parts):
@@ -894,17 +1212,22 @@ class GJJ_MiniMaxH3Studio:
         else:
             prompt_parts = [
                 _officialize_prompt_without_reasoning(
-                    raw_part, official_prompt_mode, duration, len(segmented_library_media[index][1]["images"]),
+                    prompt=raw_part,
+                    mode=official_prompt_mode,
+                    duration=duration,
+                    picture_count=len(segmented_library_media[index][1]["images"]),
                 )
                 for index, raw_part in enumerate(prompt_parts)
             ]
+        prompt_parts = [_normalize_picture_reference_tags(item) for item in prompt_parts]
 
         jobs: list[tuple[str, dict[str, list[Any]]]] = []
-        if library_assets:
+        if library_assets or has_library_voices:
             for index, segment_prompt in enumerate(prompt_parts):
                 segment_media = segmented_library_media[index][1]
                 jobs.append((segment_prompt, {
                     "images": list(segment_media["images"]), "videos": list(segment_media["videos"]), "audios": list(segment_media["audios"]),
+                    "voice_audios": list(segment_media.get("voice_audios") or []),
                 }))
         elif image_branch == "分段首尾帧":
             for index in range(image_count - 1):
@@ -919,6 +1242,16 @@ class GJJ_MiniMaxH3Studio:
                     "images": [media["images"][index]] if distribute_images else list(media["images"]),
                     "videos": list(media["videos"]), "audios": list(media["audios"]),
                 }))
+        queued_audios = list(media["audios"])
+        if len(queued_audios) > 1 and jobs:
+            source_jobs = list(jobs)
+            jobs = [
+                (
+                    source_jobs[min(index, len(source_jobs) - 1)][0],
+                    {**source_jobs[min(index, len(source_jobs) - 1)][1], "audios": [audio]},
+                )
+                for index, audio in enumerate(queued_audios)
+            ]
         segment_count = len(jobs)
         filename_prefix = str(first("filename_prefix", "video/MiniMax_H3_Studio"))
         requested_format = str(first("format_name", DEFAULT_FORMAT) or "").strip()
@@ -928,7 +1261,7 @@ class GJJ_MiniMaxH3Studio:
 
         def segment_mode(segment: dict[str, list[Any]]) -> str:
             image_count = len(segment["images"])
-            has_reference_av = bool(segment["videos"] or segment["audios"])
+            has_reference_av = bool(segment["videos"] or segment["audios"] or segment.get("voice_audios"))
             if image_branch in {"首尾帧", "分段首尾帧"} and image_count == 2 and not has_reference_av:
                 return "首尾帧"
             if image_branch == "参考" and image_count > 0:
@@ -953,10 +1286,23 @@ class GJJ_MiniMaxH3Studio:
         from comfy_extras.nodes_custom_sampler import BasicGuider, RandomNoise, SamplerCustomAdvanced
         import nodes
         from comfy_extras.nodes_audio import VAEDecodeAudio
+        _release_vram_before_sampling()
         decoded_segments: list[torch.Tensor] = []
         audio_segments: list[Any] = []
         modes: list[str] = []
         for index, (segment_prompt, current_media) in enumerate(jobs):
+            segment_duration = duration
+            if current_media["audios"]:
+                measured_duration = _audio_duration_seconds(current_media["audios"][0])
+                if measured_duration is not None:
+                    segment_duration = measured_duration
+            if segment_duration > MAX_AUDIO_DRIVEN_DURATION + 1e-6:
+                raise RuntimeError(
+                    f"队列第 {index + 1} 段音频长 {segment_duration:.3f} 秒，超过 MiniMax H3 安全上限 "
+                    f"{MAX_AUDIO_DRIVEN_DURATION:.1f} 秒。请在上游按不超过该时长重新分段；"
+                    "禁止直接生成超长 latent，否则注意力遮罩会导致显存爆炸。"
+                )
+            segment_length = _aligned_frames(duration=segment_duration, fps=fps)
             mode = segment_mode(current_media)
             modes.append(mode)
             print(
@@ -966,39 +1312,100 @@ class GJJ_MiniMaxH3Studio:
                 flush=True,
             )
             model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
-            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode}：加载模型...", index / segment_count)
+            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
             if model_name not in runtime_models:
-                runtime_models[model_name] = self._load_models(
-                    model_name, str(first("clip_name", DEFAULT_CLIP)), str(first("video_vae_name", DEFAULT_VIDEO_VAE)),
-                    str(first("audio_vae_name", DEFAULT_AUDIO_VAE)), bool(first("keep_model", False)), unique_id,
+                loaded_model, loaded_clip, loaded_video_vae, loaded_audio_vae = self._load_models(
+                    model_name=model_name,
+                    clip_name=str(first("clip_name", DEFAULT_CLIP)),
+                    video_vae_name=str(first("video_vae_name", DEFAULT_VIDEO_VAE)),
+                    audio_vae_name=str(first("audio_vae_name", DEFAULT_AUDIO_VAE)),
+                    keep=bool(first("keep_model", False)),
+                    unique_id=unique_id,
                 )
+                patched_model, _ = GJJ_ModelPatchBundle().patch(
+                    MODEL=loaded_model,
+                    启用SageAttention=bool(first("patch_enable_sage_attention", False)),
+                    SageAttention模式=str(first("patch_sage_attention_mode", "自动")),
+                    允许Sage编译=bool(first("patch_allow_sage_compile", False)),
+                    启用FP16累积设置=bool(first("patch_enable_fp16_accumulation", False)),
+                    FP16累积=bool(first("patch_fp16_accumulation", True)),
+                    # MiniMax H3 不具备 LTXV 的 transformer_blocks.*.ff.net 结构；
+                    # 保留旧输入槽位仅用于工作流兼容，执行时永远不应用该专用补丁。
+                    启用LTXV前馈分块=False,
+                    分块数量=int(first("patch_feedforward_chunks", 4)),
+                    分块阈值=int(first("patch_feedforward_threshold", 4096)),
+                    缺SageAttention处理=str(first("patch_missing_sage_handling", "自动跳过SageAttention继续运行")),
+                    unique_id=unique_id,
+                )
+                patched_model = GJJ_SpectrumApplyMiniMaxH3().apply(
+                    model=patched_model,
+                    enabled=bool(first("spectrum_enabled", False)),
+                    blend_weight=float(first("spectrum_blend_weight", 0.50)),
+                    degree=int(first("spectrum_degree", 4)),
+                    ridge_lambda=float(first("spectrum_ridge_lambda", 0.10)),
+                    window_size=float(first("spectrum_window_size", 2.0)),
+                    flex_window=float(first("spectrum_flex_window", 0.75)),
+                    warmup_steps=int(first("spectrum_warmup_steps", 5)),
+                    tail_actual_steps=int(first("spectrum_tail_actual_steps", 1)),
+                    max_history=int(first("spectrum_max_history", 8)),
+                    debug=bool(first("spectrum_debug", False)),
+                    history_storage=str(first("spectrum_history_storage", "系统内存（RAM）")),
+                )[0]
+                runtime_models[model_name] = (patched_model, loaded_clip, loaded_video_vae, loaded_audio_vae)
             model, clip, video_vae, audio_vae = runtime_models[model_name]
             if mode == "R2V":
                 ref_images = {f"ref_image_{i}": value for i, value in enumerate(current_media["images"][:10])}
                 ref_videos = {f"ref_video_{i}": value[0] for i, value in enumerate(current_media["videos"][:4])}
                 ref_video_audios = {f"ref_video_audio_{i}": value[1] for i, value in enumerate(current_media["videos"][:4]) if value[1] is not None}
-                ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(current_media["audios"][:4])}
+                # 两类音频都只进入 H3 的参考条件；最终视频音轨始终来自 sampled latent 的 VAEDecodeAudio。
+                conditioning_audios = list(current_media["audios"])
+                conditioning_audios.extend(
+                    item["audio"] for item in current_media.get("voice_audios", [])
+                    if isinstance(item, dict) and item.get("audio") is not None
+                )
+                ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(conditioning_audios[:4])}
                 positive, latent = _unwrap_node_output(MiniMaxH3ReferenceToVideo.execute(
-                    clip, video_vae, audio_vae, segment_prompt, width, height, length,
-                    str(first("ref_image_size", "match")), ref_images, ref_videos, ref_video_audios, ref_audios,
+                    clip=clip,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    prompt=segment_prompt,
+                    width=width,
+                    height=height,
+                    length=segment_length,
+                    ref_image_size=str(first("ref_image_size", "match")),
+                    ref_images=ref_images,
+                    ref_videos=ref_videos,
+                    ref_video_audios=ref_video_audios,
+                    ref_audios=ref_audios,
                 ))[:2]
             else:
                 first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
                 last_frame = current_media["images"][1] if mode == "首尾帧" else (current_media["images"][0] if mode == "尾帧" else None)
                 positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
-                    clip, video_vae, segment_prompt, width, height, length, first_frame, last_frame,
+                    clip=clip,
+                    vae=video_vae,
+                    prompt=segment_prompt,
+                    width=width,
+                    height=height,
+                    length=segment_length,
+                    first_frame=first_frame,
+                    last_frame=last_frame,
                 ))[:2]
-            guider = _node_output_first(BasicGuider.execute(model, positive))
-            noise = _node_output_first(RandomNoise.execute((seed + index) % (1 << 64)))
+            guider = _node_output_first(BasicGuider.execute(model=model, conditioning=positive))
+            noise = _node_output_first(RandomNoise.execute(noise_seed=(seed + index) % (1 << 64)))
             sampler = _ksampler(str(first("sampler_name", "res_multistep")))
             sigmas = _basic_sigmas(model, str(first("scheduler", "simple")), int(first("steps", 20)), float(first("denoise", 1.0)))
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 正在采样...", (index + 0.2) / segment_count)
-            sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(noise, guider, sampler, sigmas, latent))[0]
-            segment_images = nodes.VAEDecode().decode(video_vae, sampled)[0]
-            segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(audio_vae, sampled))[0]
+            sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(
+                noise=noise, guider=guider, sampler=sampler, sigmas=sigmas, latent_image=latent,
+            ))[0]
+            segment_images = nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
+            segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(vae=audio_vae, samples=sampled))[0]
             # 相邻段共享边界图；后续片段移除第 1 帧，避免拼接时重复该边界帧。
             if image_branch == "分段首尾帧" and index > 0 and int(segment_images.shape[0]) > 1:
                 segment_images = segment_images[1:].contiguous()
+            segment_images = segment_images.detach().to(device="cpu").contiguous()
+            segment_audio = _audio_to_cpu(segment_audio)
             decoded_segments.append(segment_images)
             audio_segments.append(segment_audio)
             if segment_count > 1:

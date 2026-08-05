@@ -9,11 +9,12 @@ const PANEL_WIDGET = "__gjj_minimax_h3_panel";
 const RESULT_WIDGET = "__gjj_minimax_h3_result";
 const STYLE_ID = "gjj-minimax-h3-studio-style";
 const MEDIA_INPUTS = ["reference_media", "reference_media_2", "reference_media_3"];
+const MANAGED_LINK_INPUTS = [...MEDIA_INPUTS, "prompt"];
 const LINK_MEMORY_PROPERTY = "gjj_minimax_h3_media_links";
 const PROMPT_BACKUP_PROPERTY = "gjj_minimax_h3_prompt";
 const SETTINGS_BACKUP_PROPERTY = "gjj_minimax_h3_settings";
 const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
-const SETTINGS_SCHEMA_VERSION = 5;
+const SETTINGS_SCHEMA_VERSION = 8;
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const PROMPT_MIN_HEIGHT = 58;
@@ -46,13 +47,33 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "audio_vae_name", label: "音频VAE", type: "STRING", aliases: ["audio_vae", "音频vae"] },
 	{ name: "keep_model", label: "保持模型", type: "BOOLEAN", aliases: ["keep_model", "保持模型"] },
 	{ name: "use_source_size", label: "首图尺寸", type: "BOOLEAN", aliases: ["source_size", "首图尺寸"] },
-	{ name: "size_mode", label: "尺寸模式", type: "STRING", aliases: ["size_mode", "尺寸模式"] },
 	{ name: "resize_fit_mode", label: "适配方式", type: "STRING", aliases: ["resize", "fit", "适配"] },
 	{ name: "resize_anchor", label: "保留位置", type: "STRING", aliases: ["anchor", "保留位置", "对齐"] },
 	{ name: "image_branch", label: "图片分支", type: "STRING", aliases: ["image_branch", "分支", "首尾帧", "参考"] },
 	{ name: "reasoning_enabled", label: "启用推理", type: "BOOLEAN", aliases: ["reasoning", "thinking", "推理"] },
 	{ name: "reasoning_model", label: "推理模型", type: "STRING", aliases: ["reasoning_model", "推理模型"] },
 	{ name: "reasoning_system_prompt", label: "推理系统提示词", type: "STRING", aliases: ["system_prompt", "系统提示词"] },
+	{ name: "global_prompt", label: "全局提示词", type: "STRING", aliases: ["global_prompt", "全局提示词"] },
+	{ name: "negative_prompt", label: "负面提示词", type: "STRING", aliases: ["negative_prompt", "negative", "负面提示词"] },
+	{ name: "prompt_replace_find", label: "查找提示词", type: "STRING", aliases: ["replace_find", "查找提示词"] },
+	{ name: "prompt_replace_with", label: "替换为", type: "STRING", aliases: ["replace_with", "替换为"] },
+	{ name: "patch_enable_sage_attention", label: "启用SageAttention", type: "BOOLEAN", aliases: ["sage", "sageattention"] },
+	{ name: "patch_sage_attention_mode", label: "SageAttention模式", type: "STRING", aliases: ["sage_mode"] },
+	{ name: "patch_allow_sage_compile", label: "允许Sage编译", type: "BOOLEAN", aliases: ["sage_compile"] },
+	{ name: "patch_enable_fp16_accumulation", label: "启用FP16累积设置", type: "BOOLEAN", aliases: ["fp16_accumulation_setting"] },
+	{ name: "patch_fp16_accumulation", label: "FP16累积", type: "BOOLEAN", aliases: ["fp16_accumulation"] },
+	{ name: "patch_missing_sage_handling", label: "缺SageAttention处理", type: "STRING", aliases: ["missing_sage"] },
+	{ name: "spectrum_enabled", label: "启用 Spectrum", type: "BOOLEAN", aliases: ["spectrum", "频谱加速"] },
+	{ name: "spectrum_blend_weight", label: "频谱混合权重", type: "FLOAT", aliases: ["blend_weight"] },
+	{ name: "spectrum_degree", label: "多项式阶数", type: "INT", aliases: ["degree"] },
+	{ name: "spectrum_ridge_lambda", label: "岭回归强度", type: "FLOAT", aliases: ["ridge_lambda"] },
+	{ name: "spectrum_window_size", label: "预测窗口", type: "FLOAT", aliases: ["window_size"] },
+	{ name: "spectrum_flex_window", label: "自适应窗口增量", type: "FLOAT", aliases: ["flex_window"] },
+	{ name: "spectrum_warmup_steps", label: "预热实算步数", type: "INT", aliases: ["warmup_steps"] },
+	{ name: "spectrum_tail_actual_steps", label: "末尾实算步数", type: "INT", aliases: ["tail_actual_steps"] },
+	{ name: "spectrum_max_history", label: "最大历史数量", type: "INT", aliases: ["max_history"] },
+	{ name: "spectrum_debug", label: "调试日志", type: "BOOLEAN", aliases: ["debug"] },
+	{ name: "spectrum_history_storage", label: "历史存储位置", type: "STRING", aliases: ["history_storage"] },
 ];
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -64,10 +85,18 @@ const HIDDEN = new Set([
 	"image_branch",
 	"reasoning_enabled", "reasoning_model", "reasoning_system_prompt",
 	"selected_actors_json", "selected_scenes_json",
+	"global_prompt", "negative_prompt", "prompt_replace_find", "prompt_replace_with",
+	"patch_enable_sage_attention", "patch_sage_attention_mode", "patch_allow_sage_compile",
+	"patch_enable_fp16_accumulation", "patch_fp16_accumulation", "patch_enable_ltxv_feedforward_chunk",
+	"patch_feedforward_chunks", "patch_feedforward_threshold", "patch_missing_sage_handling",
+	"spectrum_enabled", "spectrum_blend_weight", "spectrum_degree", "spectrum_ridge_lambda",
+	"spectrum_window_size", "spectrum_flex_window", "spectrum_warmup_steps",
+	"spectrum_tail_actual_steps", "spectrum_max_history", "spectrum_debug", "spectrum_history_storage",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size"]], ["输出", ["filename_prefix", "format_name"]]],
 	size: [["画面尺寸", ["width", "height"]]],
+	promptBook: [["提示词", ["global_prompt", "negative_prompt"]], ["替换提示词", ["prompt_replace_find", "prompt_replace_with"]]],
 };
 
 function widget(node, name) { return GJJ_Utils.getWidget(node, name); }
@@ -122,7 +151,7 @@ function installStyle() {
 	style.textContent = `
 	.gjj-mh3-root{font:12px/1.3 system-ui;color:#dcebed;background:#10191d;border-radius:8px;padding:8px;display:grid;gap:7px;align-content:start;grid-auto-rows:max-content}
 	.gjj-mh3-toolbar{display:flex;flex-wrap:wrap;gap:0;align-items:center;align-content:flex-start;max-width:100%;margin:0;padding:0}.gjj-mh3-btn{box-sizing:border-box;width:36px;height:32px;min-width:36px;flex:0 0 36px;margin:0;padding:0;border:1px solid #42747d;border-radius:0;background:#173038;color:#dff;cursor:pointer;font-weight:700}.gjj-mh3-toolbar>.gjj-mh3-btn:first-child{border-radius:6px 0 0 6px}.gjj-mh3-toolbar>.gjj-mh3-btn:last-child{border-radius:0 6px 6px 0}.gjj-mh3-btn:hover{filter:brightness(1.18)}.gjj-mh3-btn.active{background:#175f4d;border-color:#55d2a2}.gjj-mh3-run{background:#168953;border-color:#39d789;color:white;font-weight:900}
-	.gjj-mh3-btn.gjj-mh3-source-size{background:#695018;border-color:#f2bd3f;color:#fff4c8;box-shadow:inset 0 0 0 1px #f2bd3f55}
+	.gjj-mh3-btn.gjj-mh3-source-size{background:#695018;border-color:#f2bd3f;color:#fff4c8;box-shadow:inset 0 0 0 1px #f2bd3f55}.gjj-mh3-btn.gjj-mh3-spectrum.enabled{background:#795014;border-color:#ffc44d;color:#fff5d5;box-shadow:inset 0 0 0 1px #ffc44d66}
 	.gjj-mh3-folder.loaded{background:#17614e;border-color:#55d2a2}.gjj-mh3-folder:disabled{opacity:.4;cursor:not-allowed}.gjj-mh3-link{display:none}.gjj-mh3-link.show{display:block}.gjj-mh3-link.detached{background:#6b5420;border-color:#d5a83c}
 	.gjj-mh3-media-tip{position:fixed;z-index:100006;width:min(440px,calc(100vw - 24px));max-height:min(520px,calc(100vh - 24px));overflow:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:9px;border:1px solid #4e7d86;border-radius:9px;background:#0d161a;color:#dcebed;box-shadow:0 14px 45px #000c}.gjj-mh3-media-card{min-width:0;border:1px solid #304e55;border-radius:7px;background:#111d21;padding:6px;display:grid;gap:5px}.gjj-mh3-media-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a9c7cc}.gjj-mh3-media-card img,.gjj-mh3-media-card video{display:block;width:100%;max-height:190px;object-fit:contain;background:#000;border-radius:4px}.gjj-mh3-media-card audio{width:100%;height:34px}.gjj-mh3-media-text{max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#dce7e2;font:11px/1.4 ui-monospace,monospace}
 	.gjj-mh3-label{display:flex;align-items:center;gap:6px;color:#ffd27d;font-weight:700}.gjj-mh3-mode{margin-left:auto;color:#7ed9d3;font-weight:600}
@@ -142,6 +171,24 @@ function hideBackendWidgets(node) {
 		GJJ_Utils.hideWidget(target); target.hidden = true; target.computeSize = () => [0, 0]; target.getHeight = () => 0; target.draw = () => {}; target.last_y = 0; target.computedHeight = 0; target.size = [0, 0];
 		target.options ||= {}; target.options.hidden = true; target.options.display = "hidden";
 		for (const element of [target.element, target.inputEl, target.widget]) if (element?.style) { element.style.display = "none"; element.style.height = "0"; element.style.margin = "0"; element.style.padding = "0"; }
+	}
+	removeUnusedHiddenInputSockets(node);
+}
+function removeUnusedHiddenInputSockets(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	for (let index = node.inputs.length - 1; index >= 0; index--) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "");
+		const type = String(input?.type || "");
+		const convertedName = type.startsWith("converted-widget:")
+			? type.slice("converted-widget:".length)
+			: "";
+		if (!HIDDEN.has(name) && !HIDDEN.has(convertedName)) continue;
+		const links = Array.isArray(input?.link) ? input.link.filter((item) => item != null) : (input?.link != null ? [input.link] : []);
+		// 已连接的转换输入仍属于工作流接口，不能因界面收起而删除。
+		if (links.length) continue;
+		if (typeof node.removeInput === "function") node.removeInput(index);
+		else node.inputs.splice(index, 1);
 	}
 }
 function choices(target) {
@@ -248,6 +295,52 @@ function createReasoningPanel(node, treeHost) {
 	toggle.addEventListener("click", () => { setValue(node, "reasoning_enabled", !Boolean(value(node, "reasoning_enabled", false))); sync(); renderModelTree(node, treeHost); });
 	section.append(title, toggle, details); section.__gjjSync = sync; sync(); return section;
 }
+function createModelPatchPanel(node) {
+	const section = document.createElement("section"); section.className = "gjj-mh3-section";
+	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "⚡ GJJ_ModelPatchBundle 优化";
+	const grid = document.createElement("div"); grid.className = "gjj-mh3-grid";
+	const fields = [
+		"patch_enable_sage_attention", "patch_sage_attention_mode", "patch_allow_sage_compile",
+		"patch_enable_fp16_accumulation", "patch_fp16_accumulation",
+		"patch_missing_sage_handling",
+	];
+	for (const name of fields) {
+		const control = makeControl(node, name); if (!control) continue;
+		const row = document.createElement("label"); row.className = "gjj-mh3-field";
+		if (["patch_sage_attention_mode", "patch_missing_sage_handling"].includes(name)) row.classList.add("wide");
+		const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
+		row.append(label, control); grid.appendChild(row);
+	}
+	const note = document.createElement("div"); note.className = "gjj-mh3-field wide"; note.style.color = "#8faeb4"; note.textContent = "此处仅显示 MiniMax H3 可用的通用优化；LTXV 专用前馈分块已排除。";
+	grid.appendChild(note); section.append(title, grid); return section;
+}
+const SPECTRUM_FIELDS = [
+	"spectrum_enabled", "spectrum_blend_weight", "spectrum_degree", "spectrum_ridge_lambda",
+	"spectrum_window_size", "spectrum_flex_window", "spectrum_warmup_steps",
+	"spectrum_tail_actual_steps", "spectrum_max_history", "spectrum_debug", "spectrum_history_storage",
+];
+function syncSpectrumButton(node) {
+	const button = node.__gjjMiniMaxPanel?.spectrumButton; if (!button) return;
+	const enabled = Boolean(value(node, "spectrum_enabled", false));
+	button.classList.toggle("enabled", enabled);
+	button.title = enabled ? "Spectrum MiniMax H3 加速已启用；点击设置参数" : "Spectrum MiniMax H3 加速未启用；点击设置参数";
+}
+function createSpectrumPanel(node) {
+	const section = document.createElement("section"); section.className = "gjj-mh3-section";
+	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "🚀 Spectrum MiniMax H3 加速";
+	const grid = document.createElement("div"); grid.className = "gjj-mh3-grid";
+	for (const name of SPECTRUM_FIELDS) {
+		const control = makeControl(node, name); if (!control) continue;
+		if (name === "spectrum_enabled") control.addEventListener("click", () => syncSpectrumButton(node));
+		const row = document.createElement("label"); row.className = "gjj-mh3-field";
+		if (["spectrum_enabled", "spectrum_history_storage"].includes(name)) row.classList.add("wide");
+		const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
+		row.append(label, control); grid.appendChild(row);
+	}
+	const note = document.createElement("div"); note.className = "gjj-mh3-field wide"; note.style.color = "#8faeb4";
+	note.textContent = "🚀 亮起表示采样模型会应用 GJJ_SpectrumApplyMiniMaxH3。最大历史数量必须不少于多项式阶数 + 1。";
+	grid.appendChild(note); section.append(title, grid); section.__gjjSync = () => syncSpectrumButton(node); return section;
+}
 function createSizePanel(node) {
 	const host = document.createElement("div");
 	const tabs = document.createElement("div"); tabs.className = "gjj-mh3-size-tabs";
@@ -261,7 +354,6 @@ function createSizePanel(node) {
 		const buttons = values.map((item) => { const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-size-choice"; button.textContent = item; button.addEventListener("click", () => { setValue(node, name, item); sync(); }); row.appendChild(button); return button; });
 		choiceControls.set(name, { values, buttons }); return row;
 	};
-	const modeRow = makeChoiceRow("size_mode", "📐", ["宽高", "等比", "长边", "像素"]);
 	const fitRow = makeChoiceRow("resize_fit_mode", "🧲", ["拉伸", "补边", "留边", "裁剪"]);
 	const anchorRow = makeChoiceRow("resize_anchor", "📍", ["上", "下", "左", "右", "中"]);
 	const dimensions = document.createElement("div");
@@ -284,7 +376,7 @@ function createSizePanel(node) {
 	};
 	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); sync(); });
 	for (const element of [sourceButton, panelButton, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
-	host.append(tabs, modeRow, fitRow, anchorRow, dimensions); host.__gjjSync = sync; sync(); return host;
+	host.append(tabs, fitRow, anchorRow, dimensions); host.__gjjSync = sync; sync(); return host;
 }
 function popup(node, key, title) {
 	const root = document.createElement("div"); root.className = "gjj-mh3-pop"; root.dataset.popup = key; protect(root);
@@ -305,17 +397,24 @@ function popup(node, key, title) {
 		const keepControl = makeControl(node, "keep_model");
 		if (keepControl) { const row = document.createElement("label"); row.className = "gjj-mh3-field wide"; const label = document.createElement("span"); label.textContent = widget(node, "keep_model")?.options?.display_name || "保持模型"; row.append(label, keepControl); keepGrid.append(row); }
 		keepSection.appendChild(keepGrid); root.appendChild(keepSection);
+		root.appendChild(createModelPatchPanel(node));
 		root.__gjjModelTreeHost = treeHost;
 		root.__gjjReasoningPanel = reasoningPanel;
+		document.body.appendChild(root);
+		return root;
+	}
+	if (key === "spectrum") {
+		const spectrumPanel = createSpectrumPanel(node); root.appendChild(spectrumPanel); root.__gjjSpectrumPanel = spectrumPanel;
 		document.body.appendChild(root);
 		return root;
 	}
 	for (const [sectionTitle, names] of POPUP_GROUPS[key] || []) {
 		const section = document.createElement("section"); section.className = "gjj-mh3-section"; const heading = document.createElement("div"); heading.className = "gjj-mh3-title"; heading.textContent = sectionTitle;
 		const grid = document.createElement("div"); grid.className = "gjj-mh3-grid";
-		for (const name of names) { const control = makeControl(node, name); if (!control) continue; const row = document.createElement("label"); row.className = "gjj-mh3-field"; if (["filename_prefix", "format_name"].includes(name)) row.classList.add("wide"); const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name; row.append(label, control); grid.append(row); }
+		for (const name of names) { let control = makeControl(node, name); if (!control) continue; const row = document.createElement("label"); row.className = "gjj-mh3-field"; if (["filename_prefix", "format_name", "global_prompt", "negative_prompt", "prompt_replace_find", "prompt_replace_with"].includes(name)) row.classList.add("wide"); if (key === "promptBook") { const textarea = document.createElement("textarea"); textarea.className = "gjj-mh3-control"; textarea.rows = name === "prompt_replace_find" ? 2 : 4; textarea.value = String(value(node, name, "")); textarea.dataset.widgetName = name; textarea.placeholder = name === "global_prompt" ? "添加到每个分段前" : name === "negative_prompt" ? "作为每个分段必须避免的内容" : name === "prompt_replace_find" ? "不区分大小写的纯文本查找" : "替换后的提示词"; textarea.addEventListener("input", () => setValue(node, name, textarea.value)); applyBoundState(node, name, textarea); protect(textarea); control = textarea; } const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name; row.append(label, control); grid.append(row); }
 		section.append(heading, grid); root.append(section);
 	}
+	if (key === "promptBook") root.__gjjSync = () => { for (const control of root.querySelectorAll("textarea[data-widget-name]")) if (document.activeElement !== control) control.value = String(value(node, control.dataset.widgetName, "")); };
 	document.body.appendChild(root); return root;
 }
 function closePopups(node) { for (const item of Object.values(node.__gjjMiniMaxPanel?.popups || {})) item.classList.remove("open"); for (const item of Object.values(node.__gjjMiniMaxPanel?.buttons || {})) item.classList.remove("active"); }
@@ -324,6 +423,8 @@ function openPopup(node, key, anchor) {
 	const wasOpen = target.classList.contains("open"); closePopups(node); if (wasOpen) return;
 	if (key === "size") target.__gjjSizePanel?.__gjjSync?.();
 	if (key === "model" && target.__gjjModelTreeHost) { target.__gjjReasoningPanel?.__gjjSync?.(); renderModelTree(node, target.__gjjModelTreeHost); }
+	if (key === "spectrum") target.__gjjSpectrumPanel?.__gjjSync?.();
+	if (key === "promptBook") target.__gjjSync?.();
 	const rect = anchor.getBoundingClientRect(); const width = Math.min(560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
 }
 function makeButton(text, title, className = "") { const button = document.createElement("button"); button.type = "button"; button.className = `gjj-mh3-btn ${className}`; button.textContent = text; button.title = title; protect(button); return button; }
@@ -361,6 +462,14 @@ function showStoredPreview(node, key) {
 	const resize = () => { const contentWidth = Math.max(1, Number(state.preview.clientWidth || state.resultRoot?.clientWidth || node.size?.[0] - 36 || 1)); const mediaHeight = Math.max(1, Math.round(contentWidth * Number(state.video.videoHeight || 9) / Math.max(1, Number(state.video.videoWidth || 16)))); state.preview.style.height = `${mediaHeight}px`; fitPanel(node); };
 	state.video.onloadedmetadata = resize; state.previewObserver?.disconnect?.(); let lastWidth = 0; state.previewObserver = new ResizeObserver((entries) => { const width = Math.round(entries[0]?.contentRect?.width || 0); if (width > 0 && width !== lastWidth) { lastWidth = width; resize(); } }); state.previewObserver.observe(state.preview); setTimeout(resize, 50);
 }
+function resetResultPreview(node) {
+	const state = node?.__gjjMiniMaxPanel; if (!state) return;
+	state.previewEntries?.clear?.(); state.activePreviewKey = null; state.previewObserver?.disconnect?.();
+	if (state.video) { state.video.pause?.(); state.video.removeAttribute("src"); state.video.load?.(); state.video.onloadedmetadata = null; }
+	if (state.preview) { state.preview.style.display = "none"; state.preview.style.height = "0"; }
+	if (state.previewNav) state.previewNav.style.display = "none";
+	fitPanel(node); node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true);
+}
 function renderResultPreview(node, message = {}) {
 	const state = node.__gjjMiniMaxPanel; if (!state?.preview || !state?.video) return;
 	const output = message?.output && typeof message.output === "object" ? message.output : message;
@@ -371,15 +480,52 @@ function renderResultPreview(node, message = {}) {
 	state.previewEntries.set(key, { key, kind, segment, segmentCount, item }); showStoredPreview(node, key);
 }
 function mediaInput(node, name) { return (node.inputs || []).find((item) => String(item?.name || "") === name); }
+function graphLink(linkId) {
+	const id = Array.isArray(linkId) ? linkId[0] : linkId;
+	if (id == null) return null;
+	return app.graph?.links?.[id] || app.graph?._links?.[id] || null;
+}
+function connectedTextSource(node, inputName, visited = new Set()) {
+	const link = graphLink(mediaInput(node, inputName)?.link);
+	const source = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+	if (!source || visited.has(source.id)) return null;
+	visited.add(source.id);
+
+	// 文本预览节点有上游时会把实际预览正文写回实时字段和 text 控件；
+	// 没有上游时，text 控件本身就是它真正输出的内容。
+	if (String(source?.comfyClass || source?.type || "") === "GJJ_TextInput") {
+		const live = source.__gjjTextInputLiveText;
+		if (live != null && String(live) !== "等待执行后预览上游文本") return String(live);
+		const saved = source?.properties?.gjj_text_input_saved_text;
+		const current = widget(source, "text")?.value;
+		if (current != null && String(current) !== "等待执行后预览上游文本") return String(current);
+		if (saved != null && String(saved) !== "等待执行后预览上游文本") return String(saved);
+		// 仅在预览节点自身尚无可用正文时，才继续追踪它的 text_in 来源。
+		return connectedTextSource(source, "text_in", visited);
+	}
+
+	// 兼容常见文本节点：优先读取与已连接输出同名的控件，再尝试通用文本控件。
+	const outputName = String(source.outputs?.[Number(link.origin_slot)]?.name || "");
+	for (const name of [outputName, "text", "prompt", "STRING"]) {
+		const current = widget(source, name)?.value;
+		if (current != null) return String(current);
+	}
+	return null;
+}
+function effectivePromptText(node) {
+	const connected = connectedTextSource(node, "prompt");
+	return connected != null ? connected : String(value(node, "prompt", "") || "");
+}
 function activeMediaLinks(node) { return MEDIA_INPUTS.some((name) => mediaInput(node, name)?.link != null); }
+function activeManagedLinks(node) { return MANAGED_LINK_INPUTS.some((name) => mediaInput(node, name)?.link != null); }
 function linkMemory(node) { node.properties ||= {}; node.properties[LINK_MEMORY_PROPERTY] ||= {}; return node.properties[LINK_MEMORY_PROPERTY]; }
 function hasRememberedLinks(node) { return Object.values(linkMemory(node)).some((item) => item && typeof item === "object"); }
 function toggleMediaLinks(node) {
 	const memory = linkMemory(node);
-	if (activeMediaLinks(node)) {
-		for (const name of MEDIA_INPUTS) { const input = mediaInput(node, name); const link = app.graph?.links?.[input?.link]; if (!input || !link) continue; memory[name] = { origin_id: link.origin_id, origin_slot: link.origin_slot }; const index = node.inputs.indexOf(input); node.disconnectInput?.(index); }
+	if (activeManagedLinks(node)) {
+		for (const name of MANAGED_LINK_INPUTS) { const input = mediaInput(node, name); const linkId = Array.isArray(input?.link) ? input.link[0] : input?.link; const link = app.graph?.links?.[linkId]; if (!input || !link) continue; memory[name] = { origin_id: link.origin_id, origin_slot: link.origin_slot }; const inputIndex = node.inputs.indexOf(input); node.disconnectInput?.(inputIndex); }
 	} else {
-		for (const name of MEDIA_INPUTS) { const record = memory[name]; const target = mediaInput(node, name); const source = app.graph?.getNodeById?.(record?.origin_id); if (!record || !target || !source?.connect) continue; source.connect(Number(record.origin_slot), node, node.inputs.indexOf(target)); }
+		for (const name of MANAGED_LINK_INPUTS) { const record = memory[name]; const target = mediaInput(node, name); const source = app.graph?.getNodeById?.(record?.origin_id); if (!record || !target || !source?.connect) continue; source.connect(Number(record.origin_slot), node, node.inputs.indexOf(target)); }
 	}
 	node.graph?.change?.(); syncMediaToolbar(node); app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -426,13 +572,13 @@ function referencedLibraryItems(prompt, kind, items) {
 	return result;
 }
 async function syncPromptLibrarySelections(node) {
-	const prompt = String(value(node, "prompt", "") || "");
+	const prompt = effectivePromptText(node);
 	if (node.__gjjMiniMaxParsedLibraryPrompt === prompt) return;
 	node.__gjjMiniMaxParsedLibraryPrompt = prompt;
 	if (!prompt.includes("@") && !prompt.includes("🏕")) return;
 	try {
 		const index = await promptLibraryIndex();
-		if (String(value(node, "prompt", "") || "") !== prompt) { node.__gjjMiniMaxParsedLibraryPrompt = null; return; }
+		if (effectivePromptText(node) !== prompt) { node.__gjjMiniMaxParsedLibraryPrompt = null; return; }
 		for (const kind of ["actor", "scene"]) {
 			const markerPresent = kind === "actor" ? prompt.includes("@") : prompt.includes("🏕"); if (!markerPresent) continue;
 			const parsed = referencedLibraryItems(prompt, kind, index[kind]); if (!parsed.length) continue;
@@ -454,7 +600,7 @@ async function addParsedLibraryButtons(node, kind, names) {
 	} catch (error) { console.warn("[GJJ_MiniMaxH3Studio] 回显提示词资料库按钮失败", error); }
 }
 function schedulePromptLibrarySync(node) {
-	const prompt = String(value(node, "prompt", "") || "");
+	const prompt = effectivePromptText(node);
 	if (node.__gjjMiniMaxParsedLibraryPrompt === prompt || node.__gjjMiniMaxScheduledLibraryPrompt === prompt) return;
 	clearTimeout(node.__gjjMiniMaxLibraryParseTimer);
 	node.__gjjMiniMaxScheduledLibraryPrompt = prompt;
@@ -555,9 +701,9 @@ function showMediaTooltip(node) {
 }
 function syncMediaToolbar(node) {
 	const panel = node.__gjjMiniMaxPanel; if (!panel) return;
-	const linked = activeMediaLinks(node); const remembered = hasRememberedLinks(node); const loaded = internalMediaItems(node).length > 0;
-	panel.folder.disabled = linked; panel.folder.classList.toggle("loaded", loaded && !linked); panel.folder.title = linked ? "外部媒体入口已连接，内部媒体选择已禁用" : (loaded ? `已载入 ${internalMediaItems(node).length} 个内部文件` : "打开图片、文本、音频或视频");
-	panel.link.classList.toggle("show", linked || remembered); panel.link.classList.toggle("detached", !linked && remembered); panel.link.title = linked ? "记录上游接口并断开链接" : "恢复记录的上游接口";
+	const linkedMedia = activeMediaLinks(node); const linked = activeManagedLinks(node); const remembered = hasRememberedLinks(node); const loaded = internalMediaItems(node).length > 0;
+	panel.folder.disabled = linkedMedia; panel.folder.classList.toggle("loaded", loaded && !linkedMedia); panel.folder.title = linkedMedia ? "外部媒体入口已连接，内部媒体选择已禁用" : (loaded ? `已载入 ${internalMediaItems(node).length} 个内部文件` : "打开图片、文本、音频或视频");
+	panel.link.classList.toggle("show", linked || remembered); panel.link.classList.toggle("detached", !linked && remembered); panel.link.title = linked ? "记录并断开上游媒体与提示词链接" : "恢复记录的上游媒体与提示词链接";
 }
 async function uploadInternalMedia(node, files) {
 	const form = new FormData(); for (const file of files) form.append("media", file, file.name);
@@ -752,13 +898,13 @@ function createPanel(node) {
 	const root = document.createElement("div"); root.className = "gjj-mh3-root"; protect(root);
 	const toolbar = document.createElement("div"); toolbar.className = "gjj-mh3-toolbar";
 	const libraryChips = document.createElement("div"); libraryChips.className = "gjj-mh3-library-chips";
-	const folder = makeButton("📁", "打开图片、文本、音频或视频", "gjj-mh3-folder"); const link = makeButton("🔗", "记录并断开/恢复上游媒体接口", "gjj-mh3-link");
+	const folder = makeButton("📁", "打开图片、文本、音频或视频", "gjj-mh3-folder"); const link = makeButton("🔗", "记录并断开/恢复上游媒体与提示词接口", "gjj-mh3-link");
 	const file = document.createElement("input"); file.type = "file"; file.multiple = true; file.accept = "image/*,text/plain,.txt,.md,.prompt,audio/*,video/*"; file.style.display = "none"; root.appendChild(file);
 	const run = makeButton("▶️", "运行当前 MiniMax H3 节点", "gjj-mh3-run");
 	const sceneButton = makeButton("🏕️", "选择场景库引用", "gjj-mh3-library-button"); const actorButton = makeButton("👤", "选择角色库引用", "gjj-mh3-library-button");
-	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const settings = makeButton("⚙️", "生成参数");
+	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const spectrum = makeButton("🚀", "Spectrum MiniMax H3 加速设置", "gjj-mh3-spectrum"); const promptBook = makeButton("📒", "全局、负面与替换提示词"); const settings = makeButton("⚙️", "生成参数");
 	const variables = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS); variables.classList.add("gjj-mh3-btn"); variables.style.height = "32px"; variables.style.minWidth = "36px"; variables.style.width = "36px"; variables.style.flex = "0 0 36px"; variables.style.padding = "0"; variables.style.margin = "0"; variables.style.borderRadius = "0";
-	toolbar.append(folder, link, sceneButton, actorButton, size, seed, model, variables, settings, run);
+	toolbar.append(folder, link, sceneButton, actorButton, size, seed, model, spectrum, promptBook, variables, settings, run);
 	const resultRoot = document.createElement("div"); resultRoot.className = "gjj-mh3-root"; protect(resultRoot);
 	const branches = document.createElement("div"); branches.className = "gjj-mh3-branches";
 	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "图片数量决定可选生成分支";
@@ -773,17 +919,17 @@ function createPanel(node) {
 		return [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(24, hasPreview ? Number(resultRoot.scrollHeight || compactHeight) : compactHeight)];
 	}; resultDom.getHeight = () => Number(resultDom.computeSize?.()[1] || 24);
 	arrangePanelWidgets(node, dom, resultDom);
-	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, variables, buttons: { size, seed, model, settings }, popups: {} };
-	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数");
+	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, spectrumButton: spectrum, variables, buttons: { size, seed, model, spectrum, promptBook, settings }, popups: {} };
+	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数"); panel.popups.spectrum = popup(node, "spectrum", "🚀 Spectrum 加速"); panel.popups.promptBook = popup(node, "promptBook", "📒 提示词");
 	const turnPreview = (offset) => { const entries = orderedPreviewEntries(panel); const index = entries.findIndex((entry) => entry.key === panel.activePreviewKey); const target = entries[index + offset]; if (target) showStoredPreview(node, target.key); };
 	previewPrev.addEventListener("click", () => turnPreview(-1)); previewNext.addEventListener("click", () => turnPreview(1));
-	run.addEventListener("click", async () => { closePopups(node); panel.previewEntries.clear(); panel.activePreviewKey = null; previewNav.style.display = "none"; status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
+	run.addEventListener("click", async () => { closePopups(node); resetResultPreview(node); status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
 	folder.addEventListener("click", () => { if (!folder.disabled) file.click(); }); file.addEventListener("change", async () => { const files = Array.from(file.files || []); file.value = ""; if (!files.length) return; try { status.textContent = "正在载入媒体…"; await uploadInternalMedia(node, files); } catch (error) { status.textContent = `载入失败：${error?.message || error}`; } });
 	folder.addEventListener("mouseenter", () => showMediaTooltip(node)); folder.addEventListener("mouseleave", () => scheduleMediaTooltipClose(node));
 	link.addEventListener("click", () => toggleMediaLinks(node));
 	sceneButton.addEventListener("click", () => toggleLibraryPicker(node, "scene", sceneButton)); actorButton.addEventListener("click", () => toggleLibraryPicker(node, "actor", actorButton));
-	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); settings.addEventListener("click", () => openPopup(node, "params", settings));
-	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); applyPromptHeight(node, node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT); syncSeed(); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
+	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); spectrum.addEventListener("click", () => openPopup(node, "spectrum", spectrum)); promptBook.addEventListener("click", () => openPopup(node, "promptBook", promptBook)); settings.addEventListener("click", () => openPopup(node, "params", settings));
+	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); applyPromptHeight(node, node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT); syncSeed(); syncSpectrumButton(node); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
 }
 // ⚠️ 关键修复：hook prompt widget 的 DOM 事件，实时同步到 properties
 // 原因：ComfyUI 原生 multiline STRING widget 用户输入时只更新 widget.value，
@@ -914,7 +1060,8 @@ app.registerExtension({
 		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); this.properties ||= {}; this.properties[IMAGE_COUNT_PROPERTY] = Number(message?.source_image_count?.[0] || 0); if (this.__gjjMiniMaxPanel) this.__gjjMiniMaxPanel.status.textContent = `${message?.mode?.[0] || "视频"} 已完成`; void addParsedLibraryButtons(this, "actor", message?.parsed_actors); void addParsedLibraryButtons(this, "scene", message?.parsed_scenes); syncBranchButtons(this); renderResultPreview(this, message); return result; };
 	},
 	setup() {
-		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) { node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); if (Array.isArray(detail.parsed_actors)) void addParsedLibraryButtons(node, "actor", detail.parsed_actors); if (Array.isArray(detail.parsed_scenes)) void addParsedLibraryButtons(node, "scene", detail.parsed_scenes); if (detail.preview_media || detail.preview_video || detail.gifs || detail.animated || detail.videos || detail.video || detail.output_path) renderResultPreview(node, detail); } });
+		api.addEventListener("executing", (event) => { const detail = event?.detail; const nodeId = detail && typeof detail === "object" ? detail.node : detail; if (nodeId == null) return; const node = app.graph?.getNodeById?.(nodeId); if (String(node?.comfyClass || node?.type || "") === NODE_TYPE) resetResultPreview(node); });
+		api.addEventListener("gjj_node_progress", (event) => { const detail = event?.detail || {}; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE && String(node.id) === String(detail.node) && node.__gjjMiniMaxPanel) { if (Array.isArray(detail.parsed_actors) || Array.isArray(detail.parsed_scenes)) resetResultPreview(node); node.__gjjMiniMaxPanel.status.textContent = String(detail.text || "处理中…"); if (Array.isArray(detail.parsed_actors)) void addParsedLibraryButtons(node, "actor", detail.parsed_actors); if (Array.isArray(detail.parsed_scenes)) void addParsedLibraryButtons(node, "scene", detail.parsed_scenes); if (detail.preview_media || detail.preview_video || detail.gifs || detail.animated || detail.videos || detail.video || detail.output_path) renderResultPreview(node, detail); } });
 		if (!window.__gjjMiniMaxH3TemplateSourceListener) { window.__gjjMiniMaxH3TemplateSourceListener = true; const refresh = () => setTimeout(() => { for (const node of app.graph?._nodes || []) if (String(node?.comfyClass || node?.type || "") === NODE_TYPE) syncBroadcastUI(node); }, 50); window.addEventListener("gjj-generation-template-sources-updated", refresh); window.addEventListener("gjj-variable-broadcast-updated", refresh); window.addEventListener("gjj-template-params-updated", refresh); }
 		window.addEventListener("pointerdown", (event) => { if (event.target?.closest?.(".gjj-mh3-library")) return; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE) closeLibraryPicker(node); if (event.target?.closest?.(".gjj-mh3-pop,.gjj-mh3-btn")) return; for (const node of app.graph?._nodes || []) if (String(node?.comfyClass) === NODE_TYPE) closePopups(node); }, true);
 	},
