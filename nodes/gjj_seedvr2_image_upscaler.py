@@ -683,6 +683,43 @@ def _load_official_seedvr2_components(dit_model: str, vae_model: str):
     return model, vae
 
 
+def _try_resident_seedvr2_components(
+    components: tuple[Any, Any],
+    *,
+    model_offload_device: str,
+    unique_id: Any = None,
+) -> bool:
+    """Keep both SeedVR2 patchers fully loaded when offloading is disabled."""
+    if str(model_offload_device or "none").strip().lower() != "none":
+        return False
+    if not torch.cuda.is_available():
+        return False
+
+    model, vae = components
+    try:
+        import comfy.model_management as model_management
+
+        _send_status(unique_id, "2/6 将 SeedVR2 主模型与 VAE 完整驻留显存...")
+        model_management.load_models_gpu(
+            [model, vae.patcher],
+            force_full_load=True,
+        )
+        _send_status(unique_id, "2/6 SeedVR2 主模型与 VAE 已全部驻留显存。")
+        return True
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+        # A failed forced load can leave partially loaded patchers behind.
+        # Restore ComfyUI's normal lazy model scheduling before continuing.
+        try:
+            model_management.unload_all_models()
+            model_management.soft_empty_cache()
+        except Exception:
+            pass
+        if isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower():
+            _send_status(unique_id, "显存不足以全部驻留，已自动恢复 ComfyUI 动态调度。")
+            return False
+        raise
+
+
 def _resize_for_seedvr2(images: torch.Tensor, resolution: int, max_resolution: int) -> torch.Tensor:
     from comfy.utils import common_upscale
 
@@ -1139,6 +1176,7 @@ def _run_streaming_video_upscale(
     temporal_overlap: int,
     vae_temporal_size: int,
     vae_temporal_overlap: int,
+    model_offload_device: str,
     tensor_offload_device: str,
     unique_id: Any,
     replace_path: Path | None = None,
@@ -1175,10 +1213,16 @@ def _run_streaming_video_upscale(
     chunk_mode = str(video_chunk_mode).strip()
     adaptive = chunk_mode != "手动"
     adaptive_minimum = 5
-    core_frames = min(adaptive_minimum, target_core_frames) if adaptive else target_core_frames
+    # The old adaptive path always started at five frames and grew by four.
+    # With temporal context on both sides, those probe segments could process
+    # nearly three times as many frames as they emitted.  The target has
+    # already been bounded by both the official SeedVR2 VRAM estimate and the
+    # available system RAM, so start there and only shrink after observing
+    # genuine resource pressure.
+    core_frames = target_core_frames
     _send_status(
         unique_id,
-        f"智能视频分段：先用 {core_frames} 帧试跑，动态上限 {target_core_frames} 帧；{chunk_detail}"
+        f"智能视频分段：按显存与内存预算从 {core_frames} 帧开始；{chunk_detail}"
         if adaptive else f"手动视频分段：固定 {core_frames} 帧",
     )
     output_root = Path(folder_paths.get_temp_directory()).resolve() / "GJJ" / "seedvr2_stream"
@@ -1194,6 +1238,11 @@ def _run_streaming_video_upscale(
         raise RuntimeError("未找到 ffmpeg，无法拼接 SeedVR2 流式视频分段。")
     ffmpeg = str(ffmpeg_value)
     loaded_components = _load_official_seedvr2_components(dit_model, vae_model)
+    _try_resident_seedvr2_components(
+        loaded_components,
+        model_offload_device=model_offload_device,
+        unique_id=unique_id,
+    )
 
     with tempfile.TemporaryDirectory(prefix="gjj_seedvr2_") as temp_name:
         temp_root = Path(temp_name)
@@ -1207,9 +1256,14 @@ def _run_streaming_video_upscale(
             segment_started_at = time.perf_counter()
             segment_index += 1
             core_end_frame = min(total_frames, core_start_frame + core_frames)
+            # One latent overlap corresponds to four source frames.  Reusing
+            # the full VAE temporal overlap here duplicated as many as eight
+            # source frames on *each* side even though VAE tiling already
+            # handles its own internal overlap.  Four source frames is enough
+            # boundary context for the default one-latent overlap.
             requested_overlap_frames = max(
                 int(temporal_overlap) * 4,
-                min(8, int(vae_temporal_overlap)),
+                min(4, int(vae_temporal_overlap)),
             )
             # Streaming overlap is inference context, not duplicated output.
             # A five-frame probe previously produced core_frames // 8 == 0,
@@ -1239,33 +1293,48 @@ def _run_streaming_video_upscale(
             if not isinstance(frames, torch.Tensor) or frames.shape[0] == 0:
                 raise RuntimeError(f"SeedVR2 视频分段 {segment_index} 没有可用画面。")
             sample_device = _begin_segment_resource_sample() if adaptive else None
-            sample = _run_official_seedvr2_flow(
-                frames,
-                dit_model=dit_model,
-                vae_model=vae_model,
-                resolution=resolution,
-                max_resolution=max_resolution,
-                seed=seed,
-                encode_tiled=encode_tiled,
-                encode_tile_size=encode_tile_size,
-                encode_tile_overlap=encode_tile_overlap,
-                decode_tiled=decode_tiled,
-                decode_tile_size=decode_tile_size,
-                decode_tile_overlap=decode_tile_overlap,
-                color_correction=color_correction,
-                is_video=True,
-                video_chunk_mode=video_chunk_mode,
-                frames_per_chunk=frames_per_chunk,
-                temporal_overlap=temporal_overlap,
-                vae_temporal_size=vae_temporal_size,
-                vae_temporal_overlap=vae_temporal_overlap,
-                # A completed streaming segment is immediately encoded to a
-                # temporary video, so retaining its output tensor on the GPU
-                # only steals VRAM from the next segment.
-                tensor_offload_device="cpu",
-                loaded_components=loaded_components,
-                unique_id=unique_id,
-            )
+            try:
+                sample = _run_official_seedvr2_flow(
+                    frames,
+                    dit_model=dit_model,
+                    vae_model=vae_model,
+                    resolution=resolution,
+                    max_resolution=max_resolution,
+                    seed=seed,
+                    encode_tiled=encode_tiled,
+                    encode_tile_size=encode_tile_size,
+                    encode_tile_overlap=encode_tile_overlap,
+                    decode_tiled=decode_tiled,
+                    decode_tile_size=decode_tile_size,
+                    decode_tile_overlap=decode_tile_overlap,
+                    color_correction=color_correction,
+                    is_video=True,
+                    video_chunk_mode=video_chunk_mode,
+                    frames_per_chunk=frames_per_chunk,
+                    temporal_overlap=temporal_overlap,
+                    vae_temporal_size=vae_temporal_size,
+                    vae_temporal_overlap=vae_temporal_overlap,
+                    # A completed streaming segment is immediately encoded to a
+                    # temporary video, so retaining its output tensor on the GPU
+                    # only steals VRAM from the next segment.
+                    tensor_offload_device="cpu",
+                    loaded_components=loaded_components,
+                    unique_id=unique_id,
+                )
+            except torch.cuda.OutOfMemoryError:
+                # Budget estimates can be optimistic when another workflow is
+                # occupying VRAM.  Preserve the fast start, but retry the same
+                # output range at roughly half length instead of failing.
+                retry_frames = max(adaptive_minimum, 4 * max(1, ((core_frames // 2) - 1) // 4) + 1)
+                if not adaptive or retry_frames >= core_frames:
+                    raise
+                del components, frames, trimmed
+                gc.collect()
+                torch.cuda.empty_cache()
+                core_frames = retry_frames
+                segment_index -= 1
+                _send_status(unique_id, f"显存不足，自动缩短为 {core_frames} 帧并重试当前分段...")
+                continue
             left_trim = core_start_frame - load_start_frame
             wanted = core_end_frame - core_start_frame
             sample = sample[left_trim:left_trim + wanted]
@@ -1330,9 +1399,12 @@ def _run_streaming_video_upscale(
                     f"后续段长 {previous_core_frames} → {core_frames} 帧",
                 )
             del components, frames, sample, segment_video, trimmed
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Python ref-counting releases the large per-segment tensors above.
+            # Keep CUDA's allocator cache warm between segments: empty_cache()
+            # forced expensive allocation/model-transfer churn every time.
+            # A periodic cyclic-GC pass is sufficient for long videos.
+            if segment_index % 8 == 0:
+                gc.collect()
             core_start_frame = core_end_frame
 
         concat_list = temp_root / "segments.txt"
@@ -1451,7 +1523,7 @@ class GJJ_SeedVR2ImageUpscaler:
                 "model_offload_device": (offload_devices, {
                     "default": "none" if "none" in offload_devices else offload_devices[0],
                     "display_name": "模型卸载设备",
-                    "tooltip": "模型空闲时卸载到的设备；低显存时可设为 cpu。",
+                    "tooltip": "none 会在视频分段期间尝试让 SeedVR2 主模型和 VAE 全部驻留显存；显存不足时会自动恢复动态调度，低显存也可主动设为 cpu。",
                 }),
                 "tensor_offload_device": (offload_devices, {
                     "default": preferred_device if preferred_device in offload_devices else ("cpu" if "cpu" in offload_devices else offload_devices[0]),
@@ -1551,7 +1623,7 @@ class GJJ_SeedVR2ImageUpscaler:
                 "video_chunk_mode": (["智能", "手动", "关闭"], {
                     "default": "智能",
                     "display_name": "视频时间分块",
-                    "tooltip": "智能会从 5 帧安全试跑，并按实际显存、内存和秒/帧逐段调整；手动使用“每段视频帧数”；关闭仅关闭段内潜空间切分，长视频仍会安全地流式分段。",
+                    "tooltip": "智能会根据显存和内存预算直接选择高吞吐段长，并按实际压力与秒/帧调整；手动使用“每段视频帧数”；关闭仅关闭段内潜空间切分，长视频仍会安全地流式分段。",
                 }),
                 "frames_per_chunk": ("INT", {
                     "default": 13,
@@ -1570,12 +1642,12 @@ class GJJ_SeedVR2ImageUpscaler:
                     "tooltip": "相邻采样段共享并交叉淡化的潜空间帧数；通常使用 1–2。",
                 }),
                 "vae_temporal_size": ("INT", {
-                    "default": 32,
+                    "default": 64,
                     "min": 8,
                     "max": 4096,
                     "step": 4,
                     "display_name": "VAE 时间块大小",
-                    "tooltip": "VAE 编码和解码一次处理的时间帧数；视频建议 16–32。",
+                    "tooltip": "VAE 编码和解码一次处理的时间帧数；默认 64 与官方视频工作流一致，显存紧张时可降为 16–32。",
                 }),
                 "vae_temporal_overlap": ("INT", {
                     "default": 8,
@@ -1685,6 +1757,7 @@ class GJJ_SeedVR2ImageUpscaler:
             temporal_overlap=int(temporal_overlap),
             vae_temporal_size=int(vae_temporal_size),
             vae_temporal_overlap=int(vae_temporal_overlap),
+            model_offload_device=str(model_offload_device),
             tensor_offload_device=str(tensor_offload_device),
             unique_id=unique_id,
             replace_path=replace_path,

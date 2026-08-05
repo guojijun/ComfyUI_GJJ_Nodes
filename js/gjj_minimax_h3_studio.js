@@ -14,7 +14,7 @@ const LINK_MEMORY_PROPERTY = "gjj_minimax_h3_media_links";
 const PROMPT_BACKUP_PROPERTY = "gjj_minimax_h3_prompt";
 const SETTINGS_BACKUP_PROPERTY = "gjj_minimax_h3_settings";
 const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
-const SETTINGS_SCHEMA_VERSION = 8;
+const SETTINGS_SCHEMA_VERSION = 10;
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const PROMPT_MIN_HEIGHT = 58;
@@ -74,6 +74,9 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "spectrum_max_history", label: "最大历史数量", type: "INT", aliases: ["max_history"] },
 	{ name: "spectrum_debug", label: "调试日志", type: "BOOLEAN", aliases: ["debug"] },
 	{ name: "spectrum_history_storage", label: "历史存储位置", type: "STRING", aliases: ["history_storage"] },
+	{ name: "dialogue_language", label: "对白语言", type: "STRING", aliases: ["language", "dialogue_language", "语言", "对白语言"] },
+	{ name: "megapixel_aspect", label: "百万像素比例", type: "STRING", aliases: ["aspect", "ratio", "比例"] },
+	{ name: "megapixels", label: "百万像素", type: "FLOAT", aliases: ["megapixels", "mp", "百万像素"] },
 ];
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -92,9 +95,11 @@ const HIDDEN = new Set([
 	"spectrum_enabled", "spectrum_blend_weight", "spectrum_degree", "spectrum_ridge_lambda",
 	"spectrum_window_size", "spectrum_flex_window", "spectrum_warmup_steps",
 	"spectrum_tail_actual_steps", "spectrum_max_history", "spectrum_debug", "spectrum_history_storage",
+	"dialogue_language",
+	"megapixel_aspect", "megapixels",
 ]);
 const POPUP_GROUPS = {
-	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size"]], ["输出", ["filename_prefix", "format_name"]]],
+	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size", "dialogue_language"]], ["输出", ["filename_prefix", "format_name"]]],
 	size: [["画面尺寸", ["width", "height"]]],
 	promptBook: [["提示词", ["global_prompt", "negative_prompt"]], ["替换提示词", ["prompt_replace_find", "prompt_replace_with"]]],
 };
@@ -162,7 +167,7 @@ function installStyle() {
 	.gjj-mh3-library-chips{display:none;flex-wrap:wrap;gap:5px;align-items:flex-start;align-content:flex-start}.gjj-mh3-library-chip{border:1px solid #456b73;border-radius:999px;background:#172a30;color:#d8eef0;padding:4px 9px;cursor:pointer;font-size:11px}.gjj-mh3-library-chip:hover{border-color:#62c9bd;background:#1d3a3d}
 	.gjj-mh3-library-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 4px}.gjj-mh3-library-chip img{width:23px;height:23px;border-radius:50%;object-fit:cover;background:#081014}.gjj-mh3-library-button{position:relative;overflow:hidden}.gjj-mh3-library-button>img{display:block;width:100%;height:100%;object-fit:cover}.gjj-mh3-library-count{position:absolute;right:1px;bottom:0;min-width:13px;height:13px;border-radius:7px;background:#0b171bde;color:#fff;font:9px/13px system-ui;text-align:center}.gjj-mh3-library-preview{position:fixed;z-index:100012;width:280px;padding:7px;border:1px solid #54838b;border-radius:9px;background:#0b1418;color:#e5f1f2;box-shadow:0 16px 46px #000d}.gjj-mh3-library-preview img{display:block;width:100%;max-height:330px;object-fit:contain;border-radius:6px;background:#05090b}.gjj-mh3-library-preview div{padding:7px 3px 2px;line-height:1.4;white-space:normal}
 	.gjj-mh3-pop{position:fixed;z-index:100000;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow:auto;display:none;background:#101a1e;color:#e2f0f1;border:1px solid #4e7d86;border-radius:10px;box-shadow:0 14px 45px #000b;padding:10px}.gjj-mh3-pop.open{display:block}.gjj-mh3-pophead{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}.gjj-mh3-close{border:1px solid #40717a;border-radius:5px;background:#173038;color:#dff;padding:5px 12px;cursor:pointer}.gjj-mh3-section{border-top:1px solid #29434a;padding-top:8px;margin-top:8px}.gjj-mh3-title{color:#7ed9d3;font-weight:800;margin-bottom:7px}.gjj-mh3-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.gjj-mh3-field{display:grid;gap:3px;color:#9eb8bd}.gjj-mh3-field.wide{grid-column:1/-1}.gjj-mh3-control{box-sizing:border-box;width:100%;min-width:0;background:#0b1316;color:#e8f5f5;border:1px solid #304e55;border-radius:5px;padding:6px}.gjj-mh3-toggle.active{background:#17614e;color:#fff}
-	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:1fr 1fr;margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(5,1fr);margin-bottom:15px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-preview{position:relative;display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}.gjj-mh3-preview-nav{position:absolute;z-index:3;left:50%;top:7px;transform:translateX(-50%);display:none;align-items:center;gap:5px;padding:3px;border:1px solid rgba(124,194,203,.65);border-radius:7px;background:rgba(5,14,18,.82);box-shadow:0 2px 10px rgba(0,0,0,.38)}.gjj-mh3-preview-nav button{width:25px;height:24px;padding:0;border:1px solid #42636b;border-radius:5px;background:#14262d;color:#eaffff;cursor:pointer;font-weight:900}.gjj-mh3-preview-nav button:disabled{opacity:.35;cursor:default}.gjj-mh3-preview-label{min-width:74px;color:#dff7f7;text-align:center;font:700 11px/1.2 system-ui,sans-serif;white-space:nowrap}`;
+	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:repeat(3,1fr);margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;margin-bottom:10px}.gjj-mh3-ratios .gjj-mh3-size-choice{min-width:0;padding:4px 1px;font-size:11px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-megapixel{display:grid;gap:10px;margin:4px 0 14px}.gjj-mh3-size-result{padding:9px;border:1px solid #31535b;border-radius:7px;background:#091215;color:#8fe1d5;text-align:center;font-weight:900;font-size:15px}.gjj-mh3-preview{position:relative;display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}.gjj-mh3-preview-nav{position:absolute;z-index:3;left:50%;top:7px;transform:translateX(-50%);display:none;align-items:center;gap:5px;padding:3px;border:1px solid rgba(124,194,203,.65);border-radius:7px;background:rgba(5,14,18,.82);box-shadow:0 2px 10px rgba(0,0,0,.38)}.gjj-mh3-preview-nav button{width:25px;height:24px;padding:0;border:1px solid #42636b;border-radius:5px;background:#14262d;color:#eaffff;cursor:pointer;font-weight:900}.gjj-mh3-preview-nav button:disabled{opacity:.35;cursor:default}.gjj-mh3-preview-label{min-width:74px;color:#dff7f7;text-align:center;font:700 11px/1.2 system-ui,sans-serif;white-space:nowrap}`;
 	document.head.appendChild(style);
 }
 function hideBackendWidgets(node) {
@@ -346,7 +351,8 @@ function createSizePanel(node) {
 	const tabs = document.createElement("div"); tabs.className = "gjj-mh3-size-tabs";
 	const sourceButton = document.createElement("button"); sourceButton.type = "button"; sourceButton.className = "gjj-mh3-size-choice"; sourceButton.textContent = "首图尺寸";
 	const panelButton = document.createElement("button"); panelButton.type = "button"; panelButton.className = "gjj-mh3-size-choice"; panelButton.textContent = "画板尺寸";
-	tabs.append(sourceButton, panelButton);
+	const megapixelButton = document.createElement("button"); megapixelButton.type = "button"; megapixelButton.className = "gjj-mh3-size-choice"; megapixelButton.textContent = "百万像素";
+	tabs.append(sourceButton, panelButton, megapixelButton);
 	const choiceControls = new Map();
 	const makeChoiceRow = (name, icon, values) => {
 		const row = document.createElement("div"); row.className = "gjj-mh3-choice-row"; row.style.setProperty("--count", String(values.length));
@@ -357,6 +363,16 @@ function createSizePanel(node) {
 	const fitRow = makeChoiceRow("resize_fit_mode", "🧲", ["拉伸", "补边", "留边", "裁剪"]);
 	const anchorRow = makeChoiceRow("resize_anchor", "📍", ["上", "下", "左", "右", "中"]);
 	const dimensions = document.createElement("div");
+	const megapixelPanel = document.createElement("div"); megapixelPanel.className = "gjj-mh3-megapixel";
+	const ratioRow = document.createElement("div"); ratioRow.className = "gjj-mh3-ratios";
+	const ratios = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"];
+	const ratioButtons = ratios.map((ratio) => { const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-size-choice"; button.textContent = ratio; button.addEventListener("click", () => { setValue(node, "megapixel_aspect", ratio); sync(); }); ratioRow.appendChild(button); return button; });
+	const mpRow = document.createElement("label"); mpRow.className = "gjj-mh3-slider-row";
+	const mpCaption = document.createElement("span"); mpCaption.textContent = "📐 MP";
+	const mpRange = document.createElement("input"); mpRange.type = "range"; mpRange.min = "0.2"; mpRange.max = "2.0"; mpRange.step = "0.1";
+	const mpNumber = document.createElement("input"); mpNumber.type = "number"; mpNumber.className = "gjj-mh3-size-number"; mpNumber.min = mpRange.min; mpNumber.max = mpRange.max; mpNumber.step = mpRange.step;
+	const sizeResult = document.createElement("div"); sizeResult.className = "gjj-mh3-size-result";
+	mpRow.append(mpCaption, mpRange, mpNumber); megapixelPanel.append(ratioRow, mpRow, sizeResult);
 	const controls = {};
 	for (const [name, icon, label] of [["width", "📐", "宽度"], ["height", "📏", "高度"]]) {
 		const target = widget(node, name); const row = document.createElement("label"); row.className = "gjj-mh3-slider-row";
@@ -367,16 +383,22 @@ function createSizePanel(node) {
 		range.addEventListener("input", () => apply(range.value)); number.addEventListener("change", () => apply(number.value)); row.append(caption, range, number); dimensions.appendChild(row); controls[name] = { range, number };
 	}
 	const sync = () => {
-		const source = Boolean(value(node, "use_source_size", true)); sourceButton.classList.toggle("active", source); panelButton.classList.toggle("active", !source); dimensions.classList.toggle("gjj-mh3-size-disabled", source);
+		const source = Boolean(value(node, "use_source_size", true)); const megapixelMode = !source && String(value(node, "size_mode", "宽高")) === "百万像素";
+		sourceButton.classList.toggle("active", source); panelButton.classList.toggle("active", !source && !megapixelMode); megapixelButton.classList.toggle("active", megapixelMode); dimensions.style.display = source || megapixelMode ? "none" : ""; megapixelPanel.style.display = megapixelMode ? "" : "none";
 		syncMainSizeButton(node);
 		const sourceBound = Boolean(boundVariable(node, "use_source_size")); sourceButton.disabled = sourceBound; panelButton.disabled = sourceBound; sourceButton.title = panelButton.title = sourceBound ? `首图尺寸已由广播变量“${boundVariable(node, "use_source_size")}”接管` : "";
 		for (const [name, control] of Object.entries(controls)) { const bound = Boolean(boundVariable(node, name)); control.range.disabled = source || bound; control.number.disabled = source || bound; const tip = bound ? `已由广播变量“${boundVariable(node, name)}”接管` : ""; control.range.title = control.number.title = tip; }
 		for (const [name, group] of choiceControls) group.buttons.forEach((button, index) => { const variableName = boundVariable(node, name); button.classList.toggle("active", String(value(node, name, group.values[0])) === group.values[index]); button.disabled = Boolean(variableName); button.style.opacity = variableName ? "0.45" : ""; button.title = variableName ? `已由广播变量“${variableName}”接管` : ""; });
 		for (const [name, fallback] of [["width", 864], ["height", 480]]) { const next = normalizeCanvasDimension(value(node, name, fallback), fallback); if (Number(value(node, name, fallback)) !== next) setValue(node, name, next); controls[name].range.value = controls[name].number.value = String(next); }
+		const aspect = String(value(node, "megapixel_aspect", "16:9")); ratioButtons.forEach((button, index) => button.classList.toggle("active", ratios[index] === aspect));
+		const mp = Math.max(0.2, Math.min(2, Number(value(node, "megapixels", 0.4)) || 0.4)); mpRange.value = mpNumber.value = String(mp);
+		const [rw, rh] = aspect.split(":").map(Number); const total = mp * 1024 * 1024; const outputWidth = Math.round(Math.sqrt(total * rw / rh) / 32) * 32; const outputHeight = Math.round(Math.sqrt(total * rh / rw) / 32) * 32; sizeResult.textContent = `实际尺寸：${outputWidth} × ${outputHeight}`;
 	};
-	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); sync(); });
-	for (const element of [sourceButton, panelButton, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
-	host.append(tabs, fitRow, anchorRow, dimensions); host.__gjjSync = sync; sync(); return host;
+	const applyMegapixels = (raw) => { const next = Math.round(Math.max(0.2, Math.min(2, Number(raw) || 0.4)) * 10) / 10; setValue(node, "megapixels", next); sync(); };
+	mpRange.addEventListener("input", () => applyMegapixels(mpRange.value)); mpNumber.addEventListener("change", () => applyMegapixels(mpNumber.value));
+	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "size_mode", "宽高"); sync(); }); megapixelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "size_mode", "百万像素"); sync(); });
+	for (const element of [sourceButton, panelButton, megapixelButton, ...ratioButtons, mpRange, mpNumber, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
+	host.append(tabs, fitRow, anchorRow, dimensions, megapixelPanel); host.__gjjSync = sync; sync(); return host;
 }
 function popup(node, key, title) {
 	const root = document.createElement("div"); root.className = "gjj-mh3-pop"; root.dataset.popup = key; protect(root);

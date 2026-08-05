@@ -41,6 +41,19 @@ DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
 MAX_AUDIO_DRIVEN_DURATION = 15.0
+DIALOGUE_LANGUAGE_TAGS = {
+    "中文": "Chinese",
+    "英语": "English",
+    "阿拉伯语": "Arabic",
+    "法语": "French",
+    "德语": "German",
+    "意大利语": "Italian",
+    "日语": "Japanese",
+    "韩语": "Korean",
+    "葡萄牙语": "Portuguese",
+    "俄语": "Russian",
+    "西班牙语": "Spanish",
+}
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
     "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
@@ -48,11 +61,15 @@ DEFAULT_REASONING_SYSTEM_PROMPT = (
 )
 
 
-def _official_prompt_rewrite_rules(mode: str, duration: float, picture_count: int) -> str:
+def _official_prompt_rewrite_rules(
+    mode: str, duration: float, picture_count: int, dialogue_language: str = "中文",
+) -> str:
     seconds = f"{max(0.0, float(duration)):.2f}"
+    language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
     shared = (
         "Follow the official MiniMax H3 video prompt rules. Preserve every user-provided dialogue word and punctuation verbatim; "
-        "put dialogue only inside <d>[Language] ...</d>. Assign stable speaker IDs (S1), (S2), etc. "
+        f"put every spoken line inside <d>[{language_tag}] ...</d> and use [{language_tag}] for every dialogue line without exception. "
+        "Assign stable speaker IDs (S1), (S2), etc. "
         "For every spoken line, identify the concrete speaker outside <d> and use an explicit physical speech verb such as says, "
         "replies, asks, or exclaims. Unless the user explicitly requests voiceover or off-screen speech, keep that speaker on-screen "
         "with the face and mouth clearly visible during the complete line, and explicitly state that the speaker naturally moves the "
@@ -119,7 +136,20 @@ def _spoken_language(text: str) -> str:
     return "English"
 
 
-def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: float, picture_count: int) -> str:
+def _force_dialogue_language(prompt: str, dialogue_language: str) -> str:
+    """统一所有 H3 <d> 标签的语种，不改动对白正文。"""
+    language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
+    return re.sub(
+        r"<d>\s*(?:\[[^\]\r\n]+\]\s*)?",
+        f"<d>[{language_tag}] ",
+        str(prompt or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _officialize_prompt_without_reasoning(
+    prompt: str, mode: str, duration: float, picture_count: int, dialogue_language: str = "中文",
+) -> str:
     """不加载文本模型时，用确定性规则整理为 MiniMax H3 官方提示词结构。"""
     source = str(prompt or "").strip()
     if not source:
@@ -150,7 +180,7 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
         dialogue_actions.append(
             f"{subject_label} (S{speaker_id}) remains on-screen with the face and mouth clearly visible, turns naturally toward "
             f"the listener, and says while the lips and jaw move in precise synchronization with the spoken words: "
-            f"<d>[{_spoken_language(spoken_text)}] {spoken_text}</d> {subject_label} (S{speaker_id}) finishes speaking and closes "
+            f"<d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> {subject_label} (S{speaker_id}) finishes speaking and closes "
             "the mouth while the other visible characters keep their lips closed and react naturally."
         )
 
@@ -171,7 +201,7 @@ def _officialize_prompt_without_reasoning(prompt: str, mode: str, duration: floa
         speaker_id = speaker_ids[speaker_key]
         dialogue_actions.append(
             f"{speaker_name} (S{speaker_id}) remains on-screen with the face and mouth clearly visible and says while the lips "
-            f"and jaw move in precise synchronization with the spoken words: <d>[{_spoken_language(spoken_text)}] {spoken_text}</d> "
+            f"and jaw move in precise synchronization with the spoken words: <d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> "
             f"{speaker_name} (S{speaker_id}) finishes speaking and closes the mouth while the other visible characters keep their "
             "lips closed and react naturally."
         )
@@ -949,7 +979,7 @@ class GJJ_MiniMaxH3Studio:
                 "audio_vae_name": (audio_vaes, {"default": audio_vae_default, "display_name": "音频VAE", "gjj_default_model": DEFAULT_AUDIO_VAE, "gjj_model_folder": "vae", "gjj_model_icon": "🔴"}),
                 "keep_model": ("BOOLEAN", {"default": False, "display_name": "保持模型"}),
                 "use_source_size": ("BOOLEAN", {"default": True, "display_name": "首图尺寸"}),
-                "size_mode": (["宽高", "等比", "长边", "像素"], {"default": "宽高", "display_name": "尺寸模式"}),
+                "size_mode": (["宽高", "等比", "长边", "像素", "百万像素"], {"default": "宽高", "display_name": "尺寸模式"}),
                 "resize_fit_mode": (["拉伸", "补边", "留边", "裁剪"], {"default": "裁剪", "display_name": "适配方式"}),
                 "resize_anchor": (["上", "下", "左", "右", "中"], {"default": "上", "display_name": "保留位置"}),
                 "reference_media_2": (MEDIA_TYPE, {"display_name": "参考媒体 2", "tooltip": "第二个递归媒体入口；外部链接优先于📁内部媒体。"}),
@@ -985,6 +1015,9 @@ class GJJ_MiniMaxH3Studio:
                 "spectrum_max_history": ("INT", {"default": 8, "min": 2, "max": 64, "step": 1, "display_name": "最大历史数量", "tooltip": "必须不少于多项式阶数加一。"}),
                 "spectrum_debug": ("BOOLEAN", {"default": False, "display_name": "调试日志"}),
                 "spectrum_history_storage": (["系统内存（RAM）", "显存（VRAM）"], {"default": "系统内存（RAM）", "display_name": "历史存储位置"}),
+                "dialogue_language": (list(DIALOGUE_LANGUAGE_TAGS), {"default": "中文", "display_name": "对白语言", "tooltip": "强制每一句对白使用所选 H3 语种标签，例如 <d>[Chinese] ...</d>。"}),
+                "megapixel_aspect": (["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"], {"default": "16:9", "display_name": "百万像素比例"}),
+                "megapixels": ("FLOAT", {"default": 0.4, "min": 0.2, "max": 2.0, "step": 0.1, "display_name": "百万像素"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1047,6 +1080,15 @@ class GJJ_MiniMaxH3Studio:
         external_images = list(media["images"])
         external_image_count = len(external_images)
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
+        if str(first("size_mode", "宽高")) == "百万像素":
+            aspect_text = str(first("megapixel_aspect", "16:9"))
+            try:
+                aspect_width, aspect_height = (max(1.0, float(part)) for part in aspect_text.split(":", 1))
+            except (TypeError, ValueError):
+                aspect_width, aspect_height = 16.0, 9.0
+            total_pixels = max(0.2, min(2.0, float(first("megapixels", 0.4)))) * 1024.0 * 1024.0
+            panel_width = max(32, round((total_pixels * aspect_width / aspect_height) ** 0.5 / 32.0) * 32)
+            panel_height = max(32, round((total_pixels * aspect_height / aspect_width) ** 0.5 / 32.0) * 32)
         pooled_assets = {
             "scene": _library_reference_assets("scene", selected_scenes, panel_width, panel_height),
             "actor": _library_reference_assets("actor", actor_candidates, panel_width, panel_height),
@@ -1188,7 +1230,12 @@ class GJJ_MiniMaxH3Studio:
             configured_system_prompt = str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT) or "").strip()
             reasoning_system_prompt = "\n\n".join(filter(None, (
                 configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
-                _official_prompt_rewrite_rules(mode=official_prompt_mode, duration=duration, picture_count=image_count),
+                _official_prompt_rewrite_rules(
+                    mode=official_prompt_mode,
+                    duration=duration,
+                    picture_count=image_count,
+                    dialogue_language=str(first("dialogue_language", "中文")),
+                ),
             )))
             inferred_parts: list[str] = []
             for infer_index, raw_part in enumerate(prompt_parts):
@@ -1216,10 +1263,17 @@ class GJJ_MiniMaxH3Studio:
                     mode=official_prompt_mode,
                     duration=duration,
                     picture_count=len(segmented_library_media[index][1]["images"]),
+                    dialogue_language=str(first("dialogue_language", "中文")),
                 )
                 for index, raw_part in enumerate(prompt_parts)
             ]
-        prompt_parts = [_normalize_picture_reference_tags(item) for item in prompt_parts]
+        prompt_parts = [
+            _force_dialogue_language(
+                _normalize_picture_reference_tags(item),
+                str(first("dialogue_language", "中文")),
+            )
+            for item in prompt_parts
+        ]
 
         jobs: list[tuple[str, dict[str, list[Any]]]] = []
         if library_assets or has_library_voices:

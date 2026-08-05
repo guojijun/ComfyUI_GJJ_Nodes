@@ -3805,7 +3805,7 @@ def _register_gjj_scene_library_api():
 							video_chunk_mode="关闭",
 							frames_per_chunk=1,
 							temporal_overlap=0,
-							vae_temporal_size=seed_default("vae_temporal_size", 32),
+							vae_temporal_size=seed_default("vae_temporal_size", 64),
 							vae_temporal_overlap=seed_default("vae_temporal_overlap", 8),
 							local_media_file="",
 							save_in_place=False,
