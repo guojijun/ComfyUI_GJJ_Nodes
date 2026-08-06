@@ -25,6 +25,7 @@ from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_combine_runtime import DEFAULT_FORMAT, list_supported_formats
 from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _load_vae
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle, MISSING_SAGE_HANDLING_MODES, SAGE_ATTENTION_MODES
+from .gjj_multi_lora_chain import apply_lora_chain_config
 from .gjj_spectrum_apply_minimax_h3 import GJJ_SpectrumApplyMiniMaxH3
 
 
@@ -40,6 +41,7 @@ DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
+DEFAULT_ACCEL_LORA_KEYWORD = "minima_h3_turbo"
 MAX_AUDIO_DRIVEN_DURATION = 15.0
 DIALOGUE_LANGUAGE_TAGS = {
     "中文": "Chinese",
@@ -54,6 +56,22 @@ DIALOGUE_LANGUAGE_TAGS = {
     "俄语": "Russian",
     "西班牙语": "Spanish",
 }
+
+
+def _default_accel_lora_data() -> str:
+    terms = [
+        item for item in re.split(r"[^a-z0-9\u4e00-\u9fff]+", DEFAULT_ACCEL_LORA_KEYWORD.casefold())
+        if item
+    ]
+    candidates = [
+        str(item) for item in folder_paths.get_filename_list("loras")
+        if all(term in str(item).casefold() for term in terms)
+    ]
+    candidates.sort(key=lambda item: ("converted" in item.casefold(), len(item), item.casefold()))
+    return json.dumps(
+        [{"enabled": True, "name": candidates[0], "strength": 1.0}],
+        ensure_ascii=False,
+    ) if candidates else "[]"
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
     "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
@@ -1090,6 +1108,7 @@ class GJJ_MiniMaxH3Studio:
             (item for item in reasoning_models if normalized_keyword in item.lower().replace("-", "").replace("_", "")),
             reasoning_models[0],
         )
+        default_lora_data = _default_accel_lora_data()
         if "res_multistep" not in samplers:
             samplers.insert(0, "res_multistep")
         if "simple" not in schedulers:
@@ -1103,7 +1122,7 @@ class GJJ_MiniMaxH3Studio:
                 "height": ("INT", {"default": 480, "min": 352, "max": 1920, "step": 32, "display_name": "高度"}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 60.0, "step": 0.1, "display_name": "时长(秒)"}),
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0, "display_name": "帧率"}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
+                "steps": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "种子"}),
                 "randomize_seed": ("BOOLEAN", {"default": True, "display_name": "随机种子"}),
                 "sampler_name": (samplers, {"default": "res_multistep", "display_name": "采样器"}),
@@ -1158,6 +1177,7 @@ class GJJ_MiniMaxH3Studio:
                 "dialogue_language": (list(DIALOGUE_LANGUAGE_TAGS), {"default": "中文", "display_name": "对白语言", "tooltip": "强制每一句对白使用所选 H3 语种标签，例如 <d>[Chinese] ...</d>。"}),
                 "megapixel_aspect": (["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"], {"default": "16:9", "display_name": "百万像素比例"}),
                 "megapixels": ("FLOAT", {"default": 0.4, "min": 0.2, "max": 2.0, "step": 0.1, "display_name": "百万像素"}),
+                "lora_data": ("STRING", {"default": default_lora_data, "display_name": "LoRA 配置", "tooltip": "🧠 模型面板中的 LoRA 区自动维护；默认启用 MiniMax H3 Turbo 4-step LoRA，并按界面顺序串联应用。"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1544,6 +1564,24 @@ class GJJ_MiniMaxH3Studio:
                     keep=bool(first("keep_model", False)),
                     unique_id=unique_id,
                 )
+                lora_events: list[dict[str, Any]] = []
+                default_lora_data = _default_accel_lora_data()
+                configured_lora_data = str(first("lora_data", default_lora_data) or default_lora_data)
+                if configured_lora_data.strip() == "[]":
+                    configured_lora_data = default_lora_data
+                loaded_model, loaded_clip, _lora_cache = apply_lora_chain_config(
+                    loaded_model,
+                    loaded_clip,
+                    configured_lora_data,
+                    on_lora_applied=lambda payload: lora_events.append(dict(payload)),
+                )
+                for event in lora_events:
+                    print(
+                        "[GJJ_MiniMaxH3Studio] LoRA 已应用："
+                        f"{event.get('name')} · 强度 {float(event.get('strength', 1.0)):g} · "
+                        f"模型权重 {int(event.get('model', 0))} · CLIP 权重 {int(event.get('clip', 0))}",
+                        flush=True,
+                    )
                 patched_model, _ = GJJ_ModelPatchBundle().patch(
                     MODEL=loaded_model,
                     启用SageAttention=bool(first("patch_enable_sage_attention", False)),

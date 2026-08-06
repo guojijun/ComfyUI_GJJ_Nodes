@@ -15,6 +15,9 @@ const PROMPT_BACKUP_PROPERTY = "gjj_minimax_h3_prompt";
 const SETTINGS_BACKUP_PROPERTY = "gjj_minimax_h3_settings";
 const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
 const SETTINGS_SCHEMA_VERSION = 10;
+const LORA_DATA_WIDGET = "lora_data";
+const LORA_FILTER_PROPERTY = "gjj_minimax_h3_lora_filter";
+const DEFAULT_LORA_FILTER = "minima_h3_turbo";
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const PROMPT_MIN_HEIGHT = 58;
@@ -97,6 +100,7 @@ const HIDDEN = new Set([
 	"spectrum_tail_actual_steps", "spectrum_max_history", "spectrum_debug", "spectrum_history_storage",
 	"dialogue_language",
 	"megapixel_aspect", "megapixels",
+	"lora_data",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size", "dialogue_language"]], ["输出", ["filename_prefix", "format_name"]]],
@@ -277,13 +281,140 @@ function renderModelTree(node, host) {
 		refresh: () => GJJ_Utils.refreshNode?.(node),
 		onApply: () => queueMicrotask(() => renderModelTree(node, host)),
 	});
-	tree.style.maxHeight = "min(460px,calc(100vh - 180px))";
+	tree.style.maxHeight = "min(300px,calc(100vh - 260px))";
 	host.replaceChildren(tree);
+}
+function normalizeLoraRows(raw) {
+	let parsed = [];
+	try { const value = JSON.parse(String(raw || "[]")); if (Array.isArray(value)) parsed = value; } catch (_) {}
+	const rows = parsed.filter((item) => item && typeof item === "object" && String(item.name || "").trim()).map((item) => ({
+		name: String(item.name || "").trim(),
+		enabled: item.enabled !== false,
+		strength: Number.isFinite(Number(item.strength)) ? Number(item.strength) : 1,
+	}));
+	rows.push({ name: "", enabled: true, strength: 1 });
+	return rows;
+}
+function serializeLoraRows(rows) {
+	return JSON.stringify(rows.filter((row) => String(row?.name || "").trim()).map((row) => ({
+		enabled: row.enabled !== false,
+		name: String(row.name).trim(),
+		strength: Number.isFinite(Number(row.strength)) ? Number(row.strength) : 1,
+	})));
+}
+function miniMaxLoraToken(value) {
+	return String(value || "").trim().toLocaleLowerCase().split(/[\\/]/).pop()
+		.replace(/\.(safetensors|ckpt|pt|pth|bin)$/i, "").replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+function miniMaxLoraMetadata(metadata, name) {
+	const selected = miniMaxLoraToken(name);
+	return (metadata || []).find((item) => (Array.isArray(item?.match) ? item.match : []).some((keyword) => {
+		const token = miniMaxLoraToken(keyword); return token && (selected.includes(token) || token.includes(selected));
+	})) || null;
+}
+function preferredMiniMaxAccelLora(names) {
+	const terms = DEFAULT_LORA_FILTER.toLocaleLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+	return [...(names || [])]
+		.filter((name) => terms.every((term) => String(name).toLocaleLowerCase().includes(term)))
+		.sort((a, b) => Number(String(a).toLocaleLowerCase().includes("converted")) - Number(String(b).toLocaleLowerCase().includes("converted")) || String(a).length - String(b).length)[0] || "";
+}
+function syncStepsFromAccelLora(node, name) {
+	const match = String(name || "").match(/(?:^|[^0-9])(\d+)[_-]?steps?(?:[^a-z0-9]|$)/i);
+	if (match) setValue(node, "steps", Math.max(1, Number(match[1])));
+}
+async function fetchMiniMaxLoras() {
+	try {
+		const [listResponse, metadataResponse] = await Promise.all([fetch("/gjj/loras"), fetch("/gjj/lora-metadata")]);
+		const listPayload = listResponse.ok ? await listResponse.json() : {};
+		const metadataPayload = metadataResponse.ok ? await metadataResponse.json() : {};
+		return {
+			names: Array.isArray(listPayload?.loras) ? listPayload.loras.map(String).filter(Boolean) : [],
+			metadata: Array.isArray(metadataPayload?.metadata) ? metadataPayload.metadata : [],
+			previews: metadataPayload?.previews && typeof metadataPayload.previews === "object" ? metadataPayload.previews : {},
+		};
+	} catch (_) { return { names: [], metadata: [], previews: {} }; }
+}
+function createLoraPanel(node) {
+	const section = document.createElement("section"); section.className = "gjj-mh3-section";
+	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "🧩 LoRA";
+	const filter = document.createElement("input"); filter.className = "gjj-mh3-control"; filter.placeholder = "全局过滤 LoRA";
+	node.properties = node.properties || {};
+	if (!Object.prototype.hasOwnProperty.call(node.properties, LORA_FILTER_PROPERTY)) node.properties[LORA_FILTER_PROPERTY] = DEFAULT_LORA_FILTER;
+	filter.value = String(node.properties[LORA_FILTER_PROPERTY] || "");
+	const rowsHost = document.createElement("div"); rowsHost.style.cssText = "display:grid;gap:7px;margin-top:8px";
+	let catalog = { names: [], metadata: [], previews: {} };
+	let rows = normalizeLoraRows(value(node, LORA_DATA_WIDGET, "[]"));
+	const save = () => setValue(node, LORA_DATA_WIDGET, serializeLoraRows(rows));
+	const render = () => {
+		rows = normalizeLoraRows(serializeLoraRows(rows));
+		rowsHost.replaceChildren();
+		const keyword = String(filter.value || "").trim().toLocaleLowerCase();
+		const filterTerms = keyword.split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+		rows.forEach((row, index) => {
+			const metadata = miniMaxLoraMetadata(catalog.metadata, row.name);
+			const preview = String(catalog.previews?.[row.name] || "");
+			const line = document.createElement("div"); line.style.cssText = `display:grid;grid-template-columns:${row.name && preview ? "58px " : ""}minmax(0,1fr) auto 72px;gap:7px;align-items:center;padding:7px;border:1px solid #304e55;border-radius:8px;background:#111d21`;
+			if (row.name && preview) {
+				const thumb = document.createElement("img"); thumb.src = preview; thumb.alt = metadata?.title || row.name; thumb.title = metadata?.summary || metadata?.title || row.name;
+				thumb.style.cssText = "width:58px;height:58px;object-fit:cover;border:1px solid #3c5660;border-radius:7px;background:#081014;cursor:zoom-in";
+				thumb.addEventListener("click", () => window.open(preview, "_blank", "noopener,noreferrer")); protect(thumb); line.appendChild(thumb);
+			}
+			const select = document.createElement("select"); select.className = "gjj-mh3-control";
+			const available = catalog.names.filter((name) => {
+				const item = miniMaxLoraMetadata(catalog.metadata, name);
+				const haystack = [name, item?.title, item?.trigger, item?.summary, ...(Array.isArray(item?.match) ? item.match : [])].filter(Boolean).join(" ").toLocaleLowerCase();
+				return !filterTerms.length || filterTerms.every((term) => haystack.includes(term));
+			});
+			const names = row.name && !available.includes(row.name) ? [row.name, ...available] : available;
+			const empty = document.createElement("option"); empty.value = ""; empty.textContent = "未选择"; select.appendChild(empty);
+			for (const name of names) { const option = document.createElement("option"); option.value = name; option.textContent = name; select.appendChild(option); }
+			select.value = row.name;
+			const main = document.createElement("div"); main.style.cssText = "display:grid;gap:5px;min-width:0"; main.appendChild(select);
+			if (row.name && metadata) {
+				const meta = document.createElement("div"); meta.style.cssText = "display:flex;align-items:center;gap:7px;min-width:0;color:#a9c5c8;font-size:11px";
+				const text = document.createElement("span"); text.textContent = [metadata.title, metadata.trigger, metadata.strength != null ? `建议 ${metadata.strength}` : ""].filter(Boolean).join("　"); text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"; meta.appendChild(text);
+				const source = String(metadata.source || "").trim();
+				try {
+					const url = new URL(source);
+					if (url.protocol === "https:") {
+						const link = document.createElement("button"); link.type = "button"; link.textContent = "🌐"; link.title = `打开 LoRA 网页：${url.href}`; link.style.cssText = "flex:0 0 26px;width:26px;height:23px;padding:0;border:1px solid #41535b;border-radius:6px;background:#17242a;color:#dce7e2;cursor:pointer";
+						link.addEventListener("click", () => window.open(url.href, "_blank", "noopener,noreferrer")); protect(link); meta.appendChild(link);
+					}
+				} catch (_) {}
+				main.appendChild(meta);
+			}
+			const toggleLabel = document.createElement("label"); toggleLabel.style.cssText = "display:flex;align-items:center;gap:4px;white-space:nowrap";
+			const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.checked = row.enabled !== false; toggleLabel.append(toggle, document.createTextNode("启用"));
+			const strength = document.createElement("input"); strength.type = "number"; strength.className = "gjj-mh3-control"; strength.min = "-10"; strength.max = "10"; strength.step = "0.05"; strength.value = String(row.strength);
+			select.addEventListener("change", () => { rows[index].name = select.value; syncStepsFromAccelLora(node, select.value); save(); render(); });
+			toggle.addEventListener("change", () => { rows[index].enabled = toggle.checked; save(); });
+			strength.addEventListener("change", () => { rows[index].strength = Number(strength.value) || 0; save(); });
+			for (const control of [select, toggle, strength]) protect(control);
+			line.append(main, toggleLabel, strength); rowsHost.appendChild(line);
+		});
+		save();
+	};
+	filter.addEventListener("input", () => { node.properties[LORA_FILTER_PROPERTY] = filter.value; render(); });
+	protect(filter);
+	section.append(title, filter, rowsHost);
+	section.__gjjRefresh = async () => {
+		catalog = await fetchMiniMaxLoras();
+		rows = normalizeLoraRows(value(node, LORA_DATA_WIDGET, "[]"));
+		if (!rows.some((row) => row.name)) {
+			const defaultName = preferredMiniMaxAccelLora(catalog.names);
+			if (defaultName) { rows = [{ name: defaultName, enabled: true, strength: 1 }, { name: "", enabled: true, strength: 1 }]; syncStepsFromAccelLora(node, defaultName); }
+		}
+		render();
+	};
+	section.__gjjRefresh();
+	return section;
 }
 function createReasoningPanel(node, treeHost) {
 	const section = document.createElement("section"); section.className = "gjj-mh3-section";
 	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "🧠 可选推理";
+	const buttonRow = document.createElement("div"); buttonRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:7px";
 	const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "gjj-mh3-control gjj-mh3-toggle"; protect(toggle);
+	const keep = document.createElement("button"); keep.type = "button"; keep.className = "gjj-mh3-control gjj-mh3-toggle"; keep.textContent = "保持模型"; protect(keep);
 	const details = document.createElement("div"); details.className = "gjj-mh3-grid"; details.style.marginTop = "8px";
 	const promptRow = document.createElement("label"); promptRow.className = "gjj-mh3-field wide";
 	const promptLabel = document.createElement("span"); promptLabel.textContent = "推理系统提示词";
@@ -292,32 +423,42 @@ function createReasoningPanel(node, treeHost) {
 	promptRow.append(promptLabel, prompt); details.appendChild(promptRow);
 	const sync = () => {
 		const enabled = Boolean(value(node, "reasoning_enabled", false));
-		toggle.textContent = enabled ? "推理已开启" : "开启推理"; toggle.classList.toggle("active", enabled);
+		toggle.textContent = "开启推理"; toggle.classList.toggle("active", enabled);
+		keep.classList.toggle("active", Boolean(value(node, "keep_model", false)));
 		details.style.display = enabled ? "grid" : "none";
 		if (enabled && document.activeElement !== prompt) prompt.value = String(value(node, "reasoning_system_prompt", ""));
-		applyBoundState(node, "reasoning_enabled", toggle); applyBoundState(node, "reasoning_system_prompt", prompt);
+		applyBoundState(node, "reasoning_enabled", toggle); applyBoundState(node, "keep_model", keep); applyBoundState(node, "reasoning_system_prompt", prompt);
 	};
 	toggle.addEventListener("click", () => { setValue(node, "reasoning_enabled", !Boolean(value(node, "reasoning_enabled", false))); sync(); renderModelTree(node, treeHost); });
-	section.append(title, toggle, details); section.__gjjSync = sync; sync(); return section;
+	keep.addEventListener("click", () => { setValue(node, "keep_model", !Boolean(value(node, "keep_model", false))); sync(); });
+	buttonRow.append(toggle, keep); section.append(title, buttonRow, details); section.__gjjSync = sync; sync(); return section;
 }
 function createModelPatchPanel(node) {
 	const section = document.createElement("section"); section.className = "gjj-mh3-section";
-	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "⚡ GJJ_ModelPatchBundle 优化";
-	const grid = document.createElement("div"); grid.className = "gjj-mh3-grid";
-	const fields = [
-		"patch_enable_sage_attention", "patch_sage_attention_mode", "patch_allow_sage_compile",
-		"patch_enable_fp16_accumulation", "patch_fp16_accumulation",
-		"patch_missing_sage_handling",
+	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "⚡ 模型优化";
+	const buttons = document.createElement("div"); buttons.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px";
+	const booleanFields = [
+		["patch_enable_sage_attention", "Sage"],
+		["patch_allow_sage_compile", "Sage编译"],
+		["patch_enable_fp16_accumulation", "FP16设置"],
+		["patch_fp16_accumulation", "FP16累积"],
 	];
-	for (const name of fields) {
+	const syncButtons = () => {
+		for (const button of buttons.children) button.classList.toggle("active", Boolean(value(node, button.dataset.widgetName, false)));
+	};
+	for (const [name, label] of booleanFields) {
+		const button = document.createElement("button"); button.type = "button"; button.className = "gjj-mh3-control gjj-mh3-toggle"; button.textContent = label; button.dataset.widgetName = name;
+		button.addEventListener("click", () => { setValue(node, name, !Boolean(value(node, name, false))); syncButtons(); });
+		applyBoundState(node, name, button); protect(button); buttons.appendChild(button);
+	}
+	const modes = document.createElement("div"); modes.className = "gjj-mh3-grid"; modes.style.marginTop = "6px";
+	for (const name of ["patch_sage_attention_mode", "patch_missing_sage_handling"]) {
 		const control = makeControl(node, name); if (!control) continue;
 		const row = document.createElement("label"); row.className = "gjj-mh3-field";
-		if (["patch_sage_attention_mode", "patch_missing_sage_handling"].includes(name)) row.classList.add("wide");
-		const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name;
-		row.append(label, control); grid.appendChild(row);
+		const label = document.createElement("span"); label.textContent = name === "patch_sage_attention_mode" ? "Sage 模式" : "缺失处理";
+		row.append(label, control); modes.appendChild(row);
 	}
-	const note = document.createElement("div"); note.className = "gjj-mh3-field wide"; note.style.color = "#8faeb4"; note.textContent = "此处仅显示 MiniMax H3 可用的通用优化；LTXV 专用前馈分块已排除。";
-	grid.appendChild(note); section.append(title, grid); return section;
+	section.append(title, buttons, modes); section.__gjjSync = syncButtons; syncButtons(); return section;
 }
 const SPECTRUM_FIELDS = [
 	"spectrum_enabled", "spectrum_blend_weight", "spectrum_degree", "spectrum_ridge_lambda",
@@ -414,14 +555,14 @@ function popup(node, key, title) {
 		const reasoningPanel = createReasoningPanel(node, treeHost);
 		root.append(reasoningPanel, treeHost);
 		renderModelTree(node, treeHost);
-		const keepSection = document.createElement("section"); keepSection.className = "gjj-mh3-section";
-		const keepGrid = document.createElement("div"); keepGrid.className = "gjj-mh3-grid";
-		const keepControl = makeControl(node, "keep_model");
-		if (keepControl) { const row = document.createElement("label"); row.className = "gjj-mh3-field wide"; const label = document.createElement("span"); label.textContent = widget(node, "keep_model")?.options?.display_name || "保持模型"; row.append(label, keepControl); keepGrid.append(row); }
-		keepSection.appendChild(keepGrid); root.appendChild(keepSection);
-		root.appendChild(createModelPatchPanel(node));
+		const loraPanel = createLoraPanel(node);
+		root.appendChild(loraPanel);
+		const patchPanel = createModelPatchPanel(node);
+		root.appendChild(patchPanel);
 		root.__gjjModelTreeHost = treeHost;
 		root.__gjjReasoningPanel = reasoningPanel;
+		root.__gjjLoraPanel = loraPanel;
+		root.__gjjPatchPanel = patchPanel;
 		document.body.appendChild(root);
 		return root;
 	}
@@ -444,7 +585,7 @@ function openPopup(node, key, anchor) {
 	const panel = node.__gjjMiniMaxPanel; const target = panel?.popups?.[key]; if (!target) return;
 	const wasOpen = target.classList.contains("open"); closePopups(node); if (wasOpen) return;
 	if (key === "size") target.__gjjSizePanel?.__gjjSync?.();
-	if (key === "model" && target.__gjjModelTreeHost) { target.__gjjReasoningPanel?.__gjjSync?.(); renderModelTree(node, target.__gjjModelTreeHost); }
+	if (key === "model" && target.__gjjModelTreeHost) { target.__gjjReasoningPanel?.__gjjSync?.(); renderModelTree(node, target.__gjjModelTreeHost); target.__gjjLoraPanel?.__gjjRefresh?.(); target.__gjjPatchPanel?.__gjjSync?.(); }
 	if (key === "spectrum") target.__gjjSpectrumPanel?.__gjjSync?.();
 	if (key === "promptBook") target.__gjjSync?.();
 	const rect = anchor.getBoundingClientRect(); const width = Math.min(560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
@@ -475,6 +616,7 @@ function showStoredPreview(node, key) {
 	const state = node.__gjjMiniMaxPanel; const entry = state?.previewEntries?.get?.(key); if (!entry) return;
 	state.activePreviewKey = key; const item = entry.item;
 	const query = `/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "output")}&subfolder=${encodeURIComponent(item.subfolder || "")}&rand=${Date.now()}`;
+	state.resultRoot.style.display = "grid";
 	state.video.src = api.apiURL(query); state.preview.style.display = "block"; state.video.load(); const play = state.video.play?.(); play?.catch?.(() => {});
 	const entries = orderedPreviewEntries(state); const activeIndex = Math.max(0, entries.findIndex((candidate) => candidate.key === key));
 	if (state.previewNav) state.previewNav.style.display = entries.length > 1 ? "flex" : "none";
@@ -489,6 +631,7 @@ function resetResultPreview(node) {
 	state.previewEntries?.clear?.(); state.activePreviewKey = null; state.previewObserver?.disconnect?.();
 	if (state.video) { state.video.pause?.(); state.video.removeAttribute("src"); state.video.load?.(); state.video.onloadedmetadata = null; }
 	if (state.preview) { state.preview.style.display = "none"; state.preview.style.height = "0"; }
+	if (state.resultRoot) state.resultRoot.style.display = "none";
 	if (state.previewNav) state.previewNav.style.display = "none";
 	fitPanel(node); node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -866,6 +1009,7 @@ function fitPanel(node) {
 			if (panel?.preview && !panel.video?.getAttribute?.("src")) {
 				panel.preview.style.display = "none";
 				panel.preview.style.height = "0";
+				panel.resultRoot.style.display = "none";
 			}
 			const width = Math.max(280, Number(node.size?.[0] || 420));
 			if (Array.isArray(node.size)) node.size[1] = 1;
@@ -928,18 +1072,18 @@ function createPanel(node) {
 	const variables = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS); variables.classList.add("gjj-mh3-btn"); variables.style.height = "32px"; variables.style.minWidth = "36px"; variables.style.width = "36px"; variables.style.flex = "0 0 36px"; variables.style.padding = "0"; variables.style.margin = "0"; variables.style.borderRadius = "0";
 	toolbar.append(folder, link, sceneButton, actorButton, size, seed, model, spectrum, promptBook, variables, settings, run);
 	const resultRoot = document.createElement("div"); resultRoot.className = "gjj-mh3-root"; protect(resultRoot);
+	resultRoot.style.display = "none";
 	const branches = document.createElement("div"); branches.className = "gjj-mh3-branches";
 	const status = document.createElement("div"); status.className = "gjj-mh3-status"; status.textContent = "图片数量决定可选生成分支";
 	const preview = document.createElement("div"); preview.className = "gjj-mh3-preview"; const video = document.createElement("video"); video.controls = true; video.loop = true; video.playsInline = true; video.preload = "metadata";
+	preview.style.display = "none"; preview.style.height = "0";
 	const previewNav = document.createElement("div"); previewNav.className = "gjj-mh3-preview-nav"; const previewPrev = document.createElement("button"); previewPrev.type = "button"; previewPrev.textContent = "‹"; previewPrev.title = "上一片段"; const previewLabel = document.createElement("span"); previewLabel.className = "gjj-mh3-preview-label"; const previewNext = document.createElement("button"); previewNext.type = "button"; previewNext.textContent = "›"; previewNext.title = "下一片段"; previewNav.append(previewPrev, previewLabel, previewNext); preview.append(video, previewNav); protect(preview);
-	root.append(toolbar, libraryChips); resultRoot.append(branches, status, preview);
+	root.append(toolbar, libraryChips, branches, status); resultRoot.append(preview);
 	const dom = node.addDOMWidget(PANEL_WIDGET, "div", root, { serialize: false, hideOnZoom: false }); dom.serialize = false; dom.options ||= {}; dom.options.serialize = false; dom.computeSize = () => [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(40, Number(root.scrollHeight || 40))]; dom.getHeight = () => Math.max(40, Number(root.scrollHeight || 40));
 	const resultDom = node.addDOMWidget(RESULT_WIDGET, "div", resultRoot, { serialize: false, hideOnZoom: false }); resultDom.serialize = false; resultDom.options ||= {}; resultDom.options.serialize = false; resultDom.computeSize = () => {
 		const hasPreview = Boolean(video.getAttribute("src")) && preview.style.display !== "none";
-		const branchHeight = branches.style.display === "none" ? 0 : Number(branches.offsetHeight || 0);
-		const compactHeight = 16 + Number(status.offsetHeight || 16) + (branchHeight > 0 ? branchHeight + 7 : 0);
-		return [Math.max(0, Number(node.size?.[0] || 0) - 20), Math.max(24, hasPreview ? Number(resultRoot.scrollHeight || compactHeight) : compactHeight)];
-	}; resultDom.getHeight = () => Number(resultDom.computeSize?.()[1] || 24);
+		return [Math.max(0, Number(node.size?.[0] || 0) - 20), hasPreview ? Math.max(1, Number(resultRoot.scrollHeight || preview.offsetHeight || 1)) : 0];
+	}; resultDom.getHeight = () => Number(resultDom.computeSize?.()[1] || 0);
 	arrangePanelWidgets(node, dom, resultDom);
 	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, spectrumButton: spectrum, variables, buttons: { size, seed, model, spectrum, promptBook, settings }, popups: {} };
 	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数"); panel.popups.spectrum = popup(node, "spectrum", "🚀 Spectrum 加速"); panel.popups.promptBook = popup(node, "promptBook", "📒 提示词");
