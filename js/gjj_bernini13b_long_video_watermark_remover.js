@@ -5,13 +5,18 @@ import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 const NODE_NAME = "GJJ_Bernini13BLongVideoWatermarkRemover";
 const NODE_NAMES = new Set([NODE_NAME, "GJJ_Bernini13BVideoReferenceUpscaler"]);
 const MEDIA_INPUT = "media";
+const REFERENCE_INPUT = "reference_resources";
 const SELECTED_VIDEO = "selected_video";
 const PANEL_WIDGET = "gjj_bernini13b_watermark_panel";
 const PREVIEW_WIDGET = "gjj_bernini13b_watermark_preview";
 const UPLOAD_API = "/gjj/video_segment_queue/upload";
 const REMEMBERED_LINK = "gjj_bernini13b_remembered_media_link";
+const REF_LINKS_PROP = "gjj_bernini13b_reference_virtual_media_links";
+const MAX_REFERENCE_MEDIA = 15;
 const NODES = new Set();
 let outsideReady = false;
+let canvasPatched = false;
+let graphToPromptPatched = false;
 
 const GROUPS = [
 	{ key: "model", icon: "🧠", title: "模型", fields: ["keep_model", "pre_cleanup_resources", "enable_pre_upscale", "highres_lora_strength"] },
@@ -25,6 +30,9 @@ function value(node, name, fallback = null) { return widget(node, name)?.value ?
 function mediaInputIndex(node) { return node?.inputs?.findIndex((item) => item?.name === MEDIA_INPUT) ?? -1; }
 function mediaLinked(node) { const i = mediaInputIndex(node); return i >= 0 && node.inputs[i]?.link != null; }
 function dirty(node) { node?.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); }
+function isReferenceUpscaler(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === "GJJ_Bernini13BVideoReferenceUpscaler"; }
+function referenceInputIndex(node) { return node?.inputs?.findIndex((item) => item?.name === REFERENCE_INPUT) ?? -1; }
+function referenceDot(node) { const index = referenceInputIndex(node); if (index < 0) return null; const point = connectionPosition(node, true, index); return { x: point[0], y: point[1] }; }
 
 function hideWidget(item) {
 	if (!item || item.name === PANEL_WIDGET || item.name === PREVIEW_WIDGET) return;
@@ -243,6 +251,314 @@ function syncLinkState(node) {
 	if (node.__gjjB13Link) { node.__gjjB13Link.classList.toggle("show", linked || remembered); node.__gjjB13Link.classList.toggle("detached", !linked && remembered); node.__gjjB13Link.title = linked ? "断开并记住上游接口" : "恢复记住的上游接口"; }
 }
 
+function ensureReferenceLinks(node) {
+	node.properties ||= {};
+	if (!Array.isArray(node.properties[REF_LINKS_PROP])) node.properties[REF_LINKS_PROP] = [];
+	return node.properties[REF_LINKS_PROP];
+}
+
+function normalizeReferenceLinks(node, removeMissing = true) {
+	const links = ensureReferenceLinks(node);
+	const seen = new Set();
+	const kept = [];
+	for (const link of links) {
+		const sourceId = Number(link?.source_id);
+		const sourceSlot = Number(link?.source_slot) || 0;
+		if (!Number.isFinite(sourceId)) continue;
+		const source = app.graph?.getNodeById?.(sourceId);
+		if (removeMissing && !source) continue;
+		const key = `${sourceId}:${sourceSlot}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		kept.push({ source_id: sourceId, source_slot: sourceSlot, source_type: String(link?.source_type || "*"), order: kept.length + 1 });
+		if (kept.length >= MAX_REFERENCE_MEDIA) break;
+	}
+	node.properties[REF_LINKS_PROP] = kept;
+	return kept;
+}
+
+function slotType(slot) {
+	return String(slot?.type || slot?.datatype || slot?.label || "").toUpperCase();
+}
+
+function isReferenceMediaType(type) {
+	const value = String(type || "").toUpperCase();
+	return value.includes("IMAGE") || value.includes("VIDEO") || value.includes("GJJ_BATCH_IMAGE") || value === "*";
+}
+
+function connectionPosition(node, isInput, slotIndex) {
+	const normalize = (point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]) ? [point[0], point[1]] : null;
+	const modern = isInput ? normalize(node?.getInputPos?.(slotIndex)) : normalize(node?.getOutputPos?.(slotIndex));
+	if (modern) return modern;
+	const out = [0, 0];
+	try {
+		const legacy = normalize(node?.getConnectionPos?.(isInput, slotIndex, out)) || normalize(out);
+		if (legacy) return legacy;
+	} catch (_) {}
+	const y = Number(node?.pos?.[1] || 0) + 40 + Math.max(0, slotIndex) * 20;
+	return isInput ? [Number(node?.pos?.[0] || 0), y] : [Number(node?.pos?.[0] || 0) + Number(node?.size?.[0] || 160), y];
+}
+
+function graphPosition(canvas, event) {
+	try { canvas?.adjustMouseEvent?.(event); } catch (_) {}
+	if (Array.isArray(canvas?.graph_mouse)) return [canvas.graph_mouse[0], canvas.graph_mouse[1]];
+	if (Number.isFinite(event?.canvasX) && Number.isFinite(event?.canvasY)) return [event.canvasX, event.canvasY];
+	const rect = canvas?.canvas?.getBoundingClientRect?.();
+	const scale = canvas?.ds?.scale || 1;
+	const offset = canvas?.ds?.offset || [0, 0];
+	if (rect && Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) return [(event.clientX - rect.left) / scale - offset[0], (event.clientY - rect.top) / scale - offset[1]];
+	return [0, 0];
+}
+
+function clientPosition(canvas, point) {
+	const rect = canvas?.canvas?.getBoundingClientRect?.();
+	if (!rect) return null;
+	const scale = canvas?.ds?.scale || 1;
+	const offset = canvas?.ds?.offset || [0, 0];
+	return { x: rect.left + (point[0] + offset[0]) * scale, y: rect.top + (point[1] + offset[1]) * scale };
+}
+
+function connectingOutput(canvas) {
+	const node = canvas?.connecting_node || canvas?.connectingNode;
+	if (!node) return null;
+	const raw = canvas.connecting_output ?? canvas.connecting_slot ?? canvas.connecting_output_slot;
+	if (raw == null && canvas.connecting_input) return null;
+	const index = typeof raw === "number" ? raw : Number(raw?.slot_index ?? raw?.slot ?? 0);
+	const output = node.outputs?.[Number.isFinite(index) ? index : 0] || raw || {};
+	return { sourceNode: node, sourceSlot: Number.isFinite(index) ? index : 0, sourceType: slotType(output) };
+}
+
+function clearConnecting(canvas) {
+	canvas.connecting_node = null;
+	canvas.connecting_output = null;
+	canvas.connecting_slot = null;
+	canvas.connecting_pos = null;
+	canvas.connecting_input = null;
+}
+
+function referenceMediaKind(sourceType, sourceNode = null) {
+	const value = String(sourceType || "").toUpperCase();
+	if (value.includes("VIDEO")) return "video";
+	if (value.includes("IMAGE") || value.includes("GJJ_BATCH_IMAGE")) return "image";
+	const name = String(sourceNode?.comfyClass || sourceNode?.type || "").toLowerCase();
+	if (name.includes("video")) return "video";
+	return "image";
+}
+
+function addReferenceVirtualLink(targetNode, sourceNode, sourceSlot, sourceType) {
+	if (!isReferenceUpscaler(targetNode) || !sourceNode || !isReferenceMediaType(sourceType)) return false;
+	const links = normalizeReferenceLinks(targetNode, false);
+	if (links.length >= MAX_REFERENCE_MEDIA) return false;
+	if (links.some((link) => Number(link.source_id) === Number(sourceNode.id) && Number(link.source_slot) === Number(sourceSlot))) return false;
+	links.push({ source_id: Number(sourceNode.id), source_slot: Number(sourceSlot) || 0, source_type: String(sourceType || "*"), media_type: referenceMediaKind(sourceType, sourceNode), order: links.length + 1 });
+	normalizeReferenceLinks(targetNode, false);
+	dirty(targetNode);
+	return true;
+}
+
+function removeReferenceVirtualLink(node, index) {
+	const links = ensureReferenceLinks(node);
+	if (index < 0 || index >= links.length) return false;
+	links.splice(index, 1);
+	normalizeReferenceLinks(node, false);
+	dirty(node);
+	return true;
+}
+
+function cubicPoint(start, end, t) {
+	const cp1 = [start[0] + 80, start[1]];
+	const cp2 = [end[0] - 80, end[1]];
+	const mt = 1 - t;
+	return [
+		mt * mt * mt * start[0] + 3 * mt * mt * t * cp1[0] + 3 * mt * t * t * cp2[0] + t * t * t * end[0],
+		mt * mt * mt * start[1] + 3 * mt * mt * t * cp1[1] + 3 * mt * t * t * cp2[1] + t * t * t * end[1],
+	];
+}
+
+function referenceLinkGeometry(targetNode, link) {
+	const sourceNode = targetNode.graph?.getNodeById?.(Number(link.source_id)) || app.graph?.getNodeById?.(Number(link.source_id));
+	const dot = referenceDot(targetNode);
+	if (!sourceNode || !dot) return null;
+	const source = connectionPosition(sourceNode, false, Number(link.source_slot) || 0);
+	const target = [dot.x, dot.y];
+	return { sourceNode, source, target, mid: cubicPoint(source, target, 0.5) };
+}
+
+function referenceLinkColor(canvas, link) {
+	const colors = globalThis.LGraphCanvas?.link_type_colors || {};
+	const type = String(link?.source_type || "");
+	const fallback = String(link?.media_type || "image") === "video" ? "#5aa9f0" : "#83d18a";
+	return colors[type] || colors[type.toUpperCase()] || colors[type.toLowerCase()] || fallback || canvas?.default_link_color || globalThis.LiteGraph?.LINK_COLOR || "#9A9";
+}
+
+function drawReferenceLinks(canvas, ctx) {
+	const graph = canvas?.graph || app.graph;
+	if (!graph?._nodes || canvas.links_render_mode === globalThis.LiteGraph?.HIDDEN_LINK) return;
+	for (const node of graph._nodes) {
+		if (!isReferenceUpscaler(node)) continue;
+		for (const link of normalizeReferenceLinks(node)) {
+			const geometry = referenceLinkGeometry(node, link);
+			if (!geometry) continue;
+			const color = referenceLinkColor(canvas, link);
+			const width = canvas.connections_width || 3;
+			ctx.save();
+			ctx.beginPath();
+			ctx.moveTo(geometry.source[0], geometry.source[1]);
+			ctx.bezierCurveTo(geometry.source[0] + 80, geometry.source[1], geometry.target[0] - 80, geometry.target[1], geometry.target[0], geometry.target[1]);
+			ctx.lineWidth = width + 4;
+			ctx.strokeStyle = canvas.render_connections_border !== false && !canvas.low_quality ? "rgba(0,0,0,.5)" : "transparent";
+			if (ctx.strokeStyle !== "transparent") ctx.stroke();
+			ctx.beginPath();
+			ctx.moveTo(geometry.source[0], geometry.source[1]);
+			ctx.bezierCurveTo(geometry.source[0] + 80, geometry.source[1], geometry.target[0] - 80, geometry.target[1], geometry.target[0], geometry.target[1]);
+			ctx.lineWidth = width;
+			ctx.strokeStyle = color;
+			ctx.stroke();
+			ctx.beginPath();
+			ctx.arc(geometry.mid[0], geometry.mid[1], 10, 0, Math.PI * 2);
+			ctx.fillStyle = color;
+			ctx.fill();
+			ctx.lineWidth = 2;
+			ctx.strokeStyle = "rgba(255,255,255,.9)";
+			ctx.stroke();
+			ctx.fillStyle = "#fff";
+			ctx.font = "bold 14px sans-serif";
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText(String(link.order || 1), geometry.mid[0], geometry.mid[1] + 0.5);
+			ctx.restore();
+		}
+	}
+}
+
+function hitReferenceLinks(graph, x, y) {
+	let best = null;
+	for (const node of graph?._nodes || []) {
+		if (!isReferenceUpscaler(node)) continue;
+		normalizeReferenceLinks(node).forEach((link, index) => {
+			const geometry = referenceLinkGeometry(node, link);
+			if (!geometry) return;
+			const distance = Math.hypot(x - geometry.mid[0], y - geometry.mid[1]);
+			if (distance <= 18 && (!best || distance < best.distance)) best = { node, index, point: geometry.mid, distance };
+		});
+	}
+	return best;
+}
+
+function openReferenceLinkMenu(canvas, hit, event) {
+	const anchor = clientPosition(canvas, hit.point) || { x: event?.clientX || 0, y: event?.clientY || 0 };
+	const menuEvent = typeof PointerEvent === "function"
+		? new PointerEvent("pointerdown", { clientX: anchor.x + 8, clientY: anchor.y + 8, bubbles: true, cancelable: true })
+		: new MouseEvent("mousedown", { clientX: anchor.x + 8, clientY: anchor.y + 8, bubbles: true, cancelable: true });
+	if (!globalThis.LiteGraph?.ContextMenu) {
+		removeReferenceVirtualLink(hit.node, hit.index);
+		return;
+	}
+	let menu = null;
+	menu = new globalThis.LiteGraph.ContextMenu([{ content: "删除", callback: () => { removeReferenceVirtualLink(hit.node, hit.index); menu?.close?.(); menu?.remove?.(); } }], { event: menuEvent });
+}
+
+function patchReferenceCanvas() {
+	const canvas = app.canvas;
+	if (!canvas || canvasPatched || typeof canvas.drawConnections !== "function") return;
+	canvasPatched = true;
+	const originalDraw = canvas.drawConnections;
+	canvas.drawConnections = function drawConnectionsWithGjjReferenceLinks(ctx) {
+		const result = originalDraw?.apply(this, arguments);
+		const connectionContext = ctx || this.bgctx || this.ctx;
+		const onConnectionLayer = connectionContext?.canvas === this?.bgcanvas || connectionContext === this?.bgctx || !this?.bgcanvas;
+		if (connectionContext && onConnectionLayer) drawReferenceLinks(this, connectionContext);
+		return result;
+	};
+	const originalDown = canvas.processMouseDown;
+	canvas.processMouseDown = function processMouseDownWithGjjReferenceLinks(event) {
+		const [x, y] = graphPosition(this, event);
+		const hit = hitReferenceLinks(this.graph || app.graph, x, y);
+		if (hit) {
+			openReferenceLinkMenu(this, hit, event);
+			event?.preventDefault?.();
+			event?.stopImmediatePropagation?.();
+			return true;
+		}
+		return originalDown?.apply(this, arguments);
+	};
+	const originalUp = canvas.processMouseUp;
+	canvas.processMouseUp = function processMouseUpWithGjjReferenceLinks(event) {
+		const output = connectingOutput(this);
+		const [x, y] = graphPosition(this, event);
+		const target = (this.graph || app.graph)?._nodes?.find((node) => isReferenceUpscaler(node) && (() => {
+			const dot = referenceDot(node);
+			return dot && Math.hypot(x - dot.x, y - dot.y) <= 18;
+		})());
+		if (output && target && addReferenceVirtualLink(target, output.sourceNode, output.sourceSlot, output.sourceType)) {
+			clearConnecting(this);
+			this.graph?.setDirtyCanvas?.(true, true);
+			event?.preventDefault?.();
+			event?.stopImmediatePropagation?.();
+			return true;
+		}
+		return originalUp?.apply(this, arguments);
+	};
+}
+
+function patchReferenceGraphToPrompt() {
+	if (graphToPromptPatched || typeof app.graphToPrompt !== "function") return;
+	graphToPromptPatched = true;
+	const original = app.graphToPrompt;
+	app.graphToPrompt = async function graphToPromptWithGjjReferenceMedia() {
+		const promptData = await original.apply(this, arguments);
+		const output = promptData?.output || {};
+		for (const node of app.graph?._nodes || []) {
+			if (!isReferenceUpscaler(node)) continue;
+			absorbNativeReferenceLink(node);
+			const promptNode = output[String(node.id)];
+			if (!promptNode) continue;
+			promptNode.inputs ||= {};
+			delete promptNode.inputs[REFERENCE_INPUT];
+			for (let index = 1; index <= MAX_REFERENCE_MEDIA; index += 1) delete promptNode.inputs[`reference_media_${index}`];
+			const links = normalizeReferenceLinks(node).filter((link) => Boolean(output[String(link.source_id)]));
+			links.forEach((link, index) => {
+				promptNode.inputs[`reference_media_${index + 1}`] = [String(link.source_id), Number(link.source_slot) || 0];
+			});
+		}
+		return promptData;
+	};
+}
+
+function pruneReferenceTransportInputs(nodeData) {
+	if (nodeData?.name !== "GJJ_Bernini13BVideoReferenceUpscaler") return;
+	const optional = nodeData?.input?.optional;
+	if (!optional) return;
+	for (const name of Object.keys(optional)) {
+		if (/^reference_media_\d+$/.test(name)) delete optional[name];
+	}
+}
+
+function absorbNativeReferenceLink(node) {
+	if (!isReferenceUpscaler(node) || node.__gjjB13AbsorbingReferenceLink) return false;
+	const inputIndex = referenceInputIndex(node);
+	if (inputIndex < 0) return false;
+	const input = node.inputs?.[inputIndex];
+	const linkId = input?.link;
+	if (linkId == null) return false;
+	const link = app.graph?.links?.[linkId];
+	const sourceNode = app.graph?.getNodeById?.(link?.origin_id);
+	const sourceSlot = Number(link?.origin_slot) || 0;
+	const sourceType = slotType(sourceNode?.outputs?.[sourceSlot]) || String(link?.type || "*");
+	node.__gjjB13AbsorbingReferenceLink = true;
+	try {
+		if (sourceNode && addReferenceVirtualLink(node, sourceNode, sourceSlot, sourceType)) {
+			node.disconnectInput?.(inputIndex);
+			if (node.inputs?.[inputIndex]) node.inputs[inputIndex].link = null;
+			dirty(node);
+			return true;
+		}
+	} finally {
+		node.__gjjB13AbsorbingReferenceLink = false;
+	}
+	return false;
+}
+
 async function upload(node, file) {
 	const form = new FormData(); form.append("video", file, file.name || "video.mp4");
 	const response = await fetch(api.apiURL(UPLOAD_API), { method: "POST", body: form }); const data = await response.json().catch(() => ({}));
@@ -320,6 +636,9 @@ function resize(node) { requestAnimationFrame(() => { const size = node.computeS
 
 function setup(node) {
 	if (node.__gjjB13Ready) return; node.__gjjB13Ready = true; NODES.add(node); injectStyle(); outsideHandler();
+	patchReferenceCanvas();
+	patchReferenceGraphToPrompt();
+	if (isReferenceUpscaler(node)) normalizeReferenceLinks(node);
 	for (const item of node.widgets || []) hideWidget(item);
 	const root = document.createElement("div"); root.className = "gjj-b13-wmr"; protect(root); node.__gjjB13Root = root;
 	const tools = document.createElement("div"); tools.className = "gjj-b13-tools"; const file = document.createElement("input"); file.type = "file"; file.accept = "video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv,.wmv,.flv,.mpeg,.mpg"; file.style.display = "none";
@@ -333,16 +652,25 @@ function setup(node) {
 	file.onchange = async () => { const picked = file.files?.[0]; if (!picked) return; try { status.textContent = "正在导入视频..."; await upload(node, picked); } catch (error) { status.textContent = error?.message || "导入失败"; } finally { file.value = ""; } };
 	const dom = node.addDOMWidget(PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false }); dom.computeSize = (width) => [Math.max(310, Number(width || 330) - 20), 76]; ensurePreview(node); syncLinkState(node); node.setSize?.([Math.max(330, Number(node.size?.[0] || 330)), 120]);
 	const selectedItem = selectedVideoItem(node); if (selectedItem && !mediaLinked(node)) queueMicrotask(() => addSegmentPreview(node, [selectedItem], 1, 1, "source_video"));
-	const oldConnections = node.onConnectionsChange; node.onConnectionsChange = function (...args) { const result = oldConnections?.apply(this, args); queueMicrotask(() => syncLinkState(this)); return result; };
+	if (isReferenceUpscaler(node)) queueMicrotask(() => absorbNativeReferenceLink(node));
+	const oldConnections = node.onConnectionsChange; node.onConnectionsChange = function (...args) {
+		const result = oldConnections?.apply(this, args);
+		queueMicrotask(() => {
+			absorbNativeReferenceLink(this);
+			syncLinkState(this);
+		});
+		return result;
+	};
 	const oldRemoved = node.onRemoved; node.onRemoved = function (...args) { NODES.delete(this); closePopup(this); const preview = this.__gjjB13Preview; preview?.video?.pause?.(); if (preview?.video) preview.video.src = ""; return oldRemoved?.apply(this, args); };
 }
 
 app.registerExtension({
 	name: "GJJ.Bernini13BLongVideoWatermarkRemover",
 	beforeRegisterNodeDef(nodeType, nodeData) {
+		pruneReferenceTransportInputs(nodeData);
 		if (!NODE_NAMES.has(nodeData?.name)) return;
 		const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function (...args) { const result = created?.apply(this, args); queueMicrotask(() => setup(this)); return result; };
-		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { for (const item of this.widgets || []) hideWidget(item); syncLinkState(this); syncKeepModelButton(this); syncSegmentationButton(this); }); return result; };
+		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { if (isReferenceUpscaler(this)) normalizeReferenceLinks(this); for (const item of this.widgets || []) hideWidget(item); syncLinkState(this); syncKeepModelButton(this); syncSegmentationButton(this); }); return result; };
 		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); const images = message?.gjj_images || message?.ui?.gjj_images; if (images) addSegmentPreview(this, images, message?.segment_count?.[0] || 1, message?.segment_count?.[0] || 1, message?.preview_label?.[0] || "final_video"); return result; };
 	},
 });

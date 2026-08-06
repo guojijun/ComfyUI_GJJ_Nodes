@@ -82,6 +82,8 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "megapixel_aspect", label: "百万像素比例", type: "STRING", aliases: ["aspect", "ratio", "比例"] },
 	{ name: "megapixels", label: "百万像素", type: "FLOAT", aliases: ["megapixels", "mp", "百万像素"] },
 	{ name: "cache_clip", label: "缓存CLIP", type: "BOOLEAN", aliases: ["cache_clip", "缓存CLIP"] },
+	{ name: "director_storyboard_json", label: "导演分镜", type: "STRING", aliases: ["director", "storyboard", "导演台", "分镜"] },
+	{ name: "use_video_size", label: "视频尺寸", type: "BOOLEAN", aliases: ["video_size", "视频尺寸"] },
 ];
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -104,6 +106,8 @@ const HIDDEN = new Set([
 	"megapixel_aspect", "megapixels",
 	"lora_data",
 	"cache_clip",
+	"director_storyboard_json",
+	"use_video_size",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size", "dialogue_language"]], ["输出", ["filename_prefix", "format_name"]]],
@@ -174,7 +178,7 @@ function installStyle() {
 	.gjj-mh3-library-chips{display:none;flex-wrap:wrap;gap:5px;align-items:flex-start;align-content:flex-start}.gjj-mh3-library-chip{border:1px solid #456b73;border-radius:999px;background:#172a30;color:#d8eef0;padding:4px 9px;cursor:pointer;font-size:11px}.gjj-mh3-library-chip:hover{border-color:#62c9bd;background:#1d3a3d}
 	.gjj-mh3-library-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 4px}.gjj-mh3-library-chip img{width:23px;height:23px;border-radius:50%;object-fit:cover;background:#081014}.gjj-mh3-library-button{position:relative;overflow:hidden}.gjj-mh3-library-button>img{display:block;width:100%;height:100%;object-fit:cover}.gjj-mh3-library-count{position:absolute;right:1px;bottom:0;min-width:13px;height:13px;border-radius:7px;background:#0b171bde;color:#fff;font:9px/13px system-ui;text-align:center}.gjj-mh3-library-preview{position:fixed;z-index:100012;width:280px;padding:7px;border:1px solid #54838b;border-radius:9px;background:#0b1418;color:#e5f1f2;box-shadow:0 16px 46px #000d}.gjj-mh3-library-preview img{display:block;width:100%;max-height:330px;object-fit:contain;border-radius:6px;background:#05090b}.gjj-mh3-library-preview div{padding:7px 3px 2px;line-height:1.4;white-space:normal}
 	.gjj-mh3-pop{position:fixed;z-index:100000;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 40px);overflow:auto;display:none;background:#101a1e;color:#e2f0f1;border:1px solid #4e7d86;border-radius:10px;box-shadow:0 14px 45px #000b;padding:10px}.gjj-mh3-pop.open{display:block}.gjj-mh3-pophead{display:flex;justify-content:space-between;align-items:center;font-weight:800;margin-bottom:8px}.gjj-mh3-close{border:1px solid #40717a;border-radius:5px;background:#173038;color:#dff;padding:5px 12px;cursor:pointer}.gjj-mh3-section{border-top:1px solid #29434a;padding-top:8px;margin-top:8px}.gjj-mh3-title{color:#7ed9d3;font-weight:800;margin-bottom:7px}.gjj-mh3-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.gjj-mh3-field{display:grid;gap:3px;color:#9eb8bd}.gjj-mh3-field.wide{grid-column:1/-1}.gjj-mh3-control{box-sizing:border-box;width:100%;min-width:0;background:#0b1316;color:#e8f5f5;border:1px solid #304e55;border-radius:5px;padding:6px}.gjj-mh3-toggle.active{background:#17614e;color:#fff}
-	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:repeat(3,1fr);margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;margin-bottom:10px}.gjj-mh3-ratios .gjj-mh3-size-choice{min-width:0;padding:4px 1px;font-size:11px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-megapixel{display:grid;gap:10px;margin:4px 0 14px}.gjj-mh3-size-result{padding:9px;border:1px solid #31535b;border-radius:7px;background:#091215;color:#8fe1d5;text-align:center;font-weight:900;font-size:15px}.gjj-mh3-preview{position:relative;display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}.gjj-mh3-preview-nav{position:absolute;z-index:3;left:50%;top:7px;transform:translateX(-50%);display:none;align-items:center;gap:5px;padding:3px;border:1px solid rgba(124,194,203,.65);border-radius:7px;background:rgba(5,14,18,.82);box-shadow:0 2px 10px rgba(0,0,0,.38)}.gjj-mh3-preview-nav button{width:25px;height:24px;padding:0;border:1px solid #42636b;border-radius:5px;background:#14262d;color:#eaffff;cursor:pointer;font-weight:900}.gjj-mh3-preview-nav button:disabled{opacity:.35;cursor:default}.gjj-mh3-preview-label{min-width:74px;color:#dff7f7;text-align:center;font:700 11px/1.2 system-ui,sans-serif;white-space:nowrap}`;
+	.gjj-mh3-size-tabs,.gjj-mh3-ratios{display:grid;gap:8px}.gjj-mh3-size-tabs{grid-template-columns:repeat(4,1fr);margin:8px 0 14px}.gjj-mh3-ratios{grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;margin-bottom:10px}.gjj-mh3-ratios .gjj-mh3-size-choice{min-width:0;padding:4px 1px;font-size:11px}.gjj-mh3-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer}.gjj-mh3-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-mh3-size-tabs .gjj-mh3-size-choice.active{background:#12964d;border-color:#27dda0}.gjj-mh3-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-mh3-choice-icon{display:grid;place-items:center;font-size:20px}.gjj-mh3-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-mh3-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-mh3-size-number{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-mh3-size-disabled{opacity:.42}.gjj-mh3-megapixel{display:grid;gap:10px;margin:4px 0 14px}.gjj-mh3-size-result{padding:9px;border:1px solid #31535b;border-radius:7px;background:#091215;color:#8fe1d5;text-align:center;font-weight:900;font-size:15px}.gjj-mh3-preview{position:relative;display:none;width:100%;margin-top:4px;background:#000;border-radius:6px;overflow:hidden}.gjj-mh3-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}.gjj-mh3-preview-nav{position:absolute;z-index:3;left:50%;top:7px;transform:translateX(-50%);display:none;align-items:center;gap:5px;padding:3px;border:1px solid rgba(124,194,203,.65);border-radius:7px;background:rgba(5,14,18,.82);box-shadow:0 2px 10px rgba(0,0,0,.38)}.gjj-mh3-preview-nav button{width:25px;height:24px;padding:0;border:1px solid #42636b;border-radius:5px;background:#14262d;color:#eaffff;cursor:pointer;font-weight:900}.gjj-mh3-preview-nav button:disabled{opacity:.35;cursor:default}.gjj-mh3-preview-label{min-width:74px;color:#dff7f7;text-align:center;font:700 11px/1.2 system-ui,sans-serif;white-space:nowrap}`;
 	document.head.appendChild(style);
 }
 function hideBackendWidgets(node) {
@@ -515,9 +519,10 @@ function createSizePanel(node) {
 	const host = document.createElement("div");
 	const tabs = document.createElement("div"); tabs.className = "gjj-mh3-size-tabs";
 	const sourceButton = document.createElement("button"); sourceButton.type = "button"; sourceButton.className = "gjj-mh3-size-choice"; sourceButton.textContent = "首图尺寸";
+	const videoButton = document.createElement("button"); videoButton.type = "button"; videoButton.className = "gjj-mh3-size-choice"; videoButton.textContent = "视频尺寸";
 	const panelButton = document.createElement("button"); panelButton.type = "button"; panelButton.className = "gjj-mh3-size-choice"; panelButton.textContent = "画板尺寸";
 	const megapixelButton = document.createElement("button"); megapixelButton.type = "button"; megapixelButton.className = "gjj-mh3-size-choice"; megapixelButton.textContent = "百万像素";
-	tabs.append(sourceButton, panelButton, megapixelButton);
+	tabs.append(sourceButton, videoButton, panelButton, megapixelButton);
 	const choiceControls = new Map();
 	const makeChoiceRow = (name, icon, values) => {
 		const row = document.createElement("div"); row.className = "gjj-mh3-choice-row"; row.style.setProperty("--count", String(values.length));
@@ -548,11 +553,15 @@ function createSizePanel(node) {
 		range.addEventListener("input", () => apply(range.value)); number.addEventListener("change", () => apply(number.value)); row.append(caption, range, number); dimensions.appendChild(row); controls[name] = { range, number };
 	}
 	const sync = () => {
-		const source = Boolean(value(node, "use_source_size", true)); const megapixelMode = !source && String(value(node, "size_mode", "宽高")) === "百万像素";
-		sourceButton.classList.toggle("active", source); panelButton.classList.toggle("active", !source && !megapixelMode); megapixelButton.classList.toggle("active", megapixelMode); dimensions.style.display = source || megapixelMode ? "none" : ""; megapixelPanel.style.display = megapixelMode ? "" : "none";
+		const video = Boolean(value(node, "use_video_size", false));
+		const source = Boolean(value(node, "use_source_size", true)) && !video;
+		const megapixelMode = !source && !video && String(value(node, "size_mode", "宽高")) === "百万像素";
+		sourceButton.classList.toggle("active", source); videoButton.classList.toggle("active", video); panelButton.classList.toggle("active", !source && !video && !megapixelMode); megapixelButton.classList.toggle("active", megapixelMode); dimensions.style.display = source || video || megapixelMode ? "none" : ""; megapixelPanel.style.display = megapixelMode ? "" : "none";
 		syncMainSizeButton(node);
-		const sourceBound = Boolean(boundVariable(node, "use_source_size")); sourceButton.disabled = sourceBound; panelButton.disabled = sourceBound; sourceButton.title = panelButton.title = sourceBound ? `首图尺寸已由广播变量“${boundVariable(node, "use_source_size")}”接管` : "";
-		for (const [name, control] of Object.entries(controls)) { const bound = Boolean(boundVariable(node, name)); control.range.disabled = source || bound; control.number.disabled = source || bound; const tip = bound ? `已由广播变量“${boundVariable(node, name)}”接管` : ""; control.range.title = control.number.title = tip; }
+		const sourceBound = Boolean(boundVariable(node, "use_source_size")); const videoBound = Boolean(boundVariable(node, "use_video_size"));
+		sourceButton.disabled = sourceBound; videoButton.disabled = videoBound; panelButton.disabled = sourceBound || videoBound; megapixelButton.disabled = sourceBound || videoBound;
+		sourceButton.title = sourceBound ? `首图尺寸已由广播变量“${boundVariable(node, "use_source_size")}”接管` : ""; videoButton.title = videoBound ? `视频尺寸已由广播变量“${boundVariable(node, "use_video_size")}”接管` : "";
+		for (const [name, control] of Object.entries(controls)) { const bound = Boolean(boundVariable(node, name)); control.range.disabled = source || video || bound; control.number.disabled = source || video || bound; const tip = bound ? `已由广播变量“${boundVariable(node, name)}”接管` : ""; control.range.title = control.number.title = tip; }
 		for (const [name, group] of choiceControls) group.buttons.forEach((button, index) => { const variableName = boundVariable(node, name); button.classList.toggle("active", String(value(node, name, group.values[0])) === group.values[index]); button.disabled = Boolean(variableName); button.style.opacity = variableName ? "0.45" : ""; button.title = variableName ? `已由广播变量“${variableName}”接管` : ""; });
 		for (const [name, fallback] of [["width", 864], ["height", 480]]) { const next = normalizeCanvasDimension(value(node, name, fallback), fallback); if (Number(value(node, name, fallback)) !== next) setValue(node, name, next); controls[name].range.value = controls[name].number.value = String(next); }
 		const aspect = String(value(node, "megapixel_aspect", "16:9")); ratioButtons.forEach((button, index) => button.classList.toggle("active", ratios[index] === aspect));
@@ -561,9 +570,387 @@ function createSizePanel(node) {
 	};
 	const applyMegapixels = (raw) => { const next = Math.round(Math.max(0.2, Math.min(2, Number(raw) || 0.4)) * 10) / 10; setValue(node, "megapixels", next); sync(); };
 	mpRange.addEventListener("input", () => applyMegapixels(mpRange.value)); mpNumber.addEventListener("change", () => applyMegapixels(mpNumber.value));
-	sourceButton.addEventListener("click", () => { setValue(node, "use_source_size", true); sync(); }); panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "size_mode", "宽高"); sync(); }); megapixelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "size_mode", "百万像素"); sync(); });
-	for (const element of [sourceButton, panelButton, megapixelButton, ...ratioButtons, mpRange, mpNumber, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
+	sourceButton.addEventListener("click", () => { setValue(node, "use_video_size", false); setValue(node, "use_source_size", true); sync(); });
+	videoButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "use_video_size", true); sync(); });
+	panelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "use_video_size", false); setValue(node, "size_mode", "宽高"); sync(); });
+	megapixelButton.addEventListener("click", () => { setValue(node, "use_source_size", false); setValue(node, "use_video_size", false); setValue(node, "size_mode", "百万像素"); sync(); });
+	for (const element of [sourceButton, videoButton, panelButton, megapixelButton, ...ratioButtons, mpRange, mpNumber, ...Array.from(choiceControls.values()).flatMap((item) => item.buttons), ...Object.values(controls).flatMap((item) => [item.range, item.number])]) protect(element);
 	host.append(tabs, fitRow, anchorRow, dimensions, megapixelPanel); host.__gjjSync = sync; sync(); return host;
+}
+function readDirectorPlan(node) {
+	let saved = {};
+	try { saved = JSON.parse(String(value(node, "director_storyboard_json", "{}") || "{}")); } catch (_) {}
+	const fps = Math.max(1, Number(value(node, "frame_rate", 24)) || 24);
+	const totalFrames = Math.max(5, Math.round((Number(value(node, "duration", 5)) || 5) * fps));
+	const prompt = String(value(node, "prompt", "") || "");
+	const scenes = Array.isArray(saved?.scenes) && saved.scenes.length ? saved.scenes : [{ start_frame: 1, end_frame: totalFrames, prompt: "" }];
+	return {
+		configured: Boolean(saved?.configured),
+		fps,
+		total_frames: Math.max(totalFrames, Number(saved?.total_frames || 0)),
+		scenes: scenes.map((scene, index) => ({
+			index: index + 1,
+			start_frame: Math.max(1, Math.round(Number(scene?.start_frame || 1))),
+			end_frame: Math.max(1, Math.round(Number(scene?.end_frame || totalFrames))),
+			prompt: String(scene?.prompt ?? ""),
+			actors: Array.isArray(scene?.actors) ? scene.actors : [],
+			scenes: Array.isArray(scene?.scenes) ? scene.scenes : [],
+		})),
+	};
+}
+function saveDirectorPlan(node, plan) {
+	plan.scenes.sort((a, b) => Number(a.start_frame) - Number(b.start_frame));
+	plan.scenes.forEach((scene, index) => { scene.index = index + 1; });
+	setValue(node, "director_storyboard_json", JSON.stringify({ ...plan, configured: true }));
+	const button = node.__gjjMiniMaxPanel?.buttons?.director;
+	button?.classList.toggle("active", true);
+}
+function panelPromptForDirectorScene(node, sceneIndex) {
+	const prompt = String(value(node, "prompt", "") || "");
+	if (!prompt.includes("---")) return prompt.trim();
+	const parts = prompt.split("---").map((part) => part.trim()).filter(Boolean);
+	return parts.length ? parts[Math.min(Math.max(0, sceneIndex), parts.length - 1)] : "";
+}
+function syncDirectorButton(node) {
+	const button = node.__gjjMiniMaxPanel?.buttons?.director;
+	if (!button) return;
+	let configured = false;
+	try { configured = Boolean(JSON.parse(String(value(node, "director_storyboard_json", "{}") || "{}"))?.configured); } catch (_) {}
+	button.classList.toggle("active", configured);
+	button.title = configured ? "导演台：已有分镜设置" : "导演台：未设置分镜";
+}
+function createDirectorPanel(node) {
+	const host = document.createElement("div");
+	const plan = readDirectorPlan(node);
+	let playhead = 1;
+	let viewStart = 1;
+	let viewEnd = plan.total_frames;
+	let selectedScene = 0;
+	let draggedActorIndex = -1;
+	let playheadLines = [];
+	let playheadBadges = [];
+	const preview = document.createElement("video"); preview.controls = true; preview.playsInline = true; preview.preload = "metadata"; preview.style.cssText = "display:block;width:100%;height:260px;object-fit:contain;background:#05090b;border:1px solid #304e55;border-radius:7px;margin-bottom:8px";
+	const tools = document.createElement("div"); tools.style.cssText = "display:grid;grid-template-columns:auto auto auto 110px auto auto auto auto 1fr;gap:6px;align-items:center;margin-bottom:8px";
+	const openMedia = document.createElement("button"); openMedia.className = "gjj-mh3-close"; openMedia.textContent = "📁"; openMedia.title = "打开视频、图片";
+	const mediaInput = document.createElement("input"); mediaInput.type = "file"; mediaInput.multiple = true; mediaInput.accept = "video/*,image/*"; mediaInput.style.display = "none";
+	const auto = document.createElement("button"); auto.className = "gjj-mh3-close"; auto.textContent = "自动分段";
+	const snap = document.createElement("button"); snap.className = "gjj-mh3-close"; snap.textContent = "🧲"; snap.title = "把切点吸附到合法的 17n+5 分段边界";
+	const segmentFrames = document.createElement("input"); segmentFrames.type = "number"; segmentFrames.min = "5"; segmentFrames.readOnly = true; segmentFrames.className = "gjj-mh3-control"; segmentFrames.title = "按时长和帧率自动计算的 17n+5 分段帧数";
+	const fit = document.createElement("button"); fit.className = "gjj-mh3-close"; fit.textContent = "适配";
+	const zoomOut = document.createElement("button"); zoomOut.className = "gjj-mh3-close"; zoomOut.textContent = "－";
+	const zoomIn = document.createElement("button"); zoomIn.className = "gjj-mh3-close"; zoomIn.textContent = "＋";
+	const reset = document.createElement("button"); reset.className = "gjj-mh3-close"; reset.textContent = "清空";
+	const info = document.createElement("span"); info.style.cssText = "text-align:right;color:#8fb0b7";
+	tools.append(openMedia, auto, snap, segmentFrames, fit, zoomOut, zoomIn, reset, info);
+	const promptPreview = document.createElement("div"); promptPreview.title = "双击编辑当前片段提示词"; promptPreview.style.cssText = "min-height:34px;max-height:92px;overflow:auto;margin-bottom:7px;padding:7px;border:1px solid #31535b;border-radius:6px;background:#0b1519;color:#e7f5f5;white-space:pre-wrap;cursor:text";
+	const timeline = document.createElement("div"); timeline.style.cssText = "position:relative;height:112px;border:1px solid #304e55;border-radius:7px;background:#091215;overflow:hidden;cursor:crosshair;user-select:none";
+	const audioTrack = document.createElement("div"); audioTrack.style.cssText = "position:relative;height:38px;margin-top:6px;border:1px solid #315b58;border-radius:6px;background:#102c2a;overflow:hidden;cursor:ew-resize;user-select:none";
+	const refsHeader = document.createElement("div"); refsHeader.style.cssText = "display:flex;gap:6px;align-items:center;margin-top:9px";
+	const refsTitle = document.createElement("strong"); refsTitle.style.marginRight = "auto";
+	const actorRef = document.createElement("button"); actorRef.className = "gjj-mh3-close"; actorRef.textContent = "👤 角色";
+	const sceneRef = document.createElement("button"); sceneRef.className = "gjj-mh3-close"; sceneRef.textContent = "🏕️ 场景";
+	const reuseRefs = document.createElement("button"); reuseRefs.className = "gjj-mh3-close"; reuseRefs.textContent = "全局复用";
+	const clearRefs = document.createElement("button"); clearRefs.className = "gjj-mh3-close"; clearRefs.textContent = "清空";
+	refsHeader.append(refsTitle, actorRef, sceneRef, reuseRefs, clearRefs);
+	const refsGrid = document.createElement("div"); refsGrid.style.cssText = "display:flex;gap:8px;min-height:82px;margin-top:6px;padding:8px;border:1px solid #304e55;border-radius:7px;background:#091215;overflow:auto;align-items:flex-start";
+	const clamp = (number, min, max) => Math.max(min, Math.min(max, number));
+	const videoItem = () => internalMediaItems(node).find((item) => String(item?.media_type || "").toLowerCase() === "video");
+	const syncPreview = () => {
+		const item = videoItem(); const source = item ? internalMediaUrl(item) : "";
+		if (source && preview.getAttribute("src") !== source) { preview.src = source; preview.load?.(); }
+		if (!source) preview.removeAttribute("src");
+	};
+	const movePlayhead = () => {
+		const nearbyBoundary = plan.scenes.find((scene, index) =>
+			index < plan.scenes.length - 1
+			&& scene.end_frame === plan.scenes[index + 1].start_frame
+			&& Math.abs(scene.end_frame - playhead) <= 1
+		);
+		if (nearbyBoundary) playhead = nearbyBoundary.end_frame;
+		const span = Math.max(1, viewEnd - viewStart + 1);
+		const left = `${clamp(((playhead - viewStart) / span) * 100, 0, 100)}%`;
+		for (const line of playheadLines) line.style.left = left;
+		const atBoundary = plan.scenes.some((scene, index) =>
+			index < plan.scenes.length - 1
+			&& scene.end_frame === playhead
+			&& plan.scenes[index + 1].start_frame === playhead
+		);
+		for (const badge of playheadBadges) {
+			badge.textContent = atBoundary ? "🈴" : "✂️";
+			badge.title = atBoundary ? "点击合并切点两侧片段" : "点击在当前位置切割";
+			badge.style.borderColor = atBoundary ? "#52e09a" : "#d76cff";
+		}
+		info.textContent = `${plan.total_frames} 帧 @ ${Number(plan.fps).toLocaleString()} FPS · 播放头 ${playhead}`;
+	};
+	const normalize = () => {
+		plan.scenes.sort((a, b) => a.start_frame - b.start_frame);
+		let previousEnd = 1;
+		for (const [index, scene] of plan.scenes.entries()) {
+			scene.start_frame = index === 0 ? 1 : previousEnd;
+			scene.end_frame = clamp(Math.max(scene.start_frame, Math.round(Number(scene.end_frame || scene.start_frame))), scene.start_frame, plan.total_frames);
+			previousEnd = scene.end_frame;
+		}
+		if (plan.scenes.length) plan.scenes[plan.scenes.length - 1].end_frame = plan.total_frames;
+		plan.scenes = plan.scenes.filter((scene) => scene.start_frame <= plan.total_frames);
+	};
+	const boundaryIndex = () => plan.scenes.findIndex((scene, index) => index < plan.scenes.length - 1 && scene.end_frame === playhead && plan.scenes[index + 1].start_frame === playhead);
+	const splitAtPlayhead = () => {
+		const index = plan.scenes.findIndex((scene) => playhead > scene.start_frame && playhead < scene.end_frame);
+		if (index < 0 || boundaryIndex() >= 0) return;
+		const scene = plan.scenes[index]; const oldEnd = scene.end_frame; scene.end_frame = playhead;
+		plan.scenes.splice(index + 1, 0, { start_frame: playhead, end_frame: oldEnd, prompt: scene.prompt, actors: [...(scene.actors || [])], scenes: [...(scene.scenes || [])] });
+		selectedScene = index + 1; render();
+	};
+	const mergeAtBoundary = () => {
+		const index = boundaryIndex();
+		if (index < 0) return;
+		const current = plan.scenes[index]; const next = plan.scenes[index + 1];
+		current.end_frame = next.end_frame;
+		if (String(next.prompt || "").trim() && String(next.prompt || "").trim() !== String(current.prompt || "").trim()) current.prompt = `${String(current.prompt || "").trim()}\n${String(next.prompt || "").trim()}`.trim();
+		for (const key of ["actors", "scenes"]) {
+			const merged = [...(current[key] || []), ...(next[key] || [])]; const seen = new Set();
+			current[key] = merged.filter((item) => { const id = String(item?.id || item?.name); if (seen.has(id)) return false; seen.add(id); return true; });
+		}
+		plan.scenes.splice(index + 1, 1); selectedScene = index; render();
+	};
+	const playheadAction = () => boundaryIndex() >= 0 ? mergeAtBoundary() : splitAtPlayhead();
+	const appendPlayhead = (track, top) => {
+		const span = Math.max(1, viewEnd - viewStart + 1);
+		const line = document.createElement("div"); line.style.cssText = `position:absolute;z-index:8;top:0;bottom:0;width:2px;background:#ffd45c;left:${clamp(((playhead - viewStart) / span) * 100, 0, 100)}%`;
+		const badge = document.createElement("button"); badge.type = "button"; badge.style.cssText = `position:absolute;left:50%;${top ? "top:0" : "bottom:0"};transform:translate(-50%,${top ? "-1px" : "1px"});font-size:14px;line-height:18px;background:#14352d;border:1px solid #d76cff;border-radius:4px;padding:0 2px;cursor:pointer;pointer-events:auto`;
+		badge.addEventListener("pointerdown", (event) => event.stopPropagation());
+		badge.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); playheadAction(); });
+		line.appendChild(badge); track.appendChild(line); playheadLines.push(line); playheadBadges.push(badge);
+	};
+	const render = () => {
+		normalize();
+		segmentFrames.value = String(alignedSegmentFrames());
+		timeline.replaceChildren();
+		audioTrack.replaceChildren();
+		playheadLines = []; playheadBadges = [];
+		const span = Math.max(1, viewEnd - viewStart + 1);
+		for (const [index, scene] of plan.scenes.entries()) {
+			const start = Math.max(scene.start_frame, viewStart); const end = Math.min(scene.end_frame, viewEnd);
+			if (end < start) continue;
+			const block = document.createElement("div");
+			block.style.cssText = `position:absolute;top:10px;bottom:10px;left:${((start - viewStart) / span) * 100}%;width:${Math.max(.7, ((end - start + 1) / span) * 100)}%;border:${index === selectedScene ? "2px solid #ffd45c" : "1px solid #55bcd0"};background:${index % 2 ? "#183c49" : "#174b43"};color:#e8ffff;box-sizing:border-box;overflow:hidden`;
+			const source = preview.getAttribute("src");
+			if (source) {
+				const thumbnail = document.createElement("video");
+				thumbnail.muted = true; thumbnail.playsInline = true; thumbnail.preload = "metadata"; thumbnail.src = source;
+				thumbnail.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.82;pointer-events:none";
+				thumbnail.addEventListener("loadedmetadata", () => {
+					const target = clamp((((scene.start_frame + scene.end_frame) / 2) - 1) / plan.fps, 0, Math.max(0, Number(thumbnail.duration || 0) - .05));
+					if (Number.isFinite(target)) thumbnail.currentTime = target;
+				}, { once: true });
+				block.appendChild(thumbnail);
+			}
+			const sceneLabel = document.createElement("strong"); sceneLabel.textContent = `分镜 ${index + 1}`; sceneLabel.style.cssText = "position:absolute;left:5px;top:5px;padding:2px 5px;border-radius:4px;background:#071014c9;color:#fff;pointer-events:none";
+			const rangeLabel = document.createElement("span"); rangeLabel.textContent = `${scene.start_frame}-${scene.end_frame}`; rangeLabel.style.cssText = "position:absolute;left:5px;bottom:4px;padding:1px 4px;border-radius:3px;background:#071014c9;color:#eaffff;pointer-events:none";
+			block.append(sceneLabel, rangeLabel);
+			block.addEventListener("pointerdown", () => { selectedScene = index; });
+			timeline.appendChild(block);
+		}
+		const audioBody = document.createElement("div"); audioBody.style.cssText = "position:absolute;inset:5px;background:#18594f;border:1px solid #48a98e;border-radius:4px";
+		const audioLabel = document.createElement("span"); audioLabel.textContent = videoItem() ? "原视频音频" : "音频轨"; audioLabel.style.cssText = "position:absolute;left:7px;top:3px;color:#d6fff1;font-size:11px";
+		const wave = document.createElement("div"); wave.style.cssText = "position:absolute;left:8px;right:8px;top:50%;border-top:1px dashed #75d5b9aa";
+		audioBody.append(audioLabel, wave); audioTrack.appendChild(audioBody);
+		appendPlayhead(timeline, true); appendPlayhead(audioTrack, false);
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)] || plan.scenes[0];
+		if (active && !promptPreview.isContentEditable) {
+			const ownPrompt = String(active.prompt || "").trim();
+			const fallbackPrompt = panelPromptForDirectorScene(node, selectedScene);
+			promptPreview.textContent = ownPrompt || `未设置分段提示词，使用主正向提示词：\n${fallbackPrompt || "（主正向提示词为空）"}`;
+			promptPreview.style.color = ownPrompt ? "#e7f5f5" : "#8fb5ba";
+		}
+		refsTitle.textContent = `片段 ${selectedScene + 1} 参考素材`;
+		refsGrid.replaceChildren();
+		const refs = [
+			...(Array.isArray(active?.actors) ? active.actors.map((item, index) => ["actor", item, index]) : []),
+			...(Array.isArray(active?.scenes) ? active.scenes.map((item, index) => ["scene", item, index]) : []),
+		];
+		for (const [kind, item, itemIndex] of refs) {
+			const card = document.createElement("button"); card.type = "button"; card.style.cssText = "width:78px;flex:0 0 78px;padding:5px;border:1px solid #3d626a;border-radius:6px;background:#14242a;color:#e5f3f3";
+			const image = document.createElement("img"); image.style.cssText = "display:block;width:66px;height:58px;object-fit:cover;border-radius:4px;background:#05090b";
+			setGjjLibraryThumbnail(image, api, kind === "scene" ? "scene" : "character", item);
+			const label = document.createElement("span"); label.textContent = `${kind === "scene" ? "🏕️" : "👤"} ${libraryDisplayName(item)}`; label.style.cssText = "display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:4px;font-size:11px";
+			card.title = kind === "actor" ? "拖动调整角色顺序；Ctrl/Cmd+点击删除" : "Ctrl/Cmd+点击删除当前片段场景"; card.append(image, label);
+			card.addEventListener("click", (event) => {
+				if (!event.ctrlKey && !event.metaKey) return;
+				const key = kind === "scene" ? "scenes" : "actors"; const id = String(item?.id || item?.name);
+				active[key] = (active[key] || []).filter((entry) => String(entry?.id || entry?.name) !== id); render();
+			});
+			if (kind === "actor") {
+				card.draggable = true; card.dataset.actorIndex = String(itemIndex); card.style.cursor = "grab";
+				card.addEventListener("dragstart", (event) => {
+					draggedActorIndex = itemIndex; card.style.opacity = ".45";
+					event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(itemIndex));
+				});
+				card.addEventListener("dragend", () => { draggedActorIndex = -1; card.style.opacity = ""; });
+				card.addEventListener("dragover", (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; card.style.borderColor = "#ffd45c"; });
+				card.addEventListener("dragleave", () => { card.style.borderColor = "#3d626a"; });
+				card.addEventListener("drop", (event) => {
+					event.preventDefault(); event.stopPropagation();
+					const from = draggedActorIndex; let to = itemIndex;
+					if (from < 0 || from === to || !Array.isArray(active.actors)) return;
+					const [moved] = active.actors.splice(from, 1);
+					active.actors.splice(to, 0, moved); draggedActorIndex = -1; render();
+				});
+			}
+			refsGrid.appendChild(card);
+		}
+		if (!refs.length) { const empty = document.createElement("span"); empty.textContent = "当前片段没有参考素材"; empty.style.cssText = "margin:auto;color:#78939a"; refsGrid.appendChild(empty); }
+		movePlayhead();
+		saveDirectorPlan(node, plan);
+	};
+	let selectionRenderTimer = 0;
+	const beginPromptEdit = () => {
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)]; if (!active) return;
+		promptPreview.contentEditable = "true"; promptPreview.style.color = "#e7f5f5"; promptPreview.textContent = active.prompt || ""; promptPreview.focus();
+		const range = document.createRange(); range.selectNodeContents(promptPreview); range.collapse(false);
+		const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+	};
+	const installTrackDrag = (track) => track.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0 || event.target?.closest?.("button")) return;
+		const update = (next, snap = true) => {
+			const rect = track.getBoundingClientRect();
+			let frame = clamp(Math.round(viewStart + ((next.clientX - rect.left) / Math.max(1, rect.width)) * (viewEnd - viewStart)), 1, plan.total_frames);
+			if (snap) {
+				const threshold = Math.max(1, Math.round((viewEnd - viewStart + 1) * 8 / Math.max(1, rect.width)));
+				const boundaries = plan.scenes.slice(1).map((scene) => scene.start_frame);
+				const nearest = boundaries.reduce((best, value) => Math.abs(value - frame) < Math.abs(best - frame) ? value : best, Number.POSITIVE_INFINITY);
+				if (Number.isFinite(nearest) && Math.abs(nearest - frame) <= threshold) frame = nearest;
+			}
+			playhead = frame;
+			selectedScene = Math.max(0, plan.scenes.findIndex((scene) => playhead >= scene.start_frame && playhead <= scene.end_frame));
+			if (preview.src) preview.currentTime = (playhead - 1) / plan.fps;
+			movePlayhead();
+		};
+		update(event);
+		const move = (next) => update(next);
+		const stop = () => {
+			window.removeEventListener("pointermove", move, true); window.removeEventListener("pointerup", stop, true);
+			clearTimeout(selectionRenderTimer); selectionRenderTimer = window.setTimeout(render, 220);
+		};
+		window.addEventListener("pointermove", move, true); window.addEventListener("pointerup", stop, true);
+	});
+	installTrackDrag(timeline); installTrackDrag(audioTrack);
+	timeline.addEventListener("dblclick", (event) => {
+		event.preventDefault(); event.stopPropagation(); clearTimeout(selectionRenderTimer);
+		const rect = timeline.getBoundingClientRect();
+		const frame = clamp(Math.round(viewStart + ((event.clientX - rect.left) / Math.max(1, rect.width)) * (viewEnd - viewStart)), 1, plan.total_frames);
+		const found = plan.scenes.findIndex((scene) => frame >= scene.start_frame && frame <= scene.end_frame);
+		if (found >= 0) selectedScene = found;
+		playhead = frame; if (preview.src) preview.currentTime = (playhead - 1) / plan.fps; movePlayhead(); beginPromptEdit();
+	});
+	const alignedSegmentFrames = () => {
+		const base = Math.max(5, Math.round((Number(value(node, "duration", 5)) || 5) * (Number(value(node, "frame_rate", 24)) || 24)));
+		return base + ((5 - (base % 17)) % 17);
+	};
+	auto.addEventListener("click", () => {
+		const size = alignedSegmentFrames(); const advance = Math.max(4, size - 1); segmentFrames.value = String(size);
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)] || {};
+		plan.scenes = []; for (let start = 1; start <= plan.total_frames; start += advance) {
+			plan.scenes.push({ start_frame: start, end_frame: Math.min(plan.total_frames, start + size - 1), prompt: "", actors: [...(active.actors || [])], scenes: [...(active.scenes || [])] });
+			if (start + size - 1 >= plan.total_frames) break;
+		}
+		render();
+	});
+	snap.addEventListener("click", () => {
+		const size = alignedSegmentFrames(); const advance = Math.max(4, size - 1); segmentFrames.value = String(size);
+		const oldScenes = plan.scenes.map((scene) => ({ ...scene }));
+		const sceneAt = (frame) => oldScenes.find((scene) => frame >= scene.start_frame && frame <= scene.end_frame) || oldScenes.at(-1) || {};
+		const snapped = [];
+		for (let start = 1; start <= plan.total_frames; start += advance) {
+			const source = sceneAt(start); snapped.push({ start_frame: start, end_frame: Math.min(plan.total_frames, start + size - 1), prompt: source.prompt || "", actors: [...(source.actors || [])], scenes: [...(source.scenes || [])] });
+			if (start + size - 1 >= plan.total_frames) break;
+		}
+		plan.scenes = snapped; selectedScene = clamp(selectedScene, 0, plan.scenes.length - 1); render();
+	});
+	promptPreview.addEventListener("dblclick", beginPromptEdit);
+	promptPreview.addEventListener("blur", () => {
+		if (!promptPreview.isContentEditable) return;
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)];
+		if (active) active.prompt = String(promptPreview.textContent || "").trim();
+		promptPreview.contentEditable = "false"; render();
+	});
+	const directorSelection = {
+		get: (kind) => {
+			const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)] || {};
+			return kind === "scene" ? (active.scenes || []) : (active.actors || []);
+		},
+		set: (kind, items) => {
+			const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)]; if (!active) return;
+			active[kind === "scene" ? "scenes" : "actors"] = items; render();
+		},
+	};
+	actorRef.addEventListener("click", () => toggleLibraryPicker(node, "actor", actorRef, directorSelection));
+	sceneRef.addEventListener("click", () => toggleLibraryPicker(node, "scene", sceneRef, directorSelection));
+	reuseRefs.addEventListener("click", () => {
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)]; if (!active) return;
+		for (const scene of plan.scenes) { scene.actors = [...(active.actors || [])]; scene.scenes = [...(active.scenes || [])]; }
+		render();
+	});
+	clearRefs.addEventListener("click", () => {
+		const active = plan.scenes[clamp(selectedScene, 0, plan.scenes.length - 1)]; if (!active) return;
+		active.actors = []; active.scenes = []; render();
+	});
+	fit.addEventListener("click", () => { viewStart = 1; viewEnd = plan.total_frames; render(); });
+	const zoom = (factor) => { const width = clamp(Math.round((viewEnd - viewStart + 1) * factor), 8, plan.total_frames); viewStart = clamp(playhead - Math.floor(width / 2), 1, Math.max(1, plan.total_frames - width + 1)); viewEnd = Math.min(plan.total_frames, viewStart + width - 1); render(); };
+	zoomOut.addEventListener("click", () => zoom(1.5)); zoomIn.addEventListener("click", () => zoom(.65));
+	openMedia.addEventListener("click", () => mediaInput.click());
+	mediaInput.addEventListener("change", async () => {
+		const files = Array.from(mediaInput.files || []);
+		mediaInput.value = "";
+		if (!files.length) return;
+		openMedia.disabled = true;
+		info.textContent = "正在导入视频、图片…";
+		try {
+			await uploadInternalMedia(node, files);
+			syncPreview();
+			render();
+			info.textContent = `已导入 ${files.length} 个媒体文件`;
+		} catch (error) {
+			info.textContent = `导入失败：${error?.message || error}`;
+		} finally {
+			openMedia.disabled = false;
+		}
+	});
+	preview.addEventListener("loadedmetadata", () => {
+		if (!Number.isFinite(preview.duration) || preview.duration <= 0) return;
+		const nextTotal = Math.max(5, Math.round(preview.duration * plan.fps));
+		if (nextTotal !== plan.total_frames) {
+			plan.total_frames = nextTotal; viewStart = 1; viewEnd = nextTotal;
+			if (plan.scenes.length) plan.scenes[plan.scenes.length - 1].end_frame = nextTotal;
+			render();
+		}
+	});
+	preview.addEventListener("timeupdate", () => {
+		playhead = clamp(Math.round(preview.currentTime * plan.fps) + 1, 1, plan.total_frames);
+		movePlayhead();
+	});
+	reset.addEventListener("click", () => {
+		setValue(node, "director_storyboard_json", "{}");
+		syncDirectorButton(node);
+		closePopups(node);
+	});
+	for (const element of [tools, promptPreview, timeline, audioTrack, refsHeader, refsGrid]) protect(element);
+	host.append(mediaInput, preview, tools, promptPreview, timeline, audioTrack, refsHeader, refsGrid); host.__gjjSync = () => { syncPreview(); render(); }; syncPreview(); render(); return host;
+}
+function enableDirectorDrag(root, handle) {
+	handle.style.cursor = "move";
+	handle.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0 || event.target?.closest?.("button,input,textarea,select")) return;
+		event.preventDefault();
+		const rect = root.getBoundingClientRect();
+		const offsetX = event.clientX - rect.left; const offsetY = event.clientY - rect.top;
+		const move = (next) => {
+			root.style.left = `${Math.max(0, Math.min(window.innerWidth - root.offsetWidth, next.clientX - offsetX))}px`;
+			root.style.top = `${Math.max(0, Math.min(window.innerHeight - 50, next.clientY - offsetY))}px`;
+		};
+		const stop = () => { window.removeEventListener("pointermove", move, true); window.removeEventListener("pointerup", stop, true); };
+		window.addEventListener("pointermove", move, true); window.addEventListener("pointerup", stop, true);
+	}, true);
 }
 function popup(node, key, title) {
 	const root = document.createElement("div"); root.className = "gjj-mh3-pop"; root.dataset.popup = key; protect(root);
@@ -571,6 +958,12 @@ function popup(node, key, title) {
 	const close = document.createElement("button"); close.className = "gjj-mh3-close"; close.textContent = key === "size" ? "×" : "确定"; close.addEventListener("click", () => closePopups(node)); head.append(caption, close); root.append(head);
 	if (key === "size") {
 		const sizePanel = createSizePanel(node); root.appendChild(sizePanel); root.__gjjSizePanel = sizePanel;
+		document.body.appendChild(root);
+		return root;
+	}
+	if (key === "director") {
+		const directorPanel = createDirectorPanel(node); root.appendChild(directorPanel); root.__gjjDirectorPanel = directorPanel;
+		enableDirectorDrag(root, head);
 		document.body.appendChild(root);
 		return root;
 	}
@@ -604,7 +997,7 @@ function popup(node, key, title) {
 	if (key === "promptBook") root.__gjjSync = () => { for (const control of root.querySelectorAll("textarea[data-widget-name]")) if (document.activeElement !== control) control.value = String(value(node, control.dataset.widgetName, "")); };
 	document.body.appendChild(root); return root;
 }
-function closePopups(node) { for (const item of Object.values(node.__gjjMiniMaxPanel?.popups || {})) item.classList.remove("open"); for (const item of Object.values(node.__gjjMiniMaxPanel?.buttons || {})) item.classList.remove("active"); }
+function closePopups(node) { for (const item of Object.values(node.__gjjMiniMaxPanel?.popups || {})) item.classList.remove("open"); for (const item of Object.values(node.__gjjMiniMaxPanel?.buttons || {})) item.classList.remove("active"); syncDirectorButton(node); }
 function openPopup(node, key, anchor) {
 	const panel = node.__gjjMiniMaxPanel; const target = panel?.popups?.[key]; if (!target) return;
 	const wasOpen = target.classList.contains("open"); closePopups(node); if (wasOpen) return;
@@ -612,7 +1005,8 @@ function openPopup(node, key, anchor) {
 	if (key === "model" && target.__gjjModelTreeHost) { target.__gjjReasoningPanel?.__gjjSync?.(); renderModelTree(node, target.__gjjModelTreeHost); target.__gjjLoraPanel?.__gjjRefresh?.(); target.__gjjPatchPanel?.__gjjSync?.(); }
 	if (key === "spectrum") target.__gjjSpectrumPanel?.__gjjSync?.();
 	if (key === "promptBook") target.__gjjSync?.();
-	const rect = anchor.getBoundingClientRect(); const width = Math.min(560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
+	if (key === "director") target.__gjjDirectorPanel?.__gjjSync?.();
+	const rect = anchor.getBoundingClientRect(); const width = Math.min(key === "director" ? 900 : 560, window.innerWidth - 28); target.style.width = `${width}px`; target.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`; target.style.top = `${Math.max(14, Math.min(window.innerHeight - 300, rect.bottom + 7))}px`; target.classList.add("open"); anchor.classList.add("active");
 }
 function makeButton(text, title, className = "") { const button = document.createElement("button"); button.type = "button"; button.className = `gjj-mh3-btn ${className}`; button.textContent = text; button.title = title; protect(button); return button; }
 function firstPreviewItem(...values) {
@@ -813,7 +1207,7 @@ function syncLibraryButtons(node) {
 	}
 }
 function closeLibraryPicker(node) { closeLibraryPreview(); const panel = node.__gjjMiniMaxPanel; panel?.libraryPicker?.remove?.(); if (panel) panel.libraryPicker = null; panel?.sceneButton?.classList.remove("picker-open"); panel?.actorButton?.classList.remove("picker-open"); }
-async function toggleLibraryPicker(node, kind, anchor) {
+async function toggleLibraryPicker(node, kind, anchor, selectionAdapter = null) {
 	const panel = node.__gjjMiniMaxPanel; if (!panel) return;
 	if (panel.libraryPicker?.dataset?.kind === kind) { closeLibraryPicker(node); return; }
 	closeLibraryPicker(node);
@@ -827,8 +1221,10 @@ async function toggleLibraryPicker(node, kind, anchor) {
 	try {
 		const endpoint = kind === "scene" ? SCENE_LIBRARY_ENDPOINT : `${CHARACTER_LIBRARY_ENDPOINT}?summary=1`; const response = await api.fetchApi(endpoint); const data = await response.json(); if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取资料库失败");
 		const allItems = Array.isArray(kind === "scene" ? data.scenes : data.characters) ? (kind === "scene" ? data.scenes : data.characters) : [];
-		const render = () => { const keyword = search.value.trim().toLowerCase(); const selected = librarySelection(node, kind); const selectedIds = new Set(selected.map((item) => String(item?.id || item?.name))); const filtered = allItems.filter((item) => !keyword || [libraryDisplayName(item), item?.id, item?.notes, ...(item?.keywords || [])].join(" ").toLowerCase().includes(keyword)); grid.replaceChildren();
-			for (const item of filtered) { const id = String(item?.id || libraryDisplayName(item)); const card = document.createElement("button"); card.type = "button"; card.className = `gjj-mh3-library-card${selectedIds.has(id) ? " active" : ""}`; const image = document.createElement("img"); setGjjLibraryThumbnail(image, api, kind === "scene" ? "scene" : "character", item); const name = document.createElement("div"); name.className = "gjj-mh3-library-name"; name.textContent = `${kind === "scene" ? "🏕️" : "@"}${libraryDisplayName(item)}`; card.title = String(item?.notes || libraryDisplayName(item)); card.append(image, name); card.addEventListener("click", () => { const current = librarySelection(node, kind); const exists = current.some((entry) => String(entry?.id || entry?.name) === id); saveLibrarySelection(node, kind, exists ? current.filter((entry) => String(entry?.id || entry?.name) !== id) : [...current, { id, name: libraryDisplayName(item), notes: String(item?.notes || "") }]); render(); }); grid.appendChild(card); }
+		const getSelection = () => selectionAdapter?.get?.(kind) || librarySelection(node, kind);
+		const setSelection = (items) => selectionAdapter?.set ? selectionAdapter.set(kind, items) : saveLibrarySelection(node, kind, items);
+		const render = () => { const keyword = search.value.trim().toLowerCase(); const selected = getSelection(); const selectedIds = new Set(selected.map((item) => String(item?.id || item?.name))); const filtered = allItems.filter((item) => !keyword || [libraryDisplayName(item), item?.id, item?.notes, ...(item?.keywords || [])].join(" ").toLowerCase().includes(keyword)); grid.replaceChildren();
+			for (const item of filtered) { const id = String(item?.id || libraryDisplayName(item)); const card = document.createElement("button"); card.type = "button"; card.className = `gjj-mh3-library-card${selectedIds.has(id) ? " active" : ""}`; const image = document.createElement("img"); setGjjLibraryThumbnail(image, api, kind === "scene" ? "scene" : "character", item); const name = document.createElement("div"); name.className = "gjj-mh3-library-name"; name.textContent = `${kind === "scene" ? "🏕️" : "@"}${libraryDisplayName(item)}`; card.title = String(item?.notes || libraryDisplayName(item)); card.append(image, name); card.addEventListener("click", () => { const current = getSelection(); const exists = current.some((entry) => String(entry?.id || entry?.name) === id); setSelection(exists ? current.filter((entry) => String(entry?.id || entry?.name) !== id) : [...current, { id, name: libraryDisplayName(item), notes: String(item?.notes || "") }]); render(); }); grid.appendChild(card); }
 			if (!filtered.length) { const empty = document.createElement("div"); empty.className = "gjj-mh3-library-empty"; empty.textContent = allItems.length ? "没有匹配项目" : "资料库为空"; grid.appendChild(empty); }
 		}; search.addEventListener("input", render); render();
 	} catch (error) { grid.textContent = `读取失败：${error?.message || error}`; }
@@ -1066,8 +1462,10 @@ function syncBroadcastUI(node) {
 }
 function syncMainSizeButton(node) {
 	const button = node.__gjjMiniMaxPanel?.buttons?.size; if (!button) return;
-	const source = Boolean(value(node, "use_source_size", true)); button.classList.toggle("gjj-mh3-source-size", source);
-	button.title = source ? "尺寸参数（当前使用首图尺寸）" : "尺寸参数（当前使用画板尺寸）";
+	const video = Boolean(value(node, "use_video_size", false));
+	const source = Boolean(value(node, "use_source_size", true)) && !video;
+	button.classList.toggle("gjj-mh3-source-size", source || video);
+	button.title = video ? "尺寸参数（当前使用第一个视频尺寸）" : (source ? "尺寸参数（当前使用首图尺寸）" : "尺寸参数（当前使用画板或百万像素尺寸）");
 }
 function applyPromptHeight(node, rawHeight) {
 	const target = widget(node, "prompt"); if (!target) return;
@@ -1092,9 +1490,9 @@ function createPanel(node) {
 	const file = document.createElement("input"); file.type = "file"; file.multiple = true; file.accept = "image/*,text/plain,.txt,.md,.prompt,audio/*,video/*"; file.style.display = "none"; root.appendChild(file);
 	const run = makeButton("▶️", "运行当前 MiniMax H3 节点", "gjj-mh3-run");
 	const sceneButton = makeButton("🏕️", "选择场景库引用", "gjj-mh3-library-button"); const actorButton = makeButton("👤", "选择角色库引用", "gjj-mh3-library-button");
-	const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const spectrum = makeButton("🚀", "Spectrum MiniMax H3 加速设置", "gjj-mh3-spectrum"); const promptBook = makeButton("📒", "全局、负面与替换提示词"); const settings = makeButton("⚙️", "生成参数");
+	const director = makeButton("🎞️", "导演台：逐帧切割和编辑分镜"); const size = makeButton("📐", "尺寸参数"); const seed = makeButton("🎲", "随机种子"); const model = makeButton("🧠", "模型参数"); const spectrum = makeButton("🚀", "Spectrum MiniMax H3 加速设置", "gjj-mh3-spectrum"); const promptBook = makeButton("📒", "全局、负面与替换提示词"); const settings = makeButton("⚙️", "生成参数");
 	const variables = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS); variables.classList.add("gjj-mh3-btn"); variables.style.height = "32px"; variables.style.minWidth = "36px"; variables.style.width = "36px"; variables.style.flex = "0 0 36px"; variables.style.padding = "0"; variables.style.margin = "0"; variables.style.borderRadius = "0";
-	toolbar.append(folder, link, sceneButton, actorButton, size, seed, model, spectrum, promptBook, variables, settings, run);
+	toolbar.append(folder, link, sceneButton, actorButton, director, size, seed, model, spectrum, promptBook, variables, settings, run);
 	const resultRoot = document.createElement("div"); resultRoot.className = "gjj-mh3-root"; protect(resultRoot);
 	resultRoot.style.display = "none";
 	const branches = document.createElement("div"); branches.className = "gjj-mh3-branches";
@@ -1109,8 +1507,8 @@ function createPanel(node) {
 		return [Math.max(0, Number(node.size?.[0] || 0) - 20), hasPreview ? Math.max(1, Number(resultRoot.scrollHeight || preview.offsetHeight || 1)) : 0];
 	}; resultDom.getHeight = () => Number(resultDom.computeSize?.()[1] || 0);
 	arrangePanelWidgets(node, dom, resultDom);
-	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, spectrumButton: spectrum, variables, buttons: { size, seed, model, spectrum, promptBook, settings }, popups: {} };
-	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数"); panel.popups.spectrum = popup(node, "spectrum", "🚀 Spectrum 加速"); panel.popups.promptBook = popup(node, "promptBook", "📒 提示词");
+	const panel = node.__gjjMiniMaxPanel = { root, resultRoot, branches, status, preview, video, previewNav, previewPrev, previewNext, previewLabel, previewEntries: new Map(), activePreviewKey: null, folder, link, sceneButton, actorButton, libraryChips, libraryPicker: null, seedButton: seed, spectrumButton: spectrum, variables, buttons: { director, size, seed, model, spectrum, promptBook, settings }, popups: {} };
+	panel.popups.params = popup(node, "params", "生成参数"); panel.popups.director = popup(node, "director", "🎞️ 导演台"); panel.popups.size = popup(node, "size", "📐 尺寸"); panel.popups.model = popup(node, "model", "模型参数"); panel.popups.spectrum = popup(node, "spectrum", "🚀 Spectrum 加速"); panel.popups.promptBook = popup(node, "promptBook", "📒 提示词");
 	const turnPreview = (offset) => { const entries = orderedPreviewEntries(panel); const index = entries.findIndex((entry) => entry.key === panel.activePreviewKey); const target = entries[index + offset]; if (target) showStoredPreview(node, target.key); };
 	previewPrev.addEventListener("click", () => turnPreview(-1)); previewNext.addEventListener("click", () => turnPreview(1));
 	run.addEventListener("click", async () => { closePopups(node); resetResultPreview(node); status.textContent = "正在提交当前节点…"; await queueOnlyCurrentNode(node); });
@@ -1118,8 +1516,8 @@ function createPanel(node) {
 	folder.addEventListener("mouseenter", () => showMediaTooltip(node)); folder.addEventListener("mouseleave", () => scheduleMediaTooltipClose(node));
 	link.addEventListener("click", () => toggleMediaLinks(node));
 	sceneButton.addEventListener("click", () => toggleLibraryPicker(node, "scene", sceneButton)); actorButton.addEventListener("click", () => toggleLibraryPicker(node, "actor", actorButton));
-	size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); spectrum.addEventListener("click", () => openPopup(node, "spectrum", spectrum)); promptBook.addEventListener("click", () => openPopup(node, "promptBook", promptBook)); settings.addEventListener("click", () => openPopup(node, "params", settings));
-	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); applyPromptHeight(node, node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT); syncSeed(); syncSpectrumButton(node); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
+	director.addEventListener("click", () => openPopup(node, "director", director)); size.addEventListener("click", () => openPopup(node, "size", size)); model.addEventListener("click", () => openPopup(node, "model", model)); spectrum.addEventListener("click", () => openPopup(node, "spectrum", spectrum)); promptBook.addEventListener("click", () => openPopup(node, "promptBook", promptBook)); settings.addEventListener("click", () => openPopup(node, "params", settings));
+	const syncSeed = () => { const enabled = Boolean(value(node, "randomize_seed", true)); seed.classList.toggle("active", enabled); if (!boundVariable(node, "randomize_seed")) seed.title = enabled ? "随机种子已开启" : "随机种子已关闭"; }; seed.addEventListener("click", () => { if (boundVariable(node, "randomize_seed")) return; setValue(node, "randomize_seed", !Boolean(value(node, "randomize_seed", true))); syncSeed(); }); applyPromptHeight(node, node.__gjjMiniMaxPromptHeight || PROMPT_DEFAULT_HEIGHT); syncSeed(); syncDirectorButton(node); syncSpectrumButton(node); syncLibraryButtons(node); syncMediaToolbar(node); syncBranchButtons(node); syncBroadcastUI(node); fitPanel(node);
 }
 // ⚠️ 关键修复：hook prompt widget 的 DOM 事件，实时同步到 properties
 // 原因：ComfyUI 原生 multiline STRING widget 用户输入时只更新 widget.value，

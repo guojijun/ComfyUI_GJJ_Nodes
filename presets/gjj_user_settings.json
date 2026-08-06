@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "bernini",
     "page_size": 8,
     "image_format": "png",
     "jpeg_quality": 0.86

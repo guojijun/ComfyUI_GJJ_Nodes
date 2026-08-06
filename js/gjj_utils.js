@@ -1037,16 +1037,19 @@ export class GJJ_Utils {
             .pop()
             .replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")
             .replace(
-                /(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|awq|gptq|hqq|aqlm|quip|scaled|mixed|convrot|w4a4|padded)(?=$|[_\-. ])/gi,
+                /(^|[_\-. ])(?:fp8mixed|fp8_scaled|fp8_e4m3fn|fp(?:4|8|16|32)|float(?:4|8|16|32)|bf16|f16|f32|nvfp4|mxfp4|mxfp8|q[2-8](?:_[a-z0-9]+)*|int(?:4|8)|e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit|awq|gptq|hqq|aqlm|quip|scaled|mixed|convrot|w4a4|padded|uncensored)(?=$|[_\-. ])/gi,
                 "$1",
             )
             .replace(
                 /(^|[_\-. ])(?:v(?:er(?:sion)?)?\d+(?:[._-]\d+){0,3}|rev(?:ision)?[_-]?\d+(?:[._-]\d+)*|release[_-]?\d+(?:[._-]\d+)*|20\d{2}(?:[._-]\d{1,2}){1,2})(?=$|[_\-. ])/gi,
                 "$1",
             )
-            .replace(/(^|[_\-. ])\d+(?:[._-]\d+)+(?:[bmk])?(?=$|[_\-. ])/gi, "$1")
-            .replace(/[_\-. ]+/g, "_")
-            .replace(/^_+|_+$/g, "");
+            // A dot immediately following an architecture token is part of names such as
+            // Qwen3.5, not the beginning of a standalone version suffix.
+            .replace(/(^|[_\- ])\d+(?:[._-]\d+)+(?:[bmk])?(?=$|[_\-. ])/gi, "$1")
+            .replace(/[_ ]+/g, "-")
+            .replace(/-+/g, "-")
+            .replace(/^[\-.]+|[\-.]+$/g, "");
     }
 
     static _modelTreeSearchValue(entry, widget, node = null) {

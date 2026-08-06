@@ -223,6 +223,9 @@ def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, s
             count=1,
             flags=re.IGNORECASE,
         )
+        # 推理模型偶尔会把同一占位符复制到 soundscape 等附加字段。
+        # 第一处恢复原文，其余重复占位符必须删除，不能泄漏到最终提示词。
+        restored = re.sub(re.escape(marker), "", restored, flags=re.IGNORECASE)
         if count == 0:
             missing.append(normalized_original)
     if missing:
@@ -338,6 +341,39 @@ def _officialize_prompt_without_reasoning(
         "non_diegetic_music: N/A"
     )
     return f"{alignment}\n\n{core}" if alignment else core
+
+
+def _apply_video_replacement_constraints(prompt: str, picture_count: int) -> str:
+    """Keep R2V replacement driven by the current video clip instead of reference-sheet layouts."""
+    source = str(prompt or "").strip()
+    picture_tags = ", ".join(f"<Picture {index}>" for index in range(1, max(0, int(picture_count)) + 1))
+    directive = (
+        "VIDEO STRUCTURE AND CHARACTER REPLACEMENT LOCK — mandatory: <Video 1> is the current reference video segment "
+        "and is the sole "
+        "source of shot composition, visible-person count, spatial arrangement, body poses, motion, timing, camera work, "
+        "background, and continuity. Replace only the identities and character appearances of people already visible in "
+        f"<Video 1> using the configured references in order ({picture_tags or 'no picture references'}). "
+        "A picture reference supplies identity, face, hair, costume, and appearance only. Never reproduce a reference "
+        "picture's canvas, white background, contact sheet, turnaround sheet, multi-view layout, duplicated figure, pose, "
+        "framing, text, border, or still-image composition. Never replace the video shot with a reference picture. Do not "
+        "add a referenced person who is absent from <Video 1>, and do not remove or duplicate a person who is present in "
+        "<Video 1>. Preserve the complete temporal structure and moving content of <Video 1> throughout the output."
+    )
+    source = re.sub(
+        r"CAST IDENTITY AND COUNT LOCK — mandatory:.*?"
+        r"Do not add extra people unless the visual description explicitly requests them\.",
+        directive,
+        source,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    source = source.replace(
+        "fully_preserved - preserve identity, appearance, colors, clothing, objects, and spatial traits.",
+        "identity_only - preserve identity, face, hair, clothing, and colors; ignore the picture layout, pose, background, and spatial traits.",
+    )
+    if "VIDEO STRUCTURE AND CHARACTER REPLACEMENT LOCK" not in source:
+        source = "\n\n".join((directive, source))
+    return source
 
 
 def _apply_prompt_replacement(*, prompt: str, prompt_replace_find: str, prompt_replace_with: str) -> str:
@@ -693,6 +729,38 @@ def _audio_to_cpu(value: Any) -> Any:
         **value,
         "waveform": value["waveform"].detach().to(device="cpu").contiguous(),
     }
+
+
+def _slice_director_video(
+    value: tuple[Any, Any, Any],
+    scene: dict[str, Any],
+    timeline_fps: float,
+) -> tuple[Any, Any, Any]:
+    """Cut one reference video/audio tuple to the director scene's inclusive frame range."""
+    frames, audio, source_fps = value
+    if not isinstance(frames, torch.Tensor) or frames.ndim < 4 or int(frames.shape[0]) < 1:
+        return value
+    safe_timeline_fps = max(1e-6, float(timeline_fps))
+    safe_source_fps = max(1e-6, float(source_fps or timeline_fps))
+    start_frame = max(1, int(scene.get("start_frame") or 1))
+    end_frame = max(start_frame, int(scene.get("end_frame") or start_frame))
+    start_seconds = (start_frame - 1) / safe_timeline_fps
+    end_seconds = end_frame / safe_timeline_fps
+    frame_count = int(frames.shape[0])
+    start_index = max(0, min(frame_count - 1, round(start_seconds * safe_source_fps)))
+    end_index = max(start_index + 1, min(frame_count, round(end_seconds * safe_source_fps)))
+    sliced_audio = audio
+    if _is_audio(audio):
+        sample_rate = max(1, int(audio.get("sample_rate") or 44100))
+        waveform = audio["waveform"]
+        sample_count = int(waveform.shape[-1])
+        start_sample = max(0, min(sample_count, round(start_seconds * sample_rate)))
+        end_sample = max(start_sample, min(sample_count, round(end_seconds * sample_rate)))
+        sliced_audio = {
+            **audio,
+            "waveform": waveform[..., start_sample:end_sample].contiguous(),
+        }
+    return frames[start_index:end_index].contiguous(), sliced_audio, source_fps
 
 
 def _aligned_dimension(value: float) -> int:
@@ -1157,7 +1225,16 @@ def _reasoning_visual_signature(images: list[Any]) -> str:
         if not flat.numel():
             continue
         sample_count = min(1024, flat.numel())
-        indices = torch.linspace(0, flat.numel() - 1, steps=sample_count, device=flat.device).long()
+        if sample_count == 1:
+            indices = torch.zeros((1,), device=flat.device, dtype=torch.int64)
+        else:
+            # 禁止使用浮点 linspace：超大视频张量的末端位置会因 float32
+            # 精度舍入成 numel，进而导致 index_select 越界。
+            indices = (
+                torch.arange(sample_count, device=flat.device, dtype=torch.int64)
+                * (flat.numel() - 1)
+                // (sample_count - 1)
+            )
         sample = flat.index_select(0, indices).to(device="cpu", dtype=torch.float32).contiguous()
         digest.update(sample.numpy().tobytes())
     return digest.hexdigest()
@@ -1269,6 +1346,8 @@ class GJJ_MiniMaxH3Studio:
                 "megapixels": ("FLOAT", {"default": 0.4, "min": 0.2, "max": 2.0, "step": 0.1, "display_name": "百万像素"}),
                 "lora_data": ("STRING", {"default": default_lora_data, "display_name": "LoRA 配置", "tooltip": "🧠 模型面板中的 LoRA 区自动维护；默认启用 MiniMax H3 Turbo 4-step LoRA，并按界面顺序串联应用。"}),
                 "cache_clip": ("BOOLEAN", {"default": False, "display_name": "缓存CLIP", "tooltip": "最终提示词及参考条件未变化时复用上次 CLIP conditioning，跳过重复编码。"}),
+                "director_storyboard_json": ("STRING", {"default": "{}", "display_name": "导演分镜", "tooltip": "🎞️导演台保存的逐段帧范围和提示词。"}),
+                "use_video_size": ("BOOLEAN", {"default": False, "display_name": "视频尺寸", "tooltip": "使用递归解码后第一个视频的尺寸；没有视频时回退到画板尺寸。"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1314,7 +1393,43 @@ class GJJ_MiniMaxH3Studio:
         prompt = _strip_library_manifest_payloads("\n\n".join(
             part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part
         ))
-        raw_prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
+        panel_prompt_is_segmented = "---" in prompt
+        panel_prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
+        raw_prompt_parts = list(panel_prompt_parts)
+        director_scenes: list[dict[str, Any]] = []
+        try:
+            director_plan = json.loads(str(first("director_storyboard_json", "{}") or "{}"))
+            if isinstance(director_plan, dict) and director_plan.get("configured") and isinstance(director_plan.get("scenes"), list):
+                director_scenes = [
+                    scene for scene in director_plan["scenes"]
+                    if isinstance(scene, dict)
+                ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            director_scenes = []
+        if director_scenes:
+            raw_prompt_parts = []
+            for scene_index, scene in enumerate(director_scenes):
+                panel_fallback = (
+                    panel_prompt_parts[min(scene_index, len(panel_prompt_parts) - 1)]
+                    if panel_prompt_is_segmented
+                    else prompt
+                )
+                actor_markers = [
+                    f"@{str(item.get('name') or item.get('id') or '').strip()}"
+                    for item in (scene.get("actors") or [])
+                    if isinstance(item, dict) and str(item.get("name") or item.get("id") or "").strip()
+                ]
+                scene_markers = [
+                    f"🏕️{str(item.get('name') or item.get('id') or '').strip()}"
+                    for item in (scene.get("scenes") or [])
+                    if isinstance(item, dict) and str(item.get("name") or item.get("id") or "").strip()
+                ]
+                raw_prompt_parts.append("\n".join([
+                    *actor_markers,
+                    *scene_markers,
+                    str(scene.get("prompt") or "").strip() or panel_fallback,
+                ]).strip())
+            prompt = "\n---\n".join(raw_prompt_parts)
         prompt_actors = _prompt_library_references(prompt, "@")
         bare_prompt_actors = _prompt_library_references(prompt, "@", require_marker=False)
         prompt_scenes = _prompt_library_references(prompt, "🏕️")
@@ -1404,13 +1519,19 @@ class GJJ_MiniMaxH3Studio:
         ))
         has_library_voices = any(segment_media.get("voice_audios") for _part, segment_media, _assets in segmented_library_media)
         media["images"] = list(segmented_library_media[0][1]["images"]) if segmented_library_media else external_images
-        source = media["images"][0] if media["images"] else (media["videos"][0][0] if media["videos"] else None)
+        use_video_size = bool(first("use_video_size", False))
+        use_source_size = bool(first("use_source_size", True)) and not use_video_size
+        source = (
+            media["videos"][0][0]
+            if use_video_size and media["videos"]
+            else (media["images"][0] if use_source_size and media["images"] else None)
+        )
         width, height = _target_dimensions(
-            panel_width, panel_height, _visual_size(source), bool(first("use_source_size", True)), str(first("size_mode", "宽高")),
+            panel_width, panel_height, _visual_size(source), use_video_size or use_source_size, str(first("size_mode", "宽高")),
         )
         fit_mode = str(first("resize_fit_mode", "裁剪"))
         resize_anchor = str(first("resize_anchor", "上"))
-        for _segment_prompt, segment_media, assets in segmented_library_media:
+        for segment_index, (_segment_prompt, segment_media, assets) in enumerate(segmented_library_media):
             segment_media["images"] = [
                 _resize_visual(
                     image,
@@ -1421,10 +1542,18 @@ class GJJ_MiniMaxH3Studio:
                 )
                 for index, image in enumerate(segment_media["images"])
             ]
-            segment_media["videos"] = [
-                (_resize_visual(frames, width, height, fit_mode, resize_anchor), audio, source_fps)
-                for frames, audio, source_fps in segment_media["videos"]
-            ]
+            prepared_videos: list[tuple[Any, Any, Any]] = []
+            for video in segment_media["videos"]:
+                if director_scenes:
+                    scene = director_scenes[min(segment_index, len(director_scenes) - 1)]
+                    video = _slice_director_video(video, scene, float(first("frame_rate", 24.0)))
+                frames, audio, source_fps = video
+                prepared_videos.append((
+                    _resize_visual(frames, width, height, fit_mode, resize_anchor),
+                    audio,
+                    source_fps,
+                ))
+            segment_media["videos"] = prepared_videos
         if not segmented_library_media:
             _align_media(media, width, height, fit_mode, resize_anchor)
         debug_assets = [
@@ -1436,6 +1565,10 @@ class GJJ_MiniMaxH3Studio:
         )
         fps = float(first("frame_rate", 24.0))
         duration = float(first("duration", 5.0))
+        director_segment_durations = [
+            max(1, int(scene.get("end_frame") or 1) - int(scene.get("start_frame") or 1) + 1) / max(1e-6, fps)
+            for scene in director_scenes
+        ]
         configured_seed = int(first("seed", 42))
         randomize_seed = bool(first("randomize_seed", True))
         seed = configured_seed
@@ -1552,17 +1685,24 @@ class GJJ_MiniMaxH3Studio:
                 )
                 for index, raw_part in enumerate(prompt_parts)
             ]
-        prompt_parts = [
-            _apply_prompt_constraints(
-                prompt=_force_dialogue_language(
-                    _normalize_picture_reference_tags(item),
-                    str(first("dialogue_language", "中文")),
-                ),
+        constrained_prompt_parts: list[str] = []
+        for index, item in enumerate(prompt_parts):
+            normalized_prompt = _force_dialogue_language(
+                _normalize_picture_reference_tags(item),
+                str(first("dialogue_language", "中文")),
+            )
+            segment_media = segmented_library_media[index][1]
+            if segment_media["videos"] and segment_media["images"]:
+                normalized_prompt = _apply_video_replacement_constraints(
+                    normalized_prompt,
+                    len(segment_media["images"]),
+                )
+            constrained_prompt_parts.append(_apply_prompt_constraints(
+                prompt=normalized_prompt,
                 global_prompt=str(first("global_prompt", "") or ""),
                 negative_prompt=str(first("negative_prompt", "") or ""),
-            )
-            for item in prompt_parts
-        ]
+            ))
+        prompt_parts = constrained_prompt_parts
 
         jobs: list[tuple[str, dict[str, list[Any]]]] = []
         if library_assets or has_library_voices:
@@ -1634,7 +1774,7 @@ class GJJ_MiniMaxH3Studio:
         audio_segments: list[Any] = []
         modes: list[str] = []
         for index, (segment_prompt, current_media) in enumerate(jobs):
-            segment_duration = duration
+            segment_duration = director_segment_durations[min(index, len(director_segment_durations) - 1)] if director_segment_durations else duration
             mtv_singing_segment = False
             if current_media["audios"]:
                 measured_duration = _audio_duration_seconds(current_media["audios"][0])
@@ -1679,11 +1819,12 @@ class GJJ_MiniMaxH3Studio:
             if configured_lora_data.strip() == "[]":
                 configured_lora_data = default_lora_data
             turbo_lora_enabled = _uses_default_accel_lora(configured_lora_data)
-            # 参考工作流的 MiniMax H3 Turbo LoRA 始终挂在 FL2VA 模型上；
-            # 即使条件节点使用 ReferenceToVideo，也不能切到 REF2VA 模型。
-            model_field = "fl_model" if turbo_lora_enabled or mode != "R2V" else "ref_model"
+            # 模型分支是严格白名单：只有文生、首帧、尾帧、首尾帧使用 FL2VA；
+            # 参考图片/视频/音频、MTV 等其余模式一律使用 REF2VA。
+            fl2va_modes = {"T2V", "I2V", "尾帧", "首尾帧"}
+            model_field = "fl_model" if mode in fl2va_modes else "ref_model"
             model_default = DEFAULT_FL_MODEL if model_field == "fl_model" else DEFAULT_REF_MODEL
-            model_name = DEFAULT_FL_MODEL if turbo_lora_enabled else str(first(model_field, model_default))
+            model_name = str(first(model_field, model_default))
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {display_mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
             if model_name not in runtime_models:
                 loaded_model, loaded_clip, loaded_video_vae, loaded_audio_vae = self._load_models(
@@ -1842,9 +1983,18 @@ class GJJ_MiniMaxH3Studio:
                         **segment_audio,
                         "waveform": torch.zeros_like(segment_audio["waveform"]),
                     }
-            # 相邻段共享边界图；后续片段移除第 1 帧，避免拼接时重复该边界帧。
-            if image_branch == "分段首尾帧" and index > 0 and int(segment_images.shape[0]) > 1:
+            # 分段首尾帧与导演台都共享边界帧；后续片段移除第 1 帧及其对应音频，
+            # 使上一段尾帧与下一段首帧只在最终拼接结果中保留一次。
+            shared_boundary = index > 0 and (image_branch == "分段首尾帧" or bool(director_scenes))
+            if shared_boundary and int(segment_images.shape[0]) > 1:
                 segment_images = segment_images[1:].contiguous()
+                if isinstance(segment_audio, dict) and isinstance(segment_audio.get("waveform"), torch.Tensor):
+                    sample_rate = max(1, int(segment_audio.get("sample_rate") or 44100))
+                    trim_samples = max(1, round(sample_rate / max(1e-6, fps)))
+                    segment_audio = {
+                        **segment_audio,
+                        "waveform": segment_audio["waveform"][..., trim_samples:].contiguous(),
+                    }
             segment_images = segment_images.detach().to(device="cpu").contiguous()
             segment_audio = _audio_to_cpu(segment_audio)
             decoded_segments.append(segment_images)

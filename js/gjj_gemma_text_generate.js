@@ -146,6 +146,7 @@ globalThis.addEventListener("gjj_character_library_updated", () => {
 	for (const node of app.graph?._nodes || []) {
 		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
 		renderActorChips(node);
+		syncActorMentionMenu(node);
 	}
 });
 globalThis.addEventListener("gjj_scene_library_updated", () => {
@@ -156,6 +157,13 @@ globalThis.addEventListener("gjj_scene_library_updated", () => {
 });
 document.addEventListener("pointerdown", (event) => {
 	if (activeFloatingPreview && !activeFloatingPreview.owner?.contains(event.target)) closeFloatingPreview();
+	for (const node of app.graph?._nodes || []) {
+		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
+		const state = node?.__gjjGemmaPanel;
+		if (!state?.actorMentionMenu) continue;
+		if (state.actorMentionMenu.contains(event.target) || state.promptEditor?.contains(event.target)) continue;
+		closeActorMentionMenu(node);
+	}
 }, true);
 
 function loadModelSizes() {
@@ -394,6 +402,208 @@ function applyActorRangeSelection(node, characters, fromIndex, toIndex, additive
 			notes: String(character.notes || ""),
 		})));
 	}
+}
+
+function loadCharacterSummaries() {
+	if (!characterSummariesPromise) {
+		characterSummariesPromise = api.fetchApi(`${CHARACTER_LIBRARY_ENDPOINT}?summary=1`)
+			.then(async (response) => {
+				const data = await response.json();
+				if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取角色库失败");
+				return data;
+			})
+			.catch((error) => {
+				characterSummariesPromise = null;
+				throw error;
+			});
+	}
+	return characterSummariesPromise;
+}
+
+function actorMentionRange(textarea) {
+	const caret = Number(textarea?.selectionStart ?? 0);
+	const before = String(textarea?.value || "").slice(0, caret);
+	const match = before.match(/(^|[\s\n，。；：、,.!?;:()[\]{}"'“”‘’])@([^\s@，。；：、,.!?;:()[\]{}"'“”‘’]*)$/);
+	if (!match) return null;
+	return {
+		start: before.length - match[2].length - 1,
+		end: caret,
+		query: match[2] || "",
+	};
+}
+
+function closeActorMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	state?.actorMentionMenu?.remove?.();
+	if (state) {
+		state.actorMentionMenu = null;
+		state.actorMentionOptions = [];
+		state.actorMentionActive = 0;
+	}
+}
+
+function saveActorIfNeeded(node, character) {
+	const actors = selectedActors(node);
+	if (actors.some((actor) => String(actor.id) === String(character.id))) return;
+	actors.push({
+		id: String(character.id),
+		name: characterDisplayName(character),
+		notes: String(character.notes || ""),
+	});
+	saveActors(node, actors);
+}
+
+function chooseActorMention(node, character) {
+	const state = node?.__gjjGemmaPanel;
+	const editor = state?.promptEditor;
+	const range = actorMentionRange(editor);
+	if (!editor || !range) return;
+	const name = characterDisplayName(character);
+	const prefix = editor.value.slice(0, range.start);
+	const suffix = editor.value.slice(range.end);
+	const insert = `@${name}`;
+	const spacer = suffix && !/^[\s\n，。；：、,.!?;:]/.test(suffix) ? " " : "";
+	editor.value = `${prefix}${insert}${spacer}${suffix}`;
+	const nextCaret = prefix.length + insert.length + spacer.length;
+	editor.focus();
+	editor.setSelectionRange(nextCaret, nextCaret);
+	setWidgetValue(node, PROMPT_WIDGET, editor.value);
+	saveActorIfNeeded(node, character);
+	closeActorMentionMenu(node);
+}
+
+function positionActorMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const editor = state?.promptEditor;
+	const menu = state?.actorMentionMenu;
+	if (!editor || !menu) return;
+	const rect = editor.getBoundingClientRect();
+	const width = Math.min(300, Math.max(210, rect.width * 0.58));
+	menu.style.width = `${width}px`;
+	menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.left + 8))}px`;
+	menu.style.top = `${Math.max(8, Math.min(window.innerHeight - 280, rect.bottom - 4))}px`;
+}
+
+function renderActorMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const menu = state?.actorMentionMenu;
+	if (!state || !menu) return;
+	const options = state.actorMentionOptions || [];
+	const active = Math.max(0, Math.min(Number(state.actorMentionActive || 0), Math.max(0, options.length - 1)));
+	state.actorMentionActive = active;
+	menu.replaceChildren();
+	const title = document.createElement("div");
+	title.className = "gjj-gemma-mention-title";
+	title.textContent = "@角色库人物";
+	menu.appendChild(title);
+	if (!options.length) {
+		const empty = document.createElement("div");
+		empty.className = "gjj-gemma-mention-empty";
+		empty.textContent = "没有匹配的人物";
+		menu.appendChild(empty);
+		positionActorMentionMenu(node);
+		return;
+	}
+	options.forEach((character, index) => {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = `gjj-gemma-mention-item${index === active ? " active" : ""}`;
+		const image = prioritizeIconImage(document.createElement("img"));
+		setGjjLibraryThumbnail(image, api, "character", character);
+		const main = document.createElement("div");
+		main.className = "gjj-gemma-mention-main";
+		main.textContent = characterDisplayName(character);
+		const detail = document.createElement("div");
+		detail.className = "gjj-gemma-mention-detail";
+		detail.textContent = String(character?.notes || character?.id || "").replace(/\s+/g, " ").trim();
+		const text = document.createElement("span");
+		text.append(main, detail);
+		item.append(image, text);
+		item.addEventListener("pointermove", () => {
+			state.actorMentionActive = index;
+			renderActorMentionMenu(node);
+		});
+		item.addEventListener("pointerdown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			chooseActorMention(node, character);
+		});
+		menu.appendChild(item);
+	});
+	positionActorMentionMenu(node);
+}
+
+async function syncActorMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const editor = state?.promptEditor;
+	const range = actorMentionRange(editor);
+	if (!state || !editor || !range) {
+		closeActorMentionMenu(node);
+		return;
+	}
+	let data;
+	try {
+		data = await loadCharacterSummaries();
+	} catch (error) {
+		console.warn("[GJJ GemmaTextGenerate] 读取角色库 @ 候选失败：", error);
+		return;
+	}
+	const query = range.query.toLocaleLowerCase();
+	const characters = Array.isArray(data.characters) ? data.characters : [];
+	const options = characters
+		.filter((character) => {
+			const searchable = [characterDisplayName(character), character?.name, character?.id, character?.notes].filter(Boolean).join(" ").toLocaleLowerCase();
+			return !query || searchable.includes(query);
+		})
+		.sort((left, right) => Number(right?.updated_at || 0) - Number(left?.updated_at || 0))
+		.slice(0, 12);
+	state.actorMentionOptions = options;
+	state.actorMentionActive = Math.min(Number(state.actorMentionActive || 0), Math.max(0, options.length - 1));
+	if (!state.actorMentionMenu) {
+		const menu = document.createElement("div");
+		menu.className = "gjj-gemma-mention-menu";
+		protect(menu);
+		document.body.appendChild(menu);
+		state.actorMentionMenu = menu;
+	}
+	renderActorMentionMenu(node);
+}
+
+function bindActorMentionEditor(node, editor) {
+	editor.addEventListener("input", () => {
+		window.setTimeout(() => syncActorMentionMenu(node), 0);
+	});
+	editor.addEventListener("click", () => syncActorMentionMenu(node));
+	editor.addEventListener("keyup", (event) => {
+		if (["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) return;
+		syncActorMentionMenu(node);
+	});
+	editor.addEventListener("keydown", (event) => {
+		const state = node?.__gjjGemmaPanel;
+		const menu = state?.actorMentionMenu;
+		if (!menu) {
+			if (event.key === "@") window.setTimeout(() => syncActorMentionMenu(node), 0);
+			return;
+		}
+		if (event.key === "Escape") {
+			event.preventDefault();
+			closeActorMentionMenu(node);
+			return;
+		}
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			const count = Math.max(1, state.actorMentionOptions?.length || 1);
+			state.actorMentionActive = (Number(state.actorMentionActive || 0) + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+			renderActorMentionMenu(node);
+			return;
+		}
+		if (event.key === "Enter" || event.key === "Tab") {
+			const character = state.actorMentionOptions?.[Number(state.actorMentionActive || 0)];
+			if (!character) return;
+			event.preventDefault();
+			chooseActorMention(node, character);
+		}
+	});
 }
 
 function renderActorChips(node) {
@@ -1968,6 +2178,14 @@ function createPanel(node) {
 		.gjj-gemma-actor-preview { position:fixed; z-index:100003; width:280px; max-height:380px; padding:7px; border:1px solid #628278; border-radius:9px; background:#0d171b; color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.64); pointer-events:none; font:12px/1.4 system-ui,sans-serif; }
 		.gjj-gemma-actor-preview img { display:block; width:100%; max-height:320px; object-fit:contain; border-radius:6px; background:#071014; }
 		.gjj-gemma-actor-preview div { padding:6px 3px 1px; overflow-wrap:anywhere; }
+		.gjj-gemma-mention-menu { position:fixed; z-index:100004; max-height:270px; overflow:auto; display:flex; flex-direction:column; gap:3px; padding:6px; border:1px solid #58746d; border-radius:8px; background:rgba(13,22,25,.98); color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.62); font:12px/1.35 system-ui,sans-serif; }
+		.gjj-gemma-mention-title { padding:3px 6px 5px; color:#9fc8bd; font-size:11px; font-weight:800; }
+		.gjj-gemma-mention-empty { padding:10px 8px; color:#91a6aa; text-align:center; }
+		.gjj-gemma-mention-item { width:100%; min-height:42px; display:grid; grid-template-columns:34px minmax(0,1fr); gap:7px; align-items:center; border:0; border-radius:6px; background:transparent; color:#eaf6f1; padding:4px 6px; text-align:left; cursor:pointer; }
+		.gjj-gemma-mention-item:hover,.gjj-gemma-mention-item.active { background:rgba(111,198,150,.18); }
+		.gjj-gemma-mention-item img { width:34px; height:34px; border-radius:50%; object-fit:cover; background:#071014; }
+		.gjj-gemma-mention-main { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:800; }
+		.gjj-gemma-mention-detail { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; color:#9fb0b5; font-size:11px; }
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.96); }
 		.gjj-gemma-assistant-panel .gjj-ia-window-actions { display:flex; justify-content:flex-end; align-items:center; gap:6px; padding-top:2px; border-top:1px solid rgba(73,93,101,.45); }
 		.gjj-gemma-assistant-panel .gjj-ia-button { flex:0 0 auto; height:27px; padding:0 9px; border:1px solid #3d5159; border-radius:6px; background:#172127; color:#dbe6e9; font:700 12px/25px system-ui,sans-serif; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
@@ -2028,6 +2246,7 @@ function createPanel(node) {
 	});
 	promptEditor.addEventListener("change", () => setWidgetValue(node, PROMPT_WIDGET, promptEditor.value));
 	promptEditor.addEventListener("keydown", (event) => event.stopPropagation());
+	bindActorMentionEditor(node, promptEditor);
 	const actorButton = button("👤", "选择参与演员", () => {
 		toggleActorPicker(node).catch((error) => alert(`读取角色库失败：${error?.message || error}`));
 	});

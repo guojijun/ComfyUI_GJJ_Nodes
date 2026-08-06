@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+import logging
 import math
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -40,7 +41,7 @@ from .gjj_bernini_studio import (
 from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
 from .gjj_inject_latent_noise_plus import GJJ_InjectLatentNoisePlus
 from .gjj_memory_manager import _clean_all_resources
-from .gjj_model_patch_bundle import GJJ_ModelPatchBundle
+from .gjj_model_patch_bundle import GJJ_ModelPatchBundle, _is_sage_dependency_available
 from .gjj_model_upscaler import GJJ_ModelUpscaler, _list_pth_upscale_models
 from .gjj_multi_lora_chain import (
     apply_standard_lora,
@@ -53,6 +54,7 @@ from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
 
 NODE_NAME = "GJJ_Bernini13BVideoReferenceUpscaler"
 SOURCE_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+MAX_REFERENCE_MEDIA = 15
 DEFAULT_MODEL = "wan2.1_bernini_1.3B_int8_convrot.safetensors"
 DEFAULT_CLIP = "umt5_xxl_int4_convrot.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
@@ -112,39 +114,42 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         preferred_upscale = _preferred_upscale_model(upscale_models)
         samplers = list(comfy.samplers.KSampler.SAMPLERS) or ["euler"]
         schedulers = list(comfy.samplers.KSampler.SCHEDULERS) or ["beta"]
+        optional = {
+            "media": (SOURCE_MEDIA_TYPE, {"display_name": "源视频/帧序列", "tooltip": "可选 VIDEO、IMAGE 或 GJJ_BATCH_IMAGE；连接后优先于节点内部视频。"}),
+            "selected_video": ("STRING", _hidden({"default": "", "display_name": "内部视频"})),
+            "prompt": ("STRING", _hidden({"default": DEFAULT_PROMPT, "multiline": True, "display_name": "增强提示词"})),
+            "negative_prompt": ("STRING", _hidden({"default": DEFAULT_NEGATIVE, "multiline": True, "display_name": "反向提示词"})),
+            "steps": ("INT", _hidden({"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "采样步数"})),
+            "cfg": ("FLOAT", _hidden({"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "display_name": "CFG"})),
+            "seed": ("INT", _hidden({"default": 231116616039977, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "采样种子"})),
+            "sampler_name": (samplers, _hidden({"default": "euler" if "euler" in samplers else samplers[0], "display_name": "采样器"})),
+            "scheduler": (schedulers, _hidden({"default": "beta" if "beta" in schedulers else schedulers[0], "display_name": "调度器"})),
+            "denoise": ("FLOAT", _hidden({"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪"})),
+            "frame_rate": ("FLOAT", _hidden({"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "display_name": "无源帧率时使用"})),
+            "filename_prefix": ("STRING", _hidden({"default": "video/Wan2.1_Bernini_1.3B_视频参考放大", "display_name": "文件名前缀"})),
+            "format_name": ("STRING", _hidden({"default": "video/h264-mp4", "display_name": "输出格式"})),
+            "keep_model": ("BOOLEAN", _hidden({"default": False, "display_name": "保持模型"})),
+            "model_name": (model["models"], _hidden({"default": model["value"], "display_name": "Bernini 1.3B模型", "gjj_default_model": DEFAULT_MODEL, "gjj_missing_model": model["missing"]})),
+            "clip_name": (clip["models"], _hidden({"default": clip["value"], "display_name": "UMT5 XXL", "gjj_default_model": DEFAULT_CLIP, "gjj_missing_model": clip["missing"]})),
+            "vae_name": (vae["models"], _hidden({"default": vae["value"], "display_name": "Wan VAE", "gjj_default_model": DEFAULT_VAE, "gjj_missing_model": vae["missing"]})),
+            "reference_resources": (REFERENCE_RESOURCE_TYPE, {"display_name": "Media", "tooltip": "参考图片或参考视频帧；前端可把多路虚拟 Media 线映射到隐藏 reference_media_* 输入。"}),
+            "pre_cleanup_resources": ("BOOLEAN", _hidden({"default": True, "display_name": "预清理资源"})),
+            "enable_pre_upscale": ("BOOLEAN", _hidden({"default": True, "display_name": "预放大源视频", "tooltip": "关闭时不检查、不加载放大模型。"})),
+            "upscale_model_name": (upscale_models, _hidden({"default": preferred_upscale, "display_name": "放大模型", "gjj_default_model": preferred_upscale, "tooltip": "优先使用 RealESRGAN_x2plus.pth。"})),
+            "noise_seed": ("INT", _hidden({"default": 28804529240705, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "注噪种子"})),
+            "noise_strength": ("FLOAT", _hidden({"default": 0.3, "min": -20.0, "max": 20.0, "step": 0.01, "display_name": "注噪强度"})),
+            "normalize_noise": (["关闭", "开启"], _hidden({"default": "关闭", "display_name": "噪声归一化"})),
+            "segment_duration": ("INT", _hidden({"default": 121, "min": 5, "max": 121, "step": 4, "display_name": "分段时长（帧）", "gjj_panel_control": "slider", "tooltip": "范围 5–121 帧，步长 4，始终满足 4n+1。"})),
+            "enable_segmentation": ("BOOLEAN", _hidden({"default": False, "display_name": "启用分段", "tooltip": "默认关闭并整段处理；开启后按分段时长切分，相邻段使用尾帧衔接。"})),
+            "highres_lora_name": (highres_lora["models"], _hidden({"default": highres_lora["value"], "display_name": "HighResFix LoRA", "gjj_default_model": DEFAULT_HIGHRES_LORA, "gjj_missing_model": highres_lora["missing"], "tooltip": "用于 Bernini 1.3B 视频高清修复，默认 Wan2.1-1.3b-lora-highresfix-v1.safetensors。"})),
+            "highres_lora_strength": ("FLOAT", _hidden({"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05, "display_name": "HighResFix LoRA 强度"})),
+            "reference_max_size": ("INT", _hidden({"default": 1920, "min": 64, "max": 4096, "step": 32, "display_name": "参考资源最大尺寸", "tooltip": "参考工作流“Bernini 放大.json”使用 1920；过小会削弱人物与纹理参考细节。"})),
+        }
+        for index in range(1, MAX_REFERENCE_MEDIA + 1):
+            optional[f"reference_media_{index}"] = (REFERENCE_RESOURCE_TYPE, _hidden({"default": None, "display_name": f"参考 Media {index}"}))
         return {
             "required": {},
-            "optional": {
-                "media": (SOURCE_MEDIA_TYPE, {"display_name": "源视频/帧序列", "tooltip": "可选 VIDEO、IMAGE 或 GJJ_BATCH_IMAGE；连接后优先于节点内部视频。"}),
-                "selected_video": ("STRING", _hidden({"default": "", "display_name": "内部视频"})),
-                "prompt": ("STRING", _hidden({"default": DEFAULT_PROMPT, "multiline": True, "display_name": "增强提示词"})),
-                "negative_prompt": ("STRING", _hidden({"default": DEFAULT_NEGATIVE, "multiline": True, "display_name": "反向提示词"})),
-                "steps": ("INT", _hidden({"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "采样步数"})),
-                "cfg": ("FLOAT", _hidden({"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "display_name": "CFG"})),
-                "seed": ("INT", _hidden({"default": 231116616039977, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "采样种子"})),
-                "sampler_name": (samplers, _hidden({"default": "euler" if "euler" in samplers else samplers[0], "display_name": "采样器"})),
-                "scheduler": (schedulers, _hidden({"default": "beta" if "beta" in schedulers else schedulers[0], "display_name": "调度器"})),
-                "denoise": ("FLOAT", _hidden({"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪"})),
-                "frame_rate": ("FLOAT", _hidden({"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "display_name": "无源帧率时使用"})),
-                "filename_prefix": ("STRING", _hidden({"default": "video/Wan2.1_Bernini_1.3B_视频参考放大", "display_name": "文件名前缀"})),
-                "format_name": ("STRING", _hidden({"default": "video/h264-mp4", "display_name": "输出格式"})),
-                "keep_model": ("BOOLEAN", _hidden({"default": False, "display_name": "保持模型"})),
-                "model_name": (model["models"], _hidden({"default": model["value"], "display_name": "Bernini 1.3B模型", "gjj_default_model": DEFAULT_MODEL, "gjj_missing_model": model["missing"]})),
-                "clip_name": (clip["models"], _hidden({"default": clip["value"], "display_name": "UMT5 XXL", "gjj_default_model": DEFAULT_CLIP, "gjj_missing_model": clip["missing"]})),
-                "vae_name": (vae["models"], _hidden({"default": vae["value"], "display_name": "Wan VAE", "gjj_default_model": DEFAULT_VAE, "gjj_missing_model": vae["missing"]})),
-                "reference_resources": (REFERENCE_RESOURCE_TYPE, {"display_name": "参考资源", "tooltip": "递归接收参考图片或参考视频帧，按输入顺序写入 Bernini 条件。"}),
-                "pre_cleanup_resources": ("BOOLEAN", _hidden({"default": True, "display_name": "预清理资源"})),
-                "enable_pre_upscale": ("BOOLEAN", _hidden({"default": True, "display_name": "预放大源视频", "tooltip": "关闭时不检查、不加载放大模型。"})),
-                "upscale_model_name": (upscale_models, _hidden({"default": preferred_upscale, "display_name": "放大模型", "gjj_default_model": preferred_upscale, "tooltip": "优先使用 RealESRGAN_x2plus.pth。"})),
-                "noise_seed": ("INT", _hidden({"default": 28804529240705, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "注噪种子"})),
-                "noise_strength": ("FLOAT", _hidden({"default": 0.3, "min": -20.0, "max": 20.0, "step": 0.01, "display_name": "注噪强度"})),
-                "normalize_noise": (["关闭", "开启"], _hidden({"default": "关闭", "display_name": "噪声归一化"})),
-                "segment_duration": ("INT", _hidden({"default": 121, "min": 5, "max": 121, "step": 4, "display_name": "分段时长（帧）", "gjj_panel_control": "slider", "tooltip": "范围 5–121 帧，步长 4，始终满足 4n+1。"})),
-                "enable_segmentation": ("BOOLEAN", _hidden({"default": False, "display_name": "启用分段", "tooltip": "默认关闭并整段处理；开启后按分段时长切分，相邻段使用尾帧衔接。"})),
-                "highres_lora_name": (highres_lora["models"], _hidden({"default": highres_lora["value"], "display_name": "HighResFix LoRA", "gjj_default_model": DEFAULT_HIGHRES_LORA, "gjj_missing_model": highres_lora["missing"], "tooltip": "用于 Bernini 1.3B 视频高清修复，默认 Wan2.1-1.3b-lora-highresfix-v1.safetensors。"})),
-                "highres_lora_strength": ("FLOAT", _hidden({"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05, "display_name": "HighResFix LoRA 强度"})),
-                "reference_max_size": ("INT", _hidden({"default": 1920, "min": 64, "max": 4096, "step": 32, "display_name": "参考资源最大尺寸", "tooltip": "参考工作流“Bernini 放大.json”使用 1920；过小会削弱人物与纹理参考细节。"})),
-            },
+            "optional": optional,
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
@@ -279,10 +284,20 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             f"2/6 HighResFix LoRA 已应用：{model_patch_count}/{EXPECTED_HIGHRES_LORA_PATCHES} 组权重",
             0.24,
         )
+        # SageAttention 缺失时静默使用兼容模式（ComfyUI 原生注意力）
+        # 不向前端推送 gjj_dependency_model_notice，避免弹窗与执行阻塞；
+        # 仅在控制台输出 info 级日志，便于排查。FP16 累积仍会照常应用。
+        sage_mode = "自动"
+        sage_available = _is_sage_dependency_available(sage_mode)
+        if not sage_available:
+            logging.info(
+                "[GJJ] %s：未检测到 sageattention，已静默回退到 ComfyUI 原生注意力（兼容模式）。",
+                NODE_NAME,
+            )
         model = GJJ_ModelPatchBundle().patch(
             model,
-            启用SageAttention=True,
-            SageAttention模式="自动",
+            启用SageAttention=sage_available,
+            SageAttention模式=sage_mode,
             允许Sage编译=True,
             启用FP16累积设置=True,
             FP16累积=True,
@@ -311,6 +326,8 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             if segmentation_enabled else 1
         )
         reference_resources = _reference_resources(kwargs.get("reference_resources"))
+        for ref_index in range(1, MAX_REFERENCE_MEDIA + 1):
+            reference_resources.extend(_reference_resources(kwargs.get(f"reference_media_{ref_index}")))
         generated: list[torch.Tensor] = []
         preview: list[dict[str, Any]] = []
         for index in range(segment_count):
