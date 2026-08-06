@@ -27,14 +27,18 @@ from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
 from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_segment_queue import recover_selected_video, resolve_input_video_path
 from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
+from .gjj_memory_manager import _clean_all_resources
+from .gjj_model_upscaler import GJJ_ModelUpscaler, _list_pth_upscale_models
 
 
 NODE_NAME = "GJJ_Bernini13BLongVideoWatermarkRemover"
 MEDIA_TYPE = "VIDEO,IMAGE"
+REFERENCE_RESOURCE_TYPE = "IMAGE,GJJ_BATCH_IMAGE"
 OUTPUT_TYPE = "VIDEO,IMAGE"
 DEFAULT_MODEL = "wan2.1_bernini_1.3B_int4_convrot.safetensors"
 DEFAULT_CLIP = "umt5_xxl_int4_convrot.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
+DEFAULT_UPSCALE_MODEL = "RealESRGAN_x2plus.pth"
 DEFAULT_PROMPT = " You are a helpful assistant specialized in video editing.clean all watermark,text,logo,signature,caption,overlay"
 DEFAULT_NEGATIVE = "bad video"
 
@@ -86,6 +90,60 @@ def _pad_segment(frames: torch.Tensor, length: int) -> torch.Tensor:
     return torch.cat([frames, tail], dim=0).contiguous()
 
 
+def _walk_reference_resources(
+    value: Any,
+    result: list[torch.Tensor],
+    seen: set[int],
+    depth: int = 0,
+) -> None:
+    """递归解包参考资源，保留容器顺序和每个单帧/多帧资源组。"""
+    if value is None or depth > 24:
+        return
+    if not isinstance(value, (str, bytes, int, float, bool)):
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach()
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        elif tensor.ndim > 4 and int(tensor.shape[-1]) in (1, 2, 3, 4):
+            tensor = tensor.reshape(-1, int(tensor.shape[-3]), int(tensor.shape[-2]), int(tensor.shape[-1]))
+        if tensor.ndim != 4 or int(tensor.shape[0]) <= 0:
+            return
+        if int(tensor.shape[-1]) not in (1, 2, 3, 4) and int(tensor.shape[1]) in (1, 2, 3, 4):
+            tensor = tensor.permute(0, 2, 3, 1)
+        channels = int(tensor.shape[-1])
+        if channels == 1:
+            tensor = tensor.repeat(1, 1, 1, 3)
+        elif channels == 2:
+            tensor = tensor[..., :1].repeat(1, 1, 1, 3)
+        elif channels >= 4:
+            tensor = tensor[..., :3]
+        if int(tensor.shape[-1]) == 3:
+            result.append(tensor.float().clamp(0.0, 1.0).contiguous())
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _walk_reference_resources(item, result, seen, depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _walk_reference_resources(item, result, seen, depth + 1)
+        return
+    for key in ("images", "image", "frames", "frame", "batch", "samples", "items", "values"):
+        item = getattr(value, key, None)
+        if item is not None and item is not value:
+            _walk_reference_resources(item, result, seen, depth + 1)
+
+
+def _reference_resources(value: Any) -> list[torch.Tensor]:
+    result: list[torch.Tensor] = []
+    _walk_reference_resources(value, result, set())
+    return result
+
+
 def _selected_video_components(selected_video: Any, extra_pnginfo: Any, unique_id: Any):
     entry = recover_selected_video(str(_first(selected_video, "") or ""), extra_pnginfo, unique_id)
     if not entry:
@@ -113,6 +171,14 @@ class GJJ_Bernini13BLongVideoWatermarkRemover:
         model = _model_choice_state("diffusion_models", ["wan2.1", "bernini", "1.3b"], DEFAULT_MODEL)
         clip = _model_choice_state("text_encoders", ["umt5", "xxl"], DEFAULT_CLIP)
         vae = _model_choice_state("vae", ["wan", "2.1", "vae"], DEFAULT_VAE)
+        upscale_models = _list_pth_upscale_models() or [""]
+        preferred_upscale_model = next(
+            (
+                name for name in upscale_models
+                if Path(str(name)).name.casefold() == DEFAULT_UPSCALE_MODEL.casefold()
+            ),
+            upscale_models[0],
+        )
         return {
             "required": {},
             "optional": {
@@ -134,6 +200,10 @@ class GJJ_Bernini13BLongVideoWatermarkRemover:
                 "model_name": (model["models"], _hidden({"default": model["value"], "display_name": "Bernini 1.3B模型", "gjj_default_model": DEFAULT_MODEL, "gjj_missing_model": model["missing"]})),
                 "clip_name": (clip["models"], _hidden({"default": clip["value"], "display_name": "UMT5 XXL", "gjj_default_model": DEFAULT_CLIP, "gjj_missing_model": clip["missing"]})),
                 "vae_name": (vae["models"], _hidden({"default": vae["value"], "display_name": "Wan VAE", "gjj_default_model": DEFAULT_VAE, "gjj_missing_model": vae["missing"]})),
+                "reference_resources": (REFERENCE_RESOURCE_TYPE, {"display_name": "参考资源", "tooltip": "递归解包 IMAGE / GJJ_BATCH_IMAGE；按输入顺序将多帧批次作为参考视频、单帧作为参考图片传入 BerniniConditioning。"}),
+                "pre_cleanup_resources": ("BOOLEAN", _hidden({"default": True, "display_name": "预清理资源", "tooltip": "开启后，在执行其它操作前按 GJJ_MemoryManager 的强力清理逻辑释放系统内存、显存和模型缓存。"})),
+                "enable_pre_upscale": ("BOOLEAN", _hidden({"default": False, "display_name": "预放大源视频", "tooltip": "开启后先使用 GJJ_ModelUpscaler 放大源视频帧，再执行 Bernini 分段去水印；关闭时不会检查或加载放大模型。"})),
+                "upscale_model_name": (upscale_models, _hidden({"default": preferred_upscale_model, "display_name": "放大模型", "gjj_default_model": preferred_upscale_model, "tooltip": "仅在启用预放大源视频时使用；优先选择 RealESRGAN_x2plus.pth。"})),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -170,6 +240,27 @@ class GJJ_Bernini13BLongVideoWatermarkRemover:
         unique_id = _first(kwargs.get("unique_id"))
         prompt_info = _first(kwargs.get("prompt_info"))
         extra_pnginfo = _first(kwargs.get("extra_pnginfo"))
+        keep_model_requested = _boolean(kwargs.get("keep_model"), False)
+        requested_model_key = (
+            str(_first(kwargs.get("model_name"), DEFAULT_MODEL)),
+            str(_first(kwargs.get("clip_name"), DEFAULT_CLIP)),
+            str(_first(kwargs.get("vae_name"), DEFAULT_VAE)),
+        )
+        if _boolean(kwargs.get("pre_cleanup_resources"), True):
+            _send_status(unique_id, "0/5 正在预清理显存、内存和模型缓存...", 0.0)
+            protected_models = self._MODEL_CACHE.get(requested_model_key) if keep_model_requested else None
+            if protected_models is None:
+                self._MODEL_CACHE.clear()
+            cleanup_result = _clean_all_resources(protected_values=protected_models)
+            _send_status(
+                unique_id,
+                (
+                    "0/5 预清理完成（已保护 Bernini 1.3B / UMT5 / VAE）："
+                    if protected_models is not None else
+                    "0/5 预清理完成："
+                ) + cleanup_result.get("message", "资源已清理"),
+                0.01,
+            )
         media = _first(kwargs.get("media"))
         frames, audio, fps = _media_components(media)
         if frames is None:
@@ -181,6 +272,15 @@ class GJJ_Bernini13BLongVideoWatermarkRemover:
             raise RuntimeError("请连接 VIDEO/IMAGE 输入，或点击节点第一个 📁 按钮选择视频。")
 
         frames = frames.detach().cpu().contiguous()
+        if _boolean(kwargs.get("enable_pre_upscale"), False):
+            _send_status(unique_id, "1/6 正在使用 GJJ_ModelUpscaler 预放大源视频...", 0.015)
+            frames = GJJ_ModelUpscaler().upscale(
+                frames,
+                True,
+                str(_first(kwargs.get("upscale_model_name"), "") or ""),
+                unique_id=unique_id,
+            )[0].detach().cpu().contiguous()
+        reference_resources = _reference_resources(kwargs.get("reference_resources"))
         total_frames = int(frames.shape[0])
         height, width = int(frames.shape[1]), int(frames.shape[2])
         width = max(16, int(round(width / 16.0)) * 16)
@@ -231,6 +331,7 @@ class GJJ_Bernini13BLongVideoWatermarkRemover:
                 batch_size=1,
                 ref_max_size=max(width, height),
                 source_video=source,
+                reference_resources=reference_resources,
             )
             sampled = common_ksampler(
                 model,

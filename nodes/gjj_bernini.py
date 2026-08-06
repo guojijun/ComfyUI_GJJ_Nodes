@@ -178,6 +178,7 @@ def _build_bernini_context(
     source_video: Any = None,
     reference_video: Any = None,
     reference_images: list[torch.Tensor] | None = None,
+    reference_resources: list[torch.Tensor] | None = None,
     ref_max_size: int = 848,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {"refs": []}
@@ -192,26 +193,43 @@ def _build_bernini_context(
         ).movedim(1, -1)
         context["video"] = _cpu_context_latent(_encode_context_latent(vae, vid[:, :, :, :3]))
 
-    ref_video = _validate_connected_frame_input("参考视频帧", reference_video)
-    if ref_video is not None:
-        ref_vid = comfy.utils.common_upscale(
-            ref_video[: int(length), :, :, :3].movedim(-1, 1),
-            int(width),
-            int(height),
-            "area",
-            "center",
-        ).movedim(1, -1)
-        context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_vid[:, :, :, :3])))
+    ordered_resources = list(reference_resources or [])
+    if ordered_resources:
+        for resource in ordered_resources:
+            frames = _validate_connected_frame_input("参考资源", resource)
+            if frames is None:
+                continue
+            # 多帧批次使用 Bernini 参考视频语义；单帧使用参考图片语义。
+            selected = frames[: int(length)] if int(frames.shape[0]) > 1 else frames[:1]
+            resized = comfy.utils.common_upscale(
+                selected[:, :, :, :3].movedim(-1, 1),
+                int(width),
+                int(height),
+                "area",
+                "center",
+            ).movedim(1, -1)
+            context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, resized[:, :, :, :3])))
+    else:
+        ref_video = _validate_connected_frame_input("参考视频帧", reference_video)
+        if ref_video is not None:
+            ref_vid = comfy.utils.common_upscale(
+                ref_video[: int(length), :, :, :3].movedim(-1, 1),
+                int(width),
+                int(height),
+                "area",
+                "center",
+            ).movedim(1, -1)
+            context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_vid[:, :, :, :3])))
 
-    for img in reference_images or []:
-        ref_img = comfy.utils.common_upscale(
-            img[:, :, :, :3].movedim(-1, 1),
-            int(width),
-            int(height),
-            "area",
-            "center",
-        ).movedim(1, -1)
-        context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_img[:, :, :, :3])))
+        for img in reference_images or []:
+            ref_img = comfy.utils.common_upscale(
+                img[:, :, :, :3].movedim(-1, 1),
+                int(width),
+                int(height),
+                "area",
+                "center",
+            ).movedim(1, -1)
+            context["refs"].append(_cpu_context_latent(_encode_context_latent(vae, ref_img[:, :, :, :3])))
 
     return context
 
@@ -278,6 +296,7 @@ class GJJBerniniConditioning:
             device=comfy.model_management.intermediate_device(),
         )
         reference_images = _reference_inputs(kwargs)
+        reference_resources = kwargs.get("reference_resources")
         if any(_has_value(value) for key, value in kwargs.items() if _reference_index(key) is not None) and not reference_images:
             raise RuntimeError(f"参考图输入没有解析出有效图片。{FRAME_QUEUE_REQUIREMENT}")
         context_parts = _build_bernini_context(
@@ -288,6 +307,7 @@ class GJJBerniniConditioning:
             source_video=source_video,
             reference_video=reference_video,
             reference_images=reference_images,
+            reference_resources=reference_resources,
             ref_max_size=int(ref_max_size),
         )
         context = []

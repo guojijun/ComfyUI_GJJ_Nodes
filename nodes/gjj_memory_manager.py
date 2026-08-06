@@ -326,27 +326,54 @@ def _call_soft_empty_cache(mm: Any) -> None:
         fn()
 
 
-def _unload_comfy_models() -> dict:
+def _protected_object_ids(values: Any) -> set[int]:
+    """收集受保护模型及常见包装层对象标识，用于匹配 ComfyUI LoadedModel。"""
+    result: set[int] = set()
+    pending = list(values or []) if isinstance(values, (list, tuple, set)) else ([values] if values is not None else [])
+    for _depth in range(4):
+        next_pending = []
+        for value in pending:
+            if value is None or id(value) in result:
+                continue
+            result.add(id(value))
+            for name in ("model", "patcher", "model_patcher", "cond_stage_model", "first_stage_model"):
+                nested = getattr(value, name, None)
+                if nested is not None and nested is not value:
+                    next_pending.append(nested)
+        pending = next_pending
+        if not pending:
+            break
+    return result
+
+
+def _unload_comfy_models(protected_values: Any = None) -> dict:
     """尽量使用 ComfyUI 自身接口卸载模型，不杀进程、不重启服务。"""
     try:
         from comfy import model_management as mm
 
         before = _loaded_model_count(mm)
         errors = []
+        protected_ids = _protected_object_ids(protected_values)
+        protected_count = 0
 
-        for name in ("unload_all_models", "cleanup_models", "cleanup_models_gc"):
-            fn = getattr(mm, name, None)
-            if not callable(fn):
-                continue
-            try:
-                fn()
-            except Exception as e:
-                errors.append(f"{name}: {e}")
+        if not protected_ids:
+            for name in ("unload_all_models", "cleanup_models", "cleanup_models_gc"):
+                fn = getattr(mm, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    fn()
+                except Exception as e:
+                    errors.append(f"{name}: {e}")
 
         # 兼容某些模型没有被公共接口清掉的情况，按 ComfyUI loaded_model 协议逐个卸载。
         models = getattr(mm, "current_loaded_models", None)
         if isinstance(models, list):
             for loaded_model in list(models):
+                loaded_ids = _protected_object_ids(loaded_model)
+                if protected_ids and protected_ids.intersection(loaded_ids):
+                    protected_count += 1
+                    continue
                 try:
                     loaded_model.model_unload()
                 except Exception as e:
@@ -357,18 +384,20 @@ def _unload_comfy_models() -> dict:
                 except Exception:
                     pass
 
-        try:
-            _call_soft_empty_cache(mm)
-        except Exception as e:
-            errors.append(f"soft_empty_cache: {e}")
+        if not protected_ids:
+            try:
+                _call_soft_empty_cache(mm)
+            except Exception as e:
+                errors.append(f"soft_empty_cache: {e}")
 
         after = _loaded_model_count(mm)
+        protected_message = f"，保护 {protected_count} 个 Bernini 相关已加载模型" if protected_ids else ""
         return {
             "status": "success" if not errors else "warning",
             "before": before,
             "after": after,
             "unloaded": max(0, before - after),
-            "message": f"已卸载 ComfyUI 已加载模型 {before} -> {after}",
+            "message": f"已卸载 ComfyUI 已加载模型 {before} -> {after}{protected_message}",
             "errors": errors[:3],
         }
     except Exception as e:
@@ -567,10 +596,10 @@ def _clean_gpu_memory():
         return {"status": "error", "message": f"GPU 清理失败: {str(e)}"}
 
 
-def _clean_all_resources():
+def _clean_all_resources(protected_values: Any = None):
     """一键强力清理：模型只卸载一次，再清 RAM / VRAM 缓存。"""
     before_proc = _get_process_memory_info()
-    model_result = _unload_comfy_models()
+    model_result = _unload_comfy_models(protected_values=protected_values)
     gjj_result = _clear_gjj_model_caches()
     gc.collect()
     trim_msg = _trim_process_working_set()
