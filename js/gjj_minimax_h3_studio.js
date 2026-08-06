@@ -18,6 +18,7 @@ const SETTINGS_SCHEMA_VERSION = 10;
 const LORA_DATA_WIDGET = "lora_data";
 const LORA_FILTER_PROPERTY = "gjj_minimax_h3_lora_filter";
 const DEFAULT_LORA_FILTER = "minima_h3_turbo";
+const DEFAULT_ACCEL_STEPS = 10;
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
 const PROMPT_MIN_HEIGHT = 58;
@@ -80,6 +81,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "dialogue_language", label: "对白语言", type: "STRING", aliases: ["language", "dialogue_language", "语言", "对白语言"] },
 	{ name: "megapixel_aspect", label: "百万像素比例", type: "STRING", aliases: ["aspect", "ratio", "比例"] },
 	{ name: "megapixels", label: "百万像素", type: "FLOAT", aliases: ["megapixels", "mp", "百万像素"] },
+	{ name: "cache_clip", label: "缓存CLIP", type: "BOOLEAN", aliases: ["cache_clip", "缓存CLIP"] },
 ];
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -101,6 +103,7 @@ const HIDDEN = new Set([
 	"dialogue_language",
 	"megapixel_aspect", "megapixels",
 	"lora_data",
+	"cache_clip",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size", "dialogue_language"]], ["输出", ["filename_prefix", "format_name"]]],
@@ -319,6 +322,12 @@ function preferredMiniMaxAccelLora(names) {
 		.sort((a, b) => Number(String(a).toLocaleLowerCase().includes("converted")) - Number(String(b).toLocaleLowerCase().includes("converted")) || String(a).length - String(b).length)[0] || "";
 }
 function syncStepsFromAccelLora(node, name) {
+	const normalized = String(name || "").toLocaleLowerCase();
+	const defaultTerms = DEFAULT_LORA_FILTER.toLocaleLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+	if (defaultTerms.length && defaultTerms.every((term) => normalized.includes(term))) {
+		setValue(node, "steps", DEFAULT_ACCEL_STEPS);
+		return;
+	}
 	const match = String(name || "").match(/(?:^|[^0-9])(\d+)[_-]?steps?(?:[^a-z0-9]|$)/i);
 	if (match) setValue(node, "steps", Math.max(1, Number(match[1])));
 }
@@ -404,6 +413,18 @@ function createLoraPanel(node) {
 			const defaultName = preferredMiniMaxAccelLora(catalog.names);
 			if (defaultName) { rows = [{ name: defaultName, enabled: true, strength: 1 }, { name: "", enabled: true, strength: 1 }]; syncStepsFromAccelLora(node, defaultName); }
 		}
+		const activeAccel = rows.find((row) => row.name && row.enabled !== false);
+		if (activeAccel) {
+			syncStepsFromAccelLora(node, activeAccel.name);
+			const accelTerms = DEFAULT_LORA_FILTER.toLocaleLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+			if (accelTerms.every((term) => String(activeAccel.name).toLocaleLowerCase().includes(term))) {
+				const flDefault = declaredDefault(node, "fl_model");
+				if (flDefault) setValue(node, "fl_model", flDefault);
+				setValue(node, "sampler_name", "res_multistep"); setValue(node, "scheduler", "simple"); setValue(node, "denoise", 1);
+				for (const name of ["patch_enable_sage_attention", "patch_allow_sage_compile", "patch_enable_fp16_accumulation", "patch_fp16_accumulation", "spectrum_enabled"]) setValue(node, name, true);
+				syncSpectrumButton(node);
+			}
+		}
 		render();
 	};
 	section.__gjjRefresh();
@@ -412,9 +433,10 @@ function createLoraPanel(node) {
 function createReasoningPanel(node, treeHost) {
 	const section = document.createElement("section"); section.className = "gjj-mh3-section";
 	const title = document.createElement("div"); title.className = "gjj-mh3-title"; title.textContent = "🧠 可选推理";
-	const buttonRow = document.createElement("div"); buttonRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:7px";
+	const buttonRow = document.createElement("div"); buttonRow.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px";
 	const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "gjj-mh3-control gjj-mh3-toggle"; protect(toggle);
 	const keep = document.createElement("button"); keep.type = "button"; keep.className = "gjj-mh3-control gjj-mh3-toggle"; keep.textContent = "保持模型"; protect(keep);
+	const cacheClip = document.createElement("button"); cacheClip.type = "button"; cacheClip.className = "gjj-mh3-control gjj-mh3-toggle"; cacheClip.textContent = "缓存CLIP"; protect(cacheClip);
 	const details = document.createElement("div"); details.className = "gjj-mh3-grid"; details.style.marginTop = "8px";
 	const promptRow = document.createElement("label"); promptRow.className = "gjj-mh3-field wide";
 	const promptLabel = document.createElement("span"); promptLabel.textContent = "推理系统提示词";
@@ -425,13 +447,15 @@ function createReasoningPanel(node, treeHost) {
 		const enabled = Boolean(value(node, "reasoning_enabled", false));
 		toggle.textContent = "开启推理"; toggle.classList.toggle("active", enabled);
 		keep.classList.toggle("active", Boolean(value(node, "keep_model", false)));
+		cacheClip.classList.toggle("active", Boolean(value(node, "cache_clip", false)));
 		details.style.display = enabled ? "grid" : "none";
 		if (enabled && document.activeElement !== prompt) prompt.value = String(value(node, "reasoning_system_prompt", ""));
-		applyBoundState(node, "reasoning_enabled", toggle); applyBoundState(node, "keep_model", keep); applyBoundState(node, "reasoning_system_prompt", prompt);
+		applyBoundState(node, "reasoning_enabled", toggle); applyBoundState(node, "keep_model", keep); applyBoundState(node, "cache_clip", cacheClip); applyBoundState(node, "reasoning_system_prompt", prompt);
 	};
 	toggle.addEventListener("click", () => { setValue(node, "reasoning_enabled", !Boolean(value(node, "reasoning_enabled", false))); sync(); renderModelTree(node, treeHost); });
 	keep.addEventListener("click", () => { setValue(node, "keep_model", !Boolean(value(node, "keep_model", false))); sync(); });
-	buttonRow.append(toggle, keep); section.append(title, buttonRow, details); section.__gjjSync = sync; sync(); return section;
+	cacheClip.addEventListener("click", () => { setValue(node, "cache_clip", !Boolean(value(node, "cache_clip", false))); sync(); });
+	buttonRow.append(toggle, keep, cacheClip); section.append(title, buttonRow, details); section.__gjjSync = sync; sync(); return section;
 }
 function createModelPatchPanel(node) {
 	const section = document.createElement("section"); section.className = "gjj-mh3-section";

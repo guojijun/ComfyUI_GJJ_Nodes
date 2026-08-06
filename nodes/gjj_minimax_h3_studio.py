@@ -25,7 +25,7 @@ from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_combine_runtime import DEFAULT_FORMAT, list_supported_formats
 from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _load_vae
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle, MISSING_SAGE_HANDLING_MODES, SAGE_ATTENTION_MODES
-from .gjj_multi_lora_chain import apply_lora_chain_config
+from .gjj_multi_lora_chain import apply_lora_chain_config, parse_lora_data
 from .gjj_spectrum_apply_minimax_h3 import GJJ_SpectrumApplyMiniMaxH3
 
 
@@ -33,7 +33,7 @@ NODE_NAME = "GJJ_MiniMaxH3Studio"
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,AUDIO"
 UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload"
 
-DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_nvfp4.safetensors"
+DEFAULT_FL_MODEL = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 DEFAULT_REF_MODEL = "minimax_h3_ref2va_pruned_nvfp4.safetensors"
 DEFAULT_FL_MODEL_KEYWORD = "minimax_h3_fl2va"
 DEFAULT_REF_MODEL_KEYWORD = "minimax_h3_ref2va"
@@ -42,6 +42,7 @@ DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
 DEFAULT_ACCEL_LORA_KEYWORD = "minima_h3_turbo"
+DEFAULT_ACCEL_STEPS = 10
 MAX_AUDIO_DRIVEN_DURATION = 15.0
 DIALOGUE_LANGUAGE_TAGS = {
     "中文": "Chinese",
@@ -72,9 +73,31 @@ def _default_accel_lora_data() -> str:
         [{"enabled": True, "name": candidates[0], "strength": 1.0}],
         ensure_ascii=False,
     ) if candidates else "[]"
+
+
+def _uses_default_accel_lora(raw_value: Any) -> bool:
+    terms = [
+        item for item in re.split(r"[^a-z0-9\u4e00-\u9fff]+", DEFAULT_ACCEL_LORA_KEYWORD.casefold())
+        if item
+    ]
+    for item in parse_lora_data(raw_value):
+        try:
+            strength = float(item.get("strength", 1.0) or 0.0)
+        except (TypeError, ValueError):
+            strength = 1.0
+        if (
+            bool(item.get("enabled", True))
+            and all(term in str(item.get("name", "")).casefold() for term in terms)
+            and abs(strength) > 1e-5
+        ):
+            return True
+    return False
+
+
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
     "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
+    "输入中的 __GJJ_DIALOGUE_XXXX__ 是受保护原文占位符，必须原样、完整且仅出现一次，禁止翻译、改写或删除。"
     "不要解释、不要分析过程、不要 Markdown 代码块。"
 )
 
@@ -86,6 +109,7 @@ def _official_prompt_rewrite_rules(
     language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
     shared = (
         "Follow the official MiniMax H3 video prompt rules. Preserve every user-provided dialogue word and punctuation verbatim; "
+        "Any __GJJ_DIALOGUE_XXXX__ token is protected source text: copy it exactly once and never translate, rewrite, or remove it. "
         f"put every spoken line inside <d>[{language_tag}] ...</d> and use [{language_tag}] for every dialogue line without exception. "
         "Assign stable speaker IDs (S1), (S2), etc. "
         "For every spoken line, identify the concrete speaker outside <d> and use an explicit physical speech verb such as says, "
@@ -163,6 +187,51 @@ def _force_dialogue_language(prompt: str, dialogue_language: str) -> str:
         str(prompt or ""),
         flags=re.IGNORECASE,
     )
+
+
+def _protect_reasoning_dialogue(prompt: str) -> tuple[str, list[tuple[str, str]]]:
+    """推理前隐藏对白原文，防止文本模型翻译中文台词、歌词或画面文字。"""
+    protected = str(prompt or "")
+    values: list[tuple[str, str]] = []
+
+    def reserve(match: re.Match[str]) -> str:
+        marker = f"__GJJ_DIALOGUE_{len(values) + 1:04d}__"
+        values.append((marker, match.group(0)))
+        return marker
+
+    protected = re.sub(
+        r"<d>\s*(?:\[[^\]\r\n]+\]\s*)?.*?</d>",
+        reserve,
+        protected,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    protected = re.sub(r"“[^”\r\n]*[\u3400-\u9fff][^”\r\n]*”", reserve, protected)
+    protected = re.sub(r'"[^"\r\n]*[\u3400-\u9fff][^"\r\n]*"', reserve, protected)
+    return protected, values
+
+
+def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, str]]) -> str:
+    """推理后恢复保护内容；正文不变，中文弯引号统一转换为英文半角引号。"""
+    restored = str(prompt or "")
+    missing: list[str] = []
+    for marker, original in protected_values:
+        normalized_original = str(original).replace("“", '"').replace("”", '"')
+        restored, count = re.subn(
+            re.escape(marker),
+            lambda _match, text=normalized_original: text,
+            restored,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if count == 0:
+            missing.append(normalized_original)
+    if missing:
+        restored = "\n\n".join(filter(None, (
+            restored.strip(),
+            "Protected verbatim dialogue/text — mandatory, preserve exactly and do not translate: "
+            + " ".join(missing),
+        )))
+    return restored
 
 
 def _officialize_prompt_without_reasoning(
@@ -1075,6 +1144,25 @@ def _save_library_reference_debug_images(
         return []
 
 
+def _reasoning_visual_signature(images: list[Any]) -> str:
+    """Build a lightweight, stable signature without copying full reference tensors."""
+    digest = hashlib.sha256()
+    for image in images:
+        if not isinstance(image, torch.Tensor):
+            digest.update(f"{type(image).__module__}.{type(image).__qualname__}".encode("utf-8"))
+            continue
+        tensor = image.detach()
+        digest.update(f"{tuple(tensor.shape)}|{tensor.dtype}|".encode("utf-8"))
+        flat = tensor.reshape(-1)
+        if not flat.numel():
+            continue
+        sample_count = min(1024, flat.numel())
+        indices = torch.linspace(0, flat.numel() - 1, steps=sample_count, device=flat.device).long()
+        sample = flat.index_select(0, indices).to(device="cpu", dtype=torch.float32).contiguous()
+        digest.update(sample.numpy().tobytes())
+    return digest.hexdigest()
+
+
 class GJJ_MiniMaxH3Studio:
     CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
@@ -1086,6 +1174,8 @@ class GJJ_MiniMaxH3Studio:
     SEARCH_ALIASES = ["MiniMax H3 Studio", "海螺单节点", "T2V I2V Ref2V"]
     GJJ_UI = {"style_reference": "GJJ_BerniniStudio", "model_keyword": "minimax_h3"}
     _MODEL_CACHE: dict[tuple[str, ...], tuple[Any, Any, Any, Any]] = {}
+    _REASONING_CACHE: dict[str, tuple[str, tuple[str, ...]]] = {}
+    _CLIP_CONDITIONING_CACHE: dict[str, tuple[str, Any, Any]] = {}
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1122,7 +1212,7 @@ class GJJ_MiniMaxH3Studio:
                 "height": ("INT", {"default": 480, "min": 352, "max": 1920, "step": 32, "display_name": "高度"}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.2, "max": 60.0, "step": 0.1, "display_name": "时长(秒)"}),
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0, "display_name": "帧率"}),
-                "steps": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
+                "steps": ("INT", {"default": DEFAULT_ACCEL_STEPS, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "种子"}),
                 "randomize_seed": ("BOOLEAN", {"default": True, "display_name": "随机种子"}),
                 "sampler_name": (samplers, {"default": "res_multistep", "display_name": "采样器"}),
@@ -1154,16 +1244,16 @@ class GJJ_MiniMaxH3Studio:
                 "negative_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "负面提示词"}),
                 "prompt_replace_find": ("STRING", {"default": "", "multiline": True, "display_name": "查找提示词"}),
                 "prompt_replace_with": ("STRING", {"default": "", "multiline": True, "display_name": "替换为"}),
-                "patch_enable_sage_attention": ("BOOLEAN", {"default": False, "display_name": "启用SageAttention"}),
+                "patch_enable_sage_attention": ("BOOLEAN", {"default": True, "display_name": "启用SageAttention"}),
                 "patch_sage_attention_mode": (SAGE_ATTENTION_MODES, {"default": "自动", "display_name": "SageAttention模式"}),
-                "patch_allow_sage_compile": ("BOOLEAN", {"default": False, "display_name": "允许Sage编译"}),
-                "patch_enable_fp16_accumulation": ("BOOLEAN", {"default": False, "display_name": "启用FP16累积设置"}),
+                "patch_allow_sage_compile": ("BOOLEAN", {"default": True, "display_name": "允许Sage编译"}),
+                "patch_enable_fp16_accumulation": ("BOOLEAN", {"default": True, "display_name": "启用FP16累积设置"}),
                 "patch_fp16_accumulation": ("BOOLEAN", {"default": True, "display_name": "FP16累积"}),
                 "patch_enable_ltxv_feedforward_chunk": ("BOOLEAN", {"default": False, "display_name": "启用LTXV前馈分块"}),
                 "patch_feedforward_chunks": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "分块数量"}),
                 "patch_feedforward_threshold": ("INT", {"default": 4096, "min": 0, "max": 16384, "step": 256, "display_name": "分块阈值"}),
                 "patch_missing_sage_handling": (MISSING_SAGE_HANDLING_MODES, {"default": "自动跳过SageAttention继续运行", "display_name": "缺SageAttention处理"}),
-                "spectrum_enabled": ("BOOLEAN", {"default": False, "display_name": "启用 Spectrum", "tooltip": "启用后在采样前应用 GJJ_SpectrumApplyMiniMaxH3 频谱预测加速。"}),
+                "spectrum_enabled": ("BOOLEAN", {"default": True, "display_name": "启用 Spectrum", "tooltip": "启用后在采样前应用 GJJ_SpectrumApplyMiniMaxH3 频谱预测加速。"}),
                 "spectrum_blend_weight": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "频谱混合权重", "tooltip": "0 为纯线性外推，1 为纯频谱预测。"}),
                 "spectrum_degree": ("INT", {"default": 4, "min": 1, "max": 16, "step": 1, "display_name": "多项式阶数"}),
                 "spectrum_ridge_lambda": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 10.0, "step": 0.01, "display_name": "岭回归强度"}),
@@ -1178,6 +1268,7 @@ class GJJ_MiniMaxH3Studio:
                 "megapixel_aspect": (["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"], {"default": "16:9", "display_name": "百万像素比例"}),
                 "megapixels": ("FLOAT", {"default": 0.4, "min": 0.2, "max": 2.0, "step": 0.1, "display_name": "百万像素"}),
                 "lora_data": ("STRING", {"default": default_lora_data, "display_name": "LoRA 配置", "tooltip": "🧠 模型面板中的 LoRA 区自动维护；默认启用 MiniMax H3 Turbo 4-step LoRA，并按界面顺序串联应用。"}),
+                "cache_clip": ("BOOLEAN", {"default": False, "display_name": "缓存CLIP", "tooltip": "最终提示词及参考条件未变化时复用上次 CLIP conditioning，跳过重复编码。"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1345,8 +1436,10 @@ class GJJ_MiniMaxH3Studio:
         )
         fps = float(first("frame_rate", 24.0))
         duration = float(first("duration", 5.0))
-        seed = int(first("seed", 42))
-        if bool(first("randomize_seed", True)):
+        configured_seed = int(first("seed", 42))
+        randomize_seed = bool(first("randomize_seed", True))
+        seed = configured_seed
+        if randomize_seed:
             seed = int(torch.randint(0, 0x7FFFFFFF, (1,)).item())
         prompt_parts = [item[0] for item in segmented_library_media]
         prompt_parts = [
@@ -1391,6 +1484,7 @@ class GJJ_MiniMaxH3Studio:
         if bool(first("reasoning_enabled", False)):
             from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
 
+            reasoning_model_name = str(first("reasoning_model", DEFAULT_REASONING_KEYWORD))
             configured_system_prompt = str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT) or "").strip()
             reasoning_system_prompt = "\n\n".join(filter(None, (
                 configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
@@ -1401,25 +1495,52 @@ class GJJ_MiniMaxH3Studio:
                     dialogue_language=str(first("dialogue_language", "中文")),
                 ),
             )))
-            inferred_parts: list[str] = []
-            for infer_index, raw_part in enumerate(prompt_parts):
-                reasoning_images = segmented_library_media[infer_index][1]["images"]
-                reasoning_media = torch.cat(reasoning_images, dim=0) if reasoning_images else None
-                _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
-                generated = GJJ_GemmaTextGenerate().generate(
-                    clip_name=str(first("reasoning_model", DEFAULT_REASONING_KEYWORD)),
-                    clip_type="stable_diffusion", clip_device="default", prompt=raw_part,
-                    max_length=2048, sampling_mode="off", temperature=0.35, top_k=64,
-                    top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
-                    presence_penalty="0.0", thinking=False, use_default_template=True,
-                    media=reasoning_media, unique_id=unique_id,
-                    system_prompt=reasoning_system_prompt,
-                    keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
-                )
-                payload = generated.get("result") if isinstance(generated, dict) else generated
-                inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
-                inferred_parts.append(inferred or raw_part)
-            prompt_parts = inferred_parts
+            reasoning_cache_payload = {
+                "prompt_parts": prompt_parts,
+                "configured_seed": configured_seed,
+                "randomize_seed": randomize_seed,
+                "reasoning_model": reasoning_model_name,
+                "reasoning_system_prompt": reasoning_system_prompt,
+                "official_prompt_mode": official_prompt_mode,
+                "duration": duration,
+                "dialogue_language": str(first("dialogue_language", "中文")),
+                "reference_images": [
+                    _reasoning_visual_signature(segment_media["images"])
+                    for _part, segment_media, _assets in segmented_library_media
+                ],
+            }
+            reasoning_signature = hashlib.sha256(json.dumps(
+                reasoning_cache_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            reasoning_cache_slot = str(unique_id) if unique_id is not None else ""
+            cached_reasoning = self._REASONING_CACHE.get(reasoning_cache_slot) if reasoning_cache_slot else None
+            if cached_reasoning and cached_reasoning[0] == reasoning_signature:
+                prompt_parts = list(cached_reasoning[1])
+                _send_status(unique_id, "提示词与🎲未变化，已复用上次推理结果", 0.01)
+                print("[GJJ_MiniMaxH3Studio] 提示词与🎲未变化，复用上次🧠推理结果。", flush=True)
+            else:
+                inferred_parts: list[str] = []
+                for infer_index, raw_part in enumerate(prompt_parts):
+                    protected_part, protected_dialogue = _protect_reasoning_dialogue(raw_part)
+                    reasoning_images = segmented_library_media[infer_index][1]["images"]
+                    reasoning_media = torch.cat(reasoning_images, dim=0) if reasoning_images else None
+                    _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
+                    generated = GJJ_GemmaTextGenerate().generate(
+                        clip_name=reasoning_model_name,
+                        clip_type="stable_diffusion", clip_device="default", prompt=protected_part,
+                        max_length=2048, sampling_mode="off", temperature=0.35, top_k=64,
+                        top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
+                        presence_penalty="0.0", thinking=False, use_default_template=True,
+                        media=reasoning_media, unique_id=unique_id,
+                        system_prompt=reasoning_system_prompt,
+                        keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
+                    )
+                    payload = generated.get("result") if isinstance(generated, dict) else generated
+                    inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
+                    inferred_parts.append(_restore_reasoning_dialogue(inferred or protected_part, protected_dialogue))
+                prompt_parts = inferred_parts
+                if reasoning_cache_slot:
+                    self._REASONING_CACHE[reasoning_cache_slot] = (reasoning_signature, tuple(prompt_parts))
         else:
             prompt_parts = [
                 _officialize_prompt_without_reasoning(
@@ -1553,7 +1674,16 @@ class GJJ_MiniMaxH3Studio:
                 f"[GJJ_MiniMaxH3Studio] ===== 最终提示词结束 =====\n",
                 flush=True,
             )
-            model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
+            default_lora_data = _default_accel_lora_data()
+            configured_lora_data = str(first("lora_data", default_lora_data) or default_lora_data)
+            if configured_lora_data.strip() == "[]":
+                configured_lora_data = default_lora_data
+            turbo_lora_enabled = _uses_default_accel_lora(configured_lora_data)
+            # 参考工作流的 MiniMax H3 Turbo LoRA 始终挂在 FL2VA 模型上；
+            # 即使条件节点使用 ReferenceToVideo，也不能切到 REF2VA 模型。
+            model_field = "fl_model" if turbo_lora_enabled or mode != "R2V" else "ref_model"
+            model_default = DEFAULT_FL_MODEL if model_field == "fl_model" else DEFAULT_REF_MODEL
+            model_name = DEFAULT_FL_MODEL if turbo_lora_enabled else str(first(model_field, model_default))
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {display_mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
             if model_name not in runtime_models:
                 loaded_model, loaded_clip, loaded_video_vae, loaded_audio_vae = self._load_models(
@@ -1565,13 +1695,9 @@ class GJJ_MiniMaxH3Studio:
                     unique_id=unique_id,
                 )
                 lora_events: list[dict[str, Any]] = []
-                default_lora_data = _default_accel_lora_data()
-                configured_lora_data = str(first("lora_data", default_lora_data) or default_lora_data)
-                if configured_lora_data.strip() == "[]":
-                    configured_lora_data = default_lora_data
-                loaded_model, loaded_clip, _lora_cache = apply_lora_chain_config(
+                loaded_model, _unused_lora_clip, _lora_cache = apply_lora_chain_config(
                     loaded_model,
-                    loaded_clip,
+                    None,
                     configured_lora_data,
                     on_lora_applied=lambda payload: lora_events.append(dict(payload)),
                 )
@@ -1584,11 +1710,11 @@ class GJJ_MiniMaxH3Studio:
                     )
                 patched_model, _ = GJJ_ModelPatchBundle().patch(
                     MODEL=loaded_model,
-                    启用SageAttention=bool(first("patch_enable_sage_attention", False)),
+                    启用SageAttention=turbo_lora_enabled or bool(first("patch_enable_sage_attention", True)),
                     SageAttention模式=str(first("patch_sage_attention_mode", "自动")),
-                    允许Sage编译=bool(first("patch_allow_sage_compile", False)),
-                    启用FP16累积设置=bool(first("patch_enable_fp16_accumulation", False)),
-                    FP16累积=bool(first("patch_fp16_accumulation", True)),
+                    允许Sage编译=turbo_lora_enabled or bool(first("patch_allow_sage_compile", True)),
+                    启用FP16累积设置=turbo_lora_enabled or bool(first("patch_enable_fp16_accumulation", True)),
+                    FP16累积=turbo_lora_enabled or bool(first("patch_fp16_accumulation", True)),
                     # MiniMax H3 不具备 LTXV 的 transformer_blocks.*.ff.net 结构；
                     # 保留旧输入槽位仅用于工作流兼容，执行时永远不应用该专用补丁。
                     启用LTXV前馈分块=False,
@@ -1599,7 +1725,7 @@ class GJJ_MiniMaxH3Studio:
                 )
                 patched_model = GJJ_SpectrumApplyMiniMaxH3().apply(
                     model=patched_model,
-                    enabled=bool(first("spectrum_enabled", False)),
+                    enabled=turbo_lora_enabled or bool(first("spectrum_enabled", True)),
                     blend_weight=float(first("spectrum_blend_weight", 0.50)),
                     degree=int(first("spectrum_degree", 4)),
                     ridge_lambda=float(first("spectrum_ridge_lambda", 0.10)),
@@ -1613,48 +1739,95 @@ class GJJ_MiniMaxH3Studio:
                 )[0]
                 runtime_models[model_name] = (patched_model, loaded_clip, loaded_video_vae, loaded_audio_vae)
             model, clip, video_vae, audio_vae = runtime_models[model_name]
-            if mode == "R2V":
-                ref_images = {f"ref_image_{i}": value for i, value in enumerate(current_media["images"][:10])}
-                ref_videos = {f"ref_video_{i}": value[0] for i, value in enumerate(current_media["videos"][:4])}
-                ref_video_audios = {f"ref_video_audio_{i}": value[1] for i, value in enumerate(current_media["videos"][:4]) if value[1] is not None}
-                # 两类音频都只进入 H3 的参考条件；最终视频音轨始终来自 sampled latent 的 VAEDecodeAudio。
-                conditioning_audios = list(current_media["audios"])
-                conditioning_audios.extend(
-                    item["audio"] for item in current_media.get("voice_audios", [])
-                    if isinstance(item, dict) and item.get("audio") is not None
-                )
-                ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(conditioning_audios[:4])}
-                positive, latent = _unwrap_node_output(MiniMaxH3ReferenceToVideo.execute(
-                    clip=clip,
-                    vae=video_vae,
-                    audio_vae=audio_vae,
-                    prompt=segment_prompt,
-                    width=width,
-                    height=height,
-                    length=segment_length,
-                    ref_image_size=str(first("ref_image_size", "match")),
-                    ref_images=ref_images,
-                    ref_videos=ref_videos,
-                    ref_video_audios=ref_video_audios,
-                    ref_audios=ref_audios,
-                ))[:2]
+            cache_clip = bool(first("cache_clip", False))
+            clip_cache_slot = f"{unique_id}:{index}" if unique_id is not None else ""
+            clip_cache_audios = [
+                *current_media["audios"],
+                *(video[1] for video in current_media["videos"] if isinstance(video, (list, tuple)) and len(video) > 1),
+                *(item.get("audio") for item in current_media.get("voice_audios", []) if isinstance(item, dict)),
+            ]
+            clip_cache_payload = {
+                "prompt": segment_prompt,
+                "mode": mode,
+                "model": model_name,
+                "clip": str(first("clip_name", DEFAULT_CLIP)),
+                "lora": configured_lora_data,
+                "width": width,
+                "height": height,
+                "length": segment_length,
+                "ref_image_size": str(first("ref_image_size", "match")),
+                "images": _reasoning_visual_signature(list(current_media["images"])),
+                "videos": _reasoning_visual_signature([
+                    video[0] for video in current_media["videos"] if isinstance(video, (list, tuple)) and video
+                ]),
+                "audio": [
+                    {
+                        "sample_rate": audio.get("sample_rate"),
+                        "waveform": _reasoning_visual_signature([audio["waveform"]]),
+                    }
+                    for audio in clip_cache_audios
+                    if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor)
+                ],
+            }
+            clip_signature = hashlib.sha256(json.dumps(
+                clip_cache_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            cached_clip = self._CLIP_CONDITIONING_CACHE.get(clip_cache_slot) if cache_clip and clip_cache_slot else None
+            if cached_clip and cached_clip[0] == clip_signature:
+                positive, latent = cached_clip[1], cached_clip[2]
+                _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 复用缓存CLIP", index / segment_count)
+                print(f"[GJJ_MiniMaxH3Studio] 队列 {index + 1}/{segment_count}：提示词未变，复用缓存 CLIP conditioning。", flush=True)
             else:
-                first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
-                last_frame = current_media["images"][1] if mode == "首尾帧" else (current_media["images"][0] if mode == "尾帧" else None)
-                positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
-                    clip=clip,
-                    vae=video_vae,
-                    prompt=segment_prompt,
-                    width=width,
-                    height=height,
-                    length=segment_length,
-                    first_frame=first_frame,
-                    last_frame=last_frame,
-                ))[:2]
+                if mode == "R2V":
+                    ref_images = {f"ref_image_{i}": value for i, value in enumerate(current_media["images"][:10])}
+                    ref_videos = {f"ref_video_{i}": value[0] for i, value in enumerate(current_media["videos"][:4])}
+                    ref_video_audios = {f"ref_video_audio_{i}": value[1] for i, value in enumerate(current_media["videos"][:4]) if value[1] is not None}
+                    # 两类音频都只进入 H3 的参考条件；最终视频音轨始终来自 sampled latent 的 VAEDecodeAudio。
+                    conditioning_audios = list(current_media["audios"])
+                    conditioning_audios.extend(
+                        item["audio"] for item in current_media.get("voice_audios", [])
+                        if isinstance(item, dict) and item.get("audio") is not None
+                    )
+                    ref_audios = {f"ref_audio_{i}": value for i, value in enumerate(conditioning_audios[:4])}
+                    positive, latent = _unwrap_node_output(MiniMaxH3ReferenceToVideo.execute(
+                        clip=clip,
+                        vae=video_vae,
+                        audio_vae=audio_vae,
+                        prompt=segment_prompt,
+                        width=width,
+                        height=height,
+                        length=segment_length,
+                        ref_image_size=str(first("ref_image_size", "match")),
+                        ref_images=ref_images,
+                        ref_videos=ref_videos,
+                        ref_video_audios=ref_video_audios,
+                        ref_audios=ref_audios,
+                    ))[:2]
+                else:
+                    first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
+                    last_frame = current_media["images"][1] if mode == "首尾帧" else (current_media["images"][0] if mode == "尾帧" else None)
+                    positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
+                        clip=clip,
+                        vae=video_vae,
+                        prompt=segment_prompt,
+                        width=width,
+                        height=height,
+                        length=segment_length,
+                        first_frame=first_frame,
+                        last_frame=last_frame,
+                    ))[:2]
+                if cache_clip and clip_cache_slot:
+                    self._CLIP_CONDITIONING_CACHE[clip_cache_slot] = (clip_signature, positive, latent)
+            if not cache_clip and clip_cache_slot:
+                self._CLIP_CONDITIONING_CACHE.pop(clip_cache_slot, None)
             guider = _node_output_first(BasicGuider.execute(model=model, conditioning=positive))
             noise = _node_output_first(RandomNoise.execute(noise_seed=(seed + index) % (1 << 64)))
-            sampler = _ksampler(str(first("sampler_name", "res_multistep")))
-            sigmas = _basic_sigmas(model, str(first("scheduler", "simple")), int(first("steps", 20)), float(first("denoise", 1.0)))
+            sampler_name = "res_multistep" if turbo_lora_enabled else str(first("sampler_name", "res_multistep"))
+            scheduler_name = "simple" if turbo_lora_enabled else str(first("scheduler", "simple"))
+            sampling_denoise = 1.0 if turbo_lora_enabled else float(first("denoise", 1.0))
+            sampler = _ksampler(sampler_name)
+            sampling_steps = DEFAULT_ACCEL_STEPS if turbo_lora_enabled else int(first("steps", DEFAULT_ACCEL_STEPS))
+            sigmas = _basic_sigmas(model, scheduler_name, sampling_steps, sampling_denoise)
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 正在采样...", (index + 0.2) / segment_count)
             sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(
                 noise=noise, guider=guider, sampler=sampler, sigmas=sigmas, latent_image=latent,
