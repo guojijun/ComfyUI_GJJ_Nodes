@@ -622,6 +622,99 @@ def _segment_alignment(items: Any, text: str, segment_by_sentence: bool) -> tupl
     return texts, starts, ends
 
 
+def _repair_segment_timestamps(
+    texts: list[str],
+    starts: list[str],
+    ends: list[str],
+    audio_duration: float,
+) -> tuple[list[str], list[str], list[str]]:
+    """修复强制对齐偶发的零时长、倒退和异常吞并长区间。"""
+    parsed: list[dict[str, Any]] = []
+    total = max(0.0, float(audio_duration))
+    for text, raw_start, raw_end in zip(texts, starts, ends):
+        try:
+            start = max(0.0, float(raw_start))
+            end = max(start, float(raw_end))
+        except (TypeError, ValueError):
+            start = end = 0.0
+        character_count = max(1, len(re.sub(r"\s+", "", str(text or ""))))
+        estimate = min(8.0, max(0.9, character_count * 0.28))
+        duration = end - start
+        broken = (
+            duration < 0.12
+            or duration > max(12.0, estimate * 3.0)
+            or (total > 0.0 and end > total + 0.25)
+        )
+        parsed.append({
+            "text": str(text or "").strip(),
+            "start": start,
+            "end": end,
+            "estimate": estimate,
+            "broken": broken,
+        })
+
+    # 连续坏条目不能从 0 秒起凭空顺排。若后方存在可信时间戳，
+    # 以该时间戳为锚点向前回排，使前奏/间奏继续保持无歌词。
+    index = 0
+    previous_end = 0.0
+    while index < len(parsed):
+        if not parsed[index]["broken"]:
+            if parsed[index]["start"] < previous_end:
+                shift = previous_end - parsed[index]["start"]
+                parsed[index]["start"] += shift
+                parsed[index]["end"] += shift
+            previous_end = parsed[index]["end"]
+            index += 1
+            continue
+        run_start = index
+        while index < len(parsed) and parsed[index]["broken"]:
+            index += 1
+        run_end = index
+        next_anchor = parsed[index]["start"] if index < len(parsed) and not parsed[index]["broken"] else None
+        estimates = [float(parsed[item]["estimate"]) for item in range(run_start, run_end)]
+        required = sum(estimates) + max(0, len(estimates) - 1) * 0.12
+        if next_anchor is not None and next_anchor > previous_end + 0.12:
+            available = max(0.0, next_anchor - 0.12 - previous_end)
+            scale = min(1.0, available / max(required, 1e-6))
+            cursor = max(previous_end, next_anchor - 0.12 - required * scale)
+        else:
+            scale = 1.0
+            cursor = previous_end
+        for item, estimate in zip(range(run_start, run_end), estimates):
+            duration = max(0.12, estimate * scale)
+            parsed[item]["start"] = cursor
+            parsed[item]["end"] = cursor + duration
+            cursor = parsed[item]["end"] + 0.12
+        previous_end = max(previous_end, cursor - 0.12)
+
+    repaired_texts: list[str] = []
+    repaired_starts: list[str] = []
+    repaired_ends: list[str] = []
+    cursor = 0.0
+    for item in parsed:
+        text = item["text"]
+        start = max(cursor, float(item["start"]))
+        end = max(start, float(item["end"]))
+        if total > 0.0:
+            start = min(start, total)
+            end = min(max(start, end), total)
+        if end <= start + 1e-6 and (total <= 0.0 or start < total - 1e-6):
+            estimate = float(item["estimate"])
+            end = min(total, start + estimate) if total > 0.0 else start + estimate
+        if end <= start + 1e-6:
+            # 位于音频终点的零时长尾字无法形成合法字幕，合并到上一条。
+            if repaired_texts:
+                repaired_texts[-1] = " ".join(
+                    part for part in (repaired_texts[-1], str(text or "").strip()) if part
+                )
+            continue
+        repaired_texts.append(str(text or "").strip())
+        repaired_starts.append(f"{start:.3f}")
+        repaired_ends.append(f"{end:.3f}")
+        cursor = end
+    return repaired_texts, repaired_starts, repaired_ends
+
+
 def _format_timestamps(texts: list[str], starts: list[str], ends: list[str]) -> str:
     return "\n".join(f"[{start}s-{end}s] {text}" for text, start, end in zip(texts, starts, ends))
 
@@ -974,6 +1067,7 @@ class GJJ_Qwen3ASRTextFormats:
             if not align_results:
                 raise RuntimeError("强制对齐没有返回时间戳结果。")
             texts, starts, ends = _segment_alignment(align_results[0], full_text, bool(segment_by_sentence))
+            texts, starts, ends = _repair_segment_timestamps(texts, starts, ends, duration)
             _update_progress(pbar, 4, 5)
 
             _send_status(unique_id, "5/5 正在整理文本与 SRT 字幕...", 0.9)

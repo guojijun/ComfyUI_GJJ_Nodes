@@ -307,6 +307,18 @@ def _align_segments_to_video_model(
     """在原断点范围内向短侧吸附，生成无需后补帧的连续音频段。"""
     if not segments:
         return []
+    # MiniMax H3 在下游按每段实测音频时长生成满足 17n+5 的 latent 帧数。
+    # 此处若再次向下吸附，会把已经位于气口/静音区的安全断点提前到歌词中间。
+    if str(alignment_model or "").strip().casefold() in {"minimax h3", "minimaxh3", "minimax"}:
+        return [
+            {
+                "start": max(0.0, float(segment["start"])),
+                "end": min(float(duration), float(segment["end"])),
+                "lyrics": str(segment.get("lyrics") or ""),
+            }
+            for segment in segments
+            if float(segment["end"]) > float(segment["start"]) + 1e-6
+        ]
     maximum = min(MAX_VIDEO_SEGMENT_SECONDS, max(0.1, float(max_seconds)))
     total = max(0.0, float(duration))
     cursor = 0.0
@@ -536,6 +548,46 @@ def _slice_audio(audio: dict[str, Any], start: float, end: float) -> dict[str, A
 
 def _silent_like(audio: dict[str, Any]) -> dict[str, Any]:
     return {"waveform": torch.zeros_like(audio["waveform"]), "sample_rate": int(audio["sample_rate"])}
+
+
+def _fit_audio_queue_to_reference(
+    queue: list[dict[str, Any]],
+    reference: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """按采样数校正队列尾部，使全部分段拼接后与背景音乐严格等长。"""
+    if not queue or not isinstance(reference, dict):
+        return queue
+    target = reference.get("waveform")
+    sample_rate = int(reference.get("sample_rate") or 0)
+    if not isinstance(target, torch.Tensor) or sample_rate <= 0:
+        return queue
+    if any(int(item.get("sample_rate") or 0) != sample_rate for item in queue):
+        return queue
+    current_samples = sum(
+        int(item["waveform"].shape[-1])
+        for item in queue
+        if isinstance(item.get("waveform"), torch.Tensor)
+    )
+    target_samples = int(target.shape[-1])
+    delta = target_samples - current_samples
+    if delta == 0:
+        return queue
+    last = queue[-1]
+    waveform = last.get("waveform")
+    if not isinstance(waveform, torch.Tensor):
+        return queue
+    if delta > 0:
+        padding = torch.zeros(
+            (*waveform.shape[:-1], delta),
+            dtype=waveform.dtype,
+            device=waveform.device,
+        )
+        last["waveform"] = torch.cat((waveform, padding), dim=-1).contiguous()
+    else:
+        keep = max(1, int(waveform.shape[-1]) + delta)
+        last["waveform"] = waveform[..., :keep].contiguous()
+    last["gjj_mtv_length_correction_samples"] = int(delta)
+    return queue
 
 
 def _apply_boundary_fades(
@@ -962,7 +1014,9 @@ class GJJ_MTVAudioToPrompt:
             _send_status(unique_id, f"{generation_step}/{progress_total} 正在生成第 {index}/{len(segments)} 段提示词…")
             vocal_slice = _slice_audio(vocals, segment["start"], segment["end"])
             has_vocal = _has_vocal(vocal_slice, vocal_threshold_db)
-            if has_vocal:
+            has_lyrics = bool(str(segment.get("lyrics") or "").strip())
+            singing_segment = has_lyrics and has_vocal
+            if singing_segment:
                 vocal_output = _apply_boundary_fades(
                     vocal_slice,
                     boundary_fade_seconds,
@@ -971,9 +1025,13 @@ class GJJ_MTVAudioToPrompt:
                 )
             else:
                 vocal_output = _silent_like(vocal_slice)
+            vocal_output["gjj_mtv_has_vocal"] = bool(has_vocal)
+            vocal_output["gjj_mtv_has_lyrics"] = bool(has_lyrics)
+            vocal_output["gjj_mtv_singing_segment"] = bool(singing_segment)
+            vocal_output["gjj_mtv_segment_index"] = int(index)
+            vocal_output["gjj_mtv_start"] = float(segment["start"])
+            vocal_output["gjj_mtv_end"] = float(segment["end"])
             vocal_queue.append(vocal_output)
-            has_lyrics = bool(str(segment.get("lyrics") or "").strip())
-            singing_segment = has_lyrics and has_vocal
             instruction = str(prompt_instruction if singing_segment else empty_prompt_instruction)
             if not singing_segment and index == 1:
                 empty_scene_role = "片头"
@@ -1064,10 +1122,11 @@ class GJJ_MTVAudioToPrompt:
             ))
             if not text:
                 text = (
-                    "主角以嘴巴自然闭合、表情放松的状态面对镜头，"
-                    "舞台灯光随音乐节奏流动，电影感中近景构图。"
+                    "主角面向镜头自然演唱，嘴巴、嘴唇与下颌严格跟随歌词音节和节奏自然开合，"
+                    "头部、肩膀、上半身与双手随音乐自然表演，电影感中近景构图。"
                     if singing_segment else
-                    "无人的空舞台建立镜头，舞台灯光随音乐节奏缓慢流动，电影感构图，细腻氛围，平稳推进镜头。"
+                    "当前段没有歌词演唱；画面角色嘴巴自然闭合，不说话、不唱歌、不做口型，"
+                    "仅以表情和身体动作配合音乐氛围，电影感构图，平稳推进镜头。"
                 )
             text = _storyboard_line(text, index, assigned_scene_names, assigned_actor_names)
             generated.append(text)
@@ -1084,6 +1143,13 @@ class GJJ_MTVAudioToPrompt:
             })
 
         selected = max(1, min(int(current_segment), len(vocal_queue))) - 1
+        vocal_queue = _fit_audio_queue_to_reference(vocal_queue, background)
+        queue_samples = sum(int(item["waveform"].shape[-1]) for item in vocal_queue)
+        background_samples = int(background["waveform"].shape[-1])
+        if queue_samples != background_samples:
+            raise RuntimeError(
+                f"MTV 音频队列总长度 {queue_samples} 样本与背景音乐 {background_samples} 样本不一致。"
+            )
         # 人声输出始终返回完整 AUDIO 列表；current_segment 仅兼容既有工作流，
         # 不再筛选人声输出。提示词同样始终聚合完整分段列表。
         prompt_text = "\n---\n".join(generated)

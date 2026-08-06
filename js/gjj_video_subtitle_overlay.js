@@ -79,6 +79,9 @@ function setValue(node, name, next) {
 		...(node.properties[SETTINGS_PROPERTY] || {}),
 		[name]: next,
 	};
+	node.widgets_values = SERIALIZED_PARAMETER_ORDER.map(
+		(parameter) => widget(node, parameter)?.value ?? node.properties[SETTINGS_PROPERTY][parameter] ?? PARAMETER_DEFAULTS[parameter]
+	);
 	node.graph?.change?.();
 }
 
@@ -144,9 +147,13 @@ function restoreNamedSettings(node, serialized = null) {
 		const found = widget(node, name);
 		if (!found) continue;
 		found.value = settings[name];
+		found.serialize = true;
+		found.options ||= {};
+		found.options.serialize = true;
 		if (found.inputEl) found.inputEl.value = settings[name];
 		if (found.element && "value" in found.element) found.element.value = settings[name];
 	}
+	node.widgets_values = SERIALIZED_PARAMETER_ORDER.map((name) => settings[name]);
 }
 
 function fontDisplayName(fontValue) {
@@ -165,7 +172,11 @@ function hideWidget(found) {
 	if (!found || found.__gjjSubtitleHidden) return;
 	found.__gjjSubtitleHidden = true;
 	found.computeSize = () => [0, -4];
-	found.type = `gjj_hidden_${found.type || "widget"}`;
+	// 保留原始 widget.type 和 serialize=true；ComfyUI 依赖它们按后端定义
+	// 构造 prompt.inputs。改成自定义隐藏类型会导致后续参数整体移位。
+	found.serialize = true;
+	found.options ||= {};
+	found.options.serialize = true;
 	found.hidden = true;
 	if (found.inputEl) found.inputEl.style.display = "none";
 	if (found.element) found.element.style.display = "none";
@@ -576,19 +587,30 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (data, ...args) {
 			migrateSerializedWidgetOrder(data);
 			const result = originalConfigure?.apply(this, [data, ...args]);
+			// 必须同步恢复；排队执行可能发生在 setTimeout 之前。
+			restoreNamedSettings(this, data);
 			setTimeout(() => normalize(this, data), 0);
 			return result;
 		};
 		const originalSerialize = nodeType.prototype.onSerialize;
-		nodeType.prototype.onSerialize = function (...args) {
+		nodeType.prototype.onSerialize = function (data, ...args) {
 			this.properties ||= {};
 			this.properties[OUTPUTS_PROPERTY] = Boolean(this.properties[OUTPUTS_PROPERTY]);
 			const previous = this.properties[SETTINGS_PROPERTY] || {};
-			this.properties[SETTINGS_PROPERTY] = Object.fromEntries(
+			const settings = this.properties[SETTINGS_PROPERTY] = Object.fromEntries(
 				SERIALIZED_PARAMETER_ORDER.map((name) => [name, widget(this, name)?.value ?? previous[name] ?? PARAMETER_DEFAULTS[name]])
 			);
 			this.properties[PARAMETER_ORDER_VERSION] = 3;
-			return originalSerialize?.apply(this, args);
+			const result = originalSerialize?.apply(this, [data, ...args]);
+			if (data) {
+				data.properties ||= {};
+				data.properties[SETTINGS_PROPERTY] = { ...settings };
+				data.properties[PARAMETER_ORDER_VERSION] = 3;
+				// 只保存后端 16 个参数，禁止 DOM 工具栏混入末尾。
+				data.widgets_values = SERIALIZED_PARAMETER_ORDER.map((name) => settings[name]);
+			}
+			this.widgets_values = SERIALIZED_PARAMETER_ORDER.map((name) => settings[name]);
+			return result;
 		};
 		const originalRemoved = nodeType.prototype.onRemoved;
 		nodeType.prototype.onRemoved = function (...args) {

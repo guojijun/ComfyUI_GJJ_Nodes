@@ -496,30 +496,29 @@ class GJJ_VideoSubtitleOverlay:
             },
         }
 
-    def add_subtitles(
-        self,
-        video,
-        srt,
-        filename_prefix="GJJ/字幕视频",
-        font_name="Microsoft YaHei",
-        font_size=48,
-        font_color="#FFFFFF",
-        outline_color="#000000",
-        outline_width=3.0,
-        bottom_margin=60,
-        prompt=None,
-        extra_pnginfo=None,
-        unique_id=None,
-        font_size_percent=5.0,
-        bottom_margin_percent=8.0,
-        outline_width_percent=6.0,
-        save_directory="",
-        output_format="mp4",
-        video_codec="H.264",
-        encoding_preset="medium",
-        crf=18,
-        save_srt=True,
-    ):
+    def add_subtitles(self, **kwargs):
+        # 只允许 ComfyUI 按参数名传递，禁止依赖位置顺序；新增参数不会再让旧工作流错位。
+        video = kwargs["video"]
+        srt = kwargs["srt"]
+        filename_prefix = kwargs.get("filename_prefix", "GJJ/字幕视频")
+        font_name = kwargs.get("font_name", "Microsoft YaHei")
+        font_size = kwargs.get("font_size", 48)
+        font_color = kwargs.get("font_color", "#FFFFFF")
+        outline_color = kwargs.get("outline_color", "#000000")
+        outline_width = kwargs.get("outline_width", 3.0)
+        bottom_margin = kwargs.get("bottom_margin", 60)
+        save_directory = kwargs.get("save_directory", "")
+        output_format = kwargs.get("output_format", "mp4")
+        video_codec = kwargs.get("video_codec", "H.264")
+        encoding_preset = kwargs.get("encoding_preset", "medium")
+        crf = kwargs.get("crf", 18)
+        save_srt = kwargs.get("save_srt", True)
+        font_size_percent = kwargs.get("font_size_percent", 5.0)
+        bottom_margin_percent = kwargs.get("bottom_margin_percent", 8.0)
+        outline_width_percent = kwargs.get("outline_width_percent", 6.0)
+        prompt = kwargs.get("prompt")
+        extra_pnginfo = kwargs.get("extra_pnginfo")
+        unique_id = kwargs.get("unique_id")
         from .gjj_ffmpeg_tools import (
             VIDEO_SUFFIXES,
             _ffmpeg,

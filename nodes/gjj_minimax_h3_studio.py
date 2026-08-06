@@ -253,26 +253,166 @@ def _officialize_prompt_without_reasoning(
     return f"{alignment}\n\n{core}" if alignment else core
 
 
-def _apply_prompt_book(
-    *,
-    prompt: str,
-    global_prompt: str,
-    negative_prompt: str,
-    prompt_replace_find: str,
-    prompt_replace_with: str,
-) -> str:
-    """按替换、全局、负面约束的顺序整理单个分段提示词。"""
+def _apply_prompt_replacement(*, prompt: str, prompt_replace_find: str, prompt_replace_with: str) -> str:
+    """在官方格式化或推理之前，对原始单个分段执行纯文本替换。"""
     result = str(prompt or "").strip()
     find_text = str(prompt_replace_find or "")
     if find_text:
         result = re.sub(re.escape(find_text), lambda _: str(prompt_replace_with or ""), result, flags=re.IGNORECASE)
+    return result
 
+
+def _apply_prompt_constraints(*, prompt: str, global_prompt: str, negative_prompt: str) -> str:
+    """在所有改写完成后附加全局与负面约束，避免被推理或官方格式化覆盖。"""
+    result = str(prompt or "").strip()
     global_text = str(global_prompt or "").strip()
     negative_text = str(negative_prompt or "").strip()
     parts = [part for part in (global_text, result) if part]
     if negative_text:
         parts.append(f"Negative constraints (must not appear): {negative_text}")
     return "\n\n".join(parts)
+
+
+def _has_upstream_class(
+    prompt_graph: Any,
+    unique_id: Any,
+    input_names: tuple[str, ...],
+    target_class: str,
+) -> bool:
+    """只沿当前节点指定输入的连线向上追踪，判断媒体是否来自目标节点。"""
+    if not isinstance(prompt_graph, dict) or unique_id is None:
+        return False
+
+    def graph_node(node_id: Any) -> dict[str, Any]:
+        value = prompt_graph.get(str(node_id), prompt_graph.get(node_id))
+        return value if isinstance(value, dict) else {}
+
+    current = graph_node(unique_id)
+    inputs = current.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    pending = [inputs.get(name) for name in input_names]
+    visited: set[str] = set()
+    while pending:
+        link = pending.pop()
+        if not isinstance(link, (list, tuple)) or len(link) < 2:
+            continue
+        upstream_id = link[0]
+        key = str(upstream_id)
+        if key in visited:
+            continue
+        visited.add(key)
+        upstream = graph_node(upstream_id)
+        if str(upstream.get("class_type") or "") == target_class:
+            return True
+        upstream_inputs = upstream.get("inputs")
+        if isinstance(upstream_inputs, dict):
+            pending.extend(upstream_inputs.values())
+    return False
+
+
+def _apply_mtv_audio_performance(prompt: str) -> str:
+    """让 MTV 分段音频作为演唱驱动，而不是普通音色或环境音参考。"""
+    result = str(prompt or "").strip()
+    result = re.sub(
+        r"(?:嘴巴|嘴唇)\s*(?:自然)?\s*(?:保持)?\s*(?:闭合|闭上)",
+        "嘴巴随演唱节奏自然开合",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"overall_soundscape:\s*.*?(?=\n\s*\n|\Z)",
+        "overall_soundscape: Isolated synchronized singing from <Audio 1> only; no instrumental music, score, or unrelated ambience.",
+        result,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    result = re.sub(
+        r"\b(?:mouth|lips)\s+(?:remain(?:s|ed)?|stay(?:s|ed)?|keep(?:s|ing)?)?\s*closed\b",
+        "mouth and lips move naturally with the singing",
+        result,
+        flags=re.IGNORECASE,
+    )
+    directive = (
+        "MTV AUDIO PERFORMANCE MODE — mandatory and overrides conflicting closed-mouth or silent-character instructions: "
+        "the primary visible referenced character is the singer. Use the current segment's <Audio 1> as the direct isolated-vocal "
+        "performance driver. The singer visibly performs throughout the vocal passage; the mouth, lips, jaw, cheeks, "
+        "breathing, head, shoulders, upper body, and hands move naturally with the audio. Match every sung syllable, onset, "
+        "sustain, pause, rhythm, and emotional accent with precise continuous lip synchronization. Keep the singer's face and "
+        "mouth clearly visible whenever vocals are present. Generate the vocal track only: do not add instrumental accompaniment, "
+        "background music, score, or unrelated ambience because the original source music will be merged downstream. "
+        "Do not treat <Audio 1> as mere ambience or timbre reference."
+    )
+    return "\n\n".join(part for part in (directive, result) if part)
+
+
+def _mtv_audio_should_sing(audio: Any) -> bool:
+    """优先使用 MTV 上游标记；兼容旧工作流时再以波形能量判断是否为静音。"""
+    if not isinstance(audio, dict):
+        return False
+    if "gjj_mtv_singing_segment" in audio:
+        return bool(audio.get("gjj_mtv_singing_segment"))
+    waveform = audio.get("waveform")
+    if not isinstance(waveform, torch.Tensor) or not waveform.numel():
+        return False
+    rms = waveform.detach().float().square().mean().sqrt().item()
+    return rms > 10.0 ** (-55.0 / 20.0)
+
+
+def _apply_mtv_silent_performance(prompt: str) -> str:
+    """静音或无歌词分段禁止角色开口，保留环境、镜头与非口部表演。"""
+    result = str(prompt or "").strip()
+    result = re.sub(
+        r"overall_soundscape:\s*.*?(?=\n\s*\n|\Z)",
+        "overall_soundscape: Absolute digital silence.",
+        result,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    directive = (
+        "MTV SILENT/NO-LYRICS SEGMENT MODE — mandatory and overrides conflicting singing, speaking, dialogue, or lip-sync "
+        "instructions: the current vocal input is silent or this segment has no lyrics. Every visible character remains silent "
+        "and does not sing or speak. Keep the mouth and lips naturally closed with no syllable articulation and no lip "
+        "synchronization. Characters may breathe, blink, change expression, look around, walk, gesture, or move their bodies "
+        "naturally. Preserve the requested environment, action, lighting, emotion, and camera work visually only. The generated "
+        "audio channel must be absolute digital silence: no voice, breathing sound, ambience, Foley, sound effects, instrumental "
+        "music, background music, or score. The original source music will be merged downstream."
+    )
+    return "\n\n".join(part for part in (directive, result) if part)
+
+
+def _retime_official_prompt(prompt: str, duration: float) -> str:
+    """把已格式化提示词中的官方时长字段同步为当前音频段的真实长度。"""
+    seconds = f"{max(0.0, float(duration)):.3f}"
+    result = re.sub(
+        r"\bfull\s+\d+(?:\.\d+)?-second\s+video\b",
+        f"full {seconds}-second video",
+        str(prompt or ""),
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\bthe\s+\d+(?:\.\d+)?-second\s+mark\b",
+        f"the {seconds}-second mark",
+        result,
+        flags=re.IGNORECASE,
+    )
+    if "MTV AUDIO PERFORMANCE MODE" in result:
+        result = re.sub(
+            r"(MTV AUDIO PERFORMANCE MODE\s+—)(?:\s*current segment audio duration:\s*"
+            r"\d+(?:\.\d+)?\s*seconds,\s*measured from the input audio;\s*)?",
+            rf"\1 current segment audio duration: {seconds} seconds, measured from the input audio; ",
+            result,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    elif "MTV SILENT/NO-LYRICS SEGMENT MODE" in result:
+        result = re.sub(
+            r"(MTV SILENT/NO-LYRICS SEGMENT MODE\s+—)(?:\s*current segment audio duration:\s*"
+            r"\d+(?:\.\d+)?\s*seconds,\s*measured from the input audio;\s*)?",
+            rf"\1 current segment audio duration: {seconds} seconds, measured from the input audio; ",
+            result,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return result
 
 
 def _register_upload_route() -> None:
@@ -1073,6 +1213,12 @@ class GJJ_MiniMaxH3Studio:
         selected_actors = list(dict.fromkeys([*prompt_actors, *bare_prompt_actors])) or configured_actors
         selected_scenes = prompt_scenes or _library_selection_names(first("selected_scenes_json", "[]"))
         unique_id = first("unique_id")
+        mtv_audio_queue = _has_upstream_class(
+            first("prompt_info"),
+            unique_id,
+            ("reference_media", "reference_media_2", "reference_media_3"),
+            "GJJ_MTVAudioToPrompt",
+        )
         _send_status(unique_id, "已解析上游角色与场景引用", 0.0, {
             "parsed_actors": selected_actors,
             "parsed_scenes": selected_scenes,
@@ -1185,10 +1331,8 @@ class GJJ_MiniMaxH3Studio:
         prompt_parts = [item[0] for item in segmented_library_media]
         prompt_parts = [
             _attach_official_voice_references(
-                _strip_library_manifest_payloads(_apply_prompt_book(
+                _strip_library_manifest_payloads(_apply_prompt_replacement(
                         prompt=raw_part,
-                        global_prompt=str(first("global_prompt", "") or ""),
-                        negative_prompt=str(first("negative_prompt", "") or ""),
                         prompt_replace_find=str(first("prompt_replace_find", "") or ""),
                         prompt_replace_with=str(first("prompt_replace_with", "") or ""),
                     )),
@@ -1268,9 +1412,13 @@ class GJJ_MiniMaxH3Studio:
                 for index, raw_part in enumerate(prompt_parts)
             ]
         prompt_parts = [
-            _force_dialogue_language(
-                _normalize_picture_reference_tags(item),
-                str(first("dialogue_language", "中文")),
+            _apply_prompt_constraints(
+                prompt=_force_dialogue_language(
+                    _normalize_picture_reference_tags(item),
+                    str(first("dialogue_language", "中文")),
+                ),
+                global_prompt=str(first("global_prompt", "") or ""),
+                negative_prompt=str(first("negative_prompt", "") or ""),
             )
             for item in prompt_parts
         ]
@@ -1346,10 +1494,19 @@ class GJJ_MiniMaxH3Studio:
         modes: list[str] = []
         for index, (segment_prompt, current_media) in enumerate(jobs):
             segment_duration = duration
+            mtv_singing_segment = False
             if current_media["audios"]:
                 measured_duration = _audio_duration_seconds(current_media["audios"][0])
                 if measured_duration is not None:
                     segment_duration = measured_duration
+            if mtv_audio_queue and current_media["audios"]:
+                mtv_singing_segment = _mtv_audio_should_sing(current_media["audios"][0])
+                segment_prompt = (
+                    _apply_mtv_audio_performance(segment_prompt)
+                    if mtv_singing_segment
+                    else _apply_mtv_silent_performance(segment_prompt)
+                )
+                segment_prompt = _retime_official_prompt(segment_prompt, segment_duration)
             if segment_duration > MAX_AUDIO_DRIVEN_DURATION + 1e-6:
                 raise RuntimeError(
                     f"队列第 {index + 1} 段音频长 {segment_duration:.3f} 秒，超过 MiniMax H3 安全上限 "
@@ -1359,14 +1516,25 @@ class GJJ_MiniMaxH3Studio:
             segment_length = _aligned_frames(duration=segment_duration, fps=fps)
             mode = segment_mode(current_media)
             modes.append(mode)
+            display_mode = (
+                f"MTV·{'演唱' if mtv_singing_segment else '静音'}"
+                if mtv_audio_queue and current_media["audios"] else mode
+            )
+            if display_mode.startswith("MTV"):
+                print(
+                    f"[GJJ_MiniMaxH3Studio] MTV 队列 {index + 1}/{segment_count}："
+                    f"{'有歌词人声，角色演唱' if mtv_singing_segment else '静音或无歌词，角色闭口'}；"
+                    f"输入音频实测 {segment_duration:.3f} 秒，生成 {segment_length} 帧 @ {fps:g} FPS",
+                    flush=True,
+                )
             print(
-                f"\n[GJJ_MiniMaxH3Studio] ===== 最终提示词 {index + 1}/{segment_count} · {mode} =====\n"
+                f"\n[GJJ_MiniMaxH3Studio] ===== 最终提示词 {index + 1}/{segment_count} · {display_mode} =====\n"
                 f"{segment_prompt}\n"
                 f"[GJJ_MiniMaxH3Studio] ===== 最终提示词结束 =====\n",
                 flush=True,
             )
             model_name = str(first("ref_model" if mode == "R2V" else "fl_model", DEFAULT_REF_MODEL if mode == "R2V" else DEFAULT_FL_MODEL))
-            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
+            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {display_mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
             if model_name not in runtime_models:
                 loaded_model, loaded_clip, loaded_video_vae, loaded_audio_vae = self._load_models(
                     model_name=model_name,
@@ -1455,6 +1623,14 @@ class GJJ_MiniMaxH3Studio:
             ))[0]
             segment_images = nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
             segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(vae=audio_vae, samples=sampled))[0]
+            if mtv_audio_queue and current_media["audios"] and not mtv_singing_segment:
+                # MTV 空镜只生成画面；后续会合并整段源音乐，因此这里必须输出数字静音，
+                # 不能保留 H3 自行生成的环境声、配乐或残余人声。
+                if isinstance(segment_audio, dict) and isinstance(segment_audio.get("waveform"), torch.Tensor):
+                    segment_audio = {
+                        **segment_audio,
+                        "waveform": torch.zeros_like(segment_audio["waveform"]),
+                    }
             # 相邻段共享边界图；后续片段移除第 1 帧，避免拼接时重复该边界帧。
             if image_branch == "分段首尾帧" and index > 0 and int(segment_images.shape[0]) > 1:
                 segment_images = segment_images[1:].contiguous()
@@ -1473,7 +1649,9 @@ class GJJ_MiniMaxH3Studio:
         audio = _concat_audio_segments(audio_segments)
         combined = combine_segment(images, audio, filename_prefix)
         video, output_path, _files = _video_combine_result(combined)
-        final_mode = image_branch if image_count else ("队列" if segment_count > 1 else modes[0])
+        final_mode = "MTV" if mtv_audio_queue and queued_audios else (
+            image_branch if image_count else ("队列" if segment_count > 1 else modes[0])
+        )
         frame_count = sum(int(item.shape[0]) for item in decoded_segments)
         ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
         ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"], "parsed_actors": selected_actors, "parsed_scenes": selected_scenes})
