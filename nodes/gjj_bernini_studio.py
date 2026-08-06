@@ -783,12 +783,31 @@ def _decode_prompt_linked_video(prompt: Any, node_id: Any, input_name: str) -> t
     class_type = str(source_node.get("class_type") or source_node.get("type") or "")
     inputs = source_node.get("inputs") if isinstance(source_node.get("inputs"), dict) else {}
     file_value = inputs.get("file") or inputs.get("video") or inputs.get("video_file") or inputs.get("filename")
-    if not file_value:
+    multi_video_path = None
+    if not file_value and class_type == "GJJ_MultiVideoLoader":
+        try:
+            from .gjj_multi_video_loader import parse_selected_videos, resolve_input_video_path
+
+            selected = parse_selected_videos(
+                inputs.get("selected_videos_json")
+                or inputs.get("selected_videos")
+                or inputs.get("videos")
+            )
+            if selected:
+                candidate = resolve_input_video_path(selected[0])
+                if candidate.is_file():
+                    multi_video_path = str(candidate)
+        except Exception as exc:
+            print(f"[GJJ BerniniStudio] 回溯 GJJ_MultiVideoLoader 原视频失败：{exc}")
+    if multi_video_path:
+        path = multi_video_path
+    elif not file_value:
         return None, None, None
-    try:
-        path = folder_paths.get_annotated_filepath(str(file_value))
-    except Exception:
-        path = _resolve_annotated_path(str(file_value))
+    else:
+        try:
+            path = folder_paths.get_annotated_filepath(str(file_value))
+        except Exception:
+            path = _resolve_annotated_path(str(file_value))
     if not path or not os.path.isfile(path):
         return None, None, None
     frames, fps = _decode_video_media_frames(path)

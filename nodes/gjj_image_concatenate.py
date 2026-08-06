@@ -447,6 +447,10 @@ def _media_frames(value: Any) -> list[torch.Tensor]:
 
 
 def _media_items(value: Any) -> list[torch.Tensor]:
+    # INPUT_IS_LIST 会把每个动态输入再包一层单元素 list。先去掉这层执行包装，
+    # 否则后续递归会把 BHWC 视频 batch 拆成逐帧列表，最终沿空间方向依次拼成
+    # “帧数 × 单帧宽度”的超宽图像。
+    value = _single_value(value)
     # A Comfy VIDEO stores time in the tensor batch dimension.  Keep that batch
     # intact so _concat_pair can combine corresponding frames instead of turning
     # a video into one enormous spatial strip.
@@ -456,6 +460,9 @@ def _media_items(value: Any) -> list[torch.Tensor]:
         for key in MEDIA_KEYS:
             tensors.extend(_media_tensors_recursive(components.get(key)))
         return [tensor for tensor in tensors if not _is_black_placeholder(tensor)]
+    tensor = _as_media_tensor(value)
+    if tensor is not None:
+        return [] if _is_black_placeholder(tensor) else [tensor]
     return _media_frames(value)
 
 

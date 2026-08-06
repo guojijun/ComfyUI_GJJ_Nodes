@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import comfy.samplers
+import folder_paths
 from nodes import common_ksampler
 
 from .gjj_bernini import GJJBerniniConditioning, _encode_context_latent
@@ -26,6 +27,8 @@ from .gjj_bernini_studio import (
     _coerce_audio_input,
     _decode_bernini_frames,
     _decode_prompt_linked_video,
+    _decode_video_media_frames,
+    _is_video_media,
     _media_components,
     _memory_cleanup,
     _model_choice_state,
@@ -39,6 +42,11 @@ from .gjj_inject_latent_noise_plus import GJJ_InjectLatentNoisePlus
 from .gjj_memory_manager import _clean_all_resources
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle
 from .gjj_model_upscaler import GJJ_ModelUpscaler, _list_pth_upscale_models
+from .gjj_multi_lora_chain import (
+    apply_standard_lora,
+    load_lora_file_with_metadata,
+    resolve_lora_name_fuzzy,
+)
 from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
 
@@ -49,6 +57,8 @@ DEFAULT_MODEL = "wan2.1_bernini_1.3B_int8_convrot.safetensors"
 DEFAULT_CLIP = "umt5_xxl_int4_convrot.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
 DEFAULT_UPSCALE_MODEL = "RealESRGAN_x2plus.pth"
+DEFAULT_HIGHRES_LORA = "Wan2.1-1.3b-lora-highresfix-v1.safetensors"
+EXPECTED_HIGHRES_LORA_PATCHES = 300
 DEFAULT_PROMPT = "将视频改清晰，修复细节，特别是人物面部和手指，保持原视频内容、动作、构图和身份一致。"
 DEFAULT_NEGATIVE = ""
 
@@ -93,6 +103,11 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         model = _model_choice_state("diffusion_models", ["wan2.1", "bernini", "1.3b"], DEFAULT_MODEL)
         clip = _model_choice_state("text_encoders", ["umt5", "xxl"], DEFAULT_CLIP)
         vae = _model_choice_state("vae", ["wan", "2.1", "vae"], DEFAULT_VAE)
+        highres_lora = _model_choice_state(
+            "loras",
+            ["wan2.1", "1.3b", "lora", "highresfix", "v1"],
+            DEFAULT_HIGHRES_LORA,
+        )
         upscale_models = _list_pth_upscale_models() or [""]
         preferred_upscale = _preferred_upscale_model(upscale_models)
         samplers = list(comfy.samplers.KSampler.SAMPLERS) or ["euler"]
@@ -125,6 +140,10 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
                 "noise_strength": ("FLOAT", _hidden({"default": 0.3, "min": -20.0, "max": 20.0, "step": 0.01, "display_name": "注噪强度"})),
                 "normalize_noise": (["关闭", "开启"], _hidden({"default": "关闭", "display_name": "噪声归一化"})),
                 "segment_duration": ("INT", _hidden({"default": 121, "min": 5, "max": 121, "step": 4, "display_name": "分段时长（帧）", "gjj_panel_control": "slider", "tooltip": "范围 5–121 帧，步长 4，始终满足 4n+1。"})),
+                "enable_segmentation": ("BOOLEAN", _hidden({"default": False, "display_name": "启用分段", "tooltip": "默认关闭并整段处理；开启后按分段时长切分，相邻段使用尾帧衔接。"})),
+                "highres_lora_name": (highres_lora["models"], _hidden({"default": highres_lora["value"], "display_name": "HighResFix LoRA", "gjj_default_model": DEFAULT_HIGHRES_LORA, "gjj_missing_model": highres_lora["missing"], "tooltip": "用于 Bernini 1.3B 视频高清修复，默认 Wan2.1-1.3b-lora-highresfix-v1.safetensors。"})),
+                "highres_lora_strength": ("FLOAT", _hidden({"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05, "display_name": "HighResFix LoRA 强度"})),
+                "reference_max_size": ("INT", _hidden({"default": 1920, "min": 64, "max": 4096, "step": 32, "display_name": "参考资源最大尺寸", "tooltip": "参考工作流“Bernini 放大.json”使用 1920；过小会削弱人物与纹理参考细节。"})),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -173,15 +192,38 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             _send_status(unique_id, "0/6 正在预清理资源...", 0.0)
             _clean_all_resources(protected_values=protected)
 
-        media = _first(kwargs.get("media"))
+        # INPUT_IS_LIST 下，GJJ_BATCH_IMAGE 既可能是单个批量 tensor，也可能是逐帧
+        # tensor 列表。必须把完整值交给媒体解析器，不能先 _first() 丢掉其余帧。
+        media = kwargs.get("media")
         frames, audio, fps = _media_components(media)
-        if frames is None:
-            frames, audio, fps = _decode_prompt_linked_video(prompt_info, unique_id, "media")
+        # GJJ_MultiVideoLoader 的“原视频纯透传旁路”会在 VIDEO components.images
+        # 中放一个 64×64 单帧占位图，同时把真实视频保存在 stream source。此时必须
+        # 从真实流重新解码，不能把占位图当作源视频。
+        if _is_video_media(media) and (frames is None or int(frames.shape[0]) <= 1):
+            decoded_frames, decoded_fps = _decode_video_media_frames(media)
+            if decoded_frames is not None and int(decoded_frames.shape[0]) > int(frames.shape[0] if frames is not None else 0):
+                frames = decoded_frames
+                if decoded_fps is not None:
+                    fps = decoded_fps
+        if frames is None or int(frames.shape[0]) <= 1:
+            linked_frames, linked_audio, linked_fps = _decode_prompt_linked_video(prompt_info, unique_id, "media")
+            if linked_frames is not None and int(linked_frames.shape[0]) > int(frames.shape[0] if frames is not None else 0):
+                frames = linked_frames
+                audio = linked_audio if linked_audio is not None else audio
+                fps = linked_fps if linked_fps is not None else fps
         if frames is None:
             frames, audio, fps = _selected_video_components(kwargs.get("selected_video"), extra_pnginfo, unique_id)
         if frames is None or int(frames.shape[0]) <= 0:
             raise RuntimeError("请连接 VIDEO/IMAGE 输入，或使用节点 📁 按钮选择视频。")
         frames = frames.detach().cpu().contiguous()
+        if int(frames.shape[0]) < 5:
+            raise RuntimeError(
+                "源视频只解析到 "
+                f"{int(frames.shape[0])} 帧（{int(frames.shape[2])}×{int(frames.shape[1])}），"
+                "Bernini 视频参考放大至少需要 5 帧。"
+                "请确认“源视频/帧序列”连接的是完整 VIDEO/GJJ_BATCH_IMAGE，"
+                "不要误接参考图或单帧预览输出。"
+            )
 
         if _boolean(kwargs.get("enable_pre_upscale"), True):
             _send_status(unique_id, "1/6 使用 RealESRGAN 预放大源视频...", 0.08)
@@ -209,6 +251,34 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
 
         _send_status(unique_id, "2/6 加载 Bernini 1.3B / UMT5 / VAE...", 0.18)
         model, vae, clip = self._load_models(*model_key, keep_model, unique_id)
+        highres_lora_name = _require_model_choice(
+            str(_first(kwargs.get("highres_lora_name"), DEFAULT_HIGHRES_LORA)),
+            "HighResFix LoRA",
+        )
+        resolved_lora_name = resolve_lora_name_fuzzy(highres_lora_name)
+        highres_lora_path = folder_paths.get_full_path("loras", resolved_lora_name)
+        if not highres_lora_path:
+            raise RuntimeError(f"HighResFix LoRA 文件未找到：{highres_lora_name}")
+        highres_lora_state, _highres_lora_metadata = load_lora_file_with_metadata(highres_lora_path)
+        model, _unused_clip, model_patch_count, _clip_patch_count, loaded_patch_count = apply_standard_lora(
+            model,
+            None,
+            highres_lora_state,
+            _number(kwargs.get("highres_lora_strength"), 1.0),
+            0.0,
+        )
+        if model_patch_count < EXPECTED_HIGHRES_LORA_PATCHES:
+            raise RuntimeError(
+                "HighResFix LoRA 权重匹配不完整："
+                f"成功应用 {model_patch_count}/{EXPECTED_HIGHRES_LORA_PATCHES} 组模型权重"
+                f"（解析得到 {loaded_patch_count} 组）。"
+                "请确认连接的是 Bernini/Wan 2.1 1.3B 底模，并重启 ComfyUI 后重试。"
+            )
+        _send_status(
+            unique_id,
+            f"2/6 HighResFix LoRA 已应用：{model_patch_count}/{EXPECTED_HIGHRES_LORA_PATCHES} 组权重",
+            0.24,
+        )
         model = GJJ_ModelPatchBundle().patch(
             model,
             启用SageAttention=True,
@@ -230,9 +300,16 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         )
 
         effective_fps = float(fps or _number(kwargs.get("frame_rate"), 24.0))
-        segment_frames = _normalized_segment_frames(kwargs.get("segment_duration"))
-        segment_stride = segment_frames - 1
-        segment_count = max(1, int(math.ceil(max(0, total_frames - 1) / float(segment_stride))))
+        segmentation_enabled = _boolean(kwargs.get("enable_segmentation"), False)
+        segment_frames = (
+            _normalized_segment_frames(kwargs.get("segment_duration"))
+            if segmentation_enabled else total_frames
+        )
+        segment_stride = max(1, segment_frames - 1)
+        segment_count = (
+            max(1, int(math.ceil(max(0, total_frames - 1) / float(segment_stride))))
+            if segmentation_enabled else 1
+        )
         reference_resources = _reference_resources(kwargs.get("reference_resources"))
         generated: list[torch.Tensor] = []
         preview: list[dict[str, Any]] = []
@@ -244,7 +321,11 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             padded_source = _pad_segment_tail(source, segment_frames)
             _send_status(
                 unique_id,
-                f"3/6 处理第 {index + 1}/{segment_count} 段（{segment_frames} 帧，尾帧衔接）...",
+                (
+                    f"3/6 处理第 {index + 1}/{segment_count} 段（{segment_frames} 帧，尾帧衔接）..."
+                    if segmentation_enabled else
+                    f"3/6 整段处理（{total_frames} 帧）..."
+                ),
                 0.32 + 0.5 * index / max(1, segment_count),
             )
             encoded = _encode_context_latent(vae, padded_source[:, :, :, :3])
@@ -256,7 +337,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
                 str(_first(kwargs.get("normalize_noise"), "关闭")),
             )[0]
             segment_references = list(reference_resources)
-            if generated:
+            if segmentation_enabled and generated:
                 segment_references.append(generated[-1][-1:].contiguous())
             seg_positive, seg_negative, _empty = GJJBerniniConditioning().build(
                 positive=positive,
@@ -266,7 +347,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
                 height=height,
                 length=segment_frames,
                 batch_size=1,
-                ref_max_size=max(width, height),
+                ref_max_size=max(64, _integer(kwargs.get("reference_max_size"), 1920)),
                 reference_resources=segment_references,
             )
             sampled = common_ksampler(
@@ -310,7 +391,11 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         stitched = [generated[0]]
         stitched.extend(segment[1:] for segment in generated[1:])
         decoded = torch.cat(stitched, dim=0)[:total_frames].contiguous()
-        _send_status(unique_id, "5/6 删除段间重复帧并封装源音频...", 0.86)
+        _send_status(
+            unique_id,
+            "5/6 删除段间重复帧并封装源音频..." if segmentation_enabled else "5/6 封装源音频...",
+            0.86,
+        )
         audio_input = media if callable(getattr(media, "get_components", None)) else _coerce_audio_input(audio)
         combined = GJJ_VideoCombine().combine(
             images=decoded,

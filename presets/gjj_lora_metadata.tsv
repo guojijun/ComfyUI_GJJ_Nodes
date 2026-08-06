@@ -1,4 +1,5 @@
 ﻿id	match	title	trigger	strength	summary	source
+Wan2.1-1.3b-lora-highresfix-v1	Wan2.1-1.3b-lora-highresfix-v1	Wan细节修复		1	基于模型通义万相2.1-1.3B和框架 DiffSynth-Studio 训练的LoRA。由于基础模型的训练分辨率为 480P，在清晰度上存在一定缺陷，因此我们进行了额外的训练以修复模型在高分辨率视频上的效果，避免出现画面崩坏、灰暗的问题。	https://www.modelscope.cn/models/DiffSynth-Studio/Wan2.1-1.3b-lora-highresfix-v1/summary?version=v1
 detail-slider-krea-2-loraholic	detail-slider-krea-2-loraholic	细节滑块		-6~6	短提示或详细场景：-4.0至4.0 肖像或简单场景等：-6.0至6.0	https://civitai.com/models/2772451/detail-slider-krea-2-loraholic
 krea-2-breast-slider	krea-2-breast-slider	胸部滑块		2	乳房滑板	https://civitai.com/models/2732158/krea-2-breast-slider
 krea-2-realism-slider	krea-2-realism-slider	真实感滑块		-1~1	从动漫般的眼睛和绘画纹理，到皮肤毛孔和相机般的真实感。每当模型的想法和你的想法不完全一致时，就用它。	https://civitai.com/models/2781697/krea-2-realism-slider

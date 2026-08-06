@@ -608,6 +608,30 @@ def load_standard_lora_patches(model: Any, clip: Any, lora_state: dict[str, Any]
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
 
     converted_lora = comfy.lora_convert.convert_lora(lora_state)
+    peft_suffixes = (
+        ".lora_A.default.weight",
+        ".lora_B.default.weight",
+        ".lora_A.weight",
+        ".lora_B.weight",
+    )
+    peft_alias_count = 0
+    for lora_key in converted_lora:
+        base_key = next(
+            (lora_key[:-len(suffix)] for suffix in peft_suffixes if lora_key.endswith(suffix)),
+            None,
+        )
+        if not base_key or base_key in key_map:
+            continue
+        prefixed_key = f"diffusion_model.{base_key}"
+        if prefixed_key in key_map:
+            key_map[base_key] = key_map[prefixed_key]
+            peft_alias_count += 1
+    if peft_alias_count:
+        LOGGER.info(
+            "LoRA added %s unprefixed PEFT model-key alias(es).",
+            peft_alias_count,
+        )
+
     missing_capture = _LoraMissingKeyCapture()
     root_logger = logging.getLogger()
     root_logger.addHandler(missing_capture)

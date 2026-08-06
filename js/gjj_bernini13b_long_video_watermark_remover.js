@@ -14,10 +14,10 @@ const NODES = new Set();
 let outsideReady = false;
 
 const GROUPS = [
-	{ key: "model", icon: "🧠", title: "模型", fields: ["keep_model", "pre_cleanup_resources", "enable_pre_upscale"] },
-	{ key: "prompt", icon: "📒", title: "提示词", fields: ["prompt", "negative_prompt"] },
+	{ key: "model", icon: "🧠", title: "模型", fields: ["keep_model", "pre_cleanup_resources", "enable_pre_upscale", "highres_lora_strength"] },
+	{ key: "prompt", icon: "📒", title: "提示词", fields: ["prompt", "negative_prompt", "reference_max_size"] },
 	{ key: "sampling", icon: "⚙️", title: "采样设置", fields: ["steps", "cfg", "seed", "sampler_name", "scheduler", "denoise", "filename_prefix", "format_name", "noise_seed", "noise_strength", "normalize_noise"] },
-	{ key: "timing", icon: "⏰", title: "时间与分段", fields: ["segment_duration", "segment_frames", "frame_rate"] },
+	{ key: "timing", icon: "⏰", title: "时间与分段", fields: ["enable_segmentation", "segment_duration", "segment_frames", "frame_rate"] },
 ];
 
 function widget(node, name) { return node?.widgets?.find((item) => item?.name === name); }
@@ -45,6 +45,7 @@ function setValue(node, name, value) {
 	item.value = value;
 	item.callback?.(value, app.canvas, node);
 	if (name === "keep_model") syncKeepModelButton(node);
+	if (name === "enable_segmentation") syncSegmentationButton(node);
 	dirty(node);
 }
 
@@ -54,6 +55,14 @@ function syncKeepModelButton(node) {
 	const enabled = Boolean(value(node, "keep_model", false));
 	button.classList.toggle("kept", enabled);
 	button.title = enabled ? "模型（保持模型已开启）" : "模型（保持模型已关闭）";
+}
+
+function syncSegmentationButton(node) {
+	const button = node?.__gjjB13GroupButtons?.get?.("timing");
+	if (!button || !widget(node, "enable_segmentation")) return;
+	const enabled = Boolean(value(node, "enable_segmentation", false));
+	button.classList.toggle("segmented", enabled);
+	button.title = enabled ? "时间与分段（分段已开启）" : "时间与分段（分段已关闭）";
 }
 
 function protect(element) {
@@ -68,12 +77,12 @@ function injectStyle() {
 	style.id = "gjj-bernini13b-wmr-style";
 	style.textContent = `
 		.gjj-b13-wmr{display:flex;flex-direction:column;gap:6px;width:100%;padding:2px 4px;box-sizing:border-box;color:#dcebed;font:12px/1.35 sans-serif}
-		.gjj-b13-tools{display:flex;align-items:center;justify-content:center;gap:6px}.gjj-b13-tools button{width:40px;height:31px;border:1px solid #40545d;border-radius:8px;background:#172229;color:#eefaff;font-size:17px;cursor:pointer}.gjj-b13-tools button:disabled{filter:grayscale(1);opacity:.34;cursor:not-allowed}.gjj-b13-tools button.on{background:#205045;border-color:#5eead4}.gjj-b13-tools button.kept{background:#205045;border-color:#5eead4;box-shadow:inset 0 0 0 1px #5eead433}.gjj-b13-tools .link{display:none;background:#2b4052;border-color:#65a8d5}.gjj-b13-tools .link.show{display:block}.gjj-b13-tools .link.detached{background:#5a3d19;border-color:#e5a54b}
+		.gjj-b13-tools{display:flex;align-items:center;justify-content:center;gap:6px}.gjj-b13-tools button{width:40px;height:31px;border:1px solid #40545d;border-radius:8px;background:#172229;color:#eefaff;font-size:17px;cursor:pointer}.gjj-b13-tools button:disabled{filter:grayscale(1);opacity:.34;cursor:not-allowed}.gjj-b13-tools button.on{background:#205045;border-color:#5eead4}.gjj-b13-tools button.kept{background:#205045;border-color:#5eead4;box-shadow:inset 0 0 0 1px #5eead433}.gjj-b13-tools button.segmented{background:#594316;border-color:#f4b740;box-shadow:inset 0 0 0 1px #f4b74033}.gjj-b13-tools .link{display:none;background:#2b4052;border-color:#65a8d5}.gjj-b13-tools .link.show{display:block}.gjj-b13-tools .link.detached{background:#5a3d19;border-color:#e5a54b}
 		.gjj-b13-status{padding:5px 8px;border:1px solid #30464e;border-radius:6px;background:#0d171b;color:#a9bdc4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 		.gjj-b13-popup{position:fixed;z-index:100005;width:min(450px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;padding:12px;border:1px solid #49616a;border-radius:11px;background:#10191e;color:#deeaed;box-shadow:0 18px 55px #000b;font:12px/1.4 sans-serif;box-sizing:border-box}.gjj-b13-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;font-weight:800;font-size:14px}.gjj-b13-head button{border:0;background:transparent;color:#aabac0;font-size:20px;cursor:pointer}.gjj-b13-row{display:grid;grid-template-columns:128px minmax(0,1fr);gap:8px;align-items:center;margin:8px 0}.gjj-b13-row input,.gjj-b13-row textarea,.gjj-b13-row select{width:100%;box-sizing:border-box;padding:6px 7px;border:1px solid #344a53;border-radius:6px;background:#0b1418;color:#e7f0f2}.gjj-b13-row textarea{min-height:76px;resize:vertical}.gjj-b13-row input[type=checkbox]{width:18px}
 		.gjj-b13-toggle{width:100%;min-height:32px;border:1px solid #40545d;border-radius:7px;background:#142128;color:#b9c9cd;cursor:pointer;font-weight:800}.gjj-b13-toggle.on{border-color:#5eead4;background:#205045;color:#fff}
 		.gjj-b13-toggle-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:8px 0 10px}.gjj-b13-toggle-cell{display:flex;min-width:0}.gjj-b13-toggle-cell .gjj-b13-toggle{min-height:38px;padding:5px 7px;line-height:1.25;white-space:normal}
-		.gjj-b13-slider{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:7px;align-items:center}.gjj-b13-slider input{padding:0}.gjj-b13-slider output{text-align:right;color:#d9f7f2;font-weight:800}
+		.gjj-b13-slider{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:7px;align-items:center}.gjj-b13-slider input{padding:0}.gjj-b13-slider output{text-align:right;color:#d9f7f2;font-weight:800}.gjj-b13-slider.disabled{opacity:.38;filter:grayscale(1)}
 		.gjj-b13-preview{display:none;width:100%;box-sizing:border-box;padding:4px}.gjj-b13-preview-title{margin:3px 2px 6px;color:#9fb8c0;font-weight:700}
 	`;
 	document.head.appendChild(style);
@@ -108,7 +117,7 @@ function control(node, name, onDynamicChange = null, labelText = "") {
 		element.value = String(item.value ?? "");
 		element.onchange = () => setValue(node, name, element.value);
 	} else if (typeof item.value === "boolean") {
-		if (["keep_model", "pre_cleanup_resources", "enable_pre_upscale"].includes(name)) {
+		if (["keep_model", "pre_cleanup_resources", "enable_pre_upscale", "enable_segmentation"].includes(name)) {
 			element = document.createElement("button"); element.type = "button"; element.className = "gjj-b13-toggle";
 			const refresh = () => {
 				const enabled = Boolean(value(node, name, false));
@@ -118,7 +127,7 @@ function control(node, name, onDynamicChange = null, labelText = "") {
 			element.onclick = () => {
 				setValue(node, name, !Boolean(value(node, name, false)));
 				refresh();
-				if (name === "enable_pre_upscale") onDynamicChange?.();
+				if (["enable_pre_upscale", "enable_segmentation"].includes(name)) onDynamicChange?.();
 			};
 			refresh();
 		} else {
@@ -138,6 +147,10 @@ function control(node, name, onDynamicChange = null, labelText = "") {
 		if (slider) {
 			element = document.createElement("div"); element.className = "gjj-b13-slider";
 			const output = document.createElement("output"); output.textContent = String(numberInput.value);
+			if (name === "segment_duration" && !Boolean(value(node, "enable_segmentation", false))) {
+				numberInput.disabled = true;
+				element.classList.add("disabled");
+			}
 			const updateSlider = () => {
 				let nextValue = Number(numberInput.value);
 				if (name === "segment_duration") {
@@ -165,6 +178,9 @@ function modelEntries(node) {
 		["clip_name", "UMT5 XXL", "models/text_encoders", "🟡"],
 		["vae_name", "Wan VAE", "models/vae", "🔴"],
 	];
+	if (widget(node, "highres_lora_name")) {
+		entries.push(["highres_lora_name", "HighResFix LoRA", "models/loras", "🟢"]);
+	}
 	if (Boolean(value(node, "enable_pre_upscale", false))) {
 		entries.push(["upscale_model_name", "预放大模型", "models/upscale_models", "🔍"]);
 	}
@@ -183,9 +199,13 @@ function openPopup(node, group, anchor) {
 	const popup = document.createElement("div"); popup.className = "gjj-b13-popup"; protect(popup);
 	const head = document.createElement("div"); head.className = "gjj-b13-head"; head.innerHTML = `<span>${group.icon} ${group.title}</span>`;
 	const x = document.createElement("button"); x.textContent = "×"; x.onclick = () => closePopup(node); head.appendChild(x); popup.appendChild(head);
-	const toggleNames = group.key === "model" ? new Set(["keep_model", "pre_cleanup_resources", "enable_pre_upscale"]) : new Set();
+	const toggleNames = group.key === "model"
+		? new Set(["keep_model", "pre_cleanup_resources", "enable_pre_upscale"])
+		: (group.key === "timing" && widget(node, "enable_segmentation") ? new Set(["enable_segmentation"]) : new Set());
 	const toggleRow = toggleNames.size ? document.createElement("div") : null;
 	if (toggleRow) toggleRow.className = "gjj-b13-toggle-row";
+	if (toggleRow && group.key === "timing") toggleRow.style.gridTemplateColumns = "1fr";
+	if (toggleRow) popup.appendChild(toggleRow);
 	for (const name of group.fields) {
 		const reopen = () => setTimeout(() => { closePopup(node); openPopup(node, group, anchor); }, 0);
 		const item = widget(node, name);
@@ -198,7 +218,6 @@ function openPopup(node, group, anchor) {
 		}
 		const row = document.createElement("label"); row.className = "gjj-b13-row"; const label = document.createElement("span"); label.textContent = item.options?.display_name || name; row.append(label, input); popup.appendChild(row);
 	}
-	if (toggleRow?.childElementCount) popup.appendChild(toggleRow);
 	if (group.key === "model") popup.appendChild(GJJ_Utils.createModelTreeView({ node, entries: modelEntries(node), refresh: () => dirty(node), onApply: () => dirty(node) }));
 	document.body.appendChild(popup); node.__gjjB13Popup = popup; node.__gjjB13Active = group.key; node.__gjjB13GroupButtons.get(group.key)?.classList.add("on");
 	const rect = anchor.getBoundingClientRect(); let left = Math.min(rect.left, window.innerWidth - Math.min(450, window.innerWidth - 28) - 14); left = Math.max(14, left);
@@ -308,6 +327,7 @@ function setup(node) {
 	const link = document.createElement("button"); link.textContent = "🔗"; link.className = "link"; link.onclick = () => mediaLinked(node) ? rememberAndDisconnect(node) : restoreRemembered(node); node.__gjjB13Link = link; tools.appendChild(link);
 	node.__gjjB13GroupButtons = new Map(); for (const group of GROUPS) { const button = document.createElement("button"); button.textContent = group.icon; button.title = group.title; button.onclick = () => openPopup(node, group, button); node.__gjjB13GroupButtons.set(group.key, button); tools.appendChild(button); }
 	syncKeepModelButton(node);
+	syncSegmentationButton(node);
 	const run = document.createElement("button"); run.textContent = "▶️"; run.title = "只运行当前节点"; run.onclick = async () => { run.disabled = true; try { await queueOnlyCurrentNode(node); } finally { run.disabled = false; } }; tools.appendChild(run);
 	const status = document.createElement("div"); status.className = "gjj-b13-status"; status.textContent = "请选择或连接视频"; node.__gjjB13Status = status; root.append(tools, status, file);
 	file.onchange = async () => { const picked = file.files?.[0]; if (!picked) return; try { status.textContent = "正在导入视频..."; await upload(node, picked); } catch (error) { status.textContent = error?.message || "导入失败"; } finally { file.value = ""; } };
@@ -322,7 +342,7 @@ app.registerExtension({
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!NODE_NAMES.has(nodeData?.name)) return;
 		const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function (...args) { const result = created?.apply(this, args); queueMicrotask(() => setup(this)); return result; };
-		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { for (const item of this.widgets || []) hideWidget(item); syncLinkState(this); syncKeepModelButton(this); }); return result; };
+		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { for (const item of this.widgets || []) hideWidget(item); syncLinkState(this); syncKeepModelButton(this); syncSegmentationButton(this); }); return result; };
 		const executed = nodeType.prototype.onExecuted; nodeType.prototype.onExecuted = function (message) { const result = executed?.apply(this, arguments); const images = message?.gjj_images || message?.ui?.gjj_images; if (images) addSegmentPreview(this, images, message?.segment_count?.[0] || 1, message?.segment_count?.[0] || 1, message?.preview_label?.[0] || "final_video"); return result; };
 	},
 });
