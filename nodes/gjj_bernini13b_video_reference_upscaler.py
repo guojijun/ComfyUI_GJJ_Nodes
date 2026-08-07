@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,11 @@ import comfy.samplers
 import folder_paths
 from nodes import common_ksampler
 
-from .gjj_bernini import GJJBerniniConditioning, _encode_context_latent
+from .gjj_bernini import (
+    GJJBerniniConditioning,
+    _encode_bernini_reference_resources,
+    _encode_context_latent,
+)
 from .gjj_bernini13b_long_video_watermark_remover import (
     OUTPUT_TYPE,
     REFERENCE_RESOURCE_TYPE,
@@ -132,7 +137,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             "model_name": (model["models"], _hidden({"default": model["value"], "display_name": "Bernini 1.3B模型", "gjj_default_model": DEFAULT_MODEL, "gjj_missing_model": model["missing"]})),
             "clip_name": (clip["models"], _hidden({"default": clip["value"], "display_name": "UMT5 XXL", "gjj_default_model": DEFAULT_CLIP, "gjj_missing_model": clip["missing"]})),
             "vae_name": (vae["models"], _hidden({"default": vae["value"], "display_name": "Wan VAE", "gjj_default_model": DEFAULT_VAE, "gjj_missing_model": vae["missing"]})),
-            "reference_resources": (REFERENCE_RESOURCE_TYPE, {"display_name": "Media", "tooltip": "参考图片或参考视频帧；前端可把多路虚拟 Media 线映射到隐藏 reference_media_* 输入。"}),
+            "reference_resources": (REFERENCE_RESOURCE_TYPE, {"display_name": "参考媒体", "tooltip": "参考图片或参考视频帧；前端可把多路虚拟参考媒体线映射到隐藏 reference_media_* 输入。"}),
             "pre_cleanup_resources": ("BOOLEAN", _hidden({"default": True, "display_name": "预清理资源"})),
             "enable_pre_upscale": ("BOOLEAN", _hidden({"default": True, "display_name": "预放大源视频", "tooltip": "关闭时不检查、不加载放大模型。"})),
             "upscale_model_name": (upscale_models, _hidden({"default": preferred_upscale, "display_name": "放大模型", "gjj_default_model": preferred_upscale, "tooltip": "优先使用 RealESRGAN_x2plus.pth。"})),
@@ -181,6 +186,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         return loaded
 
     def upscale_video(self, **kwargs):
+        run_started = time.perf_counter()
         unique_id = _first(kwargs.get("unique_id"))
         prompt_info = _first(kwargs.get("prompt_info"))
         extra_pnginfo = _first(kwargs.get("extra_pnginfo"))
@@ -328,6 +334,23 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         reference_resources = _reference_resources(kwargs.get("reference_resources"))
         for ref_index in range(1, MAX_REFERENCE_MEDIA + 1):
             reference_resources.extend(_reference_resources(kwargs.get(f"reference_media_{ref_index}")))
+        reusable_reference_latents: list[torch.Tensor] = []
+        if segmentation_enabled and reference_resources:
+            reference_started = time.perf_counter()
+            _send_status(unique_id, "3/6 正在缓存跨段参考条件...", 0.29)
+            reusable_reference_latents = _encode_bernini_reference_resources(
+                vae,
+                segment_frames,
+                width,
+                height,
+                reference_resources,
+            )
+            logging.info(
+                "[GJJ] %s：缓存 %d 个跨段参考 latent，耗时 %.3f 秒",
+                NODE_NAME,
+                len(reusable_reference_latents),
+                time.perf_counter() - reference_started,
+            )
         generated: list[torch.Tensor] = []
         preview: list[dict[str, Any]] = []
         for index in range(segment_count):
@@ -353,7 +376,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
                 _number(kwargs.get("noise_strength"), 0.3),
                 str(_first(kwargs.get("normalize_noise"), "关闭")),
             )[0]
-            segment_references = list(reference_resources)
+            segment_references = [] if reusable_reference_latents else list(reference_resources)
             if segmentation_enabled and generated:
                 segment_references.append(generated[-1][-1:].contiguous())
             seg_positive, seg_negative, _empty = GJJBerniniConditioning().build(
@@ -366,6 +389,7 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
                 batch_size=1,
                 ref_max_size=max(64, _integer(kwargs.get("reference_max_size"), 1920)),
                 reference_resources=segment_references,
+                encoded_reference_latents=reusable_reference_latents,
             )
             sampled = common_ksampler(
                 model,
@@ -382,28 +406,29 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             decoded = _decode_bernini_frames(vae, sampled, {"vae_tiling": True, "tile_x": 272, "tile_y": 272})
             decoded = decoded[:actual_length].detach().cpu().contiguous()
             generated.append(decoded)
-            segment_preview = GJJ_VideoCombine().combine(
-                images=decoded,
-                frame_rate=effective_fps,
-                loop_count=0,
-                filename_prefix=f"gjj_bernini13b_reference_upscale_{index + 1:04d}",
-                format_name="video/h264-mp4",
-                pingpong=False,
-                save_output=False,
-                use_source_fps=False,
-                delete_tail_frame=False,
-                save_metadata=False,
-                trim_to_audio=False,
-                pix_fmt="auto",
-                crf="-1",
-                vae=None,
-                audio=None,
-                prompt=None,
-                extra_pnginfo=None,
-                unique_id=None,
-            )
-            preview = list(segment_preview.get("ui", {}).get("preview_media") or [])
-            _send_segment_preview(unique_id, preview, index + 1, segment_count, "segment_video")
+            if segmentation_enabled:
+                segment_preview = GJJ_VideoCombine().combine(
+                    images=decoded,
+                    frame_rate=effective_fps,
+                    loop_count=0,
+                    filename_prefix=f"gjj_bernini13b_reference_upscale_{index + 1:04d}",
+                    format_name="video/h264-mp4",
+                    pingpong=False,
+                    save_output=False,
+                    use_source_fps=False,
+                    delete_tail_frame=False,
+                    save_metadata=False,
+                    trim_to_audio=False,
+                    pix_fmt="auto",
+                    crf="-1",
+                    vae=None,
+                    audio=None,
+                    prompt=None,
+                    extra_pnginfo=None,
+                    unique_id=None,
+                )
+                preview = list(segment_preview.get("ui", {}).get("preview_media") or [])
+                _send_segment_preview(unique_id, preview, index + 1, segment_count, "segment_video")
 
         stitched = [generated[0]]
         stitched.extend(segment[1:] for segment in generated[1:])
@@ -440,6 +465,13 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             preview = final_preview
             _send_segment_preview(unique_id, preview, segment_count, segment_count, "final_video")
         _send_status(unique_id, f"6/6 完成：{total_frames} 帧 / {segment_count} 段 / 每段 {segment_frames} 帧 / {effective_fps:g} FPS", 1.0)
+        logging.info(
+            "[GJJ] %s：总耗时 %.3f 秒（%d 帧，%d 段）",
+            NODE_NAME,
+            time.perf_counter() - run_started,
+            total_frames,
+            segment_count,
+        )
         if not keep_model:
             _memory_cleanup(unique_id, "完成并释放模型...", clear_video_cache=False)
         return {

@@ -234,6 +234,26 @@ def _build_bernini_context(
     return context
 
 
+def _encode_bernini_reference_resources(
+    vae,
+    length: int,
+    width: int,
+    height: int,
+    reference_resources: list[torch.Tensor] | None,
+) -> list[torch.Tensor]:
+    """Encode reusable Bernini references once for callers processing several segments."""
+    if not reference_resources:
+        return []
+    context = _build_bernini_context(
+        vae,
+        length,
+        width,
+        height,
+        reference_resources=reference_resources,
+    )
+    return list(context.get("refs") or [])
+
+
 def _ref_optional_input(index: int):
     return (
         REFERENCE_IMAGE_TYPE,
@@ -297,6 +317,7 @@ class GJJBerniniConditioning:
         )
         reference_images = _reference_inputs(kwargs)
         reference_resources = kwargs.get("reference_resources")
+        encoded_reference_latents = kwargs.get("encoded_reference_latents") or []
         if any(_has_value(value) for key, value in kwargs.items() if _reference_index(key) is not None) and not reference_images:
             raise RuntimeError(f"参考图输入没有解析出有效图片。{FRAME_QUEUE_REQUIREMENT}")
         context_parts = _build_bernini_context(
@@ -311,6 +332,10 @@ class GJJBerniniConditioning:
             ref_max_size=int(ref_max_size),
         )
         context = []
+        context.extend(
+            item for item in encoded_reference_latents
+            if isinstance(item, torch.Tensor)
+        )
         context.extend(context_parts.get("refs") or [])
         if "video" in context_parts:
             context.append(context_parts["video"])

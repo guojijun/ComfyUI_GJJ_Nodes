@@ -100,7 +100,7 @@ def target_segments(layout: Any) -> tuple[tuple[int, int], tuple[int, int]]:
 
 def _native_module(inner: Any):
     module = importlib.import_module(type(inner).__module__)
-    required = ("PackedLayout", "unpatchify_video", "unpack_audio", "time_shift_sigma", "time_shift_slope")
+    required = ("PackedLayout", "unpatchify_video", "unpack_audio", "time_shift_sigma")
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
         raise RuntimeError(f"native MiniMax H3 module is missing required helpers: {', '.join(missing)}")
@@ -350,8 +350,14 @@ def _execute_forecast(
     original_t, original_h, original_w = state.original_video_shape
     video_out = video_out[:, :, :original_t, :original_h, :original_w]
     audio_out = module.unpack_audio(audio_projected)
-    slope = module.time_shift_slope(state.sigma_v, state.shift_v, state.shift_a).to(audio_out.dtype)
-    return [-video_out.to(video_x.dtype), (-slope) * audio_out.to(audio_x.dtype)]
+    # Older native H3 revisions converted the audio velocity at the output and
+    # exposed the derivative as time_shift_slope(). Newer revisions rescale the
+    # audio latent before _forward() and return the projected velocity directly.
+    time_shift_slope = getattr(module, "time_shift_slope", None)
+    if time_shift_slope is not None:
+        slope = time_shift_slope(state.sigma_v, state.shift_v, state.shift_a).to(audio_out.dtype)
+        audio_out = slope * audio_out
+    return [-video_out.to(video_x.dtype), -audio_out.to(audio_x.dtype)]
 
 
 def diffusion_model_wrapper(

@@ -30,6 +30,7 @@ from .gjj_spectrum_apply_minimax_h3 import GJJ_SpectrumApplyMiniMaxH3
 
 
 NODE_NAME = "GJJ_MiniMaxH3Studio"
+MAX_REFERENCE_MEDIA_2 = 15
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,AUDIO"
 UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload"
 
@@ -42,7 +43,7 @@ DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
 DEFAULT_ACCEL_LORA_KEYWORD = "minima_h3_turbo"
-DEFAULT_ACCEL_STEPS = 10
+DEFAULT_ACCEL_STEPS = 4
 MAX_AUDIO_DRIVEN_DURATION = 15.0
 DIALOGUE_LANGUAGE_TAGS = {
     "中文": "Chinese",
@@ -1185,7 +1186,8 @@ def _strip_library_manifest_payloads(prompt: str) -> str:
 
 def _normalize_picture_reference_tags(prompt: str) -> str:
     """MiniMax H3 直接使用 Picture 引用；拒绝推理模型额外创造 Subject 别名。"""
-    return re.sub(r"<Subject\s+(\d+)>", r"<Picture \1>", str(prompt or ""), flags=re.IGNORECASE)
+    normalized = re.sub(r"<Subject\s+(\d+)>", r"<Picture \1>", str(prompt or ""), flags=re.IGNORECASE)
+    return re.sub(r"@\s*图片\s*(\d+)", lambda match: f"<Picture {int(match.group(1))}>", normalized, flags=re.IGNORECASE)
 
 
 def _save_library_reference_debug_images(
@@ -1258,7 +1260,7 @@ class GJJ_MiniMaxH3Studio:
     def INPUT_TYPES(cls):
         fl_models, fl_default = _choices("diffusion_models", DEFAULT_FL_MODEL, (DEFAULT_FL_MODEL_KEYWORD,))
         ref_models, ref_default = _choices("diffusion_models", DEFAULT_REF_MODEL, (DEFAULT_REF_MODEL_KEYWORD,))
-        clips, clip_default = _choices("text_encoders", DEFAULT_CLIP, ("qwen3vl_32b", "minimax_h3"))
+        clips, clip_default = _choices("text_encoders", DEFAULT_CLIP, ("qwen3vl", "32b"))
         video_vaes, video_vae_default = _choices("vae", DEFAULT_VIDEO_VAE, ("minimax_h3", "video_vae"))
         audio_vaes, audio_vae_default = _choices("vae", DEFAULT_AUDIO_VAE, ("minimax_h3", "audio_vae"))
         samplers = list(comfy.samplers.KSampler.SAMPLERS)
@@ -1276,10 +1278,10 @@ class GJJ_MiniMaxH3Studio:
             reasoning_models[0],
         )
         default_lora_data = _default_accel_lora_data()
-        if "res_multistep" not in samplers:
-            samplers.insert(0, "res_multistep")
-        if "simple" not in schedulers:
-            schedulers.insert(0, "simple")
+        if "euler" not in samplers:
+            samplers.insert(0, "euler")
+        if "beta" not in schedulers:
+            schedulers.insert(0, "beta")
         return {
             "required": {},
             "optional": {
@@ -1292,8 +1294,8 @@ class GJJ_MiniMaxH3Studio:
                 "steps": ("INT", {"default": DEFAULT_ACCEL_STEPS, "min": 1, "max": 100, "step": 1, "display_name": "步数"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "display_name": "种子"}),
                 "randomize_seed": ("BOOLEAN", {"default": True, "display_name": "随机种子"}),
-                "sampler_name": (samplers, {"default": "res_multistep", "display_name": "采样器"}),
-                "scheduler": (schedulers, {"default": "simple", "display_name": "调度器"}),
+                "sampler_name": (samplers, {"default": "euler", "display_name": "采样器"}),
+                "scheduler": (schedulers, {"default": "beta", "display_name": "调度器"}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪"}),
                 "ref_image_size": (["match", "max"], {"default": "match", "display_name": "参考图尺寸"}),
                 "filename_prefix": ("STRING", {"default": "video/MiniMax_H3_Studio", "display_name": "文件名前缀"}),
@@ -1314,7 +1316,7 @@ class GJJ_MiniMaxH3Studio:
                 "reasoning_enabled": ("BOOLEAN", {"default": False, "display_name": "启用推理", "tooltip": "开启后使用 GJJ_GemmaTextGenerate 在生成视频前优化提示词；关闭时不会加载推理模型。"}),
                 "reasoning_model": (reasoning_models, {"default": reasoning_default, "display_name": "推理模型", "gjj_default_model": reasoning_default, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡", "gjj_model_keywords": [DEFAULT_REASONING_KEYWORD]}),
                 "reasoning_system_prompt": ("STRING", {"default": DEFAULT_REASONING_SYSTEM_PROMPT, "multiline": True, "display_name": "推理系统提示词"}),
-                "reference_media_3": (MEDIA_TYPE, {"display_name": "参考媒体 3", "tooltip": "第三个同级递归媒体入口；所有入口依次递归解包后按图片、视频、音频分类，并保持输入顺序。"}),
+                "reference_media_3": (MEDIA_TYPE, {"display_name": "参考媒体 3", "tooltip": "旧工作流兼容入口；新界面不再显示。"}),
                 "selected_actors_json": ("STRING", {"default": "[]", "display_name": "已选角色"}),
                 "selected_scenes_json": ("STRING", {"default": "[]", "display_name": "已选场景"}),
                 "global_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "全局提示词"}),
@@ -1348,6 +1350,14 @@ class GJJ_MiniMaxH3Studio:
                 "cache_clip": ("BOOLEAN", {"default": False, "display_name": "缓存CLIP", "tooltip": "最终提示词及参考条件未变化时复用上次 CLIP conditioning，跳过重复编码。"}),
                 "director_storyboard_json": ("STRING", {"default": "{}", "display_name": "导演分镜", "tooltip": "🎞️导演台保存的逐段帧范围和提示词。"}),
                 "use_video_size": ("BOOLEAN", {"default": False, "display_name": "视频尺寸", "tooltip": "使用递归解码后第一个视频的尺寸；没有视频时回退到画板尺寸。"}),
+                **{
+                    f"reference_media_2_{index}": (
+                        MEDIA_TYPE,
+                        {"default": None, "display_name": f"参考媒体 2 · {index}"},
+                    )
+                    for index in range(1, MAX_REFERENCE_MEDIA_2 + 1)
+                },
+                "external_prompt": ("STRING", {"forceInput": True, "display_name": "外部提示词", "tooltip": "连接后覆盖面板文本框内容，并在富文本框中实时预览。"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1383,29 +1393,38 @@ class GJJ_MiniMaxH3Studio:
             value = kwargs.get(name, default)
             return value[0] if isinstance(value, list) and value else value
 
+        director_scenes: list[dict[str, Any]] = []
+        try:
+            director_plan = json.loads(str(first("director_storyboard_json", "{}") or "{}"))
+            if isinstance(director_plan, dict) and director_plan.get("configured") and director_plan.get("enabled") and isinstance(director_plan.get("scenes"), list):
+                director_scenes = [scene for scene in director_plan["scenes"] if isinstance(scene, dict)]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            director_scenes = []
+        director_scene_media: list[tuple[dict[str, list[Any]], list[str]]] = [
+            _load_internal_media(json.dumps(scene.get("media") or [], ensure_ascii=False))
+            for scene in director_scenes
+        ]
+        has_director_media = any(any(scene_media.values()) or scene_texts for scene_media, scene_texts in director_scene_media)
+
         media = _collect_media(kwargs.get("reference_media"))
         _merge_media(media, _collect_media(kwargs.get("reference_media_2")))
         _merge_media(media, _collect_media(kwargs.get("reference_media_3")))
+        for ref_index in range(1, MAX_REFERENCE_MEDIA_2 + 1):
+            _merge_media(media, _collect_media(kwargs.get(f"reference_media_2_{ref_index}")))
         internal_texts: list[str] = []
         if not any(media.values()):
             internal_media, internal_texts = _load_internal_media(first("internal_media_json", "[]"))
             _merge_media(media, internal_media)
-        prompt = _strip_library_manifest_payloads("\n\n".join(
-            part for part in [str(first("prompt", "") or "").strip(), *[text.strip() for text in internal_texts]] if part
-        ))
+            if has_director_media:
+                media["images"] = []
+                internal_texts = []
+        prompt_source = first("external_prompt", "") if "external_prompt" in kwargs else first("prompt", "")
+        prompt = _normalize_picture_reference_tags(_strip_library_manifest_payloads("\n\n".join(
+            part for part in [str(prompt_source or "").strip(), *[text.strip() for text in internal_texts]] if part
+        )))
         panel_prompt_is_segmented = "---" in prompt
         panel_prompt_parts = [part.strip() for part in prompt.split("---") if part.strip()] or [prompt]
         raw_prompt_parts = list(panel_prompt_parts)
-        director_scenes: list[dict[str, Any]] = []
-        try:
-            director_plan = json.loads(str(first("director_storyboard_json", "{}") or "{}"))
-            if isinstance(director_plan, dict) and director_plan.get("configured") and isinstance(director_plan.get("scenes"), list):
-                director_scenes = [
-                    scene for scene in director_plan["scenes"]
-                    if isinstance(scene, dict)
-                ]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            director_scenes = []
         if director_scenes:
             raw_prompt_parts = []
             for scene_index, scene in enumerate(director_scenes):
@@ -1424,10 +1443,12 @@ class GJJ_MiniMaxH3Studio:
                     for item in (scene.get("scenes") or [])
                     if isinstance(item, dict) and str(item.get("name") or item.get("id") or "").strip()
                 ]
+                scene_texts = director_scene_media[scene_index][1] if scene_index < len(director_scene_media) else []
                 raw_prompt_parts.append("\n".join([
                     *actor_markers,
                     *scene_markers,
                     str(scene.get("prompt") or "").strip() or panel_fallback,
+                    *[text.strip() for text in scene_texts if text.strip()],
                 ]).strip())
             prompt = "\n---\n".join(raw_prompt_parts)
         prompt_actors = _prompt_library_references(prompt, "@")
@@ -1442,7 +1463,12 @@ class GJJ_MiniMaxH3Studio:
         mtv_audio_queue = _has_upstream_class(
             first("prompt_info"),
             unique_id,
-            ("reference_media", "reference_media_2", "reference_media_3"),
+            (
+                "reference_media",
+                "reference_media_2",
+                "reference_media_3",
+                *(f"reference_media_2_{index}" for index in range(1, MAX_REFERENCE_MEDIA_2 + 1)),
+            ),
             "GJJ_MTVAudioToPrompt",
         )
         _send_status(unique_id, "已解析上游角色与场景引用", 0.0, {
@@ -1471,7 +1497,7 @@ class GJJ_MiniMaxH3Studio:
             return [(kind, *available[name.casefold()]) for name in names if name.casefold() in available]
 
         segmented_library_media: list[tuple[str, dict[str, list[Any]], list[tuple[str, torch.Tensor, str, str]]]] = []
-        for raw_part in raw_prompt_parts:
+        for segment_index, raw_part in enumerate(raw_prompt_parts):
             speaking_actors = _speaking_library_names(raw_part, actor_candidates)
             if prompt_actors or bare_prompt_actors:
                 explicit_actors = _prompt_library_references(raw_part, "@")
@@ -1487,11 +1513,17 @@ class GJJ_MiniMaxH3Studio:
             part_images: list[torch.Tensor] = []
             part_references: list[tuple[str, str, int]] = []
             scene_lines: list[str] = []
-            for picture_number, (kind, image, name, _notes) in enumerate(part_assets, start=1):
+            # 富文本框中的 @图片N 始终先按外部连接图片编号；资料库图片从其后继续编号，
+            # 避免 @图片1 与 @角色名同时出现时都错误指向资料库角色图。
+            for picture_number, (kind, image, name, _notes) in enumerate(part_assets, start=external_image_count + 1):
                 part_images.append(image)
                 part_references.append((kind, name, picture_number))
                 if kind == "scene":
                     scene_lines.append(f"场景：<Picture {picture_number}>")
+            director_images = (
+                list(director_scene_media[min(segment_index, len(director_scene_media) - 1)][0]["images"])
+                if director_scene_media else []
+            )
             actor_picture_numbers = {
                 name.casefold(): picture_number
                 for kind, name, picture_number in part_references
@@ -1510,7 +1542,7 @@ class GJJ_MiniMaxH3Studio:
             if scene_lines:
                 segment_prompt = "\n".join([*scene_lines, segment_prompt]).strip()
             segmented_library_media.append((segment_prompt, {
-                "images": part_images + list(external_images),
+                "images": list(external_images) + part_images + director_images,
                 "videos": list(media["videos"]), "audios": list(media["audios"]),
                 "voice_audios": voice_audios,
             }, part_assets))
@@ -1537,7 +1569,9 @@ class GJJ_MiniMaxH3Studio:
                     image,
                     width,
                     height,
-                    ("裁剪" if assets[index][0] == "scene" else "适应") if index < len(assets) else fit_mode,
+                    (
+                        "裁剪" if assets[index - external_image_count][0] == "scene" else "适应"
+                    ) if external_image_count <= index < external_image_count + len(assets) else fit_mode,
                     resize_anchor,
                 )
                 for index, image in enumerate(segment_media["images"])
@@ -1851,11 +1885,11 @@ class GJJ_MiniMaxH3Studio:
                     )
                 patched_model, _ = GJJ_ModelPatchBundle().patch(
                     MODEL=loaded_model,
-                    启用SageAttention=turbo_lora_enabled or bool(first("patch_enable_sage_attention", True)),
+                    启用SageAttention=bool(first("patch_enable_sage_attention", True)),
                     SageAttention模式=str(first("patch_sage_attention_mode", "自动")),
-                    允许Sage编译=turbo_lora_enabled or bool(first("patch_allow_sage_compile", True)),
-                    启用FP16累积设置=turbo_lora_enabled or bool(first("patch_enable_fp16_accumulation", True)),
-                    FP16累积=turbo_lora_enabled or bool(first("patch_fp16_accumulation", True)),
+                    允许Sage编译=bool(first("patch_allow_sage_compile", True)),
+                    启用FP16累积设置=bool(first("patch_enable_fp16_accumulation", True)),
+                    FP16累积=bool(first("patch_fp16_accumulation", True)),
                     # MiniMax H3 不具备 LTXV 的 transformer_blocks.*.ff.net 结构；
                     # 保留旧输入槽位仅用于工作流兼容，执行时永远不应用该专用补丁。
                     启用LTXV前馈分块=False,
@@ -1866,7 +1900,7 @@ class GJJ_MiniMaxH3Studio:
                 )
                 patched_model = GJJ_SpectrumApplyMiniMaxH3().apply(
                     model=patched_model,
-                    enabled=turbo_lora_enabled or bool(first("spectrum_enabled", True)),
+                    enabled=bool(first("spectrum_enabled", True)),
                     blend_weight=float(first("spectrum_blend_weight", 0.50)),
                     degree=int(first("spectrum_degree", 4)),
                     ridge_lambda=float(first("spectrum_ridge_lambda", 0.10)),
@@ -1963,11 +1997,11 @@ class GJJ_MiniMaxH3Studio:
                 self._CLIP_CONDITIONING_CACHE.pop(clip_cache_slot, None)
             guider = _node_output_first(BasicGuider.execute(model=model, conditioning=positive))
             noise = _node_output_first(RandomNoise.execute(noise_seed=(seed + index) % (1 << 64)))
-            sampler_name = "res_multistep" if turbo_lora_enabled else str(first("sampler_name", "res_multistep"))
-            scheduler_name = "simple" if turbo_lora_enabled else str(first("scheduler", "simple"))
-            sampling_denoise = 1.0 if turbo_lora_enabled else float(first("denoise", 1.0))
+            sampler_name = str(first("sampler_name", "res_multistep"))
+            scheduler_name = str(first("scheduler", "simple"))
+            sampling_denoise = float(first("denoise", 1.0))
             sampler = _ksampler(sampler_name)
-            sampling_steps = DEFAULT_ACCEL_STEPS if turbo_lora_enabled else int(first("steps", DEFAULT_ACCEL_STEPS))
+            sampling_steps = int(first("steps", DEFAULT_ACCEL_STEPS))
             sigmas = _basic_sigmas(model, scheduler_name, sampling_steps, sampling_denoise)
             _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 正在采样...", (index + 0.2) / segment_count)
             sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(

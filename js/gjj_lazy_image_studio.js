@@ -35,6 +35,7 @@ const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
 const DEVICE_PREFERENCE_WIDGET_NAME = "device_preference";
 const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
 const IMAGE_RESIZE_CONFIG_WIDGET_NAME = "image_resize_config";
+const SAVE_FORMAT_WIDGET_NAME = "save_format";
 const MODEL_SOURCE_WIDGET_NAME = "model_source";
 const CHECKPOINT_WIDGET_NAME = "ckpt_name";
 const CHECKPOINT_MODEL_SOURCE_VALUE = "底模 checkpoint";
@@ -227,6 +228,7 @@ const OTHER_PANEL_WIDGETS = new Set([
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	SAVE_FORMAT_WIDGET_NAME,
 ]);
 const PROMPT_PANEL_WIDGETS = new Set([
 	"negative_prompt",
@@ -268,6 +270,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	SAVE_FORMAT_WIDGET_NAME,
 	MODEL_SOURCE_WIDGET_NAME,
 	CHECKPOINT_WIDGET_NAME,
 	...MODEL_OPTIMIZATION_WIDGETS,
@@ -493,6 +496,7 @@ const PANEL_SYNC_WIDGETS = [
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	SAVE_FORMAT_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
 	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 	MODEL_SOURCE_WIDGET_NAME,
@@ -521,6 +525,7 @@ const RESTORE_WIDGET_TYPES = {
 	scheduler: "combo",
 	denoise: "number",
 	grow_mask_by: "number",
+	[SAVE_FORMAT_WIDGET_NAME]: "combo",
 	[KEEP_MODEL_WIDGET_NAME]: "toggle",
 	[DEVICE_PREFERENCE_WIDGET_NAME]: "combo",
 	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: "toggle",
@@ -574,6 +579,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	SAVE_FORMAT_WIDGET_NAME,
 	BATCH_SOURCE_WIDGET,
 	KEEP_MODEL_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
@@ -604,6 +610,7 @@ const DEFAULT_PARAM_VALUES = {
 	scheduler: "simple",
 	denoise: 1.0,
 	grow_mask_by: 6,
+	[SAVE_FORMAT_WIDGET_NAME]: "jpg",
 	[BATCH_SOURCE_WIDGET]: "[]",
 	[KEEP_MODEL_WIDGET_NAME]: false,
 	[TEST_CONFIG_WIDGET_NAME]: "",

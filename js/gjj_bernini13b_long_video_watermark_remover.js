@@ -12,6 +12,9 @@ const PREVIEW_WIDGET = "gjj_bernini13b_watermark_preview";
 const UPLOAD_API = "/gjj/video_segment_queue/upload";
 const REMEMBERED_LINK = "gjj_bernini13b_remembered_media_link";
 const REF_LINKS_PROP = "gjj_bernini13b_reference_virtual_media_links";
+const REMEMBERED_REF_LINKS_PROP = "gjj_bernini13b_remembered_reference_virtual_media_links";
+const MINIMAX_NODE = "GJJ_MiniMaxH3Studio";
+const MINIMAX_REF_LINKS_PROP = "gjj_minimax_h3_reference_media_2_virtual_links";
 const MAX_REFERENCE_MEDIA = 15;
 const NODES = new Set();
 let outsideReady = false;
@@ -31,7 +34,14 @@ function mediaInputIndex(node) { return node?.inputs?.findIndex((item) => item?.
 function mediaLinked(node) { const i = mediaInputIndex(node); return i >= 0 && node.inputs[i]?.link != null; }
 function dirty(node) { node?.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); }
 function isReferenceUpscaler(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === "GJJ_Bernini13BVideoReferenceUpscaler"; }
-function referenceInputIndex(node) { return node?.inputs?.findIndex((item) => item?.name === REFERENCE_INPUT) ?? -1; }
+function isMiniMaxStudio(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === MINIMAX_NODE; }
+function isMultiReferenceTarget(node) { return isReferenceUpscaler(node) || isMiniMaxStudio(node); }
+function referenceConfig(node) {
+	return isMiniMaxStudio(node)
+		? { input: "reference_media_2", property: MINIMAX_REF_LINKS_PROP, transport: "reference_media_2_" }
+		: { input: REFERENCE_INPUT, property: REF_LINKS_PROP, transport: "reference_media_" };
+}
+function referenceInputIndex(node) { const name = referenceConfig(node).input; return node?.inputs?.findIndex((item) => item?.name === name) ?? -1; }
 function referenceDot(node) { const index = referenceInputIndex(node); if (index < 0) return null; const point = connectionPosition(node, true, index); return { x: point[0], y: point[1] }; }
 
 function hideWidget(item) {
@@ -233,28 +243,44 @@ function openPopup(node, group, anchor) {
 }
 
 function rememberAndDisconnect(node) {
-	const index = mediaInputIndex(node); if (index < 0) return;
-	const linkId = node.inputs[index]?.link; const link = app.graph?.links?.[linkId];
-	if (link) { node.properties ||= {}; node.properties[REMEMBERED_LINK] = { origin_id: link.origin_id, origin_slot: link.origin_slot }; }
-	node.disconnectInput?.(index); syncLinkState(node); dirty(node);
+	node.properties ||= {};
+	const index = mediaInputIndex(node);
+	if (index >= 0) {
+		const linkId = node.inputs[index]?.link; const link = app.graph?.links?.[linkId];
+		if (link) node.properties[REMEMBERED_LINK] = { origin_id: link.origin_id, origin_slot: link.origin_slot };
+		if (linkId != null) node.disconnectInput?.(index);
+	}
+	const referenceLinks = normalizeReferenceLinks(node, false);
+	if (referenceLinks.length) {
+		node.properties[REMEMBERED_REF_LINKS_PROP] = referenceLinks.map((item) => ({ ...item }));
+		node.properties[REF_LINKS_PROP] = [];
+	}
+	syncLinkState(node); dirty(node);
 }
 
 function restoreRemembered(node) {
-	const saved = node.properties?.[REMEMBERED_LINK]; const index = mediaInputIndex(node); if (!saved || index < 0) return;
-	const origin = app.graph?.getNodeById?.(saved.origin_id); if (!origin?.connect) return;
-	origin.connect(saved.origin_slot, node, index); syncLinkState(node); dirty(node);
+	const saved = node.properties?.[REMEMBERED_LINK]; const index = mediaInputIndex(node);
+	const origin = app.graph?.getNodeById?.(saved?.origin_id);
+	if (saved && index >= 0 && origin?.connect) origin.connect(saved.origin_slot, node, index);
+	const rememberedReferences = node.properties?.[REMEMBERED_REF_LINKS_PROP];
+	if (Array.isArray(rememberedReferences)) node.properties[REF_LINKS_PROP] = rememberedReferences.map((item) => ({ ...item }));
+	normalizeReferenceLinks(node);
+	syncLinkState(node); dirty(node);
 }
 
 function syncLinkState(node) {
-	const linked = mediaLinked(node); const remembered = Boolean(node.properties?.[REMEMBERED_LINK]);
-	if (node.__gjjB13Folder) { node.__gjjB13Folder.disabled = linked; node.__gjjB13Folder.title = linked ? "已有 VIDEO/IMAGE 链接，内部视频选择已禁用" : "打开本地视频"; }
-	if (node.__gjjB13Link) { node.__gjjB13Link.classList.toggle("show", linked || remembered); node.__gjjB13Link.classList.toggle("detached", !linked && remembered); node.__gjjB13Link.title = linked ? "断开并记住上游接口" : "恢复记住的上游接口"; }
+	const sourceLinked = mediaLinked(node);
+	const linked = sourceLinked || (isReferenceUpscaler(node) && normalizeReferenceLinks(node).length > 0);
+	const remembered = Boolean(node.properties?.[REMEMBERED_LINK]) || (Array.isArray(node.properties?.[REMEMBERED_REF_LINKS_PROP]) && node.properties[REMEMBERED_REF_LINKS_PROP].length > 0);
+	if (node.__gjjB13Folder) { node.__gjjB13Folder.disabled = sourceLinked; node.__gjjB13Folder.title = sourceLinked ? "已有 VIDEO/IMAGE 链接，内部视频选择已禁用" : "打开本地视频"; }
+	if (node.__gjjB13Link) { node.__gjjB13Link.classList.toggle("show", linked || remembered); node.__gjjB13Link.classList.toggle("detached", !linked && remembered); node.__gjjB13Link.title = linked ? "断开并记住全部上游接口" : "恢复记住的全部上游接口"; }
 }
 
 function ensureReferenceLinks(node) {
 	node.properties ||= {};
-	if (!Array.isArray(node.properties[REF_LINKS_PROP])) node.properties[REF_LINKS_PROP] = [];
-	return node.properties[REF_LINKS_PROP];
+	const property = referenceConfig(node).property;
+	if (!Array.isArray(node.properties[property])) node.properties[property] = [];
+	return node.properties[property];
 }
 
 function normalizeReferenceLinks(node, removeMissing = true) {
@@ -273,7 +299,7 @@ function normalizeReferenceLinks(node, removeMissing = true) {
 		kept.push({ source_id: sourceId, source_slot: sourceSlot, source_type: String(link?.source_type || "*"), order: kept.length + 1 });
 		if (kept.length >= MAX_REFERENCE_MEDIA) break;
 	}
-	node.properties[REF_LINKS_PROP] = kept;
+	node.properties[referenceConfig(node).property] = kept;
 	return kept;
 }
 
@@ -281,9 +307,9 @@ function slotType(slot) {
 	return String(slot?.type || slot?.datatype || slot?.label || "").toUpperCase();
 }
 
-function isReferenceMediaType(type) {
+function isReferenceMediaType(type, allowAudio = false) {
 	const value = String(type || "").toUpperCase();
-	return value.includes("IMAGE") || value.includes("VIDEO") || value.includes("GJJ_BATCH_IMAGE") || value === "*";
+	return value.includes("IMAGE") || value.includes("VIDEO") || value.includes("GJJ_BATCH_IMAGE") || (allowAudio && value.includes("AUDIO")) || value === "*";
 }
 
 function connectionPosition(node, isInput, slotIndex) {
@@ -346,12 +372,13 @@ function referenceMediaKind(sourceType, sourceNode = null) {
 }
 
 function addReferenceVirtualLink(targetNode, sourceNode, sourceSlot, sourceType) {
-	if (!isReferenceUpscaler(targetNode) || !sourceNode || !isReferenceMediaType(sourceType)) return false;
+	if (!isMultiReferenceTarget(targetNode) || !sourceNode || !isReferenceMediaType(sourceType, isMiniMaxStudio(targetNode))) return false;
 	const links = normalizeReferenceLinks(targetNode, false);
 	if (links.length >= MAX_REFERENCE_MEDIA) return false;
 	if (links.some((link) => Number(link.source_id) === Number(sourceNode.id) && Number(link.source_slot) === Number(sourceSlot))) return false;
 	links.push({ source_id: Number(sourceNode.id), source_slot: Number(sourceSlot) || 0, source_type: String(sourceType || "*"), media_type: referenceMediaKind(sourceType, sourceNode), order: links.length + 1 });
 	normalizeReferenceLinks(targetNode, false);
+	if (isReferenceUpscaler(targetNode)) syncLinkState(targetNode);
 	dirty(targetNode);
 	return true;
 }
@@ -361,6 +388,7 @@ function removeReferenceVirtualLink(node, index) {
 	if (index < 0 || index >= links.length) return false;
 	links.splice(index, 1);
 	normalizeReferenceLinks(node, false);
+	if (isReferenceUpscaler(node)) syncLinkState(node);
 	dirty(node);
 	return true;
 }
@@ -395,7 +423,7 @@ function drawReferenceLinks(canvas, ctx) {
 	const graph = canvas?.graph || app.graph;
 	if (!graph?._nodes || canvas.links_render_mode === globalThis.LiteGraph?.HIDDEN_LINK) return;
 	for (const node of graph._nodes) {
-		if (!isReferenceUpscaler(node)) continue;
+		if (!isMultiReferenceTarget(node)) continue;
 		for (const link of normalizeReferenceLinks(node)) {
 			const geometry = referenceLinkGeometry(node, link);
 			if (!geometry) continue;
@@ -434,7 +462,7 @@ function drawReferenceLinks(canvas, ctx) {
 function hitReferenceLinks(graph, x, y) {
 	let best = null;
 	for (const node of graph?._nodes || []) {
-		if (!isReferenceUpscaler(node)) continue;
+		if (!isMultiReferenceTarget(node)) continue;
 		normalizeReferenceLinks(node).forEach((link, index) => {
 			const geometry = referenceLinkGeometry(node, link);
 			if (!geometry) return;
@@ -486,7 +514,7 @@ function patchReferenceCanvas() {
 	canvas.processMouseUp = function processMouseUpWithGjjReferenceLinks(event) {
 		const output = connectingOutput(this);
 		const [x, y] = graphPosition(this, event);
-		const target = (this.graph || app.graph)?._nodes?.find((node) => isReferenceUpscaler(node) && (() => {
+		const target = (this.graph || app.graph)?._nodes?.find((node) => isMultiReferenceTarget(node) && (() => {
 			const dot = referenceDot(node);
 			return dot && Math.hypot(x - dot.x, y - dot.y) <= 18;
 		})());
@@ -509,16 +537,17 @@ function patchReferenceGraphToPrompt() {
 		const promptData = await original.apply(this, arguments);
 		const output = promptData?.output || {};
 		for (const node of app.graph?._nodes || []) {
-			if (!isReferenceUpscaler(node)) continue;
+			if (!isMultiReferenceTarget(node)) continue;
 			absorbNativeReferenceLink(node);
 			const promptNode = output[String(node.id)];
 			if (!promptNode) continue;
 			promptNode.inputs ||= {};
-			delete promptNode.inputs[REFERENCE_INPUT];
-			for (let index = 1; index <= MAX_REFERENCE_MEDIA; index += 1) delete promptNode.inputs[`reference_media_${index}`];
+			const config = referenceConfig(node);
+			delete promptNode.inputs[config.input];
+			for (let index = 1; index <= MAX_REFERENCE_MEDIA; index += 1) delete promptNode.inputs[`${config.transport}${index}`];
 			const links = normalizeReferenceLinks(node).filter((link) => Boolean(output[String(link.source_id)]));
 			links.forEach((link, index) => {
-				promptNode.inputs[`reference_media_${index + 1}`] = [String(link.source_id), Number(link.source_slot) || 0];
+				promptNode.inputs[`${config.transport}${index + 1}`] = [String(link.source_id), Number(link.source_slot) || 0];
 			});
 		}
 		return promptData;
@@ -526,16 +555,18 @@ function patchReferenceGraphToPrompt() {
 }
 
 function pruneReferenceTransportInputs(nodeData) {
-	if (nodeData?.name !== "GJJ_Bernini13BVideoReferenceUpscaler") return;
 	const optional = nodeData?.input?.optional;
 	if (!optional) return;
-	for (const name of Object.keys(optional)) {
-		if (/^reference_media_\d+$/.test(name)) delete optional[name];
+	if (nodeData?.name === "GJJ_Bernini13BVideoReferenceUpscaler") {
+		for (const name of Object.keys(optional)) if (/^reference_media_\d+$/.test(name)) delete optional[name];
+	} else if (nodeData?.name === MINIMAX_NODE) {
+		delete optional.reference_media_3;
+		for (const name of Object.keys(optional)) if (/^reference_media_2_\d+$/.test(name)) delete optional[name];
 	}
 }
 
 function absorbNativeReferenceLink(node) {
-	if (!isReferenceUpscaler(node) || node.__gjjB13AbsorbingReferenceLink) return false;
+	if (!isMultiReferenceTarget(node) || node.__gjjB13AbsorbingReferenceLink) return false;
 	const inputIndex = referenceInputIndex(node);
 	if (inputIndex < 0) return false;
 	const input = node.inputs?.[inputIndex];
@@ -643,7 +674,7 @@ function setup(node) {
 	const root = document.createElement("div"); root.className = "gjj-b13-wmr"; protect(root); node.__gjjB13Root = root;
 	const tools = document.createElement("div"); tools.className = "gjj-b13-tools"; const file = document.createElement("input"); file.type = "file"; file.accept = "video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv,.wmv,.flv,.mpeg,.mpg"; file.style.display = "none";
 	const folder = document.createElement("button"); folder.textContent = "📁"; folder.onclick = () => { if (!folder.disabled) file.click(); }; node.__gjjB13Folder = folder; tools.appendChild(folder);
-	const link = document.createElement("button"); link.textContent = "🔗"; link.className = "link"; link.onclick = () => mediaLinked(node) ? rememberAndDisconnect(node) : restoreRemembered(node); node.__gjjB13Link = link; tools.appendChild(link);
+	const link = document.createElement("button"); link.textContent = "🔗"; link.className = "link"; link.onclick = () => (mediaLinked(node) || (isReferenceUpscaler(node) && normalizeReferenceLinks(node).length > 0)) ? rememberAndDisconnect(node) : restoreRemembered(node); node.__gjjB13Link = link; tools.appendChild(link);
 	node.__gjjB13GroupButtons = new Map(); for (const group of GROUPS) { const button = document.createElement("button"); button.textContent = group.icon; button.title = group.title; button.onclick = () => openPopup(node, group, button); node.__gjjB13GroupButtons.set(group.key, button); tools.appendChild(button); }
 	syncKeepModelButton(node);
 	syncSegmentationButton(node);
@@ -668,6 +699,17 @@ app.registerExtension({
 	name: "GJJ.Bernini13BLongVideoWatermarkRemover",
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		pruneReferenceTransportInputs(nodeData);
+		if (nodeData?.name === MINIMAX_NODE) {
+			patchReferenceCanvas();
+			patchReferenceGraphToPrompt();
+			const created = nodeType.prototype.onNodeCreated;
+			nodeType.prototype.onNodeCreated = function (...args) { const result = created?.apply(this, args); queueMicrotask(() => { patchReferenceCanvas(); patchReferenceGraphToPrompt(); normalizeReferenceLinks(this); absorbNativeReferenceLink(this); }); return result; };
+			const configured = nodeType.prototype.onConfigure;
+			nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { normalizeReferenceLinks(this); absorbNativeReferenceLink(this); }); return result; };
+			const connections = nodeType.prototype.onConnectionsChange;
+			nodeType.prototype.onConnectionsChange = function (...args) { const result = connections?.apply(this, args); queueMicrotask(() => absorbNativeReferenceLink(this)); return result; };
+			return;
+		}
 		if (!NODE_NAMES.has(nodeData?.name)) return;
 		const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function (...args) { const result = created?.apply(this, args); queueMicrotask(() => setup(this)); return result; };
 		const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (...args) { const result = configured?.apply(this, args); queueMicrotask(() => { if (isReferenceUpscaler(this)) normalizeReferenceLinks(this); for (const item of this.widgets || []) hideWidget(item); syncLinkState(this); syncKeepModelButton(this); syncSegmentationButton(this); }); return result; };

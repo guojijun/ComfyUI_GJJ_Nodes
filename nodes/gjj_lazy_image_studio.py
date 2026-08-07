@@ -2221,6 +2221,20 @@ def _lazy_image_resize_config(value: Any) -> dict[str, Any]:
     return config
 
 
+def _lazy_image_save_format(value: Any) -> tuple[str, str, str]:
+    selected = str(value or "jpg").strip().lower()
+    if selected in {"jpeg", "jpg"}:
+        return "jpg", "JPEG", ".jpg"
+    if selected == "webp":
+        return "webp", "WEBP", ".webp"
+    return "png", "PNG", ".png"
+
+
+def _write_lazy_image_outputs(images: Any, save_format: str) -> list[dict[str, Any]]:
+    _, pillow_format, suffix = _lazy_image_save_format(save_format)
+    return gjjutils_write_temp_tensor_images(images, format=pillow_format, suffix=suffix)
+
+
 def _largest_input_canvas_size(
     pairs: list[dict[str, Any]], fallback_width: int, fallback_height: int
 ) -> tuple[int, int]:
@@ -3116,6 +3130,17 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "save_format": (
+                        ["jpg", "png", "webp"],
+                        {
+                            "default": "jpg",
+                            "display_name": "保存格式",
+                            "tooltip": "选择生成结果写入任务预览文件时使用的图片格式。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -3993,6 +4018,9 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
+        save_format, _, _ = _lazy_image_save_format(
+            _unwrap_list_input(kwargs.pop("save_format", "jpg"))
+        )
         image_resize_config_value = _unwrap_list_input(
             kwargs.pop("image_resize_config", "")
         )
@@ -4364,7 +4392,7 @@ class GJJ_LazyImageStudio:
                     raise RuntimeError("模型测试没有生成任何图片。")
                 image = torch.cat(_pad_images_to_common_size(captioned_images), dim=0)
                 elapsed_time = time.time() - test_started
-                preview_images = gjjutils_write_temp_tensor_images(image)
+                preview_images = _write_lazy_image_outputs(image, save_format)
                 _send_status(unique_id, f"模型测试完成：{len(captioned_images)} 项  耗时：{elapsed_time:.1f}s")
                 return {
                     "ui": {
@@ -4390,7 +4418,7 @@ class GJJ_LazyImageStudio:
             _send_status(unique_id, f"测试跳过：{first_line}")
             _send_soft_test_error(unique_id, first_line)
             image = _make_soft_error_image(width, height)
-            preview_images = gjjutils_write_temp_tensor_images(image)
+            preview_images = _write_lazy_image_outputs(image, save_format)
             effective_params = {
                 "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),
                 "global_prompt": global_prompt,
@@ -4711,6 +4739,7 @@ class GJJ_LazyImageStudio:
                     "force_empty_latent_reference": _as_bool(force_empty_latent_reference),
                     "use_input_image_size": bool(use_input_image_size),
                     "image_resize_config": image_resize_config,
+                    "save_format": save_format,
                     "pairs": _pairs_signature(pairs),
                     "krea2_edit_lora_strength": float(krea2_edit_lora_strength),
                     "krea2_style_reference": bool(is_krea2_style_reference),
@@ -5223,7 +5252,7 @@ class GJJ_LazyImageStudio:
             elapsed_str = f"{elapsed_time:.1f}s"
 
             # gjj_images 给节点内自定义预览；images 给 ComfyUI 任务队列/历史缩略图。
-            preview_images = gjjutils_write_temp_tensor_images(image)
+            preview_images = _write_lazy_image_outputs(image, save_format)
             _send_preview_manifest(unique_id, preview_images)
 
             # JPG 缩略图已经推送到节点面板后再报告完成；后续模型/显存清理不会阻塞结果显示。
@@ -5256,6 +5285,7 @@ class GJJ_LazyImageStudio:
                 "keep_model_loaded": bool(keep_model_loaded),
                 "use_input_image_size": bool(use_input_image_size),
                 "image_resize_config": image_resize_config,
+                "save_format": save_format,
                 **optimization_params,
             }
 
