@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,15 @@ from .gjj_video_universal_model_loader import _load_clip, _load_unet_model, _loa
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle, MISSING_SAGE_HANDLING_MODES, SAGE_ATTENTION_MODES
 from .gjj_multi_lora_chain import apply_lora_chain_config, parse_lora_data
 from .gjj_spectrum_apply_minimax_h3 import GJJ_SpectrumApplyMiniMaxH3
+from .common_utils.temp_files import (
+    GJJ_TEMP_SUBFOLDER,
+    gjjutils_read_temp_bytes,
+    gjjutils_read_temp_pil_image,
+    gjjutils_temp_path,
+    gjjutils_write_temp_bytes,
+    gjjutils_write_temp_file,
+    gjjutils_write_temp_tensor_images,
+)
 
 
 NODE_NAME = "GJJ_MiniMaxH3Studio"
@@ -549,8 +557,6 @@ def _register_upload_route() -> None:
 
         async def upload(request):
             reader = await request.multipart()
-            destination = Path(folder_paths.get_input_directory()) / "gjj_minimax_h3_studio"
-            destination.mkdir(parents=True, exist_ok=True)
             items = []
             while True:
                 part = await reader.next()
@@ -560,14 +566,13 @@ def _register_upload_route() -> None:
                     continue
                 original = Path(str(part.filename)).name
                 suffix = Path(original).suffix.lower()
-                filename = f"{uuid.uuid4().hex}_{original}"
-                target = destination / filename
-                with target.open("wb") as handle:
-                    while chunk := await part.read_chunk():
-                        handle.write(chunk)
+                content = bytearray()
+                while chunk := await part.read_chunk():
+                    content.extend(chunk)
                 media_type = "text" if suffix in {".txt", ".md", ".prompt"} else ("image" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"} else ("audio" if suffix in {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"} else "video"))
-                preview_text = target.read_text(encoding="utf-8", errors="replace")[:1200] if media_type == "text" else ""
-                items.append({"filename": filename, "subfolder": "gjj_minimax_h3_studio", "type": "input", "media_type": media_type, "original_name": original, "preview_text": preview_text})
+                info = gjjutils_write_temp_bytes(bytes(content), suffix=suffix or ".bin")
+                preview_text = bytes(content).decode("utf-8", errors="replace")[:1200] if media_type == "text" else ""
+                items.append({**info, "media_type": media_type, "original_name": original, "preview_text": preview_text})
             return web.json_response({"ok": True, "items": items})
 
         server.routes.post(UPLOAD_ROUTE)(upload)
@@ -666,17 +671,19 @@ def _load_internal_media(raw: Any) -> tuple[dict[str, list[Any]], list[str]]:
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
-        path = (input_root / str(item.get("subfolder") or "") / Path(str(item.get("filename") or "")).name).resolve()
-        if input_root not in path.parents or not path.is_file():
+        is_gjj_temp = str(item.get("type") or "").lower() == "temp" and str(item.get("subfolder") or "").replace("\\", "/").strip("/") == GJJ_TEMP_SUBFOLDER
+        path = gjjutils_temp_path(str(item.get("filename") or "")) if is_gjj_temp else (input_root / str(item.get("subfolder") or "") / Path(str(item.get("filename") or "")).name).resolve()
+        if (not is_gjj_temp and input_root not in path.parents) or not path.is_file():
             continue
         media_type = str(item.get("media_type") or "").lower()
         try:
             if media_type == "text":
-                texts.append(path.read_text(encoding="utf-8", errors="replace"))
+                content = gjjutils_read_temp_bytes(item) if is_gjj_temp else path.read_bytes()
+                texts.append(content.decode("utf-8", errors="replace"))
             elif media_type == "image":
                 import numpy as np
                 from PIL import Image, ImageOps
-                image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+                image = gjjutils_read_temp_pil_image(item).convert("RGB") if is_gjj_temp else ImageOps.exif_transpose(Image.open(path)).convert("RGB")
                 media["images"].append(torch.from_numpy(np.asarray(image).astype("float32") / 255.0).unsqueeze(0))
             elif media_type == "audio":
                 import torchaudio
@@ -906,7 +913,12 @@ def _prompt_library_references(prompt: str, marker: str, *, require_marker: bool
 
 
 def _library_reference_assets(
-    kind: str, names: list[str], reference_width: int | None = None, reference_height: int | None = None,
+    kind: str,
+    names: list[str],
+    reference_width: int | None = None,
+    reference_height: int | None = None,
+    *,
+    make_actor_board: bool = True,
 ) -> list[tuple[torch.Tensor, str, str]]:
     root_name = "character_library" if kind == "actor" else "scene_library"
     root = Path(str(getattr(folder_paths, "models_dir", "") or "")) / "GJJ" / root_name
@@ -940,9 +952,9 @@ def _library_reference_assets(
             continue
         try:
             import numpy as np
-            from PIL import Image, ImageOps
-            image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-            if kind == "actor":
+            temp_info = gjjutils_write_temp_file(path)
+            image = gjjutils_read_temp_pil_image(temp_info).convert("RGB")
+            if kind == "actor" and make_actor_board:
                 try:
                     from .gjj_storyboard_grid_generator import _make_qwen_direct_character_reference_boards
 
@@ -1242,13 +1254,37 @@ def _reasoning_visual_signature(images: list[Any]) -> str:
     return digest.hexdigest()
 
 
+def _reference_resource_batch(images: list[Any]) -> list[torch.Tensor]:
+    """Return each actually used picture as an independent one-frame reference resource."""
+    import numpy as np
+
+    unique_images: list[torch.Tensor] = []
+    seen: set[str] = set()
+    for image in images:
+        signature = _reasoning_visual_signature([image])
+        if signature in seen:
+            continue
+        seen.add(signature)
+        infos = gjjutils_write_temp_tensor_images(image, format="PNG", suffix=".png", media_type="image")
+        for info in infos:
+            pil_image = gjjutils_read_temp_pil_image(info).convert("RGB")
+            tensor = torch.from_numpy(np.asarray(pil_image).astype("float32") / 255.0).unsqueeze(0)
+            unique_images.append(tensor)
+    return [image.contiguous().cpu() for image in unique_images]
+
+
 class GJJ_MiniMaxH3Studio:
     CATEGORY = "GJJ/💗 一键生成"
     FUNCTION = "generate"
     INPUT_IS_LIST = True
     OUTPUT_NODE = True
-    RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("生成视频",)
+    RETURN_TYPES = ("VIDEO", "GJJ_BATCH_IMAGE,IMAGE")
+    RETURN_NAMES = ("生成视频", "引用资源")
+    OUTPUT_IS_LIST = (False, True)
+    OUTPUT_TOOLTIPS = (
+        "最终生成并保存的视频。",
+        "本次实际使用的外部输入、角色库、场景库及导演台原图；保持原始分辨率，按首次使用顺序去重并以独立单帧资源传给下游。",
+    )
     DESCRIPTION = "MiniMax H3 单节点工作室：按图片数量显示参考、首帧、尾帧、首尾帧或分段首尾帧分支；多图分段会按相邻图片生成并去重边界首帧。"
     SEARCH_ALIASES = ["MiniMax H3 Studio", "海螺单节点", "T2V I2V Ref2V"]
     GJJ_UI = {"style_reference": "GJJ_BerniniStudio", "model_keyword": "minimax_h3"}
@@ -1393,6 +1429,10 @@ class GJJ_MiniMaxH3Studio:
             value = kwargs.get(name, default)
             return value[0] if isinstance(value, list) and value else value
 
+        ref_image_size = str(first("ref_image_size", "match") or "match")
+        if ref_image_size not in {"match", "max"}:
+            ref_image_size = "match"
+
         director_scenes: list[dict[str, Any]] = []
         try:
             director_plan = json.loads(str(first("director_storyboard_json", "{}") or "{}"))
@@ -1487,9 +1527,24 @@ class GJJ_MiniMaxH3Studio:
             total_pixels = max(0.2, min(2.0, float(first("megapixels", 0.4)))) * 1024.0 * 1024.0
             panel_width = max(32, round((total_pixels * aspect_width / aspect_height) ** 0.5 / 32.0) * 32)
             panel_height = max(32, round((total_pixels * aspect_height / aspect_width) ** 0.5 / 32.0) * 32)
+        actor_reference_width, actor_reference_height = panel_width, panel_height
+        if ref_image_size == "max":
+            scale = 2048.0 / max(1, panel_width, panel_height)
+            actor_reference_width = max(64, round(panel_width * scale / 32.0) * 32)
+            actor_reference_height = max(64, round(panel_height * scale / 32.0) * 32)
         pooled_assets = {
             "scene": _library_reference_assets("scene", selected_scenes, panel_width, panel_height),
-            "actor": _library_reference_assets("actor", actor_candidates, panel_width, panel_height),
+            "actor": _library_reference_assets(
+                "actor", actor_candidates, actor_reference_width, actor_reference_height,
+            ),
+        }
+        original_pooled_assets = {
+            "scene": _library_reference_assets("scene", selected_scenes, make_actor_board=False),
+            "actor": _library_reference_assets("actor", actor_candidates, make_actor_board=False),
+        }
+        original_asset_by_key = {
+            kind: {name.casefold(): image for image, name, _notes in assets}
+            for kind, assets in original_pooled_assets.items()
         }
 
         def part_library_assets(kind: str, names: list[str]) -> list[tuple[str, torch.Tensor, str, str]]:
@@ -1549,6 +1604,16 @@ class GJJ_MiniMaxH3Studio:
         library_assets = list(dict.fromkeys(
             (asset[0], asset[2].casefold()) for _part, _part_media, assets in segmented_library_media for asset in assets
         ))
+        reference_source_images = list(external_images)
+        for segment_index, (_part, _part_media, assets) in enumerate(segmented_library_media):
+            for kind, _prepared_image, name, _notes in assets:
+                original_image = original_asset_by_key.get(kind, {}).get(name.casefold())
+                if original_image is not None:
+                    reference_source_images.append(original_image)
+            if director_scene_media:
+                reference_source_images.extend(
+                    director_scene_media[min(segment_index, len(director_scene_media) - 1)][0]["images"]
+                )
         has_library_voices = any(segment_media.get("voice_audios") for _part, segment_media, _assets in segmented_library_media)
         media["images"] = list(segmented_library_media[0][1]["images"]) if segmented_library_media else external_images
         use_video_size = bool(first("use_video_size", False))
@@ -1563,15 +1628,16 @@ class GJJ_MiniMaxH3Studio:
         )
         fit_mode = str(first("resize_fit_mode", "裁剪"))
         resize_anchor = str(first("resize_anchor", "上"))
+        preserve_reference_resolution = ref_image_size == "max" and (
+            bool(library_assets) or str(first("image_branch", "参考") or "参考") == "参考"
+        )
         for segment_index, (_segment_prompt, segment_media, assets) in enumerate(segmented_library_media):
             segment_media["images"] = [
+                image if preserve_reference_resolution else
                 _resize_visual(
-                    image,
-                    width,
-                    height,
-                    (
-                        "裁剪" if assets[index - external_image_count][0] == "scene" else "适应"
-                    ) if external_image_count <= index < external_image_count + len(assets) else fit_mode,
+                    image, width, height,
+                    ("裁剪" if assets[index - external_image_count][0] == "scene" else "适应")
+                    if external_image_count <= index < external_image_count + len(assets) else fit_mode,
                     resize_anchor,
                 )
                 for index, image in enumerate(segment_media["images"])
@@ -1590,6 +1656,7 @@ class GJJ_MiniMaxH3Studio:
             segment_media["videos"] = prepared_videos
         if not segmented_library_media:
             _align_media(media, width, height, fit_mode, resize_anchor)
+        reference_resources = _reference_resource_batch(reference_source_images)
         debug_assets = [
             (kind, image, name, notes)
             for kind in ("scene", "actor") for image, name, notes in pooled_assets[kind]
@@ -1689,7 +1756,10 @@ class GJJ_MiniMaxH3Studio:
                 inferred_parts: list[str] = []
                 for infer_index, raw_part in enumerate(prompt_parts):
                     protected_part, protected_dialogue = _protect_reasoning_dialogue(raw_part)
-                    reasoning_images = segmented_library_media[infer_index][1]["images"]
+                    reasoning_images = [
+                        _resize_visual(image, width, height, "适应", "中")
+                        for image in segmented_library_media[infer_index][1]["images"]
+                    ]
                     reasoning_media = torch.cat(reasoning_images, dim=0) if reasoning_images else None
                     _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
                     generated = GJJ_GemmaTextGenerate().generate(
@@ -1930,7 +2000,7 @@ class GJJ_MiniMaxH3Studio:
                 "width": width,
                 "height": height,
                 "length": segment_length,
-                "ref_image_size": str(first("ref_image_size", "match")),
+                "ref_image_size": ref_image_size,
                 "images": _reasoning_visual_signature(list(current_media["images"])),
                 "videos": _reasoning_visual_signature([
                     video[0] for video in current_media["videos"] if isinstance(video, (list, tuple)) and video
@@ -1972,7 +2042,7 @@ class GJJ_MiniMaxH3Studio:
                         width=width,
                         height=height,
                         length=segment_length,
-                        ref_image_size=str(first("ref_image_size", "match")),
+                        ref_image_size=ref_image_size,
                         ref_images=ref_images,
                         ref_videos=ref_videos,
                         ref_video_audios=ref_video_audios,
@@ -2052,7 +2122,7 @@ class GJJ_MiniMaxH3Studio:
         ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"], "parsed_actors": selected_actors, "parsed_scenes": selected_scenes})
         # 最终合并文件写出后再次推送完整预览字段，覆盖分段过程中显示的最后一段视频。
         _send_status(unique_id, f"{final_mode} 完成：{frame_count} 帧", 1.0, ui)
-        return {"ui": ui, "result": (video,)}
+        return {"ui": ui, "result": (video, reference_resources)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MiniMaxH3Studio}

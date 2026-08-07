@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import os
+import re
+import time
+
 import folder_paths
 import torch
 import comfy.utils
 from comfy import model_management
+from nodes import SaveImage
+import torch.nn.functional as F
+
+from .gjj_multi_image_loader import load_image_tensor, parse_selected_images, resolve_selected_image_path
 
 from .common_utils.dependency_checker import (
     DEFAULT_MODEL_URL,
@@ -74,6 +82,51 @@ def _list_pth_upscale_models() -> list[str]:
 
 def _default_value(values: list[str]) -> str:
     return values[0] if values else ""
+
+
+def _hidden(options: dict) -> dict:
+    return {**options, "hidden": True, "display": "hidden"}
+
+
+def _load_selected_images(raw_value) -> torch.Tensor | None:
+    images = [load_image_tensor(resolve_selected_image_path(item)) for item in parse_selected_images(raw_value)]
+    if not images:
+        return None
+    tensors = [image if image.ndim == 4 else image.unsqueeze(0) for image in images]
+    keep_alpha = any(int(image.shape[-1]) >= 4 for image in tensors)
+    normalized: list[torch.Tensor] = []
+    for image in tensors:
+        channels = int(image.shape[-1])
+        if channels == 1:
+            image = image.repeat(1, 1, 1, 3)
+        elif channels == 2:
+            image = torch.cat((image[..., :1].repeat(1, 1, 1, 3), image[..., 1:2]), dim=-1)
+        elif channels > 4:
+            image = image[..., :4]
+        if keep_alpha and int(image.shape[-1]) == 3:
+            image = torch.cat((image, torch.ones_like(image[..., :1])), dim=-1)
+        elif not keep_alpha and int(image.shape[-1]) > 3:
+            image = image[..., :3]
+        normalized.append(image)
+    tensors = normalized
+    max_height = max(int(image.shape[1]) for image in tensors)
+    max_width = max(int(image.shape[2]) for image in tensors)
+    padded: list[torch.Tensor] = []
+    for image in tensors:
+        height, width = int(image.shape[1]), int(image.shape[2])
+        if height == max_height and width == max_width:
+            padded.append(image)
+            continue
+        canvas = torch.zeros(
+            (int(image.shape[0]), max_height, max_width, int(image.shape[3])),
+            dtype=image.dtype,
+            device=image.device,
+        )
+        top = (max_height - height) // 2
+        left = (max_width - width) // 2
+        canvas[:, top:top + height, left:left + width, :] = image
+        padded.append(canvas)
+    return torch.cat(padded, dim=0)
 
 
 def _upscale_model_spec(filename: str = UPSCALE_MODEL_PATTERN) -> dict[str, str]:
@@ -182,6 +235,7 @@ def _load_upscale_model(model_name: str, unique_id=None, require_pth: bool = Fal
 class GJJ_ModelUpscaler:
     CATEGORY = "GJJ/🔍 超分放大"
     FUNCTION = "upscale"
+    OUTPUT_NODE = True
     DESCRIPTION = (
         NODE_DESCRIPTION
         if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
@@ -235,24 +289,44 @@ class GJJ_ModelUpscaler:
     @classmethod
     def INPUT_TYPES(cls):
         upscale_models = _list_pth_upscale_models() or [""]
+        default_model = _default_value(upscale_models)
         return {
-            "required": {
-                "image": ("IMAGE", {"display_name": "输入图像", "tooltip": "需要进行模型放大的图像。"}),
+            "required": {},
+            "optional": {
+                "image": ("IMAGE", _hidden({"display_name": "输入图像", "tooltip": "需要进行模型放大的图像。"})),
                 "enabled": (
                     "BOOLEAN",
-                    {
+                    _hidden({
                         "default": True,
                         "display_name": "启用放大器",
                         "tooltip": "关闭时不加载放大模型，直接输出原图。",
-                    },
+                    }),
                 ),
                 "upscale_model_name": (
                     upscale_models,
-                    {
-                        "default": _default_value(upscale_models),
+                    _hidden({
+                        "default": default_model,
                         "display_name": "放大模型",
+                        "gjj_default_model": default_model,
                         "tooltip": "从 models/upscale_models 目录及其子目录中选择一个 .pth 放大模型。",
-                    },
+                    }),
+                ),
+                "selected_images": (
+                    "STRING",
+                    _hidden({
+                        "default": "[]",
+                        "multiline": True,
+                        "display_name": "本地图片",
+                        "tooltip": "由前端文件按钮写入的多图片清单。",
+                    }),
+                ),
+                "test_mode": (
+                    "BOOLEAN",
+                    _hidden({
+                        "default": False,
+                        "display_name": "模型测试模式",
+                        "tooltip": "由前端 🧪 按钮临时开启；测试结果会按模型名、模型大小和耗时保存。",
+                    }),
                 ),
             },
             "hidden": {
@@ -261,13 +335,27 @@ class GJJ_ModelUpscaler:
         }
 
     @classmethod
-    def IS_CHANGED(cls, image, enabled, upscale_model_name):
-        return f"{bool(enabled)}|{str(upscale_model_name or '').strip()}|{tuple(image.shape)}"
+    def IS_CHANGED(
+        cls,
+        image=None,
+        enabled=True,
+        upscale_model_name="",
+        selected_images="[]",
+        test_mode=False,
+        unique_id=None,
+    ):
+        shape = tuple(image.shape) if isinstance(image, torch.Tensor) else ()
+        return f"{bool(enabled)}|{str(upscale_model_name or '').strip()}|{shape}|{selected_images}|{bool(test_mode)}"
 
-    def upscale(self, image, enabled, upscale_model_name, unique_id=None):
+    def upscale(self, image=None, enabled=True, upscale_model_name="", selected_images="[]", test_mode=False, unique_id=None):
+        if image is None:
+            image = _load_selected_images(selected_images)
+        if image is None:
+            raise RuntimeError("请通过 📁 选择一张或多张图片，或连接 IMAGE 输入。")
         if not bool(enabled):
             return (image,)
 
+        started_at = time.perf_counter()
         upscale_model = _load_upscale_model(upscale_model_name, unique_id=unique_id, require_pth=True)
         device = model_management.get_torch_device()
 
@@ -277,7 +365,20 @@ class GJJ_ModelUpscaler:
         model_management.free_memory(memory_required, device)
 
         upscale_model.to(device)
-        input_image = image.movedim(-1, -3).to(device)
+        source = image.to(device)
+        source_channels = int(source.shape[-1])
+        source_alpha = source[..., 3:4] if source_channels >= 4 else None
+        expected_channels = int(getattr(upscale_model, "input_channels", 3) or 3)
+        if expected_channels == 1:
+            rgb = source[..., :3] if source_channels >= 3 else source[..., :1].repeat(1, 1, 1, 3)
+            model_input = rgb[..., 0:1] * 0.299 + rgb[..., 1:2] * 0.587 + rgb[..., 2:3] * 0.114
+        elif expected_channels >= 4:
+            rgb = source[..., :3] if source_channels >= 3 else source[..., :1].repeat(1, 1, 1, 3)
+            alpha = source_alpha if source_alpha is not None else torch.ones_like(rgb[..., :1])
+            model_input = torch.cat((rgb, alpha), dim=-1)[..., :expected_channels]
+        else:
+            model_input = source[..., :3] if source_channels >= 3 else source[..., :1].repeat(1, 1, 1, 3)
+        input_image = model_input.movedim(-1, -3)
 
         tile = 512
         overlap = 32
@@ -311,7 +412,38 @@ class GJJ_ModelUpscaler:
         finally:
             upscale_model.to("cpu")
 
-        output_image = torch.clamp(scaled.movedim(-3, -1), min=0.0, max=1.0)
+        output_image = scaled.movedim(-3, -1)
+        if int(output_image.shape[-1]) == 1:
+            output_image = output_image.repeat(1, 1, 1, 3)
+        if source_alpha is not None and int(output_image.shape[-1]) < 4:
+            alpha = F.interpolate(
+                source_alpha.movedim(-1, -3),
+                size=(int(output_image.shape[1]), int(output_image.shape[2])),
+                mode="bilinear",
+                align_corners=False,
+            ).movedim(-3, -1).to(device=output_image.device, dtype=output_image.dtype)
+            output_image = torch.cat((output_image[..., :3], alpha), dim=-1)
+        output_image = torch.clamp(output_image, min=0.0, max=1.0)
+        if bool(test_mode):
+            elapsed = time.perf_counter() - started_at
+            try:
+                model_path = folder_paths.get_full_path_or_raise("upscale_models", upscale_model_name)
+                model_size_mb = float(os.path.getsize(model_path)) / (1024.0 * 1024.0)
+            except Exception:
+                model_size_mb = 0.0
+            model_stem = str(upscale_model_name or "model").replace("\\", "/").split("/")[-1]
+            model_stem = re.sub(r"\.[^.]+$", "", model_stem)
+            model_stem = re.sub(r"[^0-9A-Za-z._\-\u4e00-\u9fff]+", "_", model_stem).strip("._-") or "model"
+            label = f"{model_stem}_{model_size_mb:.2f}MB_{elapsed:.2f}s"
+            saved = SaveImage().save_images(output_image, filename_prefix=f"GJJ_ModelUpscaler/{label}")
+            ui = dict(saved.get("ui") or {}) if isinstance(saved, dict) else {}
+            ui.update({
+                "gjj_model_name": [str(upscale_model_name or "")],
+                "gjj_model_size_mb": [round(model_size_mb, 2)],
+                "gjj_elapsed_seconds": [round(elapsed, 2)],
+                "gjj_result_label": [label],
+            })
+            return {"ui": ui, "result": (output_image,)}
         return (output_image,)
 
 
