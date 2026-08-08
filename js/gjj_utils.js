@@ -1067,6 +1067,24 @@ export class GJJ_Utils {
         return String(configured || "").trim();
     }
 
+    static _modelTreeResolvedSearchValue(entry, widget, node = null) {
+        const searchValue = GJJ_Utils._modelTreeSearchValue(entry, widget, node);
+        const current = String(widget?.value || "").trim();
+        const available = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 10000).includes(current);
+        if (!current || available || GJJ_Utils._modelTreeSearchChoices(entry, widget, searchValue, 1).length) {
+            return searchValue;
+        }
+        const fallbackSearchValue = GJJ_Utils._modelTreeFamilyStem(GJJ_Utils._modelTreeDefaultModel(entry));
+        if (
+            fallbackSearchValue
+            && fallbackSearchValue !== searchValue
+            && GJJ_Utils._modelTreeSearchChoices(entry, widget, fallbackSearchValue, 1).length
+        ) {
+            return fallbackSearchValue;
+        }
+        return searchValue;
+    }
+
     static _modelTreeMissingDefault(entry) {
         return Boolean(entry?.missingDefault || entry?.missing_default || entry?.missing);
     }
@@ -1147,12 +1165,12 @@ export class GJJ_Utils {
         return GJJ_Utils._modelTreeSearchChoices(entry, widget, query, limit);
     }
 
-    static _modelTreeState(entry, widget) {
+    static _modelTreeState(entry, widget, node = null) {
         const current = String(widget?.value || "").trim();
         const defaultModel = GJJ_Utils._modelTreeDefaultModel(entry);
         const noModelValue = String(entry?.noModelValue || entry?.noModelLabel || entry?.noneLabel || "").trim();
         const isNoModel = Boolean(noModelValue && current === noModelValue);
-        const stateSearchValue = GJJ_Utils._modelTreeSearchValue(entry, widget);
+        const stateSearchValue = GJJ_Utils._modelTreeResolvedSearchValue(entry, widget, node);
         const allChoices = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 10000);
         const choices = GJJ_Utils._modelTreeSearchChoices(entry, widget, stateSearchValue, 10000);
         const hasCandidates = choices.length > 0;
@@ -1296,7 +1314,7 @@ export class GJJ_Utils {
         const search = document.createElement("input");
         search.type = "text";
         search.placeholder = "输入关键词过滤；回车使用第一个匹配模型";
-        search.value = GJJ_Utils._modelTreeSearchValue(entry, widget, node);
+        search.value = GJJ_Utils._modelTreeResolvedSearchValue(entry, widget, node);
         search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
         const list = document.createElement("div");
         list.style.cssText = floating
@@ -1309,11 +1327,17 @@ export class GJJ_Utils {
             list.replaceChildren();
             if (!options.length) {
                 const fallback = GJJ_Utils._modelTreeFallback(entry);
-                const empty = document.createElement("div");
-                empty.style.cssText = "color:#ff6b72;font-size:12px;padding:4px 2px;line-height:1.35;word-break:break-all;";
-                empty.title = entry?.description || entry?.tooltip || "";
-                empty.textContent = fallback ? `没有匹配模型，默认：${fallback}` : "没有匹配模型";
-                list.appendChild(empty);
+                const { row, button } = GJJ_Utils._modelTreeLine("", entry?.icon || "🟣", fallback || "没有匹配模型", {
+                    missing: true,
+                    copyValue: fallback,
+                });
+                row.style.border = "1px solid #6e3038";
+                row.style.background = "#2a171a";
+                row.title = fallback
+                    ? `过滤结果为 0；显示默认模型：${fallback}`
+                    : "过滤结果为 0；未配置默认模型";
+                button.title = [row.title, entry?.description || entry?.tooltip || ""].filter(Boolean).join("\n");
+                list.appendChild(row);
                 return;
             }
             for (const option of options) {
@@ -1400,7 +1424,7 @@ export class GJJ_Utils {
             ? GJJ_Utils.getWidget(node, entry.strengthWidget || entry.strengthWidgetName)
             : null;
         const autoSelect = entry?.autoSelect !== false;
-        const initialState = GJJ_Utils._modelTreeState(entry, widget);
+        const initialState = GJJ_Utils._modelTreeState(entry, widget, node);
         if (autoSelect && widget && initialState.hasCandidates && (!initialState.current || initialState.currentMissing || initialState.missing)) {
             const configuredAutoSelectSearchValue = typeof entry?.autoSelectSearchValue === "function"
                 ? entry.autoSelectSearchValue(entry, widget, node)
@@ -1424,7 +1448,7 @@ export class GJJ_Utils {
             renderLine();
         };
         const renderLine = () => {
-            const { currentMissing, missing, value } = GJJ_Utils._modelTreeState(entry, widget);
+            const { currentMissing, missing, value } = GJJ_Utils._modelTreeState(entry, widget, node);
             const filename = missing ? value : GJJ_Utils._modelTreeFilename(value);
             const icon = entry?.icon || "🟣";
             const prefix = entry?.prefix || "│　└─";

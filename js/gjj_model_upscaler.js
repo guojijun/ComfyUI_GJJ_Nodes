@@ -38,6 +38,33 @@ function inputLink(node) {
 	return { slot, link };
 }
 
+function selectedImages(node) {
+	const raw = widget(node, LOCAL_IMAGES_WIDGET)?.value;
+	if (Array.isArray(raw)) return raw.filter((item) => item?.filename);
+	try {
+		const parsed = JSON.parse(String(raw || "[]"));
+		return Array.isArray(parsed) ? parsed.filter((item) => item?.filename) : [];
+	} catch {
+		return [];
+	}
+}
+
+function setActionAvailable(button, available, title) {
+	if (!button) return;
+	button.disabled = !available;
+	button.title = available ? title : "请先连接外部图像，或点击 📁 打开素材";
+	button.style.cursor = available ? "pointer" : "not-allowed";
+	button.style.filter = available ? "none" : "grayscale(1)";
+	button.style.opacity = available ? "1" : "0.42";
+}
+
+function updateSourceState(node) {
+	const available = !node?.__gjjUpscalerTesting && Boolean(inputLink(node).link || selectedImages(node).length);
+	setActionAvailable(node?.__gjjUpscalerTestButton, available, "一次提交所有放大模型进行测试");
+	setActionAvailable(node?.__gjjUpscalerRunButton, available, "只运行当前节点");
+	updateLocalPreview(node);
+}
+
 function updateLinkButton(node) {
 	const button = node?.__gjjUpscalerLinkButton;
 	if (!button) return;
@@ -110,7 +137,22 @@ async function chooseImages(node) {
 		target.value = JSON.stringify(selected);
 		target.callback?.(target.value);
 	}
+	updateSourceState(node);
 	markChanged(node);
+}
+
+function updateLocalPreview(node) {
+	const popup = node?.__gjjUpscalerLocalPreview;
+	if (!popup) return;
+	popup.replaceChildren();
+	for (const item of selectedImages(node)) {
+		const image = document.createElement("img");
+		image.src = api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "input")}&subfolder=${encodeURIComponent(item.subfolder || "")}`);
+		image.alt = String(item.filename);
+		image.title = String(item.filename);
+		image.style.cssText = "display:block;width:132px;height:96px;object-fit:contain;border-radius:5px;background:#070b0d;";
+		popup.appendChild(image);
+	}
 }
 
 function closeModelPanel(node) {
@@ -170,6 +212,7 @@ async function testAllModels(node, button, runButton) {
 	const original = target.value;
 	const originalTestMode = testMode?.value;
 	if (node.__gjjUpscalerPreview) node.__gjjUpscalerPreview.replaceChildren();
+	node.__gjjUpscalerTesting = true;
 	button.disabled = true;
 	if (runButton) runButton.disabled = true;
 	try {
@@ -190,8 +233,8 @@ async function testAllModels(node, button, runButton) {
 		if (testMode) testMode.value = originalTestMode ?? false;
 		setTimeout(() => {
 			button.textContent = "🧪";
-			button.disabled = false;
-			if (runButton) runButton.disabled = false;
+			node.__gjjUpscalerTesting = false;
+			updateSourceState(node);
 		}, 1200);
 	}
 }
@@ -207,7 +250,7 @@ function createButton(label, title, colors) {
 
 function createPanel(node) {
 	const root = document.createElement("div");
-	root.style.cssText = "display:flex;flex-direction:column;gap:6px;width:100%;pointer-events:auto;box-sizing:border-box;";
+	root.style.cssText = "position:relative;display:flex;flex-direction:column;gap:6px;width:100%;pointer-events:auto;box-sizing:border-box;";
 	const toolbar = document.createElement("div");
 	toolbar.style.cssText = "display:flex;align-items:center;gap:0;width:100%;";
 	const folder = createButton("📁", "打开一张或多张本地图像", { border: "#64748b", background: "linear-gradient(135deg,#1e293b,#475569)", color: "#f8fafc" });
@@ -216,6 +259,11 @@ function createPanel(node) {
 	const test = createButton("🧪", "一次提交所有放大模型进行测试", { border: "#f59e0b", background: "linear-gradient(135deg,#4a2f08,#b45309)", color: "#fffbeb" });
 	const run = createButton("▶️", "只运行当前节点", { border: "#10b981", background: "linear-gradient(135deg,#064e3b,#059669)", color: "#d1fae5" });
 	node.__gjjUpscalerLinkButton = link;
+	node.__gjjUpscalerTestButton = test;
+	node.__gjjUpscalerRunButton = run;
+	const localPreview = document.createElement("div");
+	localPreview.style.cssText = "display:none;position:absolute;left:0;top:40px;z-index:20;max-width:440px;max-height:330px;overflow:auto;padding:6px;grid-template-columns:repeat(3,132px);gap:6px;border:1px solid #64748b;border-radius:8px;background:#10171b;box-shadow:0 12px 32px rgba(0,0,0,.62);pointer-events:none;";
+	node.__gjjUpscalerLocalPreview = localPreview;
 	const protect = (handler) => async (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -226,12 +274,18 @@ function createPanel(node) {
 	model.onclick = protect(() => openModelPanel(node));
 	test.onclick = protect(() => testAllModels(node, test, run));
 	run.onclick = protect(() => queueOnlyCurrentNode(node));
+	folder.addEventListener("mouseenter", () => {
+		updateLocalPreview(node);
+		if (selectedImages(node).length) localPreview.style.display = "grid";
+	});
+	folder.addEventListener("mouseleave", () => { localPreview.style.display = "none"; });
 	toolbar.append(folder, link, model, test, run);
 	const preview = document.createElement("div");
 	preview.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:6px;width:100%;";
 	node.__gjjUpscalerPreview = preview;
-	root.append(toolbar, preview);
+	root.append(toolbar, localPreview, preview);
 	updateLinkButton(node);
+	updateSourceState(node);
 	return root;
 }
 
@@ -268,6 +322,7 @@ function stabilize(node) {
 		node.__gjjUpscalerPanelWidget = node.addDOMWidget("gjj_model_upscaler_panel", "HTML", createPanel(node), { serialize: false });
 	}
 	updateLinkButton(node);
+	updateSourceState(node);
 	GJJ_Utils.refreshNode(node);
 }
 
@@ -292,7 +347,10 @@ app.registerExtension({
 		const originalConnections = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function () {
 			const result = originalConnections?.apply(this, arguments);
-			setTimeout(() => updateLinkButton(this), 0);
+			setTimeout(() => {
+				updateLinkButton(this);
+				updateSourceState(this);
+			}, 0);
 			return result;
 		};
 		const originalExecuted = nodeType.prototype.onExecuted;
