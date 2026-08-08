@@ -1480,7 +1480,15 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 			groupTitle.className = "gjj-cl-model-group-title";
 			groupTitle.textContent = group.name || "模型";
 			groupEl.appendChild(groupTitle);
-			groupEl.appendChild(buildClickableModelTree(group.items || [], controls, values));
+			const treeHost = document.createElement("div");
+			const renderTree = () => {
+				treeHost.replaceChildren(GJJ_Utils.createLibraryModelTreeView({
+					items: group.items || [], controls, values,
+					onApply: () => queueMicrotask(renderTree),
+				}));
+			};
+			renderTree();
+			groupEl.appendChild(treeHost);
 			body.appendChild(groupEl);
 		}
 		dialog.append(head, body);
@@ -2186,7 +2194,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 			}
 		} catch (error) {
 			finishImportProgress(false);
-			throw error;
+			throw new Error(GJJ_Utils.operationProblem("添加角色资产", error));
 		}
 	}
 

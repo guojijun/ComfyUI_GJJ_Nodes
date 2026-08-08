@@ -1527,6 +1527,55 @@ export class GJJ_Utils {
         });
         return root;
     }
+
+    static createLibraryModelTreeView({ items = [], controls = [], values = {}, onApply = null } = {}) {
+        const controlMap = new Map((controls || []).map((control) => [String(control?.key || ""), control]));
+        const adapters = new Map();
+        const entries = (items || []).map((item) => {
+            const path = String(item?.path || item || "").replaceAll("\\", "/");
+            const parts = path.split("/").filter(Boolean);
+            const modelsIndex = parts.findIndex((part) => part.toLowerCase() === "models");
+            const relative = modelsIndex >= 0 ? parts.slice(modelsIndex + 1) : parts;
+            const filename = relative.pop() || path || "未选择";
+            const folder = `models/${relative.join("/")}`.replace(/\/$/, "");
+            const controlKey = String(item?.control_key || item?.controlKey || "");
+            const control = controlMap.get(controlKey) || null;
+            if (!control) {
+                const adapter = { value: filename, options: { values: [filename] } };
+                return {
+                    label: String(item?.label || filename), folder, filename,
+                    models: [filename], defaultModel: filename, readOnly: true,
+                    icon: item?.folder ? "📁" : (item?.icon || "🟣"),
+                    getWidget: () => adapter,
+                };
+            }
+            if (!adapters.has(controlKey)) {
+                adapters.set(controlKey, {
+                    get value() { return String(values[controlKey] || ""); },
+                    set value(next) { values[controlKey] = String(next || ""); },
+                    options: { values: Array.isArray(control.options) ? control.options.slice() : [] },
+                    callback(next) { values[controlKey] = String(next || ""); },
+                });
+            }
+            const defaultModel = String(control.default || item?.default_model || filename);
+            return {
+                label: String(control.label || item?.label || controlKey), folder, filename,
+                models: Array.isArray(control.options) ? control.options : [],
+                defaultModel, fallback: defaultModel, icon: item?.icon || "🟣",
+                autoSelect: true, getWidget: () => adapters.get(controlKey),
+            };
+        });
+        return GJJ_Utils.createModelTreeView({
+            node: null,
+            entries,
+            onApply: (entry, value, widget) => onApply?.(entry, value, widget),
+        });
+    }
+
+    static operationProblem(context, error, solution = "请检查输入文件、模型设置和磁盘权限后重试。") {
+        const reason = String(error?.message || error || "未知错误").trim();
+        return `${context}失败。原因：${reason || "未知错误"}\n解决方案：${solution}`;
+    }
 }
 
 globalThis.GJJ_Utils = GJJ_Utils;

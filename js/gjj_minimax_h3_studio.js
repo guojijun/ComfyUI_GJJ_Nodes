@@ -19,7 +19,7 @@ const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
 const SETTINGS_SCHEMA_VERSION = 10;
 const LORA_DATA_WIDGET = "lora_data";
 const LORA_FILTER_PROPERTY = "gjj_minimax_h3_lora_filter";
-const DEFAULT_LORA_FILTER = "minima_h3_turbo";
+const DEFAULT_LORA_FILTER = "minimax_h3_fl2v_lightx2v_turbo_4step";
 const DEFAULT_ACCEL_STEPS = 4;
 const IMAGE_COUNT_PROPERTY = "gjj_minimax_h3_image_count";
 const UPLOAD_ROUTE = "/gjj/minimax_h3_studio/upload";
@@ -363,23 +363,62 @@ function createLoraPanel(node) {
 		rows.forEach((row, index) => {
 			const metadata = miniMaxLoraMetadata(catalog.metadata, row.name);
 			const preview = String(catalog.previews?.[row.name] || "");
+			const selectedByOtherRows = new Set(rows
+				.filter((_item, rowIndex) => rowIndex !== index)
+				.map((item) => String(item?.name || "").trim())
+				.filter(Boolean));
 			const line = document.createElement("div"); line.style.cssText = `display:grid;grid-template-columns:${row.name && preview ? "58px " : ""}minmax(0,1fr) auto 72px;gap:7px;align-items:center;padding:7px;border:1px solid #304e55;border-radius:8px;background:#111d21`;
 			if (row.name && preview) {
 				const thumb = document.createElement("img"); thumb.src = preview; thumb.alt = metadata?.title || row.name; thumb.title = metadata?.summary || metadata?.title || row.name;
 				thumb.style.cssText = "width:58px;height:58px;object-fit:cover;border:1px solid #3c5660;border-radius:7px;background:#081014;cursor:zoom-in";
 				thumb.addEventListener("click", () => window.open(preview, "_blank", "noopener,noreferrer")); protect(thumb); line.appendChild(thumb);
 			}
-			const select = document.createElement("select"); select.className = "gjj-mh3-control";
 			const available = catalog.names.filter((name) => {
+				if (selectedByOtherRows.has(String(name || "").trim())) return false;
 				const item = miniMaxLoraMetadata(catalog.metadata, name);
 				const haystack = [name, item?.title, item?.trigger, item?.summary, ...(Array.isArray(item?.match) ? item.match : [])].filter(Boolean).join(" ").toLocaleLowerCase();
 				return !filterTerms.length || filterTerms.every((term) => haystack.includes(term));
 			});
 			const names = row.name && !available.includes(row.name) ? [row.name, ...available] : available;
-			const empty = document.createElement("option"); empty.value = ""; empty.textContent = "未选择"; select.appendChild(empty);
-			for (const name of names) { const option = document.createElement("option"); option.value = name; option.textContent = name; select.appendChild(option); }
-			select.value = row.name;
-			const main = document.createElement("div"); main.style.cssText = "display:grid;gap:5px;min-width:0"; main.appendChild(select);
+			const main = document.createElement("div"); main.style.cssText = "position:relative;display:grid;gap:5px;min-width:0";
+			const selectButton = document.createElement("button"); selectButton.type = "button"; selectButton.className = "gjj-mh3-control";
+			selectButton.textContent = row.name || "未选择"; selectButton.title = row.name || "点击选择 LoRA"; selectButton.style.textAlign = "left";
+			selectButton.addEventListener("click", () => {
+				const existingPicker = main.querySelector(".gjj-mh3-lora-picker");
+				if (existingPicker) { existingPicker.remove(); return; }
+				const picker = document.createElement("div"); picker.className = "gjj-mh3-lora-picker";
+				const anchor = selectButton.getBoundingClientRect();
+				const pickerWidth = Math.max(280, Math.min(820, window.innerWidth - 32));
+				const pickerLeft = Math.max(16, Math.min(anchor.left, window.innerWidth - pickerWidth - 16));
+				picker.style.cssText = `position:fixed;z-index:100006;left:${pickerLeft}px;top:${Math.max(16, Math.min(anchor.bottom + 3, window.innerHeight - 310))}px;width:${pickerWidth}px;display:grid;gap:5px;padding:7px;box-sizing:border-box;border:1px solid #4e7d86;border-radius:8px;background:#101a1e;box-shadow:0 12px 32px #000b`;
+				const localFilter = document.createElement("input"); localFilter.type = "text"; localFilter.className = "gjj-mh3-control";
+				localFilter.placeholder = "二次过滤当前 LoRA 列表";
+				const optionHost = document.createElement("div"); optionHost.style.cssText = "display:grid;gap:3px;max-height:240px;overflow:auto";
+				const renderOptions = () => {
+					const terms = String(localFilter.value || "").toLocaleLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean);
+					const filteredNames = names.filter((name) => {
+						const item = miniMaxLoraMetadata(catalog.metadata, name);
+						const haystack = [name, item?.title, item?.trigger, item?.summary, ...(Array.isArray(item?.match) ? item.match : [])].filter(Boolean).join(" ").toLocaleLowerCase();
+						return !terms.length || terms.every((term) => haystack.includes(term));
+					});
+					optionHost.replaceChildren();
+					const options = ["", ...filteredNames];
+					for (const name of options) {
+						const option = document.createElement("button"); option.type = "button"; option.className = "gjj-mh3-control";
+						option.textContent = `${name === row.name ? "✓ " : ""}${name || "未选择"}`; option.title = name || "清除当前 LoRA"; option.style.cssText += ";text-align:left;white-space:normal;overflow-wrap:anywhere";
+						option.addEventListener("click", () => { rows[index].name = name; syncStepsFromAccelLora(node, name); save(); render(); });
+						protect(option); optionHost.appendChild(option);
+					}
+					if (!filteredNames.length && terms.length) {
+						const empty = document.createElement("div"); empty.textContent = "没有匹配的 LoRA"; empty.style.cssText = "padding:7px;color:#c58f93"; optionHost.appendChild(empty);
+					}
+				};
+				localFilter.addEventListener("input", renderOptions);
+				localFilter.addEventListener("keydown", (event) => { if (event.key === "Escape") picker.remove(); });
+				protect(localFilter); protect(picker); picker.append(localFilter, optionHost); main.appendChild(picker); renderOptions();
+				setTimeout(() => localFilter.focus(), 0);
+			});
+			protect(selectButton); main.appendChild(selectButton);
 			if (row.name && metadata) {
 				const meta = document.createElement("div"); meta.style.cssText = "display:flex;align-items:center;gap:7px;min-width:0;color:#a9c5c8;font-size:11px";
 				const text = document.createElement("span"); text.textContent = [metadata.title, metadata.trigger, metadata.strength != null ? `建议 ${metadata.strength}` : ""].filter(Boolean).join("　"); text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"; meta.appendChild(text);
@@ -396,10 +435,9 @@ function createLoraPanel(node) {
 			const toggleLabel = document.createElement("label"); toggleLabel.style.cssText = "display:flex;align-items:center;gap:4px;white-space:nowrap";
 			const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.checked = row.enabled !== false; toggleLabel.append(toggle, document.createTextNode("启用"));
 			const strength = document.createElement("input"); strength.type = "number"; strength.className = "gjj-mh3-control"; strength.min = "-10"; strength.max = "10"; strength.step = "0.05"; strength.value = String(row.strength);
-			select.addEventListener("change", () => { rows[index].name = select.value; syncStepsFromAccelLora(node, select.value); save(); render(); });
 			toggle.addEventListener("change", () => { rows[index].enabled = toggle.checked; save(); });
 			strength.addEventListener("change", () => { rows[index].strength = Number(strength.value) || 0; save(); });
-			for (const control of [select, toggle, strength]) protect(control);
+			for (const control of [toggle, strength]) protect(control);
 			line.append(main, toggleLabel, strength); rowsHost.appendChild(line);
 		});
 		save();

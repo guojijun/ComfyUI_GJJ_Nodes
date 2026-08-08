@@ -2006,20 +2006,20 @@ def _register_gjj_character_library_api():
 				{"key": "keep_model", "label": "生成后保持模型", "type": "boolean"},
 			],
 			"controls": [
-				{"key": "matting_method", "label": "抠图模型", "options": choices.get("matting_methods") or ["RMBG1.4"]},
-				{"key": "multiview_unet", "label": "多视图 UNET", "options": choices.get("diffusion_models") or []},
-				{"key": "multiview_clip", "label": "多视图 CLIP / VL", "options": choices.get("text_encoders") or []},
-				{"key": "multiview_vae", "label": "多视图 VAE", "options": choices.get("vae") or []},
-				{"key": "multiview_lora_1", "label": "Lightning LoRA", "options": choices.get("loras") or []},
-				{"key": "multiview_lora_2", "label": "多角度 LoRA", "options": choices.get("loras") or []},
-				{"key": "annotate_clip", "label": "备注/性别文本编码器", "options": choices.get("text_encoders") or []},
+				{"key": "matting_method", "label": "抠图模型", "default": "RMBG1.4", "options": choices.get("matting_methods") or ["RMBG1.4"]},
+				{"key": "multiview_unet", "label": "多视图 UNET", "default": "qwen_image_edit_2511_int4_convrot.safetensors", "options": choices.get("diffusion_models") or []},
+				{"key": "multiview_clip", "label": "多视图 CLIP / VL", "default": "qwen_2.5_vl_7b_int4_convrot.safetensors", "options": choices.get("text_encoders") or []},
+				{"key": "multiview_vae", "label": "多视图 VAE", "default": "qwen_image_vae.safetensors", "options": choices.get("vae") or []},
+				{"key": "multiview_lora_1", "label": "Lightning LoRA", "default": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "options": choices.get("loras") or []},
+				{"key": "multiview_lora_2", "label": "多角度 LoRA", "default": "qwen-image-edit-2511-multiple-angles-lora.safetensors", "options": choices.get("loras") or []},
+				{"key": "annotate_clip", "label": "备注/性别文本编码器", "default": "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors", "options": choices.get("text_encoders") or []},
 			],
 			"groups": [
 				{
 					"name": "🪄 抠图",
 					"items": [
 						{
-							"label": f"抠图模型：{matting_method}",
+							"label": f"抠图模型：{matting_method}", "control_key": "matting_method",
 							"path": matting_model_paths.get(matting_method, f"models/RMBG/{matting_method}"),
 						},
 					],
@@ -2027,17 +2027,17 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🚀 生成多视图",
 					"items": [
-						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
-						{"label": "CLIP / VL", "path": f"models/text_encoders/{settings.get('multiview_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
-						{"label": "VAE", "path": f"models/vae/{settings.get('multiview_vae') or 'qwen_image_vae.safetensors'}"},
-						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
-						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
+						{"label": "UNET", "control_key": "multiview_unet", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_int4_convrot.safetensors'}"},
+						{"label": "CLIP / VL", "control_key": "multiview_clip", "path": f"models/text_encoders/{settings.get('multiview_clip') or 'qwen_2.5_vl_7b_int4_convrot.safetensors'}"},
+						{"label": "VAE", "control_key": "multiview_vae", "path": f"models/vae/{settings.get('multiview_vae') or 'qwen_image_vae.safetensors'}"},
+						{"label": "Lightning LoRA", "control_key": "multiview_lora_1", "path": f"models/loras/{settings.get('multiview_lora_1') or 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
+						{"label": "多角度 LoRA", "control_key": "multiview_lora_2", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
 				},
 				{
 					"name": "🧠 备注/性别推理",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
+						{"label": "Gemma / Qwen VL 文本编码器", "control_key": "annotate_clip", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors'}"},
 					],
 				},
 				{

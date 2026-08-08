@@ -162,55 +162,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 	}
 
 	function createSharedModelTree(items, controls, values, onApply = null) {
-		const controlMap = new Map((controls || []).map((control) => [String(control?.key || ""), control]));
-		const adapters = new Map();
-		const entries = (items || []).map((item) => {
-			const path = String(item?.path || item || "").replace(/\\/g, "/");
-			const parts = path.split("/").filter(Boolean);
-			const modelsIndex = parts.findIndex((part) => part.toLowerCase() === "models");
-			const relative = modelsIndex >= 0 ? parts.slice(modelsIndex + 1) : parts;
-			const filename = relative.pop() || path || "未选择";
-			const folder = `models/${relative.join("/")}`.replace(/\/$/, "");
-			const controlKey = String(item?.control_key || item?.controlKey || "");
-			const control = controlMap.get(controlKey) || null;
-			if (!control) {
-				const adapter = { value: filename, options: { values: [filename] } };
-				return {
-					label: String(item?.label || filename),
-					folder,
-					filename,
-					models: [filename],
-					defaultModel: filename,
-					readOnly: true,
-					icon: item?.folder ? "📁" : (item?.icon || "🟣"),
-					getWidget: () => adapter,
-				};
-			}
-			if (!adapters.has(controlKey)) {
-				adapters.set(controlKey, {
-					get value() { return String(values[controlKey] || ""); },
-					set value(next) { values[controlKey] = String(next || ""); },
-					options: { values: Array.isArray(control.options) ? control.options.slice() : [] },
-					callback(next) { values[controlKey] = String(next || ""); },
-				});
-			}
-			return {
-				label: String(control.label || item?.label || controlKey),
-				folder,
-				filename,
-				models: Array.isArray(control.options) ? control.options : [],
-				defaultModel: String(control.default || item?.default_model || filename),
-				fallback: String(control.default || item?.default_model || filename),
-				icon: item?.icon || "🟣",
-				autoSelect: true,
-				getWidget: () => adapters.get(controlKey),
-			};
-		});
-		return GJJ_Utils.createModelTreeView({
-			node: null,
-			entries,
-			onApply: (entry, value, widget) => onApply?.(entry, value, widget),
-		});
+		return GJJ_Utils.createLibraryModelTreeView({ items, controls, values, onApply });
 	}
 
 	function stop(event) {
@@ -1015,7 +967,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 					state.selectedId = id || state.selectedId;
 					await refreshScenes(true);
 				} catch (error) {
-					errors.push(`${file.name}: ${error.message}`);
+					errors.push(GJJ_Utils.operationProblem(`添加资产“${file.name}”`, error));
 				}
 			}
 			if (importedIds.length && state.autoAnnotate) {
@@ -1025,7 +977,9 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 				setImportProgress(files.length + 1, files.length + 1, "导入完成，自动打标已关闭");
 			}
 			setImportProgress(files.length + 1, files.length + 1, errors.length ? `导入完成，失败 ${errors.length} 个` : "导入完成");
-			setStatus(errors.length ? `导入完成，失败 ${errors.length} 个：${errors[0]}` : (state.autoAnnotate ? `已导入 ${importedIds.length || files.length} 个场景并完成自动打标` : `已导入 ${importedIds.length || files.length} 个场景；自动打标已关闭`));
+			setStatus(errors.length ? `导入完成，失败 ${errors.length} 个：\n${errors.join("\n\n")}` : (state.autoAnnotate ? `已导入 ${importedIds.length || files.length} 个场景并完成自动打标` : `已导入 ${importedIds.length || files.length} 个场景；自动打标已关闭`));
+		} catch (error) {
+			throw new Error(GJJ_Utils.operationProblem("添加场景资产", error));
 		} finally {
 			state.importing = false;
 			state.importNodeId = "";

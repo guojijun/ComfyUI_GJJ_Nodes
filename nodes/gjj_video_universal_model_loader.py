@@ -1867,6 +1867,179 @@ def _is_convrot_quantized_model(model_name: str) -> bool:
     return bool(_convrot_quantization_from_model_name(model_name))
 
 
+def _decode_comfy_quant_config(value: Any) -> dict[str, Any]:
+    try:
+        raw = value.detach().cpu().tolist() if hasattr(value, "detach") else value
+        if isinstance(raw, list):
+            raw = bytes(raw).decode("utf-8")
+        parsed = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _has_asym_w4a8_quantization(path: str) -> bool:
+    if not str(path or "").lower().endswith(".safetensors"):
+        return False
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                if not key.endswith(".comfy_quant"):
+                    continue
+                config = _decode_comfy_quant_config(handle.get_tensor(key))
+                if str(config.get("format", "")).lower() == "asym_w4a8_int8":
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _first_tensor_key(sd: dict[str, Any], prefix: str, names: tuple[str, ...]) -> str:
+    for name in names:
+        key = f"{prefix}.{name}"
+        if key in sd:
+            return key
+    return ""
+
+
+def _convert_asym_w4a8_to_native_int8(sd: dict[str, Any]) -> int:
+    """Convert packed grouped W4 weights to ComfyUI's native W8A8 ConvRot layout.
+
+    The source layout stores two unsigned codebook indices per byte, plus a
+    per-output-channel scale and a relative scale for each weight group.  The
+    conversion is chunked and may use CUDA for the arithmetic, while the final
+    native INT8 tensors remain on CPU for normal ComfyUI model loading.
+    """
+    import torch
+
+    quant_keys = [key for key in sd if key.endswith(".comfy_quant")]
+    converted = 0
+    compute_device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    for quant_key in quant_keys:
+        config = _decode_comfy_quant_config(sd.get(quant_key))
+        if str(config.get("format", "")).lower() != "asym_w4a8_int8":
+            continue
+        prefix = quant_key[:-len(".comfy_quant")]
+        weight_key = f"{prefix}.weight"
+        codebook_key = _first_tensor_key(sd, prefix, ("codebook", "weight_codebook"))
+        channel_scale_key = _first_tensor_key(sd, prefix, ("s_channel", "weight_s_channel"))
+        relative_scale_key = _first_tensor_key(sd, prefix, ("scale", "s_rel", "weight_s_rel"))
+        missing = [
+            label for label, key in (
+                ("weight", weight_key if weight_key in sd else ""),
+                ("codebook", codebook_key),
+                ("s_channel", channel_scale_key),
+                ("group scale", relative_scale_key),
+            ) if not key
+        ]
+        if missing:
+            raise RuntimeError(f"W4A8 层 {prefix} 缺少量化张量：{', '.join(missing)}")
+
+        packed = sd[weight_key]
+        if packed.ndim != 2 or packed.dtype != torch.int8:
+            raise RuntimeError(f"W4A8 层 {prefix} 的打包权重应为二维 INT8，实际为 {packed.dtype} {tuple(packed.shape)}")
+        rows, packed_columns = (int(packed.shape[0]), int(packed.shape[1]))
+        columns = packed_columns * 2
+        group_size = int(config.get("group_size", 16) or 16)
+        relative_scale = sd[relative_scale_key]
+        if relative_scale.ndim != 2 or int(relative_scale.shape[0]) != rows or int(relative_scale.shape[1]) * group_size != columns:
+            raise RuntimeError(
+                f"W4A8 层 {prefix} 的分组尺寸不匹配：scale={tuple(relative_scale.shape)}, "
+                f"group_size={group_size}, weight=({rows}, {columns})"
+            )
+
+        native_weight = torch.empty((rows, columns), dtype=torch.int8, device="cpu")
+        native_scale = torch.empty((rows, 1), dtype=torch.float32, device="cpu")
+        codebook = sd[codebook_key].to(device=compute_device, dtype=torch.float32)
+        channel_scale = sd[channel_scale_key]
+        target_elements = 8 * 1024 * 1024
+        chunk_rows = max(1, min(256, target_elements // max(1, columns)))
+        for start in range(0, rows, chunk_rows):
+            end = min(rows, start + chunk_rows)
+            packed_chunk = packed[start:end].to(device=compute_device, dtype=torch.int32)
+            raw_bytes = packed_chunk.bitwise_and(0xFF)
+            values = torch.empty((end - start, columns), dtype=torch.float32, device=compute_device)
+            values[:, 0::2] = codebook[raw_bytes.bitwise_and(0x0F).long()]
+            values[:, 1::2] = codebook[raw_bytes.bitwise_right_shift(4).bitwise_and(0x0F).long()]
+            values.mul_(channel_scale[start:end].to(device=compute_device, dtype=torch.float32).reshape(-1, 1))
+            group_scales = relative_scale[start:end].to(device=compute_device, dtype=torch.float32)
+            values.mul_(group_scales.repeat_interleave(group_size, dim=1))
+            row_scale = values.abs().amax(dim=1, keepdim=True).div_(127.0)
+            row_scale = torch.where(row_scale > 0, row_scale, torch.ones_like(row_scale))
+            quantized = torch.round(values / row_scale).clamp_(-127, 127).to(torch.int8)
+            native_weight[start:end].copy_(quantized.to("cpu"))
+            native_scale[start:end].copy_(row_scale.to("cpu"))
+
+        native_config = {
+            "format": "int8_tensorwise",
+            "convrot": bool(config.get("convrot", False)),
+        }
+        if config.get("convrot_groupsize") is not None:
+            native_config["convrot_groupsize"] = int(config["convrot_groupsize"])
+        payload = json.dumps(native_config, separators=(",", ":")).encode("utf-8")
+        sd[weight_key] = native_weight
+        sd[f"{prefix}.weight_scale"] = native_scale
+        sd[quant_key] = torch.tensor(list(payload), dtype=torch.uint8)
+        for key in {codebook_key, channel_scale_key, relative_scale_key}:
+            sd.pop(key, None)
+        converted += 1
+        if converted == 1 or converted % 16 == 0:
+            print(f"[GJJ W4A8] 已转换 {converted} 个量化层为 ComfyUI 原生 W8A8 ConvRot")
+
+    return converted
+
+
+def _load_asym_w4a8_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
+    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+    try:
+        from .gjj_w4a8_native_runtime import ensure_native_w4a8_runtime, native_w4a8_status
+
+        native_available = ensure_native_w4a8_runtime()
+    except Exception:
+        native_available = False
+        native_w4a8_status = lambda: {"available": False, "cutlass": False, "error": "运行时导入失败"}
+    if native_available:
+        dtype = _torch_dtype(weight_dtype)
+        model_options: dict[str, Any] = {}
+        if dtype is not None:
+            model_options["dtype"] = dtype
+        model = comfy.sd.load_diffusion_model(path, model_options=model_options)
+        if model is None:
+            raise RuntimeError(f"原生 W4A8 运行时已启用，但无法识别模型架构：{path}")
+        status = native_w4a8_status()
+        model.cached_patcher_init = (_load_asym_w4a8_diffusion_model, (model_name, weight_dtype, unique_id))
+        try:
+            setattr(model, "gjj_asym_w4a8_native", True)
+            setattr(model, "gjj_asym_w4a8_cutlass", bool(status.get("cutlass")))
+        except Exception:
+            pass
+        mode = "CUTLASS 融合内核" if status.get("cutlass") else "便携回退内核"
+        print(f"[GJJ W4A8] 原生加载完成：{model_name} · {mode}")
+        return model
+
+    print(f"[GJJ W4A8] 正在兼容加载：{model_name}")
+    sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+    converted = _convert_asym_w4a8_to_native_int8(sd)
+    if not converted:
+        raise RuntimeError(f"模型未包含可转换的 asym_w4a8_int8 层：{model_name}")
+    dtype = _torch_dtype(weight_dtype)
+    model_options: dict[str, Any] = {}
+    if dtype is not None:
+        model_options["dtype"] = dtype
+    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+    if model is None:
+        raise RuntimeError(f"W4A8 转换成功，但无法识别模型架构：{path}")
+    model.cached_patcher_init = (_load_asym_w4a8_diffusion_model, (model_name, weight_dtype, unique_id))
+    try:
+        setattr(model, "gjj_asym_w4a8_compat_layers", converted)
+    except Exception:
+        pass
+    print(f"[GJJ W4A8] 兼容加载完成，共转换 {converted} 个量化层")
+    return model
+
+
 def _dequantize_convrot_weight_tensor(sd: dict[str, Any], prefix: str, orig_shape: tuple[int, int], dtype: Any):
     weight_key = f"{prefix}.weight"
     quant_key = f"{prefix}.comfy_quant"
@@ -2059,9 +2232,11 @@ def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltx
 def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
+    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+    if _has_asym_w4a8_quantization(path):
+        return _load_asym_w4a8_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     if _is_convrot_quantized_model(model_name):
         return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
-    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     if dtype is not None:
         try:
@@ -2078,6 +2253,9 @@ def _load_unet_model(model_name: str, weight_dtype: str = "default", unique_id: 
     """Prefer the official UNETLoader shape used by the KJ workflow."""
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
+    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+    if _has_asym_w4a8_quantization(path):
+        return _load_asym_w4a8_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     if _is_convrot_quantized_model(model_name):
         return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     import importlib

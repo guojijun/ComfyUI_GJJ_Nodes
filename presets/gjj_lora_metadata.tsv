@@ -1,5 +1,6 @@
 ﻿id	match	title	trigger	strength	summary	source
-minimax_h3_turbo_4step	minimax_h3_turbo_4step	Minimax 加速Lora			这是一个演示，不是成品模型。这是一个 进行中跑的早期快照——训练不足，时间平均 （EMA）变异株还没成熟，整体质量远远不够 全套制作会有生产力。它已经显示出明显的进步 在基础型号基础上四步：细节更清晰、更干净，同步更好 音频比底座在同样的4步中给你的。把它当作 方向，而不是目的地。	https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora
+minimax_h3_fl2v_lightx2v_turbo_4step	minimax_h3_fl2v_lightx2v_turbo_4step	Minimax Lightx2V加速		0.75	不太确定预期的α剂量，如果输出噪声大，试着用低功率试试。	https://huggingface.co/Kijai/MiniMax-H3_comfy
+minimax_h3_turbo_4step	minimax_h3_turbo_4step	Minimax 加速Lora		2	这是一个演示，不是成品模型。这是一个 进行中跑的早期快照——训练不足，时间平均 （EMA）变异株还没成熟，整体质量远远不够 全套制作会有生产力。它已经显示出明显的进步 在基础型号基础上四步：细节更清晰、更干净，同步更好 音频比底座在同样的4步中给你的。把它当作 方向，而不是目的地。	https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora
 Wan2.1-1.3b-lora-highresfix-v1	Wan2.1-1.3b-lora-highresfix-v1	Wan细节修复		1	基于模型通义万相2.1-1.3B和框架 DiffSynth-Studio 训练的LoRA。由于基础模型的训练分辨率为 480P，在清晰度上存在一定缺陷，因此我们进行了额外的训练以修复模型在高分辨率视频上的效果，避免出现画面崩坏、灰暗的问题。	https://www.modelscope.cn/models/DiffSynth-Studio/Wan2.1-1.3b-lora-highresfix-v1/summary?version=v1
 detail-slider-krea-2-loraholic	detail-slider-krea-2-loraholic	细节滑块		-6~6	短提示或详细场景：-4.0至4.0 肖像或简单场景等：-6.0至6.0	https://civitai.com/models/2772451/detail-slider-krea-2-loraholic
 krea-2-breast-slider	krea-2-breast-slider	胸部滑块		2	乳房滑板	https://civitai.com/models/2732158/krea-2-breast-slider
