@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import gc
 import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -13,6 +15,60 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+_DLL_DIRECTORY_PATHS: set[Path] = set()
+_PRELOADED_DLL_HANDLES: list[Any] = []
+
+
+def _add_dll_directory(path: Path) -> None:
+    """Keep Windows DLL search-directory cookies alive for the process lifetime."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    try:
+        resolved = path.resolve()
+        if not resolved.is_dir() or resolved in _DLL_DIRECTORY_PATHS:
+            return
+        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(resolved)))
+        _DLL_DIRECTORY_PATHS.add(resolved)
+    except (OSError, RuntimeError):
+        pass
+
+
+def _add_runtime_dll_directories() -> None:
+    # Resolve portable llama.cpp DLLs from the installed package without importing it.
+    try:
+        spec = importlib.util.find_spec("llama_cpp")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    if spec is not None:
+        locations = list(spec.submodule_search_locations or ())
+        if not locations and spec.origin:
+            locations = [str(Path(spec.origin).parent)]
+        for location in locations:
+            package_dir = Path(location)
+            _add_dll_directory(package_dir / "bin")
+            _add_dll_directory(package_dir / "lib")
+            # Load the package-local OpenMP runtime by absolute path before GGML.
+            # Otherwise LoadLibraryW may bind GGML to an incompatible System32 copy.
+            if os.name == "nt":
+                for runtime_dir in (package_dir / "lib", package_dir / "bin"):
+                    runtime_path = runtime_dir / "libomp140.x86_64.dll"
+                    if runtime_path.is_file():
+                        try:
+                            _PRELOADED_DLL_HANDLES.append(ctypes.WinDLL(str(runtime_path.resolve())))
+                        except OSError:
+                            pass
+                        break
+
+    # CUDA_PATH is supplied by the environment and therefore remains portable.
+    cuda_env = os.environ.get("CUDA_PATH")
+    if cuda_env:
+        _add_dll_directory(Path(cuda_env) / "bin" / "x64")
+        _add_dll_directory(Path(cuda_env) / "bin")
+
+
+_add_runtime_dll_directories()
 
 import numpy as np
 from PIL import Image
@@ -29,23 +85,6 @@ except Exception:
     web = None
     PromptServer = None
 
-
-def _add_cuda_dll_directories() -> None:
-    candidates = []
-    cuda_env = os.environ.get("CUDA_PATH")
-    if cuda_env:
-        candidates.extend([Path(cuda_env) / "bin" / "x64", Path(cuda_env) / "bin"])
-    candidates.extend(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA").glob("v*/bin/x64"))
-    candidates.extend(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA").glob("v*/bin"))
-    for path in candidates:
-        try:
-            if path.exists():
-                os.add_dll_directory(str(path))
-        except Exception:
-            pass
-
-
-_add_cuda_dll_directories()
 
 try:
     import llama_cpp as llama_cpp_package
@@ -72,10 +111,7 @@ def _load_llama_backends() -> None:
         lib_dir = Path(llama_cpp_package.__file__).resolve().parent / "lib"
         if not lib_dir.exists():
             return
-        try:
-            os.add_dll_directory(str(lib_dir))
-        except Exception:
-            pass
+        _add_dll_directory(lib_dir)
         for dll_name in ("ggml-cuda.dll", "ggml-cpu-zen4.dll", "ggml-cpu-x64.dll"):
             dll_path = lib_dir / dll_name
             if dll_path.exists():
@@ -604,7 +640,7 @@ class _LlamaStorage:
         if use_gpu and not gpu_backend_available:
             print(
                 "[GJJ][LlamaAssistant][WARN] GPU优先已开启，但当前 llama-cpp-python 没有可用 CUDA 后端；"
-                "日志只会加载 CPU backend。请关闭 ComfyUI 后运行 D:\\AI\\CUI78\\install_llama_cpp_cuda_gjj.bat，"
+                "日志只会加载 CPU backend。请关闭 ComfyUI 后运行整合包根目录中的 install_llama_cpp_cuda_gjj.bat，"
                 "直到显示 gpu_offload True。"
             )
         chat_handler = None

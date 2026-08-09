@@ -34,6 +34,28 @@ def _preferred(values: list[str], needles: tuple[str, ...]) -> str:
     return values[0]
 
 
+def _is_comfy_wan_clip_name(name: Any) -> bool:
+    """Reject WanVideoWrapper UMT5 encoder weights masquerading as CLIP files."""
+    filename = str(name or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    normalized = filename.replace("-", "_").replace(".", "_")
+    return not (filename.endswith(".safetensors") and "umt5_xxl_enc_" in normalized)
+
+
+def _wan_clip_names() -> list[str]:
+    values = [name for name in _names("text_encoders") if _is_comfy_wan_clip_name(name)]
+    preferred = (
+        "umt5_xxl_int4_convrot.safetensors",
+        "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "umt5_xxl_fp16.safetensors",
+    )
+    values.sort(key=lambda name: (
+        preferred.index(str(name).replace("\\", "/").rsplit("/", 1)[-1].lower())
+        if str(name).replace("\\", "/").rsplit("/", 1)[-1].lower() in preferred else len(preferred),
+        str(name).lower(),
+    ))
+    return values or ["未找到兼容的 Wan 文本编码器"]
+
+
 def _progress(unique_id: Any, text: str, value: float | None = None) -> None:
     message = f"[Wan Animate2 AIO] {text}"
     log.info(message)
@@ -100,7 +122,7 @@ class GJJ_WanAnimate2LongVideoAIO:
     def INPUT_TYPES(cls):
         unets = _names("diffusion_models")
         loras = _names("loras")
-        clips = _names("text_encoders")
+        clips = _wan_clip_names()
         visions = _names("clip_vision")
         vaes = _names("vae")
         return {
@@ -108,23 +130,23 @@ class GJJ_WanAnimate2LongVideoAIO:
                 "reference_image": ("IMAGE", {"display_name": "参考图"}),
                 "action_video": ("VIDEO", {"display_name": "动作视频"}),
                 "prompt": ("STRING", {"default": "Character follows the motion of the driving video.", "multiline": True, "display_name": "画面提示词"}),
-                "negative_prompt": ("STRING", {"default": "色调艳丽，过曝，静态，细节模糊，字幕，水印，低质量，畸形，手指错误，脸部扭曲，动作僵硬", "multiline": True, "display_name": "负面提示词"}),
-                "pose_prompt": ("STRING", {"default": "A person performs the motion shown in the reference video.", "multiline": True, "display_name": "动作提示词"}),
-                "width": ("INT", {"default": 832, "min": 256, "max": 2048, "step": 16, "display_name": "宽度"}),
-                "height": ("INT", {"default": 480, "min": 256, "max": 2048, "step": 16, "display_name": "高度"}),
-                "segment_frames": ("INT", {"default": 81, "min": 9, "max": 241, "step": 4, "display_name": "每段帧数"}),
-                "overlap_frames": ("INT", {"default": 1, "min": 0, "max": 32, "step": 1, "display_name": "续接重叠帧"}),
-                "steps": ("INT", {"default": 6, "min": 1, "max": 100, "display_name": "步数"}),
-                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "display_name": "CFG"}),
-                "seed": ("INT", {"default": 1, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "display_name": "种子"}),
-                "pose_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "display_name": "动作强度"}),
-                "reference_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "display_name": "参考图强度"}),
-                "unet_name": (unets, {"default": _preferred(unets, ("animate", "2")), "display_name": "Animate2 模型"}),
-                "lora_name": (loras, {"default": _preferred(loras, ("lightx2v",)), "display_name": "加速 LoRA"}),
-                "clip_name": (clips, {"default": _preferred(clips, ("umt5",)), "display_name": "文本编码器"}),
-                "clip_vision_name": (visions, {"default": _preferred(visions, ("clip_vision_h",)), "display_name": "CLIP Vision"}),
-                "vae_name": (vaes, {"default": _preferred(vaes, ("wan",)), "display_name": "VAE"}),
-                "filename_prefix": ("STRING", {"default": "video/WanAnimate2_AIO", "display_name": "文件名前缀"}),
+                "negative_prompt": ("STRING", {"default": "色调艳丽，过曝，静态，细节模糊，字幕，水印，低质量，畸形，手指错误，脸部扭曲，动作僵硬", "multiline": True, "hidden": True, "display": "hidden", "display_name": "负面提示词"}),
+                "pose_prompt": ("STRING", {"default": "A person performs the motion shown in the reference video.", "multiline": True, "hidden": True, "display": "hidden", "display_name": "动作提示词"}),
+                "width": ("INT", {"default": 832, "min": 256, "max": 2048, "step": 16, "hidden": True, "display": "hidden", "display_name": "宽度"}),
+                "height": ("INT", {"default": 480, "min": 256, "max": 2048, "step": 16, "hidden": True, "display": "hidden", "display_name": "高度"}),
+                "segment_frames": ("INT", {"default": 81, "min": 9, "max": 241, "step": 4, "hidden": True, "display": "hidden", "display_name": "每段帧数"}),
+                "overlap_frames": ("INT", {"default": 1, "min": 0, "max": 32, "step": 1, "hidden": True, "display": "hidden", "display_name": "续接重叠帧"}),
+                "steps": ("INT", {"default": 6, "min": 1, "max": 100, "hidden": True, "display": "hidden", "display_name": "步数"}),
+                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "hidden": True, "display": "hidden", "display_name": "CFG"}),
+                "seed": ("INT", {"default": 1, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True, "hidden": True, "display": "hidden", "display_name": "种子"}),
+                "pose_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "hidden": True, "display": "hidden", "display_name": "动作强度"}),
+                "reference_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "hidden": True, "display": "hidden", "display_name": "参考图强度"}),
+                "unet_name": (unets, {"default": _preferred(unets, ("animate", "2")), "hidden": True, "display": "hidden", "display_name": "Animate2 模型"}),
+                "lora_name": (loras, {"default": _preferred(loras, ("lightx2v",)), "hidden": True, "display": "hidden", "display_name": "加速 LoRA"}),
+                "clip_name": (clips, {"default": _preferred(clips, ("umt5",)), "hidden": True, "display": "hidden", "display_name": "文本编码器"}),
+                "clip_vision_name": (visions, {"default": _preferred(visions, ("clip_vision_h",)), "hidden": True, "display": "hidden", "display_name": "CLIP Vision"}),
+                "vae_name": (vaes, {"default": _preferred(vaes, ("wan",)), "hidden": True, "display": "hidden", "display_name": "VAE"}),
+                "filename_prefix": ("STRING", {"default": "video/WanAnimate2_AIO", "hidden": True, "display": "hidden", "display_name": "文件名前缀"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -143,6 +165,18 @@ class GJJ_WanAnimate2LongVideoAIO:
         overlap_frames = min(max(0, int(overlap_frames)), segment_frames - 1)
         stride = max(1, segment_frames - overlap_frames)
         _progress(unique_id, f"读取动作视频：{len(frames)} 帧，{fps:.3g} fps", 0.02)
+
+        if not _is_comfy_wan_clip_name(clip_name):
+            compatible_clips = _wan_clip_names()
+            if compatible_clips == ["未找到兼容的 Wan 文本编码器"]:
+                raise RuntimeError(
+                    f"文本编码器 {clip_name} 是 WanVideoWrapper 的 WANTEXTENCODER 权重，不能用于 ComfyUI CLIPTextEncode。"
+                    "请在 models/text_encoders 中安装 umt5_xxl_int4_convrot.safetensors、"
+                    "umt5_xxl_fp8_e4m3fn_scaled.safetensors 或 umt5_xxl_fp16.safetensors。"
+                )
+            replacement = _preferred(compatible_clips, ("umt5", "xxl"))
+            _progress(unique_id, f"所选 T5 不兼容 CLIP 编码，已自动改用：{replacement}", 0.03)
+            clip_name = replacement
 
         model = _call("UNETLoader", unet_name=unet_name, weight_dtype="default")[0]
         if lora_name and lora_name != "未找到模型":
