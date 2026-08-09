@@ -57,6 +57,19 @@ def gjjutils_hash_pil_image(image: Image.Image, mode: str = "RGBA") -> tuple[str
     return digest.hexdigest(), normalized
 
 
+def _prepare_pil_image_for_format(image: Image.Image, format: str) -> Image.Image:
+    """Return an image mode supported by the requested Pillow encoder."""
+    normalized_format = str(format or "PNG").upper()
+    if normalized_format in {"JPEG", "JPG"} and image.mode not in {"RGB", "L"}:
+        if "A" in image.getbands():
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            return background
+        return image.convert("RGB")
+    return image
+
+
 def gjjutils_temp_path(filename: str) -> Path:
     name = Path(str(filename or "")).name
     if not name:
@@ -304,7 +317,8 @@ def gjjutils_write_temp_pil_image(
             needs_write = True
     if needs_write:
         buffer = BytesIO()
-        normalized.save(buffer, format=normalized_format)
+        encoded = _prepare_pil_image_for_format(normalized, normalized_format)
+        encoded.save(buffer, format=normalized_format)
         if path.exists():
             path.unlink(missing_ok=True)
         _atomic_write_bytes(path, buffer.getvalue())
@@ -344,7 +358,8 @@ def gjjutils_write_persistent_pil_image(
     path = root / filename
     if not path.exists():
         buffer = BytesIO()
-        normalized.save(buffer, format=normalized_format)
+        encoded = _prepare_pil_image_for_format(normalized, normalized_format)
+        encoded.save(buffer, format=normalized_format)
         _atomic_write_bytes(path, buffer.getvalue())
     preview = ImageOps.exif_transpose(normalized).convert("RGB")
     preview.thumbnail((GJJ_PREVIEW_MAX_EDGE, GJJ_PREVIEW_MAX_EDGE), Image.Resampling.LANCZOS)

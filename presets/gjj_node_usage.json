@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 61,
-      "last_used": 1786236999476
+      "use_count": 63,
+      "last_used": 1786261956796
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -120,6 +120,10 @@
     "GJJ_SCAIL2LongVideoAIO": {
       "use_count": 1,
       "last_used": 1786242051701
+    },
+    "GJJ_WanAnimate2LongVideoAIO": {
+      "use_count": 2,
+      "last_used": 1786267203566
     }
   },
   "sort_reverse": true

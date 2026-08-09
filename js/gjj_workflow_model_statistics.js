@@ -272,6 +272,27 @@ function collectWorkflowModels() {
 			// current-model provider is authoritative for model statistics.
 			continue;
 		}
+		if (graphNode?.type === "GJJ_WanAnimate2LongVideoAIO") {
+			let activeEntries = [];
+			try {
+				const provider = graphNode.__gjjHelpModelEntries;
+				activeEntries = typeof provider === "function" ? provider.call(graphNode) : [];
+			} catch (error) {
+				console.warn("[GJJ WorkflowModelStatistics] 读取 Wan Animate2 AIO 当前模型失败：", error);
+			}
+			for (const entry of Array.isArray(activeEntries) ? activeEntries : []) {
+				items.push({
+					node_id: graphNode.id,
+					node_type: graphNode.type,
+					node_title: nodeTitle,
+					widget_name: String(entry?.kind || "").trim().toLowerCase() || "auto",
+					name: String(entry?.value || entry?.name || ""),
+					folder: String(entry?.folder || "").replace(/^models[\\/]/i, ""),
+				});
+			}
+			// 参数属性中保留旧工作流快照；当前生效清单是唯一统计来源。
+			continue;
+		}
 		if (graphNode?.type === "GJJ_StoryboardGridGenerator") {
 			const currentWidgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
 			for (const [name, kind] of [
