@@ -9,6 +9,7 @@ const NODE_TITLE_SUFFIX = " 图片反推提示词推理";
 const PANEL_WIDGET = "gjj_gemma_text_generate_panel";
 const RESULT_WIDGET = "gjj_gemma_text_generate_result";
 const PROMPT_WIDGET = "prompt";
+const EXTERNAL_PROMPT_INPUT = "external_prompt";
 const TEMPLATE_WIDGET = "system_prompt_templates";
 const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
@@ -1548,18 +1549,23 @@ function hideNativePromptWidget(node) {
 function ensurePromptInput(node) {
 	if (!Array.isArray(node?.inputs)) node.inputs = [];
 	let promptInput = node.inputs.find((input) =>
-		String(input?.name || "") === PROMPT_WIDGET || String(input?.widget?.name || "") === PROMPT_WIDGET);
+		String(input?.name || "") === EXTERNAL_PROMPT_INPUT);
 	if (!promptInput) {
-		node.addInput?.(PROMPT_WIDGET, "STRING");
+		node.addInput?.(EXTERNAL_PROMPT_INPUT, "STRING");
 		promptInput = node.inputs[node.inputs.length - 1];
 	}
 	if (!promptInput) return;
-	promptInput.name = PROMPT_WIDGET;
+	promptInput.name = EXTERNAL_PROMPT_INPUT;
 	promptInput.type = "STRING";
 	promptInput.label = "指令 / 原文";
 	promptInput.localized_name = "指令 / 原文";
+	promptInput.display_name = "指令 / 原文";
 	promptInput.tooltip = "外接 STRING 时作为用户指令；未连接时使用节点内文本框。";
-	promptInput.widget = { name: PROMPT_WIDGET };
+	promptInput.hidden = false;
+	promptInput.visible = true;
+	delete promptInput.widget;
+	delete promptInput.widget_name;
+	promptInput.forceInput = true;
 }
 
 function normalizeMediaInput(node) {
@@ -2462,8 +2468,8 @@ function stabilize(node) {
 	});
 	hideNativePromptWidget(node);
 	installActorPromptTrigger(node);
-	ensurePromptInput(node);
 	normalizeMediaInput(node);
+	ensurePromptInput(node);
 	syncMediaInputRoute(node);
 	placePromptAfterPanel(node);
 	syncPanel(node);

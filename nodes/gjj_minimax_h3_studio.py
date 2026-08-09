@@ -105,7 +105,9 @@ def _uses_default_accel_lora(raw_value: Any) -> bool:
 
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
-    "根据当前任务模式输出可直接送入模型的最终英文提示词；对白、歌词和画面文字保留原语言。"
+    "根据当前任务模式输出可直接送入模型的最终提示词。除 MiniMax H3 规定必须保留的英文结构字段、"
+    "资源标签、镜头标签、语种标签、控制标签、任务代码和保留级别标记外，其余说明与画面描述全部使用中文；"
+    "对白、歌词和画面文字严格保留原语言。"
     "输入中的 __GJJ_DIALOGUE_XXXX__ 是受保护原文占位符，必须原样、完整且仅出现一次，禁止翻译、改写或删除。"
     "不要解释、不要分析过程、不要 Markdown 代码块。"
 )
@@ -117,62 +119,64 @@ def _official_prompt_rewrite_rules(
     seconds = f"{max(0.0, float(duration)):.2f}"
     language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
     shared = (
-        "Follow the official MiniMax H3 video prompt rules. Preserve every user-provided dialogue word and punctuation verbatim; "
-        "Any __GJJ_DIALOGUE_XXXX__ token is protected source text: copy it exactly once and never translate, rewrite, or remove it. "
-        f"put every spoken line inside <d>[{language_tag}] ...</d> and use [{language_tag}] for every dialogue line without exception. "
-        "Assign stable speaker IDs (S1), (S2), etc. "
-        "For every spoken line, identify the concrete speaker outside <d> and use an explicit physical speech verb such as says, "
-        "replies, asks, or exclaims. Unless the user explicitly requests voiceover or off-screen speech, keep that speaker on-screen "
-        "with the face and mouth clearly visible during the complete line, and explicitly state that the speaker naturally moves the "
-        "lips and jaw in precise synchronization with the spoken words. Immediately after the line, state that the speaker finishes "
-        "speaking and closes the mouth. Keep all other visible characters' lips closed while they listen, react, or wait for their turn. "
-        "Never turn physical dialogue into narration, internal monologue, soundtrack vocals, or off-screen voiceover merely to simplify "
-        "the shot. Give each complete line enough uninterrupted screen time to be spoken at a natural pace; use <cutoff> only when the "
-        "user intentionally requests truncated speech. Avoid poses, objects, framing, or camera moves that hide the active speaker's mouth. "
-        "Every referenced scene or environment must fill the entire target frame edge-to-edge; never preserve blank margins, white canvas, "
-        "letterboxing, reference-board borders, or unused space from a source image. "
-        "Treat every repeated occurrence of the same character <Picture N> tag as the same single persistent on-screen individual, "
-        "never as a new instance. Keep exactly one instance of each referenced character unless the user explicitly requests duplicates; "
-        "never clone, duplicate, mirror, replace, or add a look-alike copy of a referenced character. "
-        "Write shot actions in playback order. [Shot 1] has no timestamp; later shots use strictly increasing "
-        "[Shot N] At MM:SS.mmm timestamps within the video duration. Express camera motion naturally with motion type, "
-        "and add amplitude/speed only when meaningful. Keep visible text verbatim in double quotes. "
-        "Do not invent extra dialogue or translate dialogue. Output only the finished prompt, without commentary or Markdown fences."
-        " Preserve every supplied <Audio N> tag exactly. Treat each 'Reference voice assignments' entry as an official MiniMax H3 "
-        "standalone reference-audio binding: the named character or referenced picture must use that <Audio N> voice identity for all "
-        "of its spoken lines. Treat the recording only as a voice-identity/timbre reference: never copy, replay, continue, quote, or "
-        "output its spoken content, performance timing, or waveform. Never renumber, remove, swap, or assign that timbre to another speaker."
+        "最高优先级输出语言规则：即使前文要求英文，最终提示词也必须以中文撰写；仅 MiniMax H3 固定字段名、"
+        "<Subject N>/<Picture N>/<Video N>/<Audio N>、[Shot N]、(S1)、<d>、<scenetrans>、<cutoff>、"
+        f"[{language_tag}]、模式代码、时间格式及官方保留级别标记保持英文。"
+        "严格遵循 MiniMax H3 视频提示词规范，逐字保留用户提供的对白与标点。"
+        "任何 __GJJ_DIALOGUE_XXXX__ 都是受保护原文占位符，必须原样且仅复制一次，禁止翻译、改写或删除。"
+        f"每句对白都放入 <d>[{language_tag}] ...</d>，所有对白无一例外使用 [{language_tag}]。"
+        "为说话者分配稳定的 (S1)、(S2) 等编号。每句对白前在标签外明确具体说话者及说话动作。"
+        "除非用户明确要求画外音或离屏说话，否则说话者必须全程在画面内，脸部和嘴部清晰可见，"
+        "嘴唇与下颌自然运动并与台词精准同步；说完后闭嘴，其他可见角色在倾听或反应时保持闭嘴。"
+        "不得为了简化镜头把现场对白改成旁白、内心独白、配乐演唱或画外音。"
+        "为完整台词留出自然语速所需的连续时长；仅在用户明确要求截断时使用 <cutoff>。"
+        "避免用姿势、物体、构图或运镜遮挡当前说话者的嘴部。"
+        "所有参考场景或环境都必须铺满目标画面，不保留白边、白底画布、黑边、参考板边框或无用空间。"
+        "同一角色的重复 <Picture N> 始终代表同一个持续存在的人物；除非用户明确要求，不得克隆、复制、镜像、"
+        "替换或添加相似副本，每个参考角色只保留一个实例。"
+        "按播放顺序写镜头动作；[Shot 1] 不写时间戳，后续镜头用严格递增且不超过视频时长的 "
+        "[Shot N] At MM:SS.mmm。运镜用中文自然描述运动类型、幅度与速度。画面文字用英文半角双引号原样保留。"
+        "用户已提供对白时不得改写、翻译或擅自追加；用户没有提供对白时，可以根据场景创作简短自然的对白，"
+        "但必须按自然语速控制全部对白，使其可在视频总时长内完整说完，不得为了填充时长重复台词。"
+        "只输出最终提示词，不要解释、分析过程或 Markdown 代码块。"
+        "完整保留所有 <Audio N> 标签。每条 Reference voice assignments 都是官方独立参考音频绑定："
+        "指定角色或图片在全部对白中使用对应 <Audio N> 的音色身份。音频仅作为音色、声线参考，"
+        "不得复制、重播、续写、引用其原始话语、表演时序或波形；不得重编号、删除、交换或转配给其他说话者。"
     )
     if mode == "R2VA":
         return (
-            f"Task: full-reference generation, duration {seconds} seconds, {picture_count} reference picture(s). {shared} "
-            "Write all structural prose in English and use exactly these six sections in order: subject_definitions:, summary:, "
+            f"任务：R2VA 完整参考生成，时长 {seconds} 秒，参考图片 {picture_count} 张。{shared} "
+            "正文使用中文，并严格按以下顺序使用六个英文固定字段：subject_definitions:, summary:, "
             "retention_analysis:, detailed_description:, overall_soundscape:, non_diegetic_music:. "
-            "In subject_definitions, describe reusable characters, scenes, objects, costumes, or styles directly with their existing "
-            "<Picture N> tags. Never create or use <Subject N> aliases. Keep every existing <Picture N> index unchanged. Use "
-            "[reference generation] in summary unless another "
-            "relationship is explicitly required. Use only valid retention markers: fully_preserved, partially_preserved, "
-            "attribute_transfer, weak_reference. In detailed_description, cite <Picture N> directly wherever it appears. "
-            "Use 350-500 English words when content complexity warrants it."
+            "在 subject_definitions 中直接用已有 <Picture N> 定义可复用人物、场景、物体、服装或风格；"
+            "不得创建 <Subject N> 别名，不得改动任何 <Picture N> 编号。summary 默认使用 [reference generation]，"
+            "除非任务明确需要其他关系。retention_analysis 只使用 fully_preserved、partially_preserved、"
+            "attribute_transfer、weak_reference。detailed_description 在素材实际出现处直接引用 <Picture N>。"
+            "retention_analysis 必须依据 subject_definitions 中每个资源的真实类型描述：场景只写布局、建筑、地貌、"
+            "光影与空间氛围，人物才写身份、面部、发型与服装，物体写外形、材质与结构；严禁给场景套用人物身份或服装描述。"
+            "detailed_description 必须在字段内部按 [Shot 1]、[Shot 2] 顺序写分镜；[Shot 1] 不写时间戳，"
+            "后续镜头才写 At MM:SS.mmm。每个镜头明确构图、人物位置、连续动作、运镜和同步声音。"
+            "必须让用户要求的核心动作在视频时长内真正发生并完成可见过程，不得只写对峙、准备、即将开始或静态姿势。"
+            "内容复杂时写约 700 至 1000 个中文字符，优先保证每个镜头的构图、主体、环境、动作、运镜与声音完整。"
         )
     instruction = {
         "I2VA": "The first line must be: For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
-        "FL2VA": f"The first line must align Picture 1 with 0.00 seconds and Picture 2 with the {seconds}-second mark of the actual final shot, using the official first/last-frame alignment sentence.",
-        "L2VA": f"The first line must align <Picture 1> with the {seconds}-second mark of the actual final shot, using the official last-frame alignment sentence.",
-        "T2VA": "Do not add any picture-alignment instruction.",
+        "FL2VA": f"首行使用官方首尾帧对齐句，将 Picture 1 对齐 0.00 秒，并将 Picture 2 对齐实际最终镜头的 {seconds} 秒。",
+        "L2VA": f"首行使用官方尾帧对齐句，将 <Picture 1> 对齐实际最终镜头的 {seconds} 秒。",
+        "T2VA": "不要添加图片对齐说明。",
     }.get(mode, "")
     path_rule = {
-        "I2VA": "Develop continuously from the first-frame anchor while preserving identity, clothing, objects, composition, and spatial relationships.",
-        "FL2VA": "Describe one continuous observable path from the first-frame state to the last-frame state; prefer a single shot unless the user explicitly requests cuts.",
-        "L2VA": "Infer a plausible earlier state and describe a continuous convergence toward the referenced final frame.",
-        "T2VA": "Construct a complete audiovisual timeline directly from the user's text.",
+        "I2VA": "从首帧锚点连续发展，并保持身份、服装、物体、构图与空间关系一致。",
+        "FL2VA": "描述从首帧状态到尾帧状态的连续可观察路径；除非用户明确要求切镜，否则优先使用单镜头。",
+        "L2VA": "推断合理的先前状态，并描述连续收敛到参考尾帧的过程。",
+        "T2VA": "直接根据用户文本构建完整视听时间线。",
     }.get(mode, "")
     return (
-        f"Task: {mode}, duration {seconds} seconds. {shared} {instruction} {path_rule} "
-        "After the optional alignment line and one blank line, output exactly three fields: "
+        f"任务：{mode}，时长 {seconds} 秒。{shared} {instruction} {path_rule} "
+        "可选对齐说明之后空一行，并严格输出三个英文固定字段："
         "integrated_multimodal_description:, overall_soundscape:, non_diegetic_music:. "
-        "overall_soundscape must summarize ambience, physical sounds, and non-verbal human sounds without repeating dialogue. "
-        "non_diegetic_music describes audience-only music using instrumentation, tempo, rhythm, and dynamics, or N/A when absent."
+        "overall_soundscape 用中文概括环境声、物理动作声与非语言人声，不重复对白。"
+        "non_diegetic_music 用中文描述仅观众可听见的乐器、速度、节奏和动态；无配乐时写 N/A。"
     )
 
 
@@ -240,10 +244,188 @@ def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, s
     if missing:
         restored = "\n\n".join(filter(None, (
             restored.strip(),
-            "Protected verbatim dialogue/text — mandatory, preserve exactly and do not translate: "
+            "受保护的对白或画面文字（必须逐字保留，禁止翻译）："
             + " ".join(missing),
         )))
     return restored
+
+
+def _sanitize_reasoned_prompt(
+    prompt: str, mode: str, duration: float, picture_count: int, dialogue_language: str = "中文",
+    source_prompt: str = "",
+) -> str:
+    """清除小文本模型的退化输出，并补齐 MiniMax H3 的最小官方结构。"""
+    cleaned = str(prompt or "").strip()
+    # 小模型在长输出末尾可能陷入 `[d]` 或空对白标签循环；这些不是 H3 合法标签。
+    cleaned = re.sub(r"(?im)^[ \t]*(?:\[\s*d\s*\]|<d>\s*</d>)[ \t]*(?:\r?\n|$)", "", cleaned)
+    cleaned = re.sub(r"(?i)(?<!<)\[\s*d\s*\]", "", cleaned)
+    cleaned = re.sub(r"(?is)<d>\s*(?:\[[^\]\r\n]+\]\s*)?</d>", "", cleaned)
+    source_text = str(source_prompt or "")
+    source_has_dialogue = bool(
+        re.search(r"(?is)<d>.*?</d>", source_text)
+        or re.search(r"(?:说|说道|问|询问|回答|回复|喊|叫|台词)\s*[：:]", source_text)
+    )
+    generated_speech_seconds = 0.0
+
+    def keep_valid_dialogue(match: re.Match[str]) -> str:
+        nonlocal generated_speech_seconds
+        dialogue = re.sub(r"^\s*\[[^\]\r\n]+\]\s*", "", match.group(1)).strip()
+        if not dialogue:
+            return ""
+        if source_has_dialogue:
+            return match.group(0) if dialogue in source_text else ""
+        # 没有原台词时允许模型创作；按中文约 4 字/秒、外文约 2.5 词/秒估算完整口播时长。
+        han_count = len(re.findall(r"[\u3400-\u9fff]", dialogue))
+        latin_words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", dialogue))
+        estimated_seconds = max(0.6, han_count / 4.0 + latin_words / 2.5)
+        if generated_speech_seconds + estimated_seconds > max(0.0, float(duration)) + 1e-6:
+            return ""
+        generated_speech_seconds += estimated_seconds
+        return match.group(0)
+
+    cleaned = re.sub(
+        r"(?is)<d>\s*(.*?)\s*</d>",
+        keep_valid_dialogue,
+        cleaned,
+    )
+    # 官方格式中第一镜头没有时间戳；后续镜头才使用 At MM:SS.mmm。
+    cleaned = re.sub(
+        r"(?i)\[Shot\s+1\]\s+At\s+00:00(?:\.0{1,3})?\s*", "[Shot 1] ", cleaned,
+    )
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    if not cleaned:
+        return _officialize_prompt_without_reasoning(
+            "", mode, duration, picture_count, dialogue_language,
+        )
+
+    if mode == "R2VA":
+        required = (
+            "subject_definitions:", "summary:", "retention_analysis:",
+            "detailed_description:", "overall_soundscape:", "non_diegetic_music:",
+        )
+        if all(field in cleaned for field in required):
+            # non_diegetic_music 是最后一个字段；其后的资源/对白标签属于模型跑满 token 后的退化续写。
+            music_start = cleaned.find("non_diegetic_music:")
+            music_value_start = music_start + len("non_diegetic_music:")
+            music_value = cleaned[music_value_start:]
+            tail = re.search(
+                r"(?im)^\s*(?:<Subject\s+\d+>|<Picture\s+\d+>|<Video\s+\d+>|<Audio\s+\d+>|<d>)",
+                music_value,
+            )
+            if tail:
+                cleaned = (cleaned[:music_value_start] + music_value[:tail.start()]).strip()
+
+            # `[Shot N]` 若被模型续写到最终音乐字段之后，同样属于错位尾部；最终字段后不得再有分镜。
+            music_start = cleaned.find("non_diegetic_music:")
+            music_value_start = music_start + len("non_diegetic_music:")
+            music_value = cleaned[music_value_start:]
+            misplaced_shot = re.search(r"(?im)^\s*\[Shot\s+\d+\]", music_value)
+            if misplaced_shot:
+                cleaned = (cleaned[:music_value_start] + music_value[:misplaced_shot.start()]).strip()
+
+            # detailed_description 必须自身包含镜头标签，不能只有无结构的剧情概述。
+            detailed_start = cleaned.find("detailed_description:")
+            sound_start = cleaned.find("overall_soundscape:")
+            detailed_value_start = detailed_start + len("detailed_description:")
+            detailed_value = cleaned[detailed_value_start:sound_start].strip()
+            if not re.search(r"\[Shot\s+1\]", detailed_value, flags=re.IGNORECASE):
+                cleaned = (
+                    cleaned[:detailed_value_start]
+                    + f" [Shot 1] {detailed_value}\n\n"
+                    + cleaned[sound_start:]
+                )
+
+            retention_start = cleaned.find("retention_analysis:")
+            detailed_start = cleaned.find("detailed_description:")
+            retention_value = cleaned[retention_start + len("retention_analysis:"):detailed_start].strip()
+            picture_numbers = sorted({int(value) for value in re.findall(r"<Picture\s+(\d+)>", cleaned)})
+            definitions_start = cleaned.find("subject_definitions:") + len("subject_definitions:")
+            summary_start = cleaned.find("summary:")
+            definitions_value = cleaned[definitions_start:summary_start]
+
+            def retention_detail(number: int) -> str:
+                definition_match = re.search(
+                    rf"<Picture\s+{number}>\s*(.*?)(?=<Picture\s+\d+>|$)",
+                    definitions_value,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                definition = definition_match.group(1) if definition_match else ""
+                if re.search(r"场景|背景|环境|雪山|山谷|桥|宫殿|建筑|森林|竹林|街道|房间|室内|天空|海洋|沙漠", definition):
+                    return "完整保留场景布局、建筑与地貌结构、光影、色彩及空间氛围。"
+                if re.search(r"风格|画风|美术|摄影|色调|质感", definition):
+                    return "完整保留视觉风格、色彩体系、光影方式与画面质感。"
+                if re.search(r"物体|物品|道具|武器|车辆|产品|设备|剑|刀|书|杯|珠宝", definition):
+                    return "完整保留物体外形、材质、结构、色彩与关键细节。"
+                return "完整保留人物身份、面部外观、发型、服装、色彩与核心视觉特征。"
+
+            if picture_numbers and not re.search(r"<Picture\s+\d+>", retention_value):
+                replacement = "\n".join(
+                    f"<Picture {number}>：fully_preserved - {retention_detail(number)}"
+                    for number in picture_numbers
+                )
+                cleaned = (
+                    cleaned[:retention_start]
+                    + f"retention_analysis: {replacement}\n\n"
+                    + cleaned[detailed_start:]
+                )
+            elif picture_numbers:
+                # 修正旧缓存或小模型把场景/物体误套成“人物身份、服装”的通用保留模板。
+                for number in picture_numbers:
+                    detail = retention_detail(number)
+                    cleaned = re.sub(
+                        rf"(?im)^((?:retention_analysis:\s*)?<Picture\s+{number}>\s*[：:]\s*fully_preserved\s*[-—―]\s*)"
+                        r"完整保留人物身份[^\r\n]*核心视觉特征。?$",
+                        lambda match, value=detail: match.group(1) + value,
+                        cleaned,
+                    )
+            return cleaned.strip()
+
+        if not all(field in cleaned for field in required):
+            if any(field in cleaned for field in required):
+                positions = sorted(
+                    (cleaned.find(field), field) for field in required if field in cleaned
+                )
+                sections: dict[str, str] = {}
+                for position_index, (start, field) in enumerate(positions):
+                    value_start = start + len(field)
+                    value_end = positions[position_index + 1][0] if position_index + 1 < len(positions) else len(cleaned)
+                    sections[field] = cleaned[value_start:value_end].strip()
+                picture_numbers = sorted({int(value) for value in re.findall(r"<Picture\s+(\d+)>", cleaned)})
+                definitions = " ".join(
+                    f"<Picture {number}>：对应的可复用视觉参考。" for number in picture_numbers
+                ) or "未定义可复用图片主体。"
+                retention = " ".join(
+                    f"<Picture {number}>：fully_preserved - 完整保留其定义的核心视觉特征。"
+                    for number in picture_numbers
+                ) or "N/A"
+                defaults = {
+                    "subject_definitions:": definitions,
+                    "summary:": "[reference generation] 按用户要求生成目标视频并保持参考关系。",
+                    "retention_analysis:": retention,
+                    "detailed_description:": cleaned,
+                    "overall_soundscape:": "自然环境声与动作声随画面同步变化，不重复对白。",
+                    "non_diegetic_music:": "N/A",
+                }
+                return "\n\n".join(
+                    f"{field} {sections.get(field) or defaults[field]}" for field in required
+                )
+            return _officialize_prompt_without_reasoning(
+                cleaned, mode, duration, picture_count, dialogue_language,
+            )
+        return cleaned
+
+    body_field = "integrated_multimodal_description:"
+    sound_field = "overall_soundscape:"
+    music_field = "non_diegetic_music:"
+    if body_field not in cleaned:
+        cleaned = f"{body_field} {cleaned}"
+    if sound_field not in cleaned:
+        cleaned += "\n\noverall_soundscape: 自然环境声与动作声随画面同步变化，不重复对白。"
+    if music_field not in cleaned:
+        cleaned += "\n\nnon_diegetic_music: N/A"
+    return cleaned.strip()
 
 
 def _officialize_prompt_without_reasoning(
@@ -252,7 +434,7 @@ def _officialize_prompt_without_reasoning(
     """不加载文本模型时，用确定性规则整理为 MiniMax H3 官方提示词结构。"""
     source = str(prompt or "").strip()
     if not source:
-        source = "A coherent cinematic scene develops naturally across the full video."
+        source = "一个连贯的电影化场景在完整视频时长内自然展开。"
     official_fields = ("integrated_multimodal_description:", "subject_definitions:", "detailed_description:")
     if any(field in source for field in official_fields):
         return source
@@ -277,10 +459,9 @@ def _officialize_prompt_without_reasoning(
         speaker_id = speaker_ids[speaker_key]
         subject_label = picture_label
         dialogue_actions.append(
-            f"{subject_label} (S{speaker_id}) remains on-screen with the face and mouth clearly visible, turns naturally toward "
-            f"the listener, and says while the lips and jaw move in precise synchronization with the spoken words: "
-            f"<d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> {subject_label} (S{speaker_id}) finishes speaking and closes "
-            "the mouth while the other visible characters keep their lips closed and react naturally."
+            f"{subject_label} (S{speaker_id}) 始终在画面内，脸部与嘴部清晰可见，自然转向倾听者并开口说话，"
+            f"嘴唇和下颌与台词精准同步：<d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> "
+            f"{subject_label} (S{speaker_id}) 说完后闭嘴，其他可见角色保持闭嘴并自然反应。"
         )
 
     narrative = dialogue_pattern.sub(" ", source)
@@ -299,42 +480,41 @@ def _officialize_prompt_without_reasoning(
             speaker_ids[speaker_key] = len(speaker_ids) + 1
         speaker_id = speaker_ids[speaker_key]
         dialogue_actions.append(
-            f"{speaker_name} (S{speaker_id}) remains on-screen with the face and mouth clearly visible and says while the lips "
-            f"and jaw move in precise synchronization with the spoken words: <d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> "
-            f"{speaker_name} (S{speaker_id}) finishes speaking and closes the mouth while the other visible characters keep their "
-            "lips closed and react naturally."
+            f"{speaker_name} (S{speaker_id}) 始终在画面内，脸部与嘴部清晰可见并开口说话，嘴唇和下颌与台词精准同步："
+            f"<d>[{DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), 'Chinese')}] {spoken_text}</d> "
+            f"{speaker_name} (S{speaker_id}) 说完后闭嘴，其他可见角色保持闭嘴并自然反应。"
         )
     narrative = named_dialogue_pattern.sub(" ", narrative)
     if mode == "R2VA":
         narrative = re.sub(
             r"场景\s*[：:]\s*<Picture\s+(\d+)>",
-            r"The scene and environment fully reference <Picture \1> and fill the entire frame edge-to-edge without blank margins, white canvas, letterboxing, or reference-board borders.",
+            r"场景与环境完整参考 <Picture \1>，并铺满整个画面，不保留白边、白底画布、黑边或参考板边框。",
             narrative,
             flags=re.IGNORECASE,
         )
     narrative = re.sub(r"\s+", " ", narrative).strip(" ,，。;")
     body_parts = [part for part in (narrative, *dialogue_actions) if part]
-    body = " ".join(body_parts) or "The referenced subjects perform the requested actions in a coherent continuous scene."
-    timeline = f"[Shot 1] Cinematic, coherent audiovisual continuity for the full {max(0.0, float(duration)):.2f}-second video. {body}"
+    body = " ".join(body_parts) or "参考主体在连贯连续的场景中完成用户要求的动作。"
+    timeline = f"[Shot 1] 电影化呈现，在完整 {max(0.0, float(duration)):.2f} 秒视频内保持视听连续。{body}"
 
     if mode == "R2VA":
         referenced_numbers = sorted({int(number) for number in re.findall(r"<Picture\s+(\d+)>", source)})
         if not referenced_numbers:
             referenced_numbers = list(range(1, max(0, int(picture_count)) + 1))
         definitions = " ".join(
-            f"<Picture {number}> is the corresponding reusable visual character, scene, object, costume, or style reference."
+            f"<Picture {number}>：对应的可复用人物、场景、物体、服装或风格视觉参考。"
             for number in referenced_numbers
-        ) or "No reusable picture subject is defined."
+        ) or "未定义可复用的图片主体。"
         retention = " ".join(
-            f"<Picture {number}>: fully_preserved - preserve identity, appearance, colors, clothing, objects, and spatial traits."
+            f"<Picture {number}>：fully_preserved - 完整保留身份、外观、色彩、服装、物体与空间特征。"
             for number in referenced_numbers
         ) or "N/A"
         return (
             f"subject_definitions: {definitions}\n\n"
-            "summary: [reference generation] Preserve the referenced subjects and realize the user's requested scene, actions, and dialogue.\n\n"
+            "summary: [reference generation] 保留参考主体，并实现用户要求的场景、动作与对白。\n\n"
             f"retention_analysis: {retention}\n\n"
             f"detailed_description: {timeline}\n\n"
-            "overall_soundscape: Natural room tone, physical movement sounds, clothing movement, breathing, and synchronized non-verbal reactions support the visible action without repeating dialogue.\n\n"
+            "overall_soundscape: 自然环境底噪、肢体动作声、衣物摩擦声、呼吸声与同步的非语言反应共同配合画面动作，不重复对白。\n\n"
             "non_diegetic_music: N/A"
         )
 
@@ -346,7 +526,7 @@ def _officialize_prompt_without_reasoning(
     }.get(mode, "")
     core = (
         f"integrated_multimodal_description: {timeline}\n\n"
-        "overall_soundscape: Natural ambience, synchronized physical action sounds, breathing, and non-verbal reactions support the visible action without repeating dialogue.\n\n"
+        "overall_soundscape: 自然环境声、同步的物理动作声、呼吸声与非语言反应共同配合画面动作，不重复对白。\n\n"
         "non_diegetic_music: N/A"
     )
     return f"{alignment}\n\n{core}" if alignment else core
@@ -401,7 +581,7 @@ def _apply_prompt_constraints(*, prompt: str, global_prompt: str, negative_promp
     negative_text = str(negative_prompt or "").strip()
     parts = [part for part in (global_text, result) if part]
     if negative_text:
-        parts.append(f"Negative constraints (must not appear): {negative_text}")
+        parts.append(f"负面约束（不得出现）：{negative_text}")
     return "\n\n".join(parts)
 
 
@@ -716,7 +896,49 @@ def _audio_duration_seconds(value: Any) -> float | None:
     return float(samples) / float(sample_rate) if samples > 0 else None
 
 
+def _synchronize_comfy_cuda_streams(stage: str) -> None:
+    """同步默认流及 ComfyUI 动态权重 cast/offload 流，避免异步错误延迟到节点返回后。"""
+    try:
+        import comfy.model_management as model_management
+        streams = set(getattr(model_management, "STREAM_CAST_BUFFERS", {}))
+        streams.update(getattr(model_management, "STREAM_AIMDO_CAST_BUFFERS", {}))
+        for stream in streams:
+            if stream is not None:
+                stream.synchronize()
+        model_management.synchronize()
+    except Exception as exc:
+        if "illegal memory access" not in str(exc).casefold():
+            raise
+        raise RuntimeError(
+            f"MiniMax H3 在{stage}检测到 ComfyUI 动态权重流 CUDA 非法访存。"
+            "发生后必须重启 ComfyUI，当前 CUDA 进程不能安全续跑。"
+        ) from exc
+
+
+def _safe_minimax_sage_settings(enabled: bool, mode: str) -> tuple[bool, str]:
+    """Blackwell 禁用会触发非法访存的 SageAttention 2 Triton/CUDA 内核。"""
+    requested = bool(enabled)
+    selected_mode = str(mode or "自动")
+    if not requested or not torch.cuda.is_available():
+        return requested, selected_mode
+    try:
+        major, _minor = torch.cuda.get_device_capability()
+    except Exception:
+        return requested, selected_mode
+    if int(major) >= 10 and "sageattn3" not in selected_mode.casefold():
+        print(
+            "[GJJ_MiniMaxH3Studio] 检测到 Blackwell GPU：已禁用不兼容的 SageAttention 2 "
+            f"模式“{selected_mode}”，回退 ComfyUI 原生注意力。需要 Sage 加速时请明确选择 sageattn3。",
+            flush=True,
+        )
+        return False, selected_mode
+    return requested, selected_mode
+
+
 def _release_vram_before_sampling() -> None:
+    # cudaMallocAsync 下先等推理模型的动态权重流完成，再清缓存和卸载，避免仍在使用的
+    # cast buffer 被提前回收，最终延迟到 reset_cast_buffers 才报告非法访存。
+    _synchronize_comfy_cuda_streams("卸载提示词推理模型之前")
     try:
         from .gjj_gemma_text_generate import _clear_clip_cache
         _clear_clip_cache()
@@ -728,6 +950,7 @@ def _release_vram_before_sampling() -> None:
         model_management.soft_empty_cache()
     except Exception:
         pass
+    _synchronize_comfy_cuda_streams("卸载提示词推理模型之后")
 
 
 def _audio_to_cpu(value: Any) -> Any:
@@ -1359,9 +1582,9 @@ class GJJ_MiniMaxH3Studio:
                 "negative_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "负面提示词"}),
                 "prompt_replace_find": ("STRING", {"default": "", "multiline": True, "display_name": "查找提示词"}),
                 "prompt_replace_with": ("STRING", {"default": "", "multiline": True, "display_name": "替换为"}),
-                "patch_enable_sage_attention": ("BOOLEAN", {"default": True, "display_name": "启用SageAttention"}),
+                "patch_enable_sage_attention": ("BOOLEAN", {"default": True, "display_name": "启用SageAttention", "tooltip": "Blackwell 显卡会自动禁用不兼容的 SageAttention 2 自动/int8/fp8 模式；明确选择 sageattn3 时才启用。"}),
                 "patch_sage_attention_mode": (SAGE_ATTENTION_MODES, {"default": "自动", "display_name": "SageAttention模式"}),
-                "patch_allow_sage_compile": ("BOOLEAN", {"default": True, "display_name": "允许Sage编译"}),
+                "patch_allow_sage_compile": ("BOOLEAN", {"default": False, "display_name": "允许Sage编译", "tooltip": "MiniMax H3 固定使用稳定的非编译 Sage 调用边界；保留此项仅兼容旧工作流。"}),
                 "patch_enable_fp16_accumulation": ("BOOLEAN", {"default": True, "display_name": "启用FP16累积设置"}),
                 "patch_fp16_accumulation": ("BOOLEAN", {"default": True, "display_name": "FP16累积"}),
                 "patch_enable_ltxv_feedforward_chunk": ("BOOLEAN", {"default": False, "display_name": "启用LTXV前馈分块"}),
@@ -1789,6 +2012,17 @@ class GJJ_MiniMaxH3Studio:
                 )
                 for index, raw_part in enumerate(prompt_parts)
             ]
+        prompt_parts = [
+            _sanitize_reasoned_prompt(
+                item,
+                official_prompt_mode,
+                duration,
+                len(segmented_library_media[index][1]["images"]),
+                str(first("dialogue_language", "中文")),
+                segmented_library_media[index][0],
+            )
+            for index, item in enumerate(prompt_parts)
+        ]
         constrained_prompt_parts: list[str] = []
         for index, item in enumerate(prompt_parts):
             normalized_prompt = _force_dialogue_language(
@@ -1953,11 +2187,17 @@ class GJJ_MiniMaxH3Studio:
                         f"模型权重 {int(event.get('model', 0))} · CLIP 权重 {int(event.get('clip', 0))}",
                         flush=True,
                     )
+                sage_enabled, sage_mode = _safe_minimax_sage_settings(
+                    bool(first("patch_enable_sage_attention", True)),
+                    str(first("patch_sage_attention_mode", "自动")),
+                )
                 patched_model, _ = GJJ_ModelPatchBundle().patch(
                     MODEL=loaded_model,
-                    启用SageAttention=bool(first("patch_enable_sage_attention", True)),
-                    SageAttention模式=str(first("patch_sage_attention_mode", "自动")),
-                    允许Sage编译=bool(first("patch_allow_sage_compile", True)),
+                    启用SageAttention=sage_enabled,
+                    SageAttention模式=sage_mode,
+                    # MiniMax H3 ConvRot + cudaMallocAsync 下编译第三方 Sage kernel 可能产生
+                    # 异步非法访存；该模型固定使用 compiler-disable 的稳定调用边界。
+                    允许Sage编译=False,
                     启用FP16累积设置=bool(first("patch_enable_fp16_accumulation", True)),
                     FP16累积=bool(first("patch_fp16_accumulation", True)),
                     # MiniMax H3 不具备 LTXV 的 transformer_blocks.*.ff.net 结构；
@@ -2077,8 +2317,10 @@ class GJJ_MiniMaxH3Studio:
             sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(
                 noise=noise, guider=guider, sampler=sampler, sigmas=sigmas, latent_image=latent,
             ))[0]
+            _synchronize_comfy_cuda_streams("H3 采样结束后")
             segment_images = nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
             segment_audio = _unwrap_node_output(VAEDecodeAudio.execute(vae=audio_vae, samples=sampled))[0]
+            _synchronize_comfy_cuda_streams("视频与音频 VAE 解码结束后")
             if mtv_audio_queue and current_media["audios"] and not mtv_singing_segment:
                 # MTV 空镜只生成画面；后续会合并整段源音乐，因此这里必须输出数字静音，
                 # 不能保留 H3 自行生成的环境声、配乐或残余人声。
@@ -2122,6 +2364,7 @@ class GJJ_MiniMaxH3Studio:
         ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"], "parsed_actors": selected_actors, "parsed_scenes": selected_scenes})
         # 最终合并文件写出后再次推送完整预览字段，覆盖分段过程中显示的最后一段视频。
         _send_status(unique_id, f"{final_mode} 完成：{frame_count} 帧", 1.0, ui)
+        _synchronize_comfy_cuda_streams("节点返回之前")
         return {"ui": ui, "result": (video, reference_resources)}
 
 

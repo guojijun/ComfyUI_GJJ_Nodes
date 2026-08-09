@@ -1181,6 +1181,11 @@ class GJJ_GemmaTextGenerate:
                     "display_name": "媒体",
                     "tooltip": "统一输入口，支持 IMAGE、GJJ_BATCH_IMAGE、VIDEO、AUDIO；节点会按输入类型自动分流。",
                 }),
+                "external_prompt": ("STRING", {
+                    "display_name": "指令 / 原文",
+                    "forceInput": True,
+                    "tooltip": "连接外部 STRING 后优先作为用户指令；未连接时使用节点内文本框。",
+                }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1226,6 +1231,7 @@ class GJJ_GemmaTextGenerate:
         device_preference: str = "GPU优先",
         workflow_values_json: str = "{}",
         model_filter_keywords: str = MODEL_FILTER_EXPRESSION,
+        external_prompt: Any = None,
     ):
         received_thinking = thinking
         try:
@@ -1306,9 +1312,10 @@ class GJJ_GemmaTextGenerate:
                 if str(sampling_mode or "on") == "on" and configured_seed == 0
                 else configured_seed
             )
+            effective_user_prompt = prompt if external_prompt is None else str(external_prompt)
             # 选中的角色信息隐性注入到用户指令前面，原文不再插入 @名。
             injected_prompt = _inject_character_notes(
-                prompt,
+                effective_user_prompt,
                 saved_values.get("selected_actors", []),
             )
             injected_prompt = _inject_scene_notes(
