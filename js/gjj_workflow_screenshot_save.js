@@ -1064,7 +1064,7 @@ import { api } from "/scripts/api.js";
 		text = text.replace(/\.(json|workflow)$/i, "");
 		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
 		text = text.replace(/[. ]+$/g, "");
-		return /^(comfyui|untitled|未命名)$/i.test(text) ? "" : text;
+		return /^(?:comfyui|untitled|未命名|未保存的工作流|unsaved workflow(?:\s*\(\d+\))?)$/i.test(text) ? "" : text;
 	}
 
 	function workflowNameFromValue(value, depth = 0) {
@@ -3247,24 +3247,42 @@ import { api } from "/scripts/api.js";
 			graph.extra.filename = filename;
 			graph.extra.path = filename;
 		}
-		const manager = app?.workflowManager;
-		for (const target of [manager?.activeWorkflow, manager?.activeWorkflowInfo, manager?.currentWorkflow, manager?.workflow, app?.ui]) {
+		const managers = [
+			app?.workflowManager,
+			app?.extensionManager?.workflow,
+		].filter((value, index, values) => value && values.indexOf(value) === index);
+		const targets = [app?.ui];
+		for (const manager of managers) {
+			targets.push(
+				manager?.activeWorkflow,
+				manager?.activeWorkflowInfo,
+				manager?.currentWorkflow,
+				manager?.workflow,
+			);
+		}
+		for (const target of targets) {
 			if (!target || typeof target !== "object") continue;
-			target.name = text;
-			target.title = text;
-			target.workflow_name = text;
-			target.workflowName = text;
-			target.filename = filename;
-			target.fileName = filename;
-			target.path = filename;
+			for (const [key, value] of Object.entries({
+				name: text,
+				title: text,
+				workflow_name: text,
+				workflowName: text,
+				filename,
+				fileName: filename,
+				path: filename,
+			})) {
+				try { target[key] = value; } catch (_) {}
+			}
 		}
-		for (const method of ["setWorkflowName", "setWorkflowTitle", "setActiveWorkflowName"]) {
-			if (typeof manager?.[method] !== "function") continue;
-			try { manager[method](text); } catch (_) {}
-		}
-		for (const method of ["updateTopbar", "updateTopBar", "updateWorkflowName", "refresh", "update"]) {
-			if (typeof manager?.[method] !== "function") continue;
-			try { manager[method](); } catch (_) {}
+		for (const manager of managers) {
+			for (const method of ["setWorkflowName", "setWorkflowTitle", "setActiveWorkflowName"]) {
+				if (typeof manager?.[method] !== "function") continue;
+				try { manager[method](text); } catch (_) {}
+			}
+			for (const method of ["updateTopbar", "updateTopBar", "updateWorkflowName", "refresh", "update"]) {
+				if (typeof manager?.[method] !== "function") continue;
+				try { manager[method](); } catch (_) {}
+			}
 		}
 		if (typeof document !== "undefined") {
 			document.title = `ComfyUI - ${text}`;
@@ -3515,6 +3533,7 @@ import { api } from "/scripts/api.js";
 			await app.loadGraphData(workflow, true, true);
 			applyLoadedWorkflowTitle(title);
 			setTimeout(() => applyLoadedWorkflowTitle(title), 80);
+			setTimeout(() => applyLoadedWorkflowTitle(title), 300);
 			app?.canvas?.setDirty?.(true, true);
 			app?.graph?.setDirtyCanvas?.(true, true);
 		} catch (error) {
