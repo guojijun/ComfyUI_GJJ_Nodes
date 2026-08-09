@@ -43,6 +43,10 @@ from .common_utils.text_tools import (
     gjjutils_dedupe_keep_order as _dedupe_keep_order,
 )
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils.network_media import (
+    gjjutils_download_network_media_to_input,
+    gjjutils_is_network_url,
+)
 from .common_utils.dependency_checker import (
     DEFAULT_MODEL_URL,
     is_comfyui_model_compatibility_error,
@@ -1523,7 +1527,14 @@ def _recover_serialized_image_entries(raw_value: Any) -> list[torch.Tensor]:
     recovered: list[torch.Tensor] = []
     for entry in selected_images:
         try:
-            recovered.append(load_image_tensor(resolve_input_image_path(entry)))
+            filename = str(entry.get("filename") or "").strip()
+            if gjjutils_is_network_url(filename):
+                image_path = Path(
+                    gjjutils_download_network_media_to_input(filename, "IMAGE")
+                )
+            else:
+                image_path = resolve_input_image_path(entry)
+            recovered.append(load_image_tensor(image_path))
         except Exception:
             return []
     return recovered

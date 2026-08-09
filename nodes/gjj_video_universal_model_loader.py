@@ -436,7 +436,18 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "t2v", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
-
+    "wan22_animate2": {
+        "label": "wan_animate_2 动作迁移",
+        "clip_type": "wan",
+        "slots": [
+            S("model", "wan_animate_2", "diffusion_models", "diffusion", ["wan_animate_2"], preferred_name="wan_animate_2_distill_int8_convrot.safetensors", official_names=["wan_animate_2_distill_int8_convrot.safetensors"]),
+            S("model2_empty", "", "", "empty", []),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("lightx2v_lora", "LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"),
+        ],
+    },
     "wan22_bernini": {
         "label": "Bernini+多功能视频编辑",
         "clip_type": "wan",

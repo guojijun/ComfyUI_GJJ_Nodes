@@ -1755,13 +1755,13 @@ def _register_gjj_character_library_api():
 
 	def labels_for_split(count: int) -> list[str]:
 		if count <= 1:
-			return ["大头照"]
+			return ["自动分类"]
 		if count == 2:
 			return ["大头照", "正面"]
 		if count == 3:
 			return ["大头照", "正面", "背面"]
 		if count == 4:
-			return ["大头照", "正面", "45度", "背面"]
+			return ["大头照", "正面", "侧面", "背面"]
 		base = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "动作"]
 		return [base[index] if index < len(base) else f"视图{index + 1}" for index in range(count)]
 
@@ -1940,7 +1940,9 @@ def _register_gjj_character_library_api():
 			else:
 				resolved_label = "人物资产"
 		else:
-			resolved_label = "大头照" if subject_width >= subject_height else label
+			# 明确指定的视图名是调用方的意图，不能再按横竖比覆盖。
+			# 四视图拼版、横向动作图等都可能比高度更宽，但并不是大头照。
+			resolved_label = label
 		return save_view_bytes(character_id, resolved_label, png_bytes(rgba))
 
 	@server.routes.get("/gjj/character_library/list")

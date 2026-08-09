@@ -2128,9 +2128,10 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 					const form = new FormData();
 					form.append("id", createdId);
 					form.append("name", created.character?.name || name);
-					form.append("label", "自动分类");
 					form.append("file", file, file.name);
-					const saved = await apiJson(`${ENDPOINT}/view`, { method: "POST", body: form });
+					// 同一个入口同时兼容单张人物图和多视图拼版：后端拆分失败/仅有
+					// 一个主体时仍会自动分类，拆出多个主体时则直接保存各个视图。
+					const saved = await apiJson(`${ENDPOINT}/import_sheet`, { method: "POST", body: form });
 					let character = saved.character || created.character;
 					const views = Array.isArray(character?.views) ? character.views : [];
 					const hasHeadshot = views.some((view) => /大头|头像|头部|脸|face|head|portrait/i.test(`${view?.label || ""} ${view?.id || ""}`));

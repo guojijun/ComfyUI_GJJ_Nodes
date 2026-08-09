@@ -217,8 +217,17 @@ function findFieldForVariable(node, slot, name) {
 function valueFromTemplateNode(node, field, name, graph) {
 	const props = node?.properties || {};
 	const values = parseJsonObject(props.gjj_template_params_values || props.gjj_template_set_variables_values);
+	const mappedMediaValue = (value) => {
+		const key = String(field?.key || "").trim();
+		const mapping = key ? node?.__gjjTemplateParamsNetworkMappings?.get?.(key) : null;
+		const original = String(value ?? "").trim();
+		if (mapping?.path && (!mapping.url || String(mapping.url).trim() === original)) {
+			return mapping.path;
+		}
+		return value;
+	};
 	for (const key of fieldCandidates(field).concat(name)) {
-		if (Object.prototype.hasOwnProperty.call(values, key)) return values[key];
+		if (Object.prototype.hasOwnProperty.call(values, key)) return mappedMediaValue(values[key]);
 	}
 	const inputName = field?.inputName;
 	if (inputName) {
@@ -229,7 +238,7 @@ function valueFromTemplateNode(node, field, name, graph) {
 			return valueFromNodeOutput(upstream, Number(linkOriginSlot(link) || 0), graph || node?.graph || app.graph);
 		}
 	}
-	return field?.value ?? field?.default ?? field?.defaultValue;
+	return mappedMediaValue(field?.value ?? field?.default ?? field?.defaultValue);
 }
 
 function widgetCurrentValue(widget) {
@@ -426,7 +435,10 @@ function openVariablePicker(node, field = null) {
 			variableColumn.appendChild(empty);
 		}
 		const activeOption = allOptions.find((option) => option.value === activeVariable);
-		const matchedFields = activeOption ? fields.filter((item) => optionMatchesField(activeOption, item)) : [];
+		let matchedFields = activeOption ? fields.filter((item) => optionMatchesField(activeOption, item)) : [];
+		if (activeOption && !matchedFields.length) {
+			matchedFields = fields.filter((item) => item.showWhenUnmatched === true);
+		}
 		for (const sectionField of matchedFields) {
 			const current = String(draftSources[sectionField.name] || "");
 			const selected = current === activeVariable;
@@ -601,6 +613,9 @@ export function createTemplateSourceButton(node, fields, buttonStyle = []) {
 	button.onclick = (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		if (typeof node.__gjjTemplateSourceFieldsProvider === "function") {
+			node.__gjjTemplateSourceFields = node.__gjjTemplateSourceFieldsProvider(node) || node.__gjjTemplateSourceFields;
+		}
 		openVariablePicker(node);
 	};
 	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
@@ -622,12 +637,14 @@ export function updateTemplateSourcePanel(node, fields = null) {
 		const widget = getWidget(node, field.widget || field.name);
 		if (variableName) {
 			const value = resolveVariableValue(node, variableName);
-			if (!inputHasLink(getInput(node, field.widget || field.name))) {
+			if (typeof field.applyValue === "function") {
+				field.applyValue(node, value, field);
+			} else if (!inputHasLink(getInput(node, field.widget || field.name))) {
 				setWidgetValue(widget, value, field);
 			}
-			setWidgetEnabled(widget, false);
+			if (widget) setWidgetEnabled(widget, false);
 		} else {
-			setWidgetEnabled(widget, true);
+			if (widget) setWidgetEnabled(widget, true);
 		}
 		const button = node.__gjjTemplateSourceButtons?.[field.name];
 		if (button) {

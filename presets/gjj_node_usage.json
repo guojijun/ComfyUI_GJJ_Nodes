@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sort_mode": "frequency",
+  "sort_mode": "category",
   "use_colors_enabled": true,
   "use_colors": [
     {
@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 60,
-      "last_used": 1786036187907
+      "use_count": 61,
+      "last_used": 1786236999476
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -86,8 +86,8 @@
       "last_used": 1785551362276
     },
     "GJJ_BatchWatermarkRemover": {
-      "use_count": 11,
-      "last_used": 1785600676732
+      "use_count": 12,
+      "last_used": 1786239320480
     },
     "GJJ_Bernini13BLongVideoWatermarkRemover": {
       "use_count": 12,

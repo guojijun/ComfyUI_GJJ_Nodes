@@ -280,11 +280,75 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
 	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
 	{ name: "height", widget: "height", label: "高度", type: "INT", aliases: ["height", "高", "高度"] },
+	{ name: "reference_image", label: "参考图片", type: "IMAGE", aliases: ["image", "reference_image", "reference image", "参考图", "参考图片"], applyValue: applyTemplateReferenceImage },
 ];
 
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
 const DEFAULT_FIRST_SEARCH_TERMS = "";
+
+function applyTemplateReferenceImage(node, value) {
+	const text = String(value ?? "").trim();
+	if (!text || /^(?:data:|blob:)/i.test(text)) return;
+	const item = /^https?:\/\//i.test(text)
+		? { filename: text, subfolder: "", type: "input", url: text }
+		: splitReferenceInputPath(text);
+	if (!item) return;
+	const raw = JSON.stringify([item]);
+	const widget = getWidget(node, BATCH_SOURCE_WIDGET);
+	if (widget) widget.value = raw;
+	node.properties = node.properties || {};
+	node.properties[BATCH_SOURCE_WIDGET] = raw;
+	applyReferenceBrowserButtonState(node);
+	syncQwenImageModelForReferences(node);
+}
+
+function applyTemplateLoraStrength(node, value, loraName) {
+	const strength = Number(value);
+	if (!Number.isFinite(strength)) return;
+	const state = ensureLoraNodeState(node);
+	let changed = false;
+	for (const row of state.rows) {
+		if (String(row?.name || "") !== String(loraName || "")) continue;
+		const next = normalizeStrength(strength, 1.0);
+		if (row.strength !== next) {
+			row.strength = next;
+			changed = true;
+		}
+	}
+	if (changed) {
+		persistLoraRows(node, state.rows);
+		renderLoraUi(node);
+	}
+}
+
+function templateSourceFieldsForNode(node) {
+	const state = ensureLoraNodeState(node);
+	const fields = [...TEMPLATE_SOURCE_FIELDS];
+	for (const row of state.rows) {
+		const loraName = String(row?.name || "").trim();
+		if (!loraName) continue;
+		const metadata = getLoraMetadata(state, loraName) || {};
+		const shortName = loraName.split(/[\\/]/).pop().replace(/\.(safetensors|ckpt|pt|bin)$/i, "");
+		const title = String(metadata.title || shortName || loraName).trim();
+		fields.push({
+			name: `lora_strength:${loraName}`,
+			label: `${title} · 强度`,
+			type: "FLOAT",
+			aliases: [
+				loraName,
+				shortName,
+				title,
+				metadata.trigger,
+				metadata.summary,
+				...(Array.isArray(metadata.match) ? metadata.match : []),
+			].filter(Boolean),
+			showWhenUnmatched: true,
+			applyValue: (targetNode, value) => applyTemplateLoraStrength(targetNode, value, loraName),
+		});
+	}
+	return fields;
+}
 
 function clearNativePreview(node) {
 	if (!node) {
@@ -1862,7 +1926,7 @@ function applySettingsVisibility(node) {
 	setBatchLinkButtonState(node);
 	applyReferenceBrowserButtonState(node);
 	orderLazyWidgets(node);
-	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
+	updateTemplateSourcePanel(node, templateSourceFieldsForNode(node));
 	GJJ_Utils.refreshNode(node);
 }
 
@@ -3864,8 +3928,15 @@ function patchLazySeedIntoPromptData(promptData) {
 		if (!node) {
 			continue;
 		}
+		updateTemplateSourcePanel(node, templateSourceFieldsForNode(node));
+		const batchSourceImages = String(
+			getWidget(node, BATCH_SOURCE_WIDGET)?.value
+			|| node?.properties?.[BATCH_SOURCE_WIDGET]
+			|| "[]",
+		);
 		const seed = applySeedControlBeforeQueue(node);
 		entry.inputs = entry.inputs || {};
+		entry.inputs[BATCH_SOURCE_WIDGET] = batchSourceImages;
 		if (seed !== null && seed !== undefined) {
 			entry.inputs.seed = seed;
 		}
@@ -3878,6 +3949,7 @@ function patchLazySeedIntoPromptData(promptData) {
 		}
 		if (promptData?.prompt && promptData.prompt !== promptData.output && promptData.prompt[key]) {
 			promptData.prompt[key].inputs = promptData.prompt[key].inputs || {};
+			promptData.prompt[key].inputs[BATCH_SOURCE_WIDGET] = batchSourceImages;
 			if (seed !== null && seed !== undefined) {
 				promptData.prompt[key].inputs.seed = seed;
 			}
@@ -5098,7 +5170,8 @@ function createButtons(node) {
 		"color:#e5edf2",
 	].join(";");
 	node.__gjjSettingsButton = settingsButton;
-	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, emojiButtonStyle);
+	node.__gjjTemplateSourceFieldsProvider = templateSourceFieldsForNode;
+	const templateButton = createTemplateSourceButton(node, templateSourceFieldsForNode(node), emojiButtonStyle);
 	templateButton.style.width = "36px";
 	templateButton.style.flex = "0 0 auto";
 	templateButton.style.padding = "0";
@@ -7800,7 +7873,7 @@ app.registerExtension({
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, !this.__gjjLazyConfiguredFromWorkflow);
 				syncPanelFromLinkedSources(this);
-				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
+				updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
 
 			}, 0);
 			void ensureModelPresetsLoaded().then(() => scheduleStabilize(this, !this.__gjjLazyConfiguredFromWorkflow));
@@ -7834,7 +7907,7 @@ app.registerExtension({
 				applyInputSizeButtonState(this);
 				stabilizeNode(this, false);
 				syncPanelFromLinkedSources(this);
-				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
+				updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
 
 			}, 0);
 			return result;
@@ -7862,7 +7935,7 @@ app.registerExtension({
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, false);
 				syncPanelFromLinkedSources(this);
-				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
+				updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
 			}, 0);
 			return result;
 		};
@@ -7920,7 +7993,7 @@ app.registerExtension({
 				? message.effective_params[0]
 				: (Array.isArray(message?.ui?.effective_params) ? message.ui.effective_params[0] : null);
 			applyEffectiveParamsToPanel(this, effectiveParams, true);
-			updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
+			updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
 			return undefined;
 		};
 	},
@@ -7947,7 +8020,7 @@ app.registerExtension({
 				}
 				stabilizeNode(node, false);
 				syncPanelFromLinkedSources(node);
-				updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
+				updateTemplateSourcePanel(node, templateSourceFieldsForNode(node));
 			}
 		});
 	},
