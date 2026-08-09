@@ -5913,19 +5913,35 @@ function createLazyPreviewCard(node, item, index = 0) {
 			removeLazyPreviewItem(node, index);
 			return;
 		}
-		openLazyPreviewOverlay(image.src, node.__gjjLazyPreview?.items || [item], index);
+		openLazyPreviewOverlay(
+			imageDataToUrl(item, true),
+			node.__gjjLazyPreview?.items || [item],
+			index,
+		);
 	});
 	card.appendChild(image);
 	return card;
 }
 
 function imageDataToUrl(item, original = false) {
-	const filename = String((!original && item?.preview_filename) || item?.filename || "");
+	const filename = String(
+		original
+			? (item?.original_filename || item?.filename || "")
+			: (item?.preview_filename || item?.filename || ""),
+	);
 	if (!filename) {
 		return "";
 	}
-	const type = String((!original && item?.preview_type) || item?.type || "output");
-	const subfolder = String((!original && item?.preview_subfolder) || item?.subfolder || "");
+	const type = String(
+		original
+			? (item?.original_type || item?.type || "output")
+			: (item?.preview_type || item?.type || "output"),
+	);
+	const subfolder = String(
+		original
+			? (item?.original_subfolder ?? item?.subfolder ?? "")
+			: (item?.preview_subfolder ?? item?.subfolder ?? ""),
+	);
 	const stableJpegPreview = !original && Boolean(item?.preview_filename);
 	const immutableMedia = stableJpegPreview || Boolean(item?.hash);
 	const previewFormat = !original && !stableJpegPreview && typeof app.getPreviewFormatParam === "function"

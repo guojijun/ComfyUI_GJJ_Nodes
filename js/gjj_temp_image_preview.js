@@ -52,9 +52,8 @@ export function isGjjTempMediaItem(item) {
 export function gjjTempImagePreviewFilename(filename) {
 	const original = String(filename || "");
 	if (!original) return "";
-	if (/\.jpe?g$/i.test(original)) return original.replace(/\.jpe?g$/i, "_preview.jpg");
-	if (/\.[^.]+$/.test(original)) return original.replace(/\.[^.]+$/, ".jpg");
-	return `${original}.jpg`;
+	if (/\.[^.]+$/.test(original)) return original.replace(/\.[^.]+$/, "_preview.jpg");
+	return `${original}_preview.jpg`;
 }
 
 export function gjjTempImagePreviewItem(item) {

@@ -95,14 +95,11 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 
 def gjjutils_temp_image_preview_filename(filename: str) -> str:
-    """返回原图对应的稳定 JPG 预览名；非 JPG 只替换扩展名。"""
+    """返回原图对应的稳定 JPG 预览名，并与所有原图扩展名隔离。"""
     name = Path(str(filename or "")).name
     if not name:
         raise ValueError("原图文件名不能为空。")
-    suffix = Path(name).suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        return f"{Path(name).stem}_preview.jpg"
-    return f"{Path(name).stem}.jpg"
+    return f"{Path(name).stem}_preview.jpg"
 
 
 def _attach_jpeg_preview_metadata(
@@ -295,9 +292,21 @@ def gjjutils_write_temp_pil_image(
         clean_suffix = f".{clean_suffix}"
     filename = f"{digest}{clean_suffix.lower()}"
     path = gjjutils_temp_path(filename)
-    if not path.exists():
+    needs_write = not path.exists()
+    if not needs_write and clean_suffix.lower() in {".jpg", ".jpeg"}:
+        # Older PNG previews used <hash>.jpg, which collides with a later JPG
+        # original containing the same pixels. Repair that stale 512px preview
+        # instead of treating it as the immutable full-resolution JPG.
+        try:
+            with Image.open(path) as existing:
+                needs_write = tuple(existing.size) != tuple(normalized.size)
+        except Exception:
+            needs_write = True
+    if needs_write:
         buffer = BytesIO()
         normalized.save(buffer, format=normalized_format)
+        if path.exists():
+            path.unlink(missing_ok=True)
         _atomic_write_bytes(path, buffer.getvalue())
     info = {
         "filename": filename,

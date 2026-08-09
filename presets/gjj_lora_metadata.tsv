@@ -1,4 +1,14 @@
 ﻿id	match	title	trigger	strength	summary	source
+紫灵K2-ziling	紫灵K2-ziling	国漫人物：紫灵	ziling	1.0	乱星海第一美人，妙音门遗孤，独立坚韧不依附他人，与韩立惺惺相惜，最终同登仙界。	https://www.bilibili.com/video/BV1K7uV6rEmp
+银月K2-yinyue	银月K2-yinyue	国漫人物：银月	yinyue	1.0	灵界银月狼族公主，曾为韩立法宝器灵，知晓小瓶秘密，聪慧通透，是韩立最信任的红颜知己。	https://www.bilibili.com/video/BV1K7uV6rEmp
+燕如嫣K2-ruyan	燕如嫣K2-ruyan	国漫人物：燕如嫣	ruyan	1.0	天南大派女修，心思缜密长袖善舞，与韩立有多次利益交集，处事圆滑，深谙修真界生存法则。	https://www.bilibili.com/video/BV1K7uV6rEmp
+宋玉K2-songyu	宋玉K2-songyu	国漫人物：宋玉	songyu	1.0	落云宗白凤峰峰主，天灵根白凤仙子，修习通明灵犀，温柔温婉，一直倾慕敬重韩立。	https://www.bilibili.com/video/BV1K7uV6rEmp
+慕沛灵K2-mupeilin	慕沛灵K2-mupeilin	国漫人物：慕沛灵	mupeilin	1.0	落云宗药园管事，韩立名义侍妾，满心爱慕韩立，冲击元婴时困于心魔，遗憾陨落。	https://www.bilibili.com/video/BV1K7uV6rEmp
+梅凝K2-meining	梅凝K2-meining	国漫人物：梅凝	meining	1.0	凡人温婉清纯女修，与韩立共患难互生情愫，自知资质平庸不愿拖累韩立，主动放手独自修行。	https://www.bilibili.com/video/BV1K7uV6rEmp
+陆雪琪K2-luxueqi	陆雪琪K2-luxueqi	国漫人物：陆雪琪	luxueqi	1.0	《诛仙》青云小竹峰首座，白衣清冷，持天琊神剑，外冷内热，痴心守候张小凡一生。	https://www.bilibili.com/video/BV1K7uV6rEmp
+柳玉K2-liuyu	柳玉K2-liuyu	国漫人物：柳玉	liuyu	1.0	凡人韩立首徒，原御灵宗修士，聪慧善谋热衷权柄，执掌落云宗白凤峰，办事干练深得韩立信任。	https://www.bilibili.com/video/BV1K7uV6rEmp
+姬紫月K2-jiziyue	姬紫月K2-jiziyue	国漫人物：姬紫月	jiziyue	1.0	《遮天》姬家小公主，天赋卓绝精通虚空术，古灵精怪痴情叶凡，相伴共渡漫漫证道长路。	https://www.bilibili.com/video/BV1K7uV6rEmp
+韩立K2-hanli	韩立K2-hanli	国漫人物：韩立	hanli	1.0	《凡人修仙传》男主，四系伪灵根凡人，凭神秘小瓶步步修行，谨慎惜命，人称韩跑跑，最终修成仙界道祖。	https://www.bilibili.com/video/BV1K7uV6rEmp
 minimax_h3_fl2v_lightx2v_turbo_4step	minimax_h3_fl2v_lightx2v_turbo_4step	Minimax Lightx2V加速		0.75	不太确定预期的α剂量，如果输出噪声大，试着用低功率试试。	https://huggingface.co/Kijai/MiniMax-H3_comfy
 minimax_h3_turbo_4step	minimax_h3_turbo_4step	Minimax 加速Lora		2	这是一个演示，不是成品模型。这是一个 进行中跑的早期快照——训练不足，时间平均 （EMA）变异株还没成熟，整体质量远远不够 全套制作会有生产力。它已经显示出明显的进步 在基础型号基础上四步：细节更清晰、更干净，同步更好 音频比底座在同样的4步中给你的。把它当作 方向，而不是目的地。	https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora
 Wan2.1-1.3b-lora-highresfix-v1	Wan2.1-1.3b-lora-highresfix-v1	Wan细节修复		1	基于模型通义万相2.1-1.3B和框架 DiffSynth-Studio 训练的LoRA。由于基础模型的训练分辨率为 480P，在清晰度上存在一定缺陷，因此我们进行了额外的训练以修复模型在高分辨率视频上的效果，避免出现画面崩坏、灰暗的问题。	https://www.modelscope.cn/models/DiffSynth-Studio/Wan2.1-1.3b-lora-highresfix-v1/summary?version=v1

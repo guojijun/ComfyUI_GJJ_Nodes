@@ -116,6 +116,10 @@
     "GJJ_ModelUpscaler": {
       "use_count": 2,
       "last_used": 1786169185862
+    },
+    "GJJ_SCAIL2LongVideoAIO": {
+      "use_count": 1,
+      "last_used": 1786242051701
     }
   },
   "sort_reverse": true

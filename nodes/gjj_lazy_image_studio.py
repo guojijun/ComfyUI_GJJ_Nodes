@@ -812,6 +812,51 @@ def _without_krea2_edit_lora(value: Any) -> str:
     return json.dumps(filtered, ensure_ascii=False)
 
 
+def _without_named_lora(value: Any, lora_name: Any) -> str:
+    """Remove one LoRA from a serialized config without disturbing other rows."""
+    if not str(value or "").strip():
+        return str(value or "")
+    expected_name = Path(
+        clean_lora_config_name(lora_name).replace("\\", "/")
+    ).as_posix().casefold()
+    if not expected_name:
+        return str(value or "")
+    try:
+        rows = json.loads(normalize_lora_chain_data(value))
+    except Exception:
+        return str(value or "")
+    if not isinstance(rows, list):
+        return str(value or "")
+
+    def normalized_name(row: Any) -> str:
+        if not isinstance(row, dict):
+            return ""
+        return Path(
+            clean_lora_config_name(row.get("name", "")).replace("\\", "/")
+        ).as_posix().casefold()
+
+    filtered = [row for row in rows if normalized_name(row) != expected_name]
+    return json.dumps(filtered, ensure_ascii=False)
+
+
+def _test_lora_data(base_value: Any, lora_name: Any, strength: float) -> str:
+    """Build an isolated test config, retaining unrelated configured LoRAs."""
+    try:
+        rows = json.loads(_without_named_lora(base_value, lora_name) or "[]")
+    except Exception:
+        rows = []
+    if not isinstance(rows, list):
+        rows = []
+    rows.append(
+        {
+            "enabled": True,
+            "name": str(lora_name or "").strip(),
+            "strength": float(strength),
+        }
+    )
+    return json.dumps(rows, ensure_ascii=False)
+
+
 def _configured_krea2_edit_lora_strength(*values: Any) -> float:
     edit_basename = Path(KREA2_IDENTITY_EDIT_LORA).name.casefold()
     resolved: float | None = None
@@ -4275,6 +4320,15 @@ class GJJ_LazyImageStudio:
                         item_denoise = denoise
                         item_model_source = model_source
                         item_ckpt_name = ckpt_name
+                        item_lora_chain_config = lora_chain_config
+                        # LoRA tests create a distinct patched MODEL for every row/strength.
+                        # Keeping all of them pins multiple heavyweight runtimes and makes
+                        # later rows fail nondeterministically during ComfyUI GPU residency.
+                        item_keep_model_loaded = (
+                            keep_model_loaded
+                            if mode not in {"lora", "lora_strength"}
+                            else False
+                        )
                         if mode == "unet":
                             item_unet_name = model_name
                             item_preset, item_clip_name1, item_vae_name = _resolve_lazy_test_model_pair(item_unet_name)
@@ -4292,18 +4346,18 @@ class GJJ_LazyImageStudio:
                             item_ckpt_name = model_name
                         elif mode == "lora_strength":
                             strength = float(item_strength if item_strength is not None else 1.0)
-                            item_lora_data = json.dumps(
-                                [{"enabled": True, "name": model_name, "strength": strength}],
-                                ensure_ascii=False,
+                            item_lora_data = _test_lora_data(lora_data, model_name, strength)
+                            item_lora_chain_config = _without_named_lora(
+                                lora_chain_config, model_name
                             )
                         elif mode == "sampler":
                             item_sampler_name = model_name
                         elif mode == "scheduler":
                             item_scheduler = model_name
                         else:
-                            item_lora_data = json.dumps(
-                                [{"enabled": True, "name": model_name, "strength": 1.0}],
-                                ensure_ascii=False,
+                            item_lora_data = _test_lora_data(lora_data, model_name, 1.0)
+                            item_lora_chain_config = _without_named_lora(
+                                lora_chain_config, model_name
                             )
                         item_result = self.create_image(
                             prompt,
@@ -4323,14 +4377,14 @@ class GJJ_LazyImageStudio:
                             item_scheduler,
                             item_denoise,
                             grow_mask_by,
-                            lora_chain_config=lora_chain_config,
+                            lora_chain_config=item_lora_chain_config,
                             lora_data=item_lora_data,
                             batch_source_images=batch_source_images,
                             mask=mask,
                             disable_reference_auto_mask=disable_reference_auto_mask,
                             force_empty_latent_reference=force_empty_latent_reference,
                             disable_equal_reference_canvas=disable_equal_reference_canvas,
-                            keep_model_loaded=keep_model_loaded,
+                            keep_model_loaded=item_keep_model_loaded,
                             test_config="",
                             use_input_image_size=use_input_image_size,
                             model_source=item_model_source,
