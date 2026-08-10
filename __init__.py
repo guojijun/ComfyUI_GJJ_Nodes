@@ -182,6 +182,8 @@ def _gjj_default_user_settings() -> dict:
 			"sampling_denoise": -1.0,
 			"sampling_seed": 0,
 			"keep_model": True,
+			"vae_decode_tiled": True,
+			"vae_decode_tile_size": 512,
 		},
 		"scene_library": {
 			"panorama_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
@@ -211,6 +213,8 @@ def _gjj_default_user_settings() -> dict:
 			"seedvr2_decode_tiled": True,
 			"seedvr2_decode_tile_size": 512,
 			"seedvr2_decode_tile_overlap": 128,
+			"vae_decode_tiled": True,
+			"vae_decode_tile_size": 512,
 		},
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
@@ -309,6 +313,46 @@ def _gjj_section_settings(section: str) -> dict:
 	settings = _gjj_read_user_settings()
 	value = settings.get(section) if isinstance(settings, dict) else {}
 	return value if isinstance(value, dict) else {}
+
+def _gjj_prepare_library_run(library_name: str) -> None:
+	"""在角色库/场景库开始模型推理前释放上一任务占用的资源。"""
+	errors = []
+	try:
+		import comfy.model_management
+		comfy.model_management.unload_all_models()
+		comfy.model_management.soft_empty_cache()
+	except Exception as exc:
+		errors.append(f"ComfyUI 模型缓存清理失败：{exc}")
+	try:
+		import gc
+		import torch
+		gc.collect()
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+			torch.cuda.ipc_collect()
+	except Exception as exc:
+		errors.append(f"CUDA 缓存清理失败：{exc}")
+	if len(errors) >= 2:
+		raise RuntimeError(
+			f"{library_name}运行前资源清理失败。原因：{'；'.join(errors)}。"
+			"解决方案：停止其它生成任务并重启 ComfyUI；确认 PyTorch/CUDA 与显卡驱动匹配后重试。"
+		)
+
+def _gjj_library_error_details(exc: Exception, stage: str, library_name: str) -> dict:
+	reason = str(exc).strip() or type(exc).__name__
+	lowered = reason.lower()
+	if "out of memory" in lowered or ("cuda" in lowered and "memory" in lowered):
+		solution = "开启低显存 VAE 分块解码，将解码块大小改为 256，并降低生成分辨率；关闭其它占用显存的程序后重试。"
+	elif "vae" in lowered and ("decode" in lowered or "解码" in reason):
+		solution = "确认 VAE 模型完整且与主模型匹配；开启分块解码，块大小先设为 256。"
+	elif "not found" in lowered or "不存在" in reason or "缺少模型" in reason:
+		solution = "在 🧠 模型设置中重新选择本机实际存在的模型，保存后重试。"
+	elif "shape" in lowered or "size mismatch" in lowered or "维度" in reason:
+		solution = "更新 ComfyUI 与 GJJ 节点并重启；仍失败时恢复推荐模型组合和默认尺寸。"
+	else:
+		solution = "先重启 ComfyUI 并重试；若仍失败，请保留控制台中该任务的完整错误堆栈以便定位。"
+	message = f"{library_name}运行失败｜阶段：{stage}｜原因：{reason}｜解决方案：{solution}"
+	return {"ok": False, "error": message, "stage": stage, "reason": reason, "solution": solution}
 
 def _gjj_model_filename_choices(category: str) -> list[str]:
 	try:
@@ -2006,6 +2050,8 @@ def _register_gjj_character_library_api():
 				{"key": "sampling_denoise", "label": "降噪强度", "type": "number", "min": -1, "max": 1, "step": 0.01, "hint": "-1 = 自动"},
 				{"key": "sampling_seed", "label": "种子", "type": "number", "min": 0, "max": 4294967295, "step": 1},
 				{"key": "keep_model", "label": "生成后保持模型", "type": "boolean"},
+				{"key": "vae_decode_tiled", "label": "低显存 VAE 分块解码", "type": "boolean", "hint": "建议低显存用户开启"},
+				{"key": "vae_decode_tile_size", "label": "VAE 解码块大小", "type": "number", "min": 64, "max": 2048, "step": 64, "hint": "显存不足时可降至 256"},
 			],
 			"controls": [
 				{"key": "matting_method", "label": "抠图模型", "default": "RMBG1.4", "options": choices.get("matting_methods") or ["RMBG1.4"]},
@@ -2269,6 +2315,7 @@ def _register_gjj_character_library_api():
 
 	@server.routes.post("/gjj/character_library/generate_multiview")
 	async def gjj_character_library_generate_multiview(request):
+		stage = "读取角色图片和参数"
 		try:
 			content_type = str(request.content_type or "")
 			if "multipart" in content_type:
@@ -2440,6 +2487,8 @@ def _register_gjj_character_library_api():
 			sampling_denoise = float(character_settings.get("sampling_denoise", -1.0))
 			sampling_seed = int(character_settings.get("sampling_seed", 0) or 0)
 			keep_model = bool(character_settings.get("keep_model", True))
+			vae_decode_tiled = bool(character_settings.get("vae_decode_tiled", True))
+			vae_decode_tile_size = max(64, min(2048, int(character_settings.get("vae_decode_tile_size", 512) or 512)))
 			def basename_seed(value: str) -> str:
 				return str(value or "").replace("\\", "/").split("/")[-1].strip()
 			def pick_model_any_subdir(folder_type: str, seed: str, available: list[str], fallback: str = "", extensions: tuple[str, ...] = ()) -> str:
@@ -2555,6 +2604,9 @@ def _register_gjj_character_library_api():
 					setattr(server, "last_prompt_id", context_unique_id)
 				except Exception:
 					pass
+			stage = "运行前清理模型与显存"
+			_gjj_prepare_library_run("角色库")
+			stage = "生成角色多视图并执行 VAE 解码"
 			try:
 				multiview_result = GJJ_CharacterMultiViewStudio().generate(
 					main_image=main_image,
@@ -2579,6 +2631,8 @@ def _register_gjj_character_library_api():
 					sampling_sampler=sampling_sampler,
 					sampling_scheduler=sampling_scheduler,
 					sampling_denoise=sampling_denoise,
+					vae_decode_tiled=vae_decode_tiled,
+					vae_decode_tile_size=vae_decode_tile_size,
 					prompt={},
 					extra_pnginfo={},
 					unique_id=context_unique_id,
@@ -2622,7 +2676,7 @@ def _register_gjj_character_library_api():
 		except Exception as exc:
 			print("[GJJ][CharacterLibrary][Multiview][ERROR]")
 			print(traceback.format_exc())
-			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+			return web.json_response(_gjj_library_error_details(exc, stage, "角色库"), status=400)
 
 	@server.routes.post("/gjj/character_library/annotate_missing")
 	async def gjj_character_library_annotate_missing(request):
@@ -3636,6 +3690,7 @@ def _register_gjj_scene_library_api():
 		return torch.from_numpy(array).unsqueeze(0).contiguous()
 
 	def generate_360_from_scene_image(image: Image.Image, scene_name: str, unique_id: str = "") -> Image.Image:
+		_gjj_prepare_library_run("场景库")
 		try:
 			from .nodes.gjj_360_panorama_generator import (
 				DEFAULT_PROMPT_SUFFIX,
@@ -3744,6 +3799,8 @@ def _register_gjj_scene_library_api():
 				current_view_data="",
 				save_directory="",
 				unique_id=context_unique_id,
+				vae_decode_tiled=bool(scene_settings.get("vae_decode_tiled", True)),
+				vae_decode_tile_size=setting_int("vae_decode_tile_size", 512, 64, 2048),
 			)
 		output = None
 		if isinstance(result, dict):
@@ -4123,6 +4180,7 @@ def _register_gjj_scene_library_api():
 
 	@server.routes.post("/gjj/scene_library/import_auto")
 	async def gjj_scene_library_import_auto(request):
+		stage = "读取场景文件和参数"
 		try:
 			import asyncio
 			reader = await request.multipart()
@@ -4177,6 +4235,7 @@ def _register_gjj_scene_library_api():
 					method = "direct_360"
 				else:
 					method = "generated_360"
+					stage = "清理资源并生成 360° 场景"
 					image = await asyncio.to_thread(generate_360_from_scene_image, image, name, import_unique_id)
 			if import_unique_id:
 				server.send_sync("gjj_node_progress", {
@@ -4189,7 +4248,9 @@ def _register_gjj_scene_library_api():
 			scene = enrich_manifest(write_manifest(manifest))
 			return web.json_response({"ok": True, "scene": scene, "asset": asset, "method": method})
 		except Exception as exc:
-			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+			print("[GJJ][SceneLibrary][Import][ERROR]")
+			print(traceback.format_exc())
+			return web.json_response(_gjj_library_error_details(exc, stage, "场景库"), status=400)
 
 	@server.routes.post("/gjj/scene_library/asset")
 	async def gjj_scene_library_asset(request):

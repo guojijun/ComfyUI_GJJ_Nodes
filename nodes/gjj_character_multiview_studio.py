@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from comfy.cli_args import args
 from PIL import Image, ImageDraw, ImageFont
 from PIL.PngImagePlugin import PngInfo
-from nodes import VAEDecode, common_ksampler
+from nodes import VAEDecode, VAEDecodeTiled, common_ksampler
 try:
 	from nodes import EmptySD3LatentImage
 except ImportError:
@@ -3073,6 +3073,8 @@ class GJJ_CharacterMultiViewStudio:
 		sampling_denoise: float = -1.0,
 		runtime_unet_name: str = "",
 		runtime_clip_type: str = "",
+		vae_decode_tiled: bool = True,
+		vae_decode_tile_size: int = 512,
 	):
 		target_width, target_height = _resolve_target_size_from_image(
 			main_image,
@@ -3312,6 +3314,8 @@ class GJJ_CharacterMultiViewStudio:
 			latent_out,
 			denoise=effective_denoise,
 		)[0]
+		if bool(vae_decode_tiled):
+			return VAEDecodeTiled().decode(vae, sampled_latent, max(64, int(vae_decode_tile_size)))[0]
 		return VAEDecode().decode(vae, sampled_latent)[0]
 
 	def generate(
@@ -3600,6 +3604,8 @@ class GJJ_CharacterMultiViewStudio:
 					sampling_denoise=kwargs.get("sampling_denoise", -1.0),
 					runtime_unet_name=unet_name,
 					runtime_clip_type=resolved_clip_type,
+					vae_decode_tiled=kwargs.get("vae_decode_tiled", True),
+					vae_decode_tile_size=kwargs.get("vae_decode_tile_size", 512),
 				)
 			except Exception as exc:
 				raise RuntimeError(

@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "krea",
+    "search_text": "",
     "page_size": 8,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -53,7 +53,9 @@
     "sampling_cfg": -1.0,
     "sampling_denoise": -1.0,
     "sampling_seed": 0,
-    "keep_model": true
+    "keep_model": true,
+    "vae_decode_tiled": true,
+    "vae_decode_tile_size": 512
   },
   "scene_library": {
     "panorama_unet": "qwen_image_edit_2511_int4_convrot.safetensors",
@@ -82,7 +84,9 @@
     "seedvr2_encode_tile_overlap": 128,
     "seedvr2_decode_tiled": true,
     "seedvr2_decode_tile_size": 512,
-    "seedvr2_decode_tile_overlap": 128
+    "seedvr2_decode_tile_overlap": 128,
+    "vae_decode_tiled": true,
+    "vae_decode_tile_size": 512
   },
   "ollama_assistant": {
     "version": 1,

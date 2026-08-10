@@ -26,6 +26,7 @@ from nodes import (
     CheckpointLoaderSimple,
     EmptyLatentImage,
     VAEDecode,
+    VAEDecodeTiled,
     VAEEncode,
     VAEEncodeForInpaint,
     common_ksampler,
@@ -4074,6 +4075,9 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
+        vae_decode_tiled = bool(_unwrap_list_input(kwargs.pop("vae_decode_tiled", False)))
+        vae_decode_tile_size = max(64, int(_unwrap_list_input(kwargs.pop("vae_decode_tile_size", 512))))
+        raise_generation_errors = bool(_unwrap_list_input(kwargs.pop("raise_generation_errors", False)))
         save_format, _, _ = _lazy_image_save_format(
             _unwrap_list_input(kwargs.pop("save_format", "jpg"))
         )
@@ -5272,7 +5276,10 @@ class GJJ_LazyImageStudio:
                 _send_status(unique_id, f"6/6 解码输出图像{status_suffix}...")
                 sampled_latent = _limit_latent_batch(sampled_latent, int(batch_size))
                 _prepare_vae_device(vae, device_preference)
-                output_image = VAEDecode().decode(vae, sampled_latent)[0]
+                if vae_decode_tiled:
+                    output_image = VAEDecodeTiled().decode(vae, sampled_latent, vae_decode_tile_size)[0]
+                else:
+                    output_image = VAEDecode().decode(vae, sampled_latent)[0]
                 return output_image, local_width, local_height
 
             generated_images: list[torch.Tensor] = []
@@ -5282,7 +5289,7 @@ class GJJ_LazyImageStudio:
                 try:
                     generated_image, final_width, final_height = generate_one_prompt(prompt_text, prompt_index)
                 except Exception as exc:
-                    if _is_memory_allocation_error(exc):
+                    if raise_generation_errors or _is_memory_allocation_error(exc):
                         raise
                     first_line = str(exc).splitlines()[0] if str(exc).splitlines() else str(exc)
                     _send_status(

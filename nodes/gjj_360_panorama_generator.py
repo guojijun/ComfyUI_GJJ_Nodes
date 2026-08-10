@@ -633,6 +633,8 @@ class GJJ_360PanoramaGenerator:
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
+        vae_decode_tiled: bool = True,
+        vae_decode_tile_size: int = 512,
     ) -> torch.Tensor:
         kwargs: dict[str, Any] = {}
         if image is not None:
@@ -661,6 +663,9 @@ class GJJ_360PanoramaGenerator:
             prompt_graph=prompt_graph,
             unique_id=unique_id,
             extra_pnginfo=extra_pnginfo,
+            vae_decode_tiled=vae_decode_tiled,
+            vae_decode_tile_size=vae_decode_tile_size,
+            raise_generation_errors=True,
             **kwargs,
         )
         output = result.get("result", (None,))[0] if isinstance(result, dict) else None
@@ -686,6 +691,8 @@ class GJJ_360PanoramaGenerator:
         clip_name: str,
         vae_name: str,
         lora_data: str,
+        vae_decode_tiled: bool = True,
+        vae_decode_tile_size: int = 512,
     ) -> torch.Tensor:
         try:
             from nodes import ConditioningZeroOut, InpaintModelConditioning
@@ -730,7 +737,12 @@ class GJJ_360PanoramaGenerator:
             cond[2],
             denoise,
         )
-        return _ensure_bhwc_rgb(_decode_vae(vae, sampled))[:1].contiguous()
+        if vae_decode_tiled:
+            from nodes import VAEDecodeTiled
+            decoded = VAEDecodeTiled().decode(vae, sampled, max(64, int(vae_decode_tile_size)))[0]
+        else:
+            decoded = _decode_vae(vae, sampled)
+        return _ensure_bhwc_rgb(decoded)[:1].contiguous()
 
     def _finish_output(
         self,
@@ -813,6 +825,8 @@ class GJJ_360PanoramaGenerator:
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
+        vae_decode_tiled=True,
+        vae_decode_tile_size=512,
     ):
         positive_prompt = str(_first_scalar(positive_prompt) or "")
         negative_prompt = str(_first_scalar(negative_prompt) or "")
@@ -845,6 +859,8 @@ class GJJ_360PanoramaGenerator:
         current_view_data = str(_first_scalar(current_view_data) or "")
         save_directory = str(_first_scalar(save_directory) or "")
         unique_id = _first_scalar(unique_id)
+        vae_decode_tiled = bool(_first_scalar(vae_decode_tiled))
+        vae_decode_tile_size = max(64, int(_first_scalar(vae_decode_tile_size)))
 
         source = _split_optional_image(image)
         lora_data = _make_lora_data(lora_1_name, lora_1_strength, lora_2_name, lora_2_strength)
@@ -926,6 +942,8 @@ class GJJ_360PanoramaGenerator:
             unique_id=unique_id,
             prompt_graph=prompt_graph,
             extra_pnginfo=extra_pnginfo,
+            vae_decode_tiled=vae_decode_tiled,
+            vae_decode_tile_size=vae_decode_tile_size,
         )
         _send_status(unique_id, f"2/5 {mode_text} 主生成完成。", 0.46, stage_index=2, stage_total=stage_total)
         _send_preview(unique_id, base, "主生成")
@@ -979,6 +997,8 @@ class GJJ_360PanoramaGenerator:
                 clip_name=clip_name,
                 vae_name=vae_name,
                 lora_data=lora_data,
+                vae_decode_tiled=vae_decode_tiled,
+                vae_decode_tile_size=vae_decode_tile_size,
             )
         else:
             _send_status(unique_id, "4/5 已跳过中缝修复。", 0.94, stage_index=4, stage_total=stage_total)

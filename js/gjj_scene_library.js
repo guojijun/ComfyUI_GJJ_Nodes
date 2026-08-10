@@ -762,6 +762,8 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 				["repair_enabled", "启用中缝修复", "checkbox", true, "关闭可提速，但全景接缝可能明显。"],
 				["seam_mask_width", "中缝遮罩宽度", "number", 256, "修复区域宽度。", 0, 2048, 8],
 				["seam_blur", "中缝羽化", "number", 24, "遮罩边缘过渡宽度。", 0, 256, 1],
+				["vae_decode_tiled", "低显存 VAE 分块解码", "checkbox", true, "同时用于 360 底图和中缝修复，建议低显存用户开启。"],
+				["vae_decode_tile_size", "VAE 解码块大小", "number", 512, "显存不足时可降至 256；数值越小越省显存但更慢。", 64, 2048, 64],
 			]],
 			["🔍 SeedVR2 放大", [
 				["seedvr2_enabled", "启用 SeedVR2", "checkbox", true, "关闭后直接缩放底图到最终尺寸。"],
