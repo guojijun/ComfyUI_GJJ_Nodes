@@ -337,12 +337,10 @@ def _sanitize_reasoned_prompt(
     }
     for label, limit in reference_limits.items():
         cleaned = re.sub(
-            rf"<{label}\s+(\d+)>(.*?)(?=<(?:Subject|Picture|Video|Audio)\s+\d+>|"
-            r"(?:\r?\n\s*)?(?:summary|retention_analysis|detailed_description|"
-            r"overall_soundscape|non_diegetic_music):|$)",
+            rf"<{label}\s+(\d+)>",
             lambda match, maximum=limit: match.group(0) if int(match.group(1)) <= maximum else "",
             cleaned,
-            flags=re.IGNORECASE | re.DOTALL,
+            flags=re.IGNORECASE,
         )
 
     # A model that repeats the same multi-clause block three or more times has entered a
@@ -535,6 +533,52 @@ def _assemble_fixed_prompt_fields(prompt: str, structure: str) -> str:
     return f"{alignment}\n\n{assembled}" if alignment else assembled
 
 
+def _target_shot_count(shot_plan: str) -> int:
+    plan = str(shot_plan or "")
+    cut_match = re.search(r"(\d+)\s*(?:次切镜|Cuts?)", plan, flags=re.IGNORECASE)
+    return 1 if "Single Shot" in plan or "不切镜" in plan else (int(cut_match.group(1)) + 1 if cut_match else 0)
+
+
+def _short_shot_description(text: str, max_words: int = 45, max_chars: int = 280) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" ,")
+    cleaned = re.sub(r"(?i)^At\s+\d{2}:\d{2}(?:\.\d{1,3})?\s*,?\s*", "", cleaned)
+    words = cleaned.split()
+    if len(words) > max_words:
+        cleaned = " ".join(words[:max_words]).rstrip(" ,;:")
+    if len(cleaned) > max_chars:
+        shortened = cleaned[:max_chars].rstrip()
+        if " " in shortened:
+            shortened = shortened.rsplit(" ", 1)[0]
+        cleaned = shortened.rstrip(" ,;:")
+    if cleaned and cleaned[-1] not in ".!?。！？>\"'":
+        cleaned += "."
+    return cleaned
+
+
+def _compose_generated_shots(body: str, target_shots: int, duration: float) -> str:
+    """Apply stable shot numbering/timestamps to the model's short continuous descriptions."""
+    matches = list(re.finditer(
+        r"(?is)\[Shot\s+(\d+)\]\s*(.*?)(?=\[Shot\s+\d+\]|$)",
+        str(body or ""),
+    ))
+    if not matches:
+        return str(body or "").strip()
+    descriptions = [_short_shot_description(match.group(2)) for match in matches[:target_shots]]
+    descriptions = [description for description in descriptions if description]
+    if len(descriptions) != target_shots:
+        return str(body or "").strip()
+    shots = []
+    for index, description in enumerate(descriptions, start=1):
+        if index == 1:
+            shots.append(f"[Shot 1] {description}")
+            continue
+        seconds = max(0.001, float(duration) * (index - 1) / target_shots)
+        minutes = int(seconds // 60)
+        remainder = seconds - minutes * 60
+        shots.append(f"[Shot {index}] At {minutes:02d}:{remainder:06.3f}, {description}")
+    return " ".join(shots)
+
+
 def _prompt_option_directive(
     visual_style: str, shot_plan: str, camera_motion: str, music_style: str,
 ) -> str:
@@ -551,15 +595,40 @@ def _prompt_option_directive(
             selections.append(f"{label}: {selected}")
     if not selections:
         return ""
+    target_shots = _target_shot_count(shot_plan)
+    shot_requirement = ""
+    if target_shots:
+        shot_requirement = (
+            f" First derive exactly {target_shots} simple, continuous shot descriptions from the user's prompt, one for "
+            f"each shot from [Shot 1] through [Shot {target_shots}]. Each description must be 25 to 45 English words, "
+            "contain concrete visible subjects and action, and progress naturally from the previous description. "
+            "Place those short descriptions in the integrated/detailed description field; the node will normalize "
+            "numbering and timestamps afterward. "
+            "Do not use generic phrases such as 'complementary angle', 'same subjects continue', or "
+            "'selected visual treatment continue', and do not invent Picture/Video/Audio references."
+        )
     return (
         "Mandatory target-video presets selected by the user. Apply them naturally in the appropriate "
         "shot and music fields without repeating this instruction verbatim: " + "; ".join(selections) + "."
+        + shot_requirement
+    )
+
+
+def _compact_shot_system_prompt(target_shots: int, duration: float, directive: str) -> str:
+    return (
+        "You are a compact video shot planner. Use the user's prompt as the source of truth. "
+        f"Return only exactly {target_shots} lines, labeled [Shot 1] through [Shot {target_shots}], for a "
+        f"continuous {max(0.0, float(duration)):.2f}-second video. Each line must contain 25 to 45 English words "
+        "describing concrete visible subjects, setting, and action. Each shot must advance naturally from the previous "
+        "shot. Do not output analysis, field names, soundscape, music, timestamps, generic continuity placeholders, "
+        "or invented Picture/Video/Audio references. Preserve dialogue verbatim if present. "
+        + str(directive or "")
     )
 
 
 def _apply_prompt_option_selections(
     prompt: str, structure: str, duration: float, visual_style: str,
-    shot_plan: str, camera_motion: str, music_style: str,
+    shot_plan: str, camera_motion: str, music_style: str, source_prompt: str = "",
 ) -> str:
     """Deterministically enforce UI selections after generated fields are assembled."""
     result = str(prompt or "")
@@ -603,33 +672,26 @@ def _apply_prompt_option_selections(
             "Shake Slightly": "The camera has a controlled, slight handheld shake.",
         }
         motion_phrase = motion_phrases.get(motion_name, "")
-        forced_opening = " ".join(filter(None, (style_phrase, motion_phrase)))
-        if forced_opening:
+        if motion_phrase:
             body, count = re.subn(
-                r"(?i)\[Shot\s+1\]\s*", f"[Shot 1] {forced_opening} ", body, count=1,
+                r"(?i)\[Shot\s+1\]\s*", f"[Shot 1] {motion_phrase} ", body, count=1,
             )
             if count == 0:
-                body = f"[Shot 1] {forced_opening} {body}"
+                body = f"[Shot 1] {motion_phrase} {body}"
 
-        plan = str(shot_plan or "")
-        cut_match = re.search(r"(\d+)\s*(?:次切镜|Cuts?)", plan, flags=re.IGNORECASE)
-        target_shots = 1 if "Single Shot" in plan or "不切镜" in plan else (int(cut_match.group(1)) + 1 if cut_match else 0)
+        target_shots = _target_shot_count(shot_plan)
         if target_shots:
-            def flatten_extra_shot(match: re.Match[str]) -> str:
-                return match.group(0) if int(match.group(1)) <= target_shots else "Within the same shot, "
-            body = re.sub(
-                r"(?i)\[Shot\s+(\d+)\](?:\s+At\s+\d{2}:\d{2}(?:\.\d{1,3})?)?\s*,?\s*",
-                flatten_extra_shot, body,
-            )
-            existing = max((int(value) for value in re.findall(r"(?i)\[Shot\s+(\d+)\]", body)), default=1)
-            for shot_number in range(existing + 1, target_shots + 1):
-                seconds = max(0.001, float(duration) * (shot_number - 1) / target_shots)
-                minutes = int(seconds // 60)
-                remainder = seconds - minutes * 60
-                body += (
-                    f" [Shot {shot_number}] At {minutes:02d}:{remainder:06.3f}, the shot cuts to a complementary "
-                    "angle while the same subjects, action, spatial continuity, and selected visual treatment continue."
+            body = _compose_generated_shots(body, target_shots, duration)
+        if style_phrase:
+            shot_header = r"(?i)(\[Shot\s+\d+\](?:\s+At\s+\d{2}:\d{2}(?:\.\d{1,3})?\s*,)?\s*)"
+            if re.search(shot_header, body):
+                body = re.sub(
+                    shot_header + rf"(?!{re.escape(style_phrase)})",
+                    lambda match: f"{match.group(1)}{style_phrase} ",
+                    body,
                 )
+            else:
+                body = f"[Shot 1] {style_phrase} {body}"
         result = result[:body_match.start()] + body_match.group(1) + body + result[body_match.end():]
 
     music_name = str(music_style or "").split(" / ", 1)[0].strip()
@@ -720,7 +782,11 @@ def _officialize_prompt_without_reasoning(
     narrative = re.sub(r"\s+", " ", narrative).strip(" ,，。;")
     body_parts = [part for part in (narrative, *dialogue_actions) if part]
     body = " ".join(body_parts) or "参考主体在连贯连续的场景中完成用户要求的动作。"
-    timeline = f"[Shot 1] 电影化呈现，在完整 {max(0.0, float(duration)):.2f} 秒视频内保持视听连续。{body}"
+    timeline = (
+        body
+        if re.search(r"(?i)\[Shot\s+1\]", body)
+        else f"[Shot 1] 电影化呈现，在完整 {max(0.0, float(duration)):.2f} 秒视频内保持视听连续。{body}"
+    )
 
     if mode == "R2VA":
         referenced_numbers = sorted({int(number) for number in re.findall(r"<Picture\s+(\d+)>", source)})
@@ -1843,7 +1909,7 @@ class GJJ_MiniMaxH3Studio:
                 },
                 "external_prompt": ("STRING", {"forceInput": True, "display_name": "外部提示词", "tooltip": "连接后覆盖面板文本框内容，并在富文本框中实时预览。"}),
                 "prompt_structure": (["自动", "基础三字段", "参考六字段"], {"default": "自动", "display_name": "提示词结构", "tooltip": "最终由节点固定拼接官方字段；自动按媒体分支选择，或强制使用基础三字段/参考六字段。"}),
-                "visual_style": (["自动 / Auto", "Cinematic / 电影感", "Live-action / 实拍", "Vintage film / 复古胶片", "Black & White / 黑白电影", "Documentary / 纪录片", "Minimalist commercial / 极简广告", "Macro photography / 微距摄影", "Aerial drone / 航拍", "2D-animated / 二维动画", "3D CG / 三维CG", "Anime / 日系二次元", "American Comic / 美式漫画", "Pixar-style 3D / 皮克斯3D", "Stop-motion / 定格动画", "Cyberpunk / 赛博朋克", "Watercolor / 水彩", "Claymation / 粘土动画", "Ink wash / 水墨", "Oil painting / 油画", "Paper cutout / 剪纸", "Pencil sketch / 铅笔素描"], {"default": "自动 / Auto", "display_name": "视觉风格"}),
+                "visual_style": (["自动 / Auto", "Cinematic / 电影感", "Live-action / 实拍", "Vintage film / 复古胶片", "Black & White / 黑白电影", "Documentary / 纪录片", "Minimalist commercial / 极简广告", "Macro photography / 微距摄影", "Aerial drone / 航拍", "2D-animated / 二维动画", "3D CG / 三维CG", "Anime / 日系二次元", "American Comic / 美式漫画", "Pixar-style 3D / 皮克斯3D", "Stop-motion / 定格动画", "Cyberpunk / 赛博朋克", "Watercolor / 水彩", "Claymation / 粘土动画", "Ink wash / 水墨", "Oil painting / 油画", "Paper cutout / 剪纸", "Pencil sketch / 铅笔素描"], {"default": "自动 / Auto", "display_name": "整个视频"}),
                 "shot_plan": (["自动 / Auto", "不切镜 / Single Shot", "1 次切镜 / 1 Cut", "2 次切镜 / 2 Cuts", "3 次切镜 / 3 Cuts", "4 次切镜 / 4 Cuts", "5 次切镜 / 5 Cuts", "6 次切镜 / 6 Cuts", "7 次切镜 / 7 Cuts", "8 次切镜 / 8 Cuts", "9 次切镜 / 9 Cuts"], {"default": "自动 / Auto", "display_name": "分镜"}),
                 "camera_motion": (["自动 / Auto", "Static Shot / 静止镜头", "Push In / 前推", "Pull Out / 后拉", "Pan Left / 向左摇摄", "Pan Right / 向右摇摄", "Truck Left / 向左横移", "Truck Right / 向右横移", "Tilt Up / 上摇", "Tilt Down / 下摇", "Pedestal Up / 上升", "Pedestal Down / 下降", "Arc Shot / 环绕", "Tracking Shot / 跟拍", "Zoom In / 变焦推近", "Zoom Out / 变焦拉远", "POV / 主观视角", "Shake Slightly / 轻微手持晃动"], {"default": "自动 / Auto", "display_name": "运镜"}),
                 "music_style": (["自动 / Auto", "无配乐 / N/A", "Piano / 钢琴", "Orchestral / 管弦乐", "Acoustic / 原声吉他", "Electronic / 电子", "Ambient / 氛围", "Synthwave / 合成器浪潮", "Chiptune / 芯片音乐", "Lo-fi / Lo-fi", "Epic / 史诗", "Suspense / 悬疑", "Romantic Strings / 浪漫弦乐", "Rock / 摇滚", "Jazz / 爵士", "Hip-Hop / 嘻哈", "Funk / 放克", "Acapella Choir / 纯人声合唱", "Minimalist Foley / 极简拟音", "Chinese Folk / 国风民乐", "Chinese Opera / 戏曲", "Guqin / 古琴"], {"default": "自动 / Auto", "display_name": "音乐"}),
@@ -1911,7 +1977,8 @@ class GJJ_MiniMaxH3Studio:
             if has_director_media:
                 media["images"] = []
                 internal_texts = []
-        prompt_source = first("external_prompt", "") if "external_prompt" in kwargs else first("prompt", "")
+        external_prompt = first("external_prompt", "") if "external_prompt" in kwargs else ""
+        prompt_source = external_prompt if str(external_prompt or "").strip() else first("prompt", "")
         prompt = _normalize_picture_reference_tags(_strip_library_manifest_payloads("\n\n".join(
             part for part in [str(prompt_source or "").strip(), *[text.strip() for text in internal_texts]] if part
         )))
@@ -2190,16 +2257,21 @@ class GJJ_MiniMaxH3Studio:
 
             reasoning_model_name = str(first("reasoning_model", DEFAULT_REASONING_KEYWORD))
             configured_system_prompt = str(first("reasoning_system_prompt", DEFAULT_REASONING_SYSTEM_PROMPT) or "").strip()
-            reasoning_system_prompt = "\n\n".join(filter(None, (
-                configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
-                _official_prompt_rewrite_rules(
-                    mode=official_prompt_mode,
-                    duration=duration,
-                    picture_count=image_count,
-                    dialogue_language=str(first("dialogue_language", "中文")),
-                ),
-                prompt_option_directive,
-            )))
+            requested_shots = _target_shot_count(str(first("shot_plan", "自动 / Auto")))
+            reasoning_system_prompt = (
+                _compact_shot_system_prompt(requested_shots, duration, prompt_option_directive)
+                if requested_shots
+                else "\n\n".join(filter(None, (
+                    configured_system_prompt or DEFAULT_REASONING_SYSTEM_PROMPT,
+                    _official_prompt_rewrite_rules(
+                        mode=official_prompt_mode,
+                        duration=duration,
+                        picture_count=image_count,
+                        dialogue_language=str(first("dialogue_language", "中文")),
+                    ),
+                    prompt_option_directive,
+                )))
+            )
             reasoning_cache_payload = {
                 "prompt_parts": prompt_parts,
                 "configured_seed": configured_seed,
@@ -2232,19 +2304,35 @@ class GJJ_MiniMaxH3Studio:
                         for image in segmented_library_media[infer_index][1]["images"]
                     ]
                     reasoning_media = torch.cat(reasoning_images, dim=0) if reasoning_images else None
+                    target_shots = _target_shot_count(str(first("shot_plan", "自动 / Auto")))
+                    reasoning_max_length = min(1280, max(896, 512 + max(1, target_shots) * 112))
                     _send_status(unique_id, f"推理提示词 {infer_index + 1}/{len(prompt_parts)}...", 0.01)
-                    generated = GJJ_GemmaTextGenerate().generate(
-                        clip_name=reasoning_model_name,
-                        clip_type="stable_diffusion", clip_device="default", prompt=protected_part,
-                        max_length=2048, sampling_mode="off", temperature=0.35, top_k=64,
-                        top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
-                        presence_penalty="0.0", thinking=False, use_default_template=True,
-                        media=reasoning_media, unique_id=unique_id,
-                        system_prompt=reasoning_system_prompt,
-                        keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
-                    )
-                    payload = generated.get("result") if isinstance(generated, dict) else generated
-                    inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
+                    try:
+                        generated = GJJ_GemmaTextGenerate().generate(
+                            clip_name=reasoning_model_name,
+                            clip_type="stable_diffusion", clip_device="default", prompt=protected_part,
+                            max_length=reasoning_max_length, sampling_mode="off", temperature=0.35, top_k=64,
+                            top_p=0.95, min_p=0.05, repetition_penalty=1.05, seed=0,
+                            presence_penalty="0.0", thinking=False, use_default_template=True,
+                            media=reasoning_media, unique_id=unique_id,
+                            system_prompt=reasoning_system_prompt,
+                            keep_model=bool(first("keep_model", False)), device_preference="GPU优先",
+                        )
+                        payload = generated.get("result") if isinstance(generated, dict) else generated
+                        inferred = str(payload[0] if isinstance(payload, (list, tuple)) and payload else payload or "").strip()
+                    except Exception as exc:
+                        print(
+                            "[GJJ_MiniMaxH3Studio] 推理正文不可用，改用用户原始提示词继续生成："
+                            f"{exc}",
+                            flush=True,
+                        )
+                        inferred = _officialize_prompt_without_reasoning(
+                            prompt="\n\n".join(filter(None, (protected_part, prompt_option_directive))),
+                            mode=official_prompt_mode,
+                            duration=duration,
+                            picture_count=len(segmented_library_media[infer_index][1]["images"]),
+                            dialogue_language=str(first("dialogue_language", "中文")),
+                        )
                     inferred_parts.append(_restore_reasoning_dialogue(inferred or protected_part, protected_dialogue))
                 prompt_parts = inferred_parts
                 if reasoning_cache_slot:
@@ -2282,8 +2370,9 @@ class GJJ_MiniMaxH3Studio:
                 str(first("shot_plan", "自动 / Auto")),
                 str(first("camera_motion", "自动 / Auto")),
                 str(first("music_style", "自动 / Auto")),
+                raw_prompt_parts[min(index, len(raw_prompt_parts) - 1)] if raw_prompt_parts else "",
             )
-            for item in prompt_parts
+            for index, item in enumerate(prompt_parts)
         ]
         constrained_prompt_parts: list[str] = []
         for index, item in enumerate(prompt_parts):
@@ -2292,6 +2381,8 @@ class GJJ_MiniMaxH3Studio:
                 str(first("dialogue_language", "中文")),
             )
             segment_media = segmented_library_media[index][1]
+            if not segment_media["images"]:
+                normalized_prompt = re.sub(r"(?i)<Picture\s+\d+>", "", normalized_prompt)
             if segment_media["videos"] and segment_media["images"]:
                 normalized_prompt = _apply_video_replacement_constraints(
                     normalized_prompt,

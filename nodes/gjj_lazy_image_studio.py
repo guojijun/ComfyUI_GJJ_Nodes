@@ -3662,8 +3662,8 @@ class GJJ_LazyImageStudio:
         positive = method_args[0]
         negative = ConditioningZeroOut().zero_out(positive)[0]
         latent_out = EmptyLatentImage().generate(
-            1024,
-            1024,
+            max(8, int(width)),
+            max(8, int(height)),
             max(1, int(batch_size)),
         )[0]
         return positive, negative, latent_out
@@ -4073,6 +4073,7 @@ class GJJ_LazyImageStudio:
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
+        preserve_krea2_dimensions=False,
         **kwargs,
     ):
         vae_decode_tiled = bool(_unwrap_list_input(kwargs.pop("vae_decode_tiled", False)))
@@ -4140,6 +4141,7 @@ class GJJ_LazyImageStudio:
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
+        preserve_krea2_dimensions = _as_bool(_unwrap_list_input(preserve_krea2_dimensions))
         keep_model_loaded = _as_bool(keep_model_loaded)
         disable_equal_reference_canvas = _as_bool(disable_equal_reference_canvas)
         use_input_image_size = _as_bool(use_input_image_size)
@@ -4695,7 +4697,7 @@ class GJJ_LazyImageStudio:
                 is_krea2_runtime
                 and krea2_style_lora_selected
             )
-            if is_krea2_style_reference:
+            if is_krea2_style_reference and not preserve_krea2_dimensions:
                 width = 1024
                 height = 1024
                 steps = 8

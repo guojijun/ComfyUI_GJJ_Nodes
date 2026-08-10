@@ -485,46 +485,24 @@ def _generate_text(
     if not thinking_enabled:
         text = _clean_no_think_output(text, effective_prompt)
     if not str(text or "").strip():
-        retry_prompt = (
-            f"{effective_prompt.rstrip()}\n\n"
-            "请直接给出最终正文；不要输出思考、分析、推理标签或空回答。"
-        )
-        retry_kwargs = dict(official_kwargs)
-        retry_kwargs["prompt"] = retry_prompt
-        retry_sampling = dict(sampling_payload)
-        retry_sampling["seed"] = (int(seed) + 1) & 0xFFFFFFFFFFFFFFFF
-        retry_kwargs["sampling_mode"] = retry_sampling
-        print(
-            "[GJJ GemmaTextGenerate] 首次输出无可用正文，自动重试一次最终正文生成。",
-            flush=True,
-        )
-        try:
-            retry_output, retry_seconds = execute_official(retry_kwargs)
-        except Exception as exc:
-            raise RuntimeError(f"首次输出为空，自动重试失败：{exc}") from exc
-        retry_raw_text = output_text(retry_output)
-        retry_text = _strip_after_think_end(retry_raw_text)
-        if not thinking_enabled:
-            retry_text = _clean_no_think_output(retry_text, retry_prompt)
-        print(
-            "[GJJ GemmaTextGenerate] 官方 TextGenerate 重试耗时: "
-            f"total={retry_seconds:.2f}s raw_chars={len(retry_raw_text)}",
-            flush=True,
-        )
-        if str(retry_text or "").strip():
-            return retry_text
+        recovered = _recover_generated_body(raw_text, effective_prompt)
+        if recovered:
+            print(
+                "[GJJ GemmaTextGenerate] 清理结果为空，已从首次原始输出恢复正文，"
+                f"recovered_chars={len(recovered)}。",
+                flush=True,
+            )
+            return recovered
         print(
             "[GJJ GemmaTextGenerate] 输出为空诊断: "
-            f"raw_length={len(raw_text)} retry_raw_length={len(retry_raw_text)} "
+            f"raw_length={len(raw_text)} "
             f"has_think_end={bool(re.search(r'</think\\s*>', raw_text, flags=re.IGNORECASE))} "
-            f"retry_has_think_end={bool(re.search(r'</think\\s*>', retry_raw_text, flags=re.IGNORECASE))} "
             f"official_output_type={type(official_output).__name__}",
             flush=True,
         )
-        had_generated_content = bool(raw_text.strip() or retry_raw_text.strip())
-        if had_generated_content:
-            raise RuntimeError("官方 TextGenerate 连续两次只返回思考过程，关闭思考后正文为空。")
-        raise RuntimeError("官方 TextGenerate 连续两次返回空内容，模型在生成首个正文 token 前提前结束。")
+        if raw_text.strip():
+            raise RuntimeError("官方 TextGenerate 首次输出没有可恢复的最终正文。")
+        raise RuntimeError("官方 TextGenerate 返回空内容，模型在生成首个正文 token 前提前结束。")
     return text
 
 
@@ -554,6 +532,34 @@ def _strip_after_think_end(text: str) -> str:
     if matches:
         return cleaned[matches[-1].end():].lstrip()
     return cleaned
+
+
+def _recover_generated_body(text: str, prompt: str = "") -> str:
+    """Recover a structured final answer when an unclosed thinking tag hid valid output."""
+    cleaned = str(text or "").replace("<|im_start|>", "").replace("<|im_end|>", "").strip()
+    if not cleaned:
+        return ""
+    prompt_text = str(prompt or "").strip()
+    if prompt_text and cleaned.startswith(prompt_text):
+        cleaned = cleaned[len(prompt_text):].lstrip()
+    final_markers = list(re.finditer(
+        r"(?im)^\s*(?:最终答案|最终结果|最终输出|正文|提示词|final answer|final result|output)\s*[:：]\s*",
+        cleaned,
+    ))
+    if final_markers:
+        candidate = cleaned[final_markers[-1].end():].strip()
+        if candidate:
+            return candidate
+    structured = re.search(
+        r"(?im)^\s*(?:subject_definitions|integrated_multimodal_description|detailed_description)\s*:",
+        cleaned,
+    )
+    if structured:
+        return cleaned[structured.start():].strip()
+    shot = re.search(r"(?i)\[Shot\s+1\]", cleaned)
+    if shot:
+        return cleaned[shot.start():].strip()
+    return ""
 
 
 def _clean_no_think_output(text: str, prompt: str = "") -> str:
@@ -1112,7 +1118,7 @@ class GJJ_GemmaTextGenerate:
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "思考模式",
-                    "tooltip": "开启时允许模型输出推理过程；关闭时向模型明确禁用思考，并清除 thinking/analysis/reasoning 内容。若模型仍只生成思考段，会自动重试最终正文。",
+                    "tooltip": "开启时允许模型输出推理过程；关闭时向模型明确禁用思考，并清除 thinking/analysis/reasoning 内容。清理结果为空时会从首次原始输出恢复正文，不重复推理。",
                 }),
                 "use_default_template": ("BOOLEAN", {
                     "default": True,
@@ -1343,7 +1349,7 @@ class GJJ_GemmaTextGenerate:
             )
             if not str(text or "").strip():
                 raise RuntimeError(
-                    "官方 TextGenerate 连续两次返回空内容。"
+                    "官方 TextGenerate 首次输出没有可用正文。"
                     f"当前模型：{_basename(clip_name)}；CLIP 类型：{clip_type or 'stable_diffusion'}。"
                     "请确认模型文件与 CLIP 类型匹配，或改用已验证可工作的 Qwen3.5 文本编码器。"
                 )
