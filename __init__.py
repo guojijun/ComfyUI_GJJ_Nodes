@@ -215,6 +215,7 @@ def _gjj_default_user_settings() -> dict:
 			"seedvr2_decode_tile_overlap": 128,
 			"vae_decode_tiled": True,
 			"vae_decode_tile_size": 512,
+			"source_max_height_percent": 60.0,
 		},
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
@@ -2608,7 +2609,12 @@ def _register_gjj_character_library_api():
 			_gjj_prepare_library_run("角色库")
 			stage = "生成角色多视图并执行 VAE 解码"
 			try:
-				multiview_result = GJJ_CharacterMultiViewStudio().generate(
+				# This API calls the node outside ComfyUI's normal executor. Keep the
+				# complete sampling and tiled-VAE decode inside inference mode so the
+				# decoder may safely normalize inference tensors in-place.
+				import torch
+				with torch.inference_mode():
+					multiview_result = GJJ_CharacterMultiViewStudio().generate(
 					main_image=main_image,
 					base_prompt=identity_prompt,
 					negative_prompt=DEFAULT_NEGATIVE_PROMPT,
@@ -2636,8 +2642,8 @@ def _register_gjj_character_library_api():
 					prompt={},
 					extra_pnginfo={},
 					unique_id=context_unique_id,
-					**action_kwargs,
-				)
+						**action_kwargs,
+					)
 				if isinstance(multiview_result, dict):
 					_collage, batch_images = multiview_result.get("result", (None, None))
 				else:
@@ -3671,16 +3677,29 @@ def _register_gjj_scene_library_api():
 		# 任何近似比例都必须进入 generated_360 补边重绘，禁止直接缩放/裁切冒充 2:1。
 		return int(width) == int(height) * 2
 
-	def fit_to_360_png_canvas(image: Image.Image, width: int = 2048, height: int = 1024) -> Image.Image:
+	def fit_to_360_png_canvas(
+		image: Image.Image,
+		width: int = 2048,
+		height: int = 1024,
+		max_source_height_ratio: float = 1.0,
+	) -> Image.Image:
 		src = image.convert("RGB")
 		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
-		if src.width != width or src.height != height:
-			scale = max(width / max(1, src.width), height / max(1, src.height))
+		max_height_ratio = max(0.01, min(1.0, float(max_source_height_ratio or 1.0)))
+		max_source_height = max(1, int(round(height * max_height_ratio)))
+		if src.width != width or src.height != height or src.height > max_source_height:
+			# Preserve the whole source image. Non-2:1 inputs must be padded rather
+			# than enlarged and cropped, otherwise the import silently loses content.
+			# The optional height cap keeps the reference from dominating the panorama
+			# and leaves enough surrounding canvas for outpainting.
+			scale = min(width / max(1, src.width), max_source_height / max(1, src.height))
 			next_size = (max(1, int(round(src.width * scale))), max(1, int(round(src.height * scale))))
 			src = src.resize(next_size, resample)
-			left = max(0, (src.width - width) // 2)
-			top = max(0, (src.height - height) // 2)
-			src = src.crop((left, top, left + width, top + height))
+			canvas = Image.new("RGB", (width, height), (0, 0, 0))
+			left = max(0, (width - src.width) // 2)
+			top = max(0, (height - src.height) // 2)
+			canvas.paste(src, (left, top))
+			src = canvas
 		return src
 
 	def pil_to_scene_tensor(image: Image.Image):
@@ -3732,6 +3751,7 @@ def _register_gjj_scene_library_api():
 		final_height = setting_int("final_height", 1024, 128, 4096)
 		base_width = setting_int("base_width", 1024, 256, 4096)
 		base_height = setting_int("base_height", 512, 128, 2048)
+		source_max_height_ratio = setting_float("source_max_height_percent", 60.0, 1.0, 100.0) / 100.0
 
 		def selected_model(key: str, setting_key: str, fallback: str) -> str:
 			spec = required.get(key)
@@ -3800,7 +3820,12 @@ def _register_gjj_scene_library_api():
 				seam_mask_width=setting_int("seam_mask_width", 256, 0, 2048),
 				seam_blur=setting_int("seam_blur", 24, 0, 256),
 				repair_enabled=bool(scene_settings.get("repair_enabled", True)),
-				image=pil_to_scene_tensor(image),
+				image=pil_to_scene_tensor(fit_to_360_png_canvas(
+					image,
+					base_width,
+					base_height,
+					max_source_height_ratio=source_max_height_ratio,
+				)),
 				output_current_view=False,
 				current_view_data="",
 				save_directory="",

@@ -22,7 +22,7 @@ let canvasPatched = false;
 let graphToPromptPatched = false;
 
 const GROUPS = [
-	{ key: "model", icon: "🧠", title: "模型", fields: ["keep_model", "pre_cleanup_resources", "enable_pre_upscale", "highres_lora_strength"] },
+	{ key: "model", icon: "🧠", title: "模型", fields: ["keep_model", "pre_cleanup_resources", "enable_pre_upscale", "highres_lora_strength", "sage_attention_policy"] },
 	{ key: "prompt", icon: "📒", title: "提示词", fields: ["prompt", "negative_prompt", "reference_max_size"] },
 	{ key: "sampling", icon: "⚙️", title: "采样设置", fields: ["steps", "cfg", "seed", "sampler_name", "scheduler", "denoise", "filename_prefix", "format_name", "noise_seed", "noise_strength", "normalize_noise"] },
 	{ key: "timing", icon: "⏰", title: "时间与分段", fields: ["enable_segmentation", "segment_duration", "segment_frames", "frame_rate"] },

@@ -152,6 +152,11 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
         }
         for index in range(1, MAX_REFERENCE_MEDIA + 1):
             optional[f"reference_media_{index}"] = (REFERENCE_RESOURCE_TYPE, _hidden({"default": None, "display_name": f"参考 Media {index}"}))
+        optional["sage_attention_policy"] = (["自动（静默兼容）", "强制 SageAttention", "关闭"], _hidden({
+            "default": "自动（静默兼容）",
+            "display_name": "SageAttention",
+            "tooltip": "自动（静默兼容）=检测到 sageattention 时启用，缺失时不提示并使用 ComfyUI 原生注意力；强制 SageAttention=明确启用并在依赖缺失时提示；关闭=始终使用原生注意力。",
+        }))
         return {
             "required": {},
             "optional": optional,
@@ -290,19 +295,14 @@ class GJJ_Bernini13BVideoReferenceUpscaler:
             f"2/6 HighResFix LoRA 已应用：{model_patch_count}/{EXPECTED_HIGHRES_LORA_PATCHES} 组权重",
             0.24,
         )
-        # SageAttention 缺失时静默使用兼容模式（ComfyUI 原生注意力）
-        # 不向前端推送 gjj_dependency_model_notice，避免弹窗与执行阻塞；
-        # 仅在控制台输出 info 级日志，便于排查。FP16 累积仍会照常应用。
+        sage_policy = str(_first(kwargs.get("sage_attention_policy"), "自动（静默兼容）") or "自动（静默兼容）")
         sage_mode = "自动"
         sage_available = _is_sage_dependency_available(sage_mode)
-        if not sage_available:
-            logging.info(
-                "[GJJ] %s：未检测到 sageattention，已静默回退到 ComfyUI 原生注意力（兼容模式）。",
-                NODE_NAME,
-            )
+        force_sage = sage_policy == "强制 SageAttention"
+        enable_sage = force_sage or (sage_policy != "关闭" and sage_available)
         model = GJJ_ModelPatchBundle().patch(
             model,
-            启用SageAttention=sage_available,
+            启用SageAttention=enable_sage,
             SageAttention模式=sage_mode,
             允许Sage编译=True,
             启用FP16累积设置=True,

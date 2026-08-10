@@ -86,7 +86,8 @@
     "seedvr2_decode_tile_size": 512,
     "seedvr2_decode_tile_overlap": 128,
     "vae_decode_tiled": true,
-    "vae_decode_tile_size": 512
+    "vae_decode_tile_size": 512,
+    "source_max_height_percent": 60.0
   },
   "ollama_assistant": {
     "version": 1,

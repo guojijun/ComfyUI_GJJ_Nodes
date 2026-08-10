@@ -16,6 +16,7 @@ const MIN_PREVIEW_HEIGHT = 96;
 const MIN_WIDTH = 200;
 const MULTI_IMAGE_MIN_WIDTH = 104;
 const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
+const BUTTON_ROW_HEIGHT = 38;
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
 const FILENAME_VARIABLES_PROPERTY = "gjj_save_any_object_filename_prefix_variables";
 const SAVE_FORMAT_CONFIG_WIDGET = "save_format_config";
@@ -932,8 +933,12 @@ function ensureButtonWidget(node) {
 	const container = document.createElement("div");
 	container.style.cssText = [
 		"display:flex",
-		"gap:8px",
+		"flex-wrap:wrap",
+		"gap:0",
+		"align-items:stretch",
 		"width:100%",
+		"min-width:0",
+		"overflow:visible",
 		"box-sizing:border-box",
 	].join(";");
 	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu"]) {
@@ -942,13 +947,19 @@ function ensureButtonWidget(node) {
 
 	const outputButton = document.createElement("button");
 	outputButton.style.cssText = [
-		"padding:6px 12px",
+		"flex:1 1 52px",
+		"min-width:52px",
+		`min-height:${BUTTON_ROW_HEIGHT}px`,
+		"margin:0",
+		"padding:4px 6px",
+		"box-sizing:border-box",
 		"background:#2a3a42",
 		"color:#d9e4df",
 		"border:1px solid #33434a",
 		"border-radius:6px",
 		"cursor:pointer",
-		"font-size:12px",
+		"font-size:22px",
+		"line-height:1",
 		"font-weight:500",
 		"transition:background 0.15s",
 	].join(";");
@@ -974,13 +985,19 @@ function ensureButtonWidget(node) {
 	browserFilesButton.textContent = "📂";
 	browserFilesButton.title = "选择一个或多个浏览器文件；执行节点时保存（可选）";
 	browserFilesButton.style.cssText = [
-		"padding:6px 12px",
+		"flex:1 1 52px",
+		"min-width:52px",
+		`min-height:${BUTTON_ROW_HEIGHT}px`,
+		"margin:0",
+		"padding:4px 6px",
+		"box-sizing:border-box",
 		"background:#2a3a42",
 		"color:#d9e4df",
 		"border:1px solid #33434a",
 		"border-radius:6px",
 		"cursor:pointer",
-		"font-size:14px",
+		"font-size:22px",
+		"line-height:1",
 		"transition:background 0.15s",
 	].join(";");
 	browserFilesButton.onmouseover = () => { browserFilesButton.style.background = "#3a4a52"; };
@@ -996,13 +1013,19 @@ function ensureButtonWidget(node) {
 	folderButton.textContent = "📁";
 	folderButton.title = "打开保存文件夹";
 	folderButton.style.cssText = [
-		"padding:6px 12px",
+		"flex:1 1 52px",
+		"min-width:52px",
+		`min-height:${BUTTON_ROW_HEIGHT}px`,
+		"margin:0",
+		"padding:4px 6px",
+		"box-sizing:border-box",
 		"background:#2a3a42",
 		"color:#d9e4df",
 		"border:1px solid #33434a",
 		"border-radius:6px",
 		"cursor:pointer",
-		"font-size:14px",
+		"font-size:22px",
+		"line-height:1",
 		"transition:background 0.15s",
 	].join(";");
 	folderButton.onmouseover = () => { folderButton.style.background = "#3a4a52"; };
@@ -1074,10 +1097,13 @@ function ensureButtonWidget(node) {
 	const widget = node.addDOMWidget?.(BUTTON_WIDGET_NAME, "操作按钮", container, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => 32,
+		getHeight: () => Math.max(BUTTON_ROW_HEIGHT, Math.ceil(container.scrollHeight || container.offsetHeight || BUTTON_ROW_HEIGHT)),
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || MIN_WIDTH)), 32];
+		widget.computeSize = (width) => [
+			Math.max(MIN_WIDTH, Number(width || MIN_WIDTH)),
+			Math.max(BUTTON_ROW_HEIGHT, Math.ceil(container.scrollHeight || container.offsetHeight || BUTTON_ROW_HEIGHT)),
+		];
 		widget.draw = () => {};
 		node.__gjjSaveAnyObjectButtonWidget = widget;
 	}
@@ -1091,7 +1117,19 @@ function ensureButtonWidget(node) {
 	node.__gjjSaveAnyObjectFormatButton = formatButton;
 	node.__gjjSaveAnyObjectFolderButton = folderButton;
 	node.__gjjSaveAnyObjectRunButton = runButton;
+	if (typeof ResizeObserver === "function") {
+		let lastHeight = 0;
+		node.__gjjSaveAnyObjectButtonResizeObserver = new ResizeObserver(() => {
+			const nextHeight = Math.max(BUTTON_ROW_HEIGHT, Math.ceil(container.scrollHeight || container.offsetHeight || BUTTON_ROW_HEIGHT));
+			if (nextHeight !== lastHeight) {
+				lastHeight = nextHeight;
+				scheduleLayout(node);
+			}
+		});
+		node.__gjjSaveAnyObjectButtonResizeObserver.observe(container);
+	}
 	updateButtonState(node);
+	requestAnimationFrame(() => scheduleLayout(node));
 }
 
 function updateButtonState(node) {
@@ -1336,6 +1374,13 @@ app.registerExtension({
 			const result = originalOnConnectionsChange?.apply(this, args);
 			scheduleStabilize(this);
 			return result;
+		};
+
+		const originalOnRemoved = nodeType.prototype.onRemoved;
+		nodeType.prototype.onRemoved = function (...args) {
+			this.__gjjSaveAnyObjectButtonResizeObserver?.disconnect?.();
+			this.__gjjSaveAnyObjectButtonResizeObserver = null;
+			return originalOnRemoved?.apply(this, args);
 		};
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;

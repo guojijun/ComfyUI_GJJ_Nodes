@@ -37,6 +37,11 @@ DEFAULT_UNET = "flux-2-klein-4b"
 DEFAULT_CLIP = "qwen_3_4b.safetensors"
 DEFAULT_CLIP_FAMILY = Path(DEFAULT_CLIP).stem
 DEFAULT_VAE = "flux2-vae.safetensors"
+MODEL_FILTER_KEYWORDS = {
+    "unet": ("flux-2-klein-4b", "flux-2-klein-base-4b", "f2k-4b", "f2k4b"),
+    "clip": ("qwen_3_4b",),
+    "vae": ("flux2-vae",),
+}
 DEFAULT_PROMPT = "clean all watermark,text,logo,signature,caption,overlay"
 DEFAULT_NEGATIVE = ""
 DEFAULT_FILENAME_PREFIX = "GJJ/批量去水印"
@@ -466,14 +471,13 @@ def _find_required_model(available: list[str], required_name: str) -> str:
 
 
 def _required_model_choices(available: list[str], required_names: tuple[str, ...]) -> list[str]:
-    choices: list[str] = []
-    for required_name in required_names:
-        matches = [str(candidate or "").strip() for candidate in available or [] if _model_matches_required(candidate, required_name)]
-        if matches:
-            choices.extend(item for item in matches if item)
-        else:
-            choices.append(f"{MISSING_MODEL_PREFIX}{required_name}")
-    return list(dict.fromkeys(choices))
+    choices = [
+        str(candidate or "").strip()
+        for candidate in available or []
+        if any(_model_matches_required(candidate, required_name) for required_name in required_names)
+    ]
+    choices = list(dict.fromkeys(item for item in choices if item))
+    return choices or [f"{MISSING_MODEL_PREFIX}{required_names[0]}"]
 
 
 def _selected_required_name(requested: Any, required_names: tuple[str, ...]) -> str:
@@ -495,7 +499,7 @@ def _default_required_choice(choices: list[str], preferred: str) -> str:
 
 
 def _allowed_required_names(key: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(str(config[key]) for config in MODEL_CONFIGS))
+    return MODEL_FILTER_KEYWORDS[key]
 
 
 def _resolve_required_model(requested: Any, available: list[str], required_names: tuple[str, ...], label: str, folder: str) -> str:
@@ -519,21 +523,26 @@ def _resolve_required_model(requested: Any, available: list[str], required_names
 
 def _selected_config_for_unet(unet_name: Any) -> dict[str, str]:
     selected = _strip_missing_model_label(unet_name)
-    for config in MODEL_CONFIGS:
-        if _model_matches_required(selected, config["unet"]):
-            return config
-    allowed = "、".join(str(config["unet"]) for config in MODEL_CONFIGS)
+    if any(_model_matches_required(selected, keyword) for keyword in _allowed_required_names("unet")):
+        return MODEL_CONFIGS[0]
+    allowed = "、".join(_allowed_required_names("unet"))
     raise RuntimeError(f"UNET 主模型只能使用指定模型：{allowed}。")
 
 
 def _validate_model_config(unet_name: Any, clip_name: Any, vae_name: Any) -> dict[str, str]:
     config = _selected_config_for_unet(unet_name)
-    if not _model_matches_required(_strip_missing_model_label(clip_name), config["clip_family"]):
+    if not any(
+        _model_matches_required(_strip_missing_model_label(clip_name), keyword)
+        for keyword in _allowed_required_names("clip")
+    ):
         raise RuntimeError(
             f"{config['label']} 必须搭配 {config['clip_family']} 模型族的 CLIP（量化后缀不限）；"
             f"当前选择：{_strip_missing_model_label(clip_name) or '空'}。"
         )
-    if _model_key(_strip_missing_model_label(vae_name)) != _model_key(config["vae"]):
+    if not any(
+        _model_matches_required(_strip_missing_model_label(vae_name), keyword)
+        for keyword in _allowed_required_names("vae")
+    ):
         raise RuntimeError(
             f"{config['label']} 必须搭配 VAE：{config['vae']}；"
             f"当前选择：{_strip_missing_model_label(vae_name) or '空'}。"
@@ -617,7 +626,7 @@ class GJJ_BatchWatermarkRemover:
             "input": "unet_name",
             "type": "UNET",
             "kind": "Flux2 Klein",
-            "tooltip": "可放在 diffusion_models 子目录下；文件名需包含 flux-2-klein-4b 关键词，不限定 fp8 后缀。",
+            "tooltip": "可放在 diffusion_models 子目录下；文件名需包含允许的 Flux2 Klein 4B 关键词之一，量化后缀不限。",
         },
         {
             "label": "4B CLIP 文本编码器",
@@ -651,7 +660,7 @@ class GJJ_BatchWatermarkRemover:
                 "input": "unet_name",
                 "type": "UNET",
                 "kind": "Flux2 Klein",
-                "tooltip": "4B 去水印重绘主模型；文件名需包含 flux-2-klein-4b 关键词，不限定 fp8 后缀。",
+                "tooltip": "4B 去水印重绘主模型；严格匹配允许的 Flux2 Klein 4B 关键词之一，量化后缀不限。",
             },
             {
                 "label": "4B CLIP 文本编码器",
@@ -682,7 +691,7 @@ class GJJ_BatchWatermarkRemover:
         ],
         "usage": [
             "输入兼容 GJJ_BATCH_IMAGE 与普通 IMAGE 批量；可接 GJJ 批量多图片加载预览器、批量图片包装器或普通 IMAGE 输出。",
-            "UNET 下拉只列出匹配 flux-2-klein-4b 的模型；CLIP 下拉只列出 qwen_3_4b 模型族，并支持不同量化后缀。",
+            "UNET 下拉只列出匹配 flux-2-klein-4b、flux-2-klein-base-4b、f2k-4b 或 f2k4b 的模型；CLIP 下拉只列出 qwen_3_4b 模型族，并支持不同量化后缀。",
             "工作像素量越大，去水印细节可能更稳，但显存和耗时也会增加。",
             "自动保存开启后，会把结果写入 ComfyUI output 下的文件名前缀目录。",
         ],
@@ -740,7 +749,7 @@ class GJJ_BatchWatermarkRemover:
                         "default": _default_required_choice(unet_models, complete_config["unet"]),
                         "gjj_default_model": complete_config["unet"],
                         "display_name": "🟣 UNET 主模型",
-                        "tooltip": "只允许文件名包含 flux-2-klein-4b 的 4B 模型，或固定的 flux-2-klein-9b.safetensors。显示“缺失：名称”表示未在 models/diffusion_models 找到，节点不会用其它文件替代。",
+                        "tooltip": "只允许文件名包含 flux-2-klein-4b、flux-2-klein-base-4b、f2k-4b 或 f2k4b。显示“缺失：名称”表示未在 models/diffusion_models 找到，节点不会用无关文件替代。",
                     }),
                 ),
                 "clip_name": (
@@ -758,7 +767,7 @@ class GJJ_BatchWatermarkRemover:
                         "default": _default_required_choice(vae_models, complete_config["vae"]),
                         "gjj_default_model": complete_config["vae"],
                         "display_name": "🧩 VAE",
-                        "tooltip": "两套配置都固定使用 flux2-vae.safetensors。显示“缺失：文件名”表示未在 models/vae 找到。",
+                        "tooltip": "只允许文件名包含 flux2-vae。显示“缺失：文件名”表示未在 models/vae 找到。",
                     }),
                 ),
                 "working_megapixels": (

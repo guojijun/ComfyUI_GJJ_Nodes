@@ -76,6 +76,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 		panelPosition: null,
 		panelSize: null,
 		lastAnchor: null,
+		statusTimer: null,
 	};
 
 	function apiUrl(path) {
@@ -496,11 +497,24 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 	}
 
 	function setStatus(text) {
+		if (state.statusTimer) {
+			clearTimeout(state.statusTimer);
+			state.statusTimer = null;
+		}
 		state.status = String(text || "");
 		const el = document.querySelector(`#${PANEL_ID} .gjj-cl-status`);
 		const busyStatus = document.querySelector(`#${PANEL_ID} .gjj-cl-busy-status`);
 		if (el) el.textContent = state.status;
 		if (busyStatus) busyStatus.textContent = state.status || "正在处理角色素材，请稍候…";
+	}
+
+	function setTemporaryStatus(text, timeout = 12000) {
+		setStatus(text);
+		const expected = state.status;
+		state.statusTimer = window.setTimeout(() => {
+			state.statusTimer = null;
+			if (state.status === expected) setStatus("");
+		}, timeout);
 	}
 
 	function setBusy(value) {
@@ -2316,7 +2330,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 		title.textContent = "角色库";
 		const spacer = document.createElement("div");
 		spacer.className = "gjj-cl-spacer";
-		const importButton = button("➕", "选择一张或多张人物图片，自动抠图、分类并添加到角色库", "gjj-cl-btn gjj-cl-icon", () => importCharacters().catch((error) => setStatus(error.message)));
+		const importButton = button("➕", "选择一张或多张人物图片，自动抠图、分类并添加到角色库", "gjj-cl-btn gjj-cl-icon", () => importCharacters().catch((error) => setTemporaryStatus(error.message)));
 		head.append(drag, title, spacer, importButton);
 		head.appendChild(button("🧑‍🎨", "批量给角色补备注和性别符号", "gjj-cl-btn gjj-cl-icon", () => annotateMissingNotes().catch((error) => setStatus(error.message))));
 		head.appendChild(button("🧠", "查看并设置角色库使用的模型树", "gjj-cl-btn gjj-cl-icon", () => showModelTree().catch((error) => setStatus(error.message))));

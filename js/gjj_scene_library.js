@@ -764,6 +764,7 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 				["seam_blur", "中缝羽化", "number", 24, "遮罩边缘过渡宽度。", 0, 256, 1],
 				["vae_decode_tiled", "低显存 VAE 分块解码", "checkbox", true, "同时用于 360 底图和中缝修复，建议低显存用户开启。"],
 				["vae_decode_tile_size", "VAE 解码块大小", "number", 512, "显存不足时可降至 256；数值越小越省显存但更慢。", 64, 2048, 64],
+				["source_max_height_percent", "源图最大高度占比 (%)", "number", 60, "源图在 360 生成参考画布中的最大高度占比；缩小后居中并留出扩展空间，避免主体铺满全景。", 1, 100, 1],
 			]],
 			["🔍 SeedVR2 放大", [
 				["seedvr2_enabled", "启用 SeedVR2", "checkbox", true, "关闭后直接缩放底图到最终尺寸。"],

@@ -1082,6 +1082,8 @@ export class GJJ_Utils {
         ) {
             return fallbackSearchValue;
         }
+        const filteredFallback = GJJ_Utils._modelTreeSearchChoices(entry, widget, "", 1)[0];
+        if (filteredFallback) return GJJ_Utils._modelTreeFamilyStem(filteredFallback);
         return searchValue;
     }
 

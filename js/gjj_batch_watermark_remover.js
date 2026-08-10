@@ -7,6 +7,11 @@ const TOOLBAR_WIDGET = "gjj_watermark_toolbar";
 const PREVIEW_WIDGET = "gjj_watermark_preview";
 const WMR_NODES = new Set();
 let outsideClickReady = false;
+const MODEL_FILTERS = Object.freeze({
+	unet_name: ["flux-2-klein-4b", "flux-2-klein-base-4b", "f2k-4b", "f2k4b"],
+	clip_name: ["qwen_3_4b"],
+	vae_name: ["flux2-vae"],
+});
 const GROUPS = [
 	{
 		key: "size",
@@ -252,6 +257,7 @@ function modelTreeEntries(node) {
 		return {
 			...entry,
 			models,
+			anyKeywords: MODEL_FILTERS[entry.widget] || [],
 			defaultModel,
 			fallback: defaultModel,
 			missingDefault: models.length === 0,
