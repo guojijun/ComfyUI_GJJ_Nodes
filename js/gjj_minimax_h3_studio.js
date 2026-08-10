@@ -16,7 +16,7 @@ const MULTI_MEDIA_MEMORY_KEY = "__reference_media_2_virtual_links";
 const PROMPT_BACKUP_PROPERTY = "gjj_minimax_h3_prompt";
 const SETTINGS_BACKUP_PROPERTY = "gjj_minimax_h3_settings";
 const SETTINGS_SCHEMA_PROPERTY = "gjj_minimax_h3_settings_schema";
-const SETTINGS_SCHEMA_VERSION = 10;
+const SETTINGS_SCHEMA_VERSION = 12;
 const LORA_DATA_WIDGET = "lora_data";
 const LORA_FILTER_PROPERTY = "gjj_minimax_h3_lora_filter";
 const DEFAULT_LORA_FILTER = "minimax_h3_fl2v_lightx2v_turbo_4step";
@@ -86,6 +86,11 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "cache_clip", label: "缓存CLIP", type: "BOOLEAN", aliases: ["cache_clip", "缓存CLIP"] },
 	{ name: "director_storyboard_json", label: "导演分镜", type: "STRING", aliases: ["director", "storyboard", "导演台", "分镜"] },
 	{ name: "use_video_size", label: "视频尺寸", type: "BOOLEAN", aliases: ["video_size", "视频尺寸"] },
+	{ name: "prompt_structure", label: "提示词结构", type: "STRING", aliases: ["prompt_structure", "字段结构", "提示词结构"] },
+	{ name: "visual_style", label: "视觉风格", type: "STRING", aliases: ["visual_style", "style", "视觉风格"] },
+	{ name: "shot_plan", label: "分镜", type: "STRING", aliases: ["shot_plan", "cuts", "分镜", "切镜"] },
+	{ name: "camera_motion", label: "运镜", type: "STRING", aliases: ["camera_motion", "camera", "运镜"] },
+	{ name: "music_style", label: "音乐", type: "STRING", aliases: ["music_style", "music", "音乐", "配乐"] },
 ];
 const HIDDEN = new Set([
 	"width", "height", "duration", "frame_rate", "steps", "seed", "randomize_seed",
@@ -110,11 +115,13 @@ const HIDDEN = new Set([
 	"cache_clip",
 	"director_storyboard_json",
 	"use_video_size",
+	"prompt_structure",
+	"visual_style", "shot_plan", "camera_motion", "music_style",
 ]);
 const POPUP_GROUPS = {
 	params: [["生成参数", ["duration", "frame_rate", "steps", "seed", "sampler_name", "scheduler", "denoise", "ref_image_size", "dialogue_language"]], ["输出", ["filename_prefix", "format_name"]]],
 	size: [["画面尺寸", ["width", "height"]]],
-	promptBook: [["提示词", ["global_prompt", "negative_prompt"]], ["替换提示词", ["prompt_replace_find", "prompt_replace_with"]]],
+	promptBook: [["提示词结构", ["prompt_structure", "visual_style", "shot_plan", "camera_motion", "music_style"]], ["附加提示词", ["global_prompt", "negative_prompt"]], ["替换提示词", ["prompt_replace_find", "prompt_replace_with"]]],
 };
 
 function widget(node, name) { return GJJ_Utils.getWidget(node, name); }
@@ -139,13 +146,13 @@ function inputDefinition(node, name) {
 	return null;
 }
 function declaredDefault(node, name) {
-	const definition = inputDefinition(node, name); const options = definition?.[1] || {}; const target = widget(node, name); const items = choices(target);
+	const definition = inputDefinition(node, name); const options = definition?.[1] || {}; const target = widget(node, name); const items = declaredChoices(node, name, target);
 	if (Object.prototype.hasOwnProperty.call(options, "default")) return options.default;
 	if (items.length) return items[0];
 	const type = definition?.[0]; if (type === "BOOLEAN") return false; if (type === "INT" || type === "FLOAT") return 0; return "";
 }
 function normalizedSettingValue(node, name, current) {
-	const definition = inputDefinition(node, name); if (!definition) return current; const type = definition[0]; const options = definition[1] || {}; const items = choices(widget(node, name)); const fallback = declaredDefault(node, name);
+	const definition = inputDefinition(node, name); if (!definition) return current; const type = definition[0]; const options = definition[1] || {}; const items = declaredChoices(node, name, widget(node, name)); const fallback = declaredDefault(node, name);
 	if (items.length) return items.map(String).includes(String(current)) ? current : fallback;
 	if (type === "BOOLEAN") return typeof current === "boolean" ? current : fallback;
 	if (type === "INT" || type === "FLOAT") { const number = Number(current); if (!Number.isFinite(number) || (options.min != null && number < Number(options.min)) || (options.max != null && number > Number(options.max))) return fallback; if (name === "width" || name === "height") return normalizeCanvasDimension(number); return type === "INT" ? Math.round(number) : number; }
@@ -215,6 +222,12 @@ function choices(target) {
 	if (typeof items === "function") try { items = items(); } catch (_) { items = []; }
 	return Array.isArray(items) ? items : [];
 }
+function declaredChoices(node, name, target = widget(node, name)) {
+	const nativeItems = choices(target);
+	if (nativeItems.length) return nativeItems;
+	const definition = inputDefinition(node, name);
+	return Array.isArray(definition?.[0]) ? definition[0] : [];
+}
 function widgetDefinitionOptions(node, target) {
 	const fieldName = String(target?.name || target?.options?.name || "").trim();
 	const definition = inputDefinition(node, fieldName); return definition?.[1] && typeof definition[1] === "object" ? definition[1] : {};
@@ -242,7 +255,7 @@ function declaredKeywords(...values) {
 }
 function makeControl(node, name) {
 	const target = widget(node, name); if (!target) return null;
-	let control; const items = choices(target);
+	let control; const items = declaredChoices(node, name, target);
 	if (typeof target.value === "boolean") {
 		control = document.createElement("button"); control.type = "button"; control.className = "gjj-mh3-control gjj-mh3-toggle";
 		const sync = () => { control.textContent = target.value ? "开启" : "关闭"; control.classList.toggle("active", Boolean(target.value)); };
@@ -1068,7 +1081,7 @@ function popup(node, key, title) {
 	for (const [sectionTitle, names] of POPUP_GROUPS[key] || []) {
 		const section = document.createElement("section"); section.className = "gjj-mh3-section"; const heading = document.createElement("div"); heading.className = "gjj-mh3-title"; heading.textContent = sectionTitle;
 		const grid = document.createElement("div"); grid.className = "gjj-mh3-grid";
-		for (const name of names) { let control = makeControl(node, name); if (!control) continue; const row = document.createElement("label"); row.className = "gjj-mh3-field"; if (["filename_prefix", "format_name", "global_prompt", "negative_prompt", "prompt_replace_find", "prompt_replace_with"].includes(name)) row.classList.add("wide"); if (key === "promptBook") { const textarea = document.createElement("textarea"); textarea.className = "gjj-mh3-control"; textarea.rows = name === "prompt_replace_find" ? 2 : 4; textarea.value = String(value(node, name, "")); textarea.dataset.widgetName = name; textarea.placeholder = name === "global_prompt" ? "添加到每个分段前" : name === "negative_prompt" ? "作为每个分段必须避免的内容" : name === "prompt_replace_find" ? "不区分大小写的纯文本查找" : "替换后的提示词"; textarea.addEventListener("input", () => setValue(node, name, textarea.value)); applyBoundState(node, name, textarea); protect(textarea); control = textarea; } const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name; row.append(label, control); grid.append(row); }
+		for (const name of names) { let control = makeControl(node, name); if (!control) continue; const row = document.createElement("label"); row.className = "gjj-mh3-field"; if (["filename_prefix", "format_name", "global_prompt", "negative_prompt", "prompt_replace_find", "prompt_replace_with"].includes(name)) row.classList.add("wide"); if (key === "promptBook" && ["global_prompt", "negative_prompt", "prompt_replace_find", "prompt_replace_with"].includes(name)) { const textarea = document.createElement("textarea"); textarea.className = "gjj-mh3-control"; textarea.rows = name === "prompt_replace_find" ? 2 : 4; textarea.value = String(value(node, name, "")); textarea.dataset.widgetName = name; textarea.placeholder = name === "global_prompt" ? "添加到每个分段前" : name === "negative_prompt" ? "作为每个分段必须避免的内容" : name === "prompt_replace_find" ? "不区分大小写的纯文本查找" : "替换后的提示词"; textarea.addEventListener("input", () => setValue(node, name, textarea.value)); applyBoundState(node, name, textarea); protect(textarea); control = textarea; } const label = document.createElement("span"); label.textContent = widget(node, name)?.options?.display_name || widget(node, name)?.label || name; row.append(label, control); grid.append(row); }
 		section.append(heading, grid); root.append(section);
 	}
 	if (key === "promptBook") root.__gjjSync = () => { for (const control of root.querySelectorAll("textarea[data-widget-name]")) if (document.activeElement !== control) control.value = String(value(node, control.dataset.widgetName, "")); };

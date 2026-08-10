@@ -747,14 +747,20 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 	async function showGenerationSettings() {
 		const data = await apiJson("/gjj/user_settings");
 		const values = { ...(data.settings?.scene_library || {}) };
+		const applyDerivedDimensions = () => {
+			const requestedWidth = Number(values.final_width);
+			const finalWidth = Math.max(512, Math.min(8192, Math.round((Number.isFinite(requestedWidth) ? requestedWidth : 2048) / 8) * 8));
+			values.final_width = finalWidth;
+			values.final_height = finalWidth / 2;
+			values.base_width = finalWidth / 2;
+			values.base_height = finalWidth / 4;
+		};
+		applyDerivedDimensions();
 		const groups = [
 			["🖼️ 最终输出", [
-				["final_width", "最终宽度", "number", 2048, "建议与高度保持 2:1；范围 256–8192。", 256, 8192, 8],
-				["final_height", "最终高度", "number", 1024, "最终保存 PNG 的实际高度；范围 128–4096。", 128, 4096, 8],
+				["final_width", "最终宽度", "number", 2048, "唯一尺寸参数；高度自动取宽度的 1/2，保证高度:宽度 = 1:2。底图尺寸自动取最终尺寸的 1/2。", 512, 8192, 8],
 			]],
 			["🌏 360° 生成", [
-				["base_width", "生成底图宽度", "number", 1024, "进入 SeedVR2 前的全景宽度。", 256, 4096, 8],
-				["base_height", "生成底图高度", "number", 512, "建议与底图宽度保持 2:1。", 128, 2048, 8],
 				["generation_steps", "采样步数", "number", 4, "主生成与中缝修复使用的步数。", 1, 100, 1],
 				["generation_cfg", "CFG", "number", 1, "提示词引导强度。", 0, 100, 0.1],
 				["generation_seed", "随机种子", "number", 0, "同一图片与参数可复现结果。", 0, Number.MAX_SAFE_INTEGER, 1],
@@ -793,12 +799,13 @@ import { setGjjLibraryThumbnail } from "./gjj_library_thumbnails.js";
 		const spacer = document.createElement("div");
 		spacer.className = "gjj-sl-spacer";
 		const save = button("保存设置", "保存并应用到之后的导入任务", "gjj-sl-btn", async () => {
+			applyDerivedDimensions();
 			await apiJson("/gjj/user_settings", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ section: "scene_library", values }),
 			});
-			setStatus(`场景生成设置已保存：${values.final_width || 2048}×${values.final_height || 1024}`);
+			setStatus(`场景生成设置已保存：${values.final_width}×${values.final_height}（底图 ${values.base_width}×${values.base_height}）`);
 			backdrop.remove();
 		});
 		head.append(title, spacer, save, button("❌关闭", "关闭设置", "gjj-sl-btn", () => backdrop.remove()));

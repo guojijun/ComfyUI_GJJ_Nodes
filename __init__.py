@@ -3747,10 +3747,13 @@ def _register_gjj_scene_library_api():
 			except (TypeError, ValueError):
 				return fallback
 
-		final_width = setting_int("final_width", 2048, 256, 8192)
-		final_height = setting_int("final_height", 1024, 128, 4096)
-		base_width = setting_int("base_width", 1024, 256, 4096)
-		base_height = setting_int("base_height", 512, 128, 2048)
+		# 场景库只以最终宽度为尺寸基准：全景高度:宽度固定为 1:2，
+		# 生成底图再按最终尺寸的 1/2 缩小。旧设置中的其余三个尺寸不再参与计算。
+		final_width = setting_int("final_width", 2048, 512, 8192)
+		final_width = max(512, min(8192, ((final_width + 4) // 8) * 8))
+		final_height = final_width // 2
+		base_width = final_width // 2
+		base_height = final_width // 4
 		source_max_height_ratio = setting_float("source_max_height_percent", 60.0, 1.0, 100.0) / 100.0
 
 		def selected_model(key: str, setting_key: str, fallback: str) -> str:
@@ -3918,10 +3921,10 @@ def _register_gjj_scene_library_api():
 			target_name = f"{stem}_360_{now_ms()}.png"
 		scene_settings = _gjj_section_settings("scene_library")
 		try:
-			final_width = max(256, min(8192, int(scene_settings.get("final_width", 2048))))
-			final_height = max(128, min(4096, int(scene_settings.get("final_height", 1024))))
+			final_width = max(512, min(8192, ((int(scene_settings.get("final_width", 2048)) + 4) // 8) * 8))
 		except (TypeError, ValueError):
-			final_width, final_height = 2048, 1024
+			final_width = 2048
+		final_height = final_width // 2
 		final = fit_to_360_png_canvas(image, final_width, final_height)
 		final.save(base / target_name, "PNG")
 		timestamp = now_ms()
@@ -4203,9 +4206,14 @@ def _register_gjj_scene_library_api():
 		try:
 			scene_id = request.query.get("id") or ""
 			path = scene_dir(scene_id)
-			if path.exists():
+			if path.is_dir():
 				shutil.rmtree(path)
-			return web.json_response({"ok": True})
+			elif path.exists():
+				raise ValueError("场景路径不是目录，已停止删除。")
+			scene_thumbnail_path(scene_id).unlink(missing_ok=True)
+			if path.exists():
+				raise RuntimeError("场景目录删除失败，请检查文件是否被其他程序占用。")
+			return web.json_response({"ok": True, "directory_removed": True})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 

@@ -105,9 +105,8 @@ def _uses_default_accel_lora(raw_value: Any) -> bool:
 
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "你是 MiniMax H3 官方格式视频提示词改写器。严格保留用户意图、对白原文、歌词和画面文字，"
-    "根据当前任务模式输出可直接送入模型的最终提示词。除 MiniMax H3 规定必须保留的英文结构字段、"
-    "资源标签、镜头标签、语种标签、控制标签、任务代码和保留级别标记外，其余说明与画面描述全部使用中文；"
-    "对白、歌词和画面文字严格保留原语言。"
+    "根据当前任务模式输出可直接送入模型的最终提示词。所有结构字段、说明与画面描述必须使用英文；"
+    "仅对白、歌词和画面中真实可见的文字严格保留原语言。"
     "输入中的 __GJJ_DIALOGUE_XXXX__ 是受保护原文占位符，必须原样、完整且仅出现一次，禁止翻译、改写或删除。"
     "不要解释、不要分析过程、不要 Markdown 代码块。"
 )
@@ -119,9 +118,9 @@ def _official_prompt_rewrite_rules(
     seconds = f"{max(0.0, float(duration)):.2f}"
     language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
     shared = (
-        "最高优先级输出语言规则：即使前文要求英文，最终提示词也必须以中文撰写；仅 MiniMax H3 固定字段名、"
-        "<Subject N>/<Picture N>/<Video N>/<Audio N>、[Shot N]、(S1)、<d>、<scenetrans>、<cutoff>、"
-        f"[{language_tag}]、模式代码、时间格式及官方保留级别标记保持英文。"
+        "最高优先级输出语言规则：全部结构字段、说明、分析、画面、动作、运镜和声音描述必须使用英文；"
+        "仅对白、歌词和画面中真实可见的文字保留原语言。保持 <Subject N>/<Picture N>/<Video N>/<Audio N>、"
+        f"[Shot N]、(S1)、<d>、<scenetrans>、<cutoff>、[{language_tag}]、模式代码、时间格式及官方保留级别标记。"
         "严格遵循 MiniMax H3 视频提示词规范，逐字保留用户提供的对白与标点。"
         "任何 __GJJ_DIALOGUE_XXXX__ 都是受保护原文占位符，必须原样且仅复制一次，禁止翻译、改写或删除。"
         f"每句对白都放入 <d>[{language_tag}] ...</d>，所有对白无一例外使用 [{language_tag}]。"
@@ -146,7 +145,7 @@ def _official_prompt_rewrite_rules(
     if mode == "R2VA":
         return (
             f"任务：R2VA 完整参考生成，时长 {seconds} 秒，参考图片 {picture_count} 张。{shared} "
-            "正文使用中文，并严格按以下顺序使用六个英文固定字段：subject_definitions:, summary:, "
+            "正文使用英文，并严格按以下顺序使用六个英文固定字段：subject_definitions:, summary:, "
             "retention_analysis:, detailed_description:, overall_soundscape:, non_diegetic_music:. "
             "在 subject_definitions 中直接用已有 <Picture N> 定义可复用人物、场景、物体、服装或风格；"
             "不得创建 <Subject N> 别名，不得改动任何 <Picture N> 编号。summary 默认使用 [reference generation]，"
@@ -175,8 +174,8 @@ def _official_prompt_rewrite_rules(
         f"任务：{mode}，时长 {seconds} 秒。{shared} {instruction} {path_rule} "
         "可选对齐说明之后空一行，并严格输出三个英文固定字段："
         "integrated_multimodal_description:, overall_soundscape:, non_diegetic_music:. "
-        "overall_soundscape 用中文概括环境声、物理动作声与非语言人声，不重复对白。"
-        "non_diegetic_music 用中文描述仅观众可听见的乐器、速度、节奏和动态；无配乐时写 N/A。"
+        "overall_soundscape 用英文概括环境声、物理动作声与非语言人声，不重复对白。"
+        "non_diegetic_music 用英文描述仅观众可听见的乐器、速度、节奏和动态；无配乐时写 N/A。"
     )
 
 
@@ -250,9 +249,43 @@ def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, s
     return restored
 
 
+def _collapse_repeated_prose(text: str) -> tuple[str, int]:
+    """Collapse exact punctuation-delimited phrase loops emitted by small text models."""
+    parts = re.split(r"([，。；;！？!?\r\n]+)", str(text or ""))
+    chunks = ["".join(parts[index:index + 2]) for index in range(0, len(parts), 2)]
+    normalized = [re.sub(r"\s+", "", chunk).strip() for chunk in chunks]
+    output: list[str] = []
+    removed = 0
+    index = 0
+    while index < len(chunks):
+        collapsed = False
+        max_width = min(32, (len(chunks) - index) // 3)
+        for width in range(1, max_width + 1):
+            block = normalized[index:index + width]
+            if not any(block) or block != normalized[index + width:index + width * 2]:
+                continue
+            repeats = 2
+            while (
+                index + width * (repeats + 1) <= len(chunks)
+                and block == normalized[index + width * repeats:index + width * (repeats + 1)]
+            ):
+                repeats += 1
+            if repeats < 3:
+                continue
+            output.extend(chunks[index:index + width])
+            removed += width * (repeats - 1)
+            index += width * repeats
+            collapsed = True
+            break
+        if not collapsed:
+            output.append(chunks[index])
+            index += 1
+    return "".join(output), removed
+
+
 def _sanitize_reasoned_prompt(
     prompt: str, mode: str, duration: float, picture_count: int, dialogue_language: str = "中文",
-    source_prompt: str = "",
+    source_prompt: str = "", video_count: int = 0, audio_count: int = 0,
 ) -> str:
     """清除小文本模型的退化输出，并补齐 MiniMax H3 的最小官方结构。"""
     cleaned = str(prompt or "").strip()
@@ -294,6 +327,33 @@ def _sanitize_reasoned_prompt(
     )
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    # Reference labels are an inventory owned by the node, not free text for the
+    # reasoning model to extend. Remove every hallucinated out-of-range label.
+    reference_limits = {
+        "Picture": max(0, int(picture_count)),
+        "Video": max(0, int(video_count)),
+        "Audio": max(0, int(audio_count)),
+    }
+    for label, limit in reference_limits.items():
+        cleaned = re.sub(
+            rf"<{label}\s+(\d+)>(.*?)(?=<(?:Subject|Picture|Video|Audio)\s+\d+>|"
+            r"(?:\r?\n\s*)?(?:summary|retention_analysis|detailed_description|"
+            r"overall_soundscape|non_diegetic_music):|$)",
+            lambda match, maximum=limit: match.group(0) if int(match.group(1)) <= maximum else "",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    # A model that repeats the same multi-clause block three or more times has entered a
+    # decoding loop. Falling back to the deterministic formatter is safer than feeding a
+    # truncated, duplicated subject definition to the video model.
+    cleaned, repeated_chunks = _collapse_repeated_prose(cleaned)
+    if repeated_chunks and source_text:
+        fallback_source, _ = _collapse_repeated_prose(source_text)
+        return _officialize_prompt_without_reasoning(
+            fallback_source, mode, duration, picture_count, dialogue_language,
+        )
 
     if not cleaned:
         return _officialize_prompt_without_reasoning(
@@ -428,11 +488,176 @@ def _sanitize_reasoned_prompt(
     return cleaned.strip()
 
 
+def _assemble_fixed_prompt_fields(prompt: str, structure: str) -> str:
+    """Rebuild the selected H3 field envelope after all generated prose is complete."""
+    source = str(prompt or "").strip()
+    reference_fields = (
+        "subject_definitions:", "summary:", "retention_analysis:",
+        "detailed_description:", "overall_soundscape:", "non_diegetic_music:",
+    )
+    base_fields = (
+        "integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:",
+    )
+    fields = reference_fields if structure == "参考六字段" else base_fields
+    positions = sorted(
+        (source.find(field), field) for field in fields if source.find(field) >= 0
+    )
+    values: dict[str, str] = {}
+    for index, (start, field) in enumerate(positions):
+        value_start = start + len(field)
+        value_end = positions[index + 1][0] if index + 1 < len(positions) else len(source)
+        value = source[value_start:value_end].strip()
+        # A field name nested inside another field is generated structure leakage.
+        value = re.sub(
+            r"(?im)^\s*(?:subject_definitions|summary|retention_analysis|detailed_description|"
+            r"integrated_multimodal_description|overall_soundscape|non_diegetic_music):\s*",
+            "", value,
+        ).strip()
+        values[field] = value
+    defaults = {
+        "subject_definitions:": "N/A",
+        "summary:": "[reference generation] The target video follows the supplied references and user request.",
+        "retention_analysis:": "N/A",
+        "detailed_description:": "[Shot 1] The requested scene unfolds continuously across the target video.",
+        "integrated_multimodal_description:": "[Shot 1] The requested scene unfolds continuously across the target video.",
+        "overall_soundscape:": "N/A",
+        "non_diegetic_music:": "N/A",
+    }
+    alignment = ""
+    if structure == "基础三字段":
+        first_field = source.find("integrated_multimodal_description:")
+        if first_field > 0:
+            alignment = source[:first_field].strip()
+    separator = "\n" if structure == "参考六字段" else " "
+    assembled = "\n\n".join(
+        f"{field}{separator}{values.get(field) or defaults[field]}" for field in fields
+    )
+    return f"{alignment}\n\n{assembled}" if alignment else assembled
+
+
+def _prompt_option_directive(
+    visual_style: str, shot_plan: str, camera_motion: str, music_style: str,
+) -> str:
+    """Translate UI presets into one compact instruction for the prompt writer."""
+    selections = []
+    for label, value in (
+        ("Visual style", visual_style),
+        ("Shot plan", shot_plan),
+        ("Camera motion", camera_motion),
+        ("Background music", music_style),
+    ):
+        selected = str(value or "自动 / Auto").strip()
+        if selected not in {"自动", "自动 / Auto", "不指定 / Unspecified"}:
+            selections.append(f"{label}: {selected}")
+    if not selections:
+        return ""
+    return (
+        "Mandatory target-video presets selected by the user. Apply them naturally in the appropriate "
+        "shot and music fields without repeating this instruction verbatim: " + "; ".join(selections) + "."
+    )
+
+
+def _apply_prompt_option_selections(
+    prompt: str, structure: str, duration: float, visual_style: str,
+    shot_plan: str, camera_motion: str, music_style: str,
+) -> str:
+    """Deterministically enforce UI selections after generated fields are assembled."""
+    result = str(prompt or "")
+    body_field = "detailed_description:" if structure == "参考六字段" else "integrated_multimodal_description:"
+    body_match = re.search(
+        rf"(?s)({re.escape(body_field)}\s*)(.*?)(?=\n\s*overall_soundscape:)", result,
+    )
+    if body_match:
+        body = body_match.group(2).strip()
+        style_name = str(visual_style or "").split(" / ", 1)[0].strip()
+        style_phrases = {
+            "Black & White": "Black-and-white cinematography with strictly monochrome imagery and no visible color.",
+            "Cinematic": "Cinematic visual treatment.",
+            "Live-action": "Live-action visual treatment.",
+            "Vintage film": "Vintage-film visual treatment with period-appropriate grain and contrast.",
+            "Documentary": "Documentary-style visual treatment.",
+            "3D CG": "3D CG visual treatment.",
+            "2D-animated": "2D-animated visual treatment.",
+            "Anime": "Anime visual treatment.",
+        }
+        style_phrase = style_phrases.get(style_name, f"{style_name} visual treatment." if style_name and style_name != "自动" else "")
+
+        motion_name = str(camera_motion or "").split(" / ", 1)[0].strip()
+        motion_phrases = {
+            "Static Shot": "The camera remains completely static.",
+            "Push In": "The camera pushes in at a steady speed.",
+            "Pull Out": "The camera pulls out at a steady speed.",
+            "Pan Left": "The camera pans left at a steady speed.",
+            "Pan Right": "The camera pans right at a steady speed.",
+            "Truck Left": "The camera trucks left at a steady speed.",
+            "Truck Right": "The camera trucks right at a steady speed.",
+            "Tilt Up": "The camera tilts up at a steady speed.",
+            "Tilt Down": "The camera tilts down at a steady speed.",
+            "Pedestal Up": "The camera rises vertically at a steady speed.",
+            "Pedestal Down": "The camera descends vertically at a steady speed.",
+            "Arc Shot": "The camera moves in a smooth arc around the main subject.",
+            "Tracking Shot": "The camera tracks the main subject at a steady speed.",
+            "Zoom In": "The camera zooms in at a steady speed.",
+            "Zoom Out": "The camera zooms out at a steady speed.",
+            "POV": "The shot uses the main subject's point of view.",
+            "Shake Slightly": "The camera has a controlled, slight handheld shake.",
+        }
+        motion_phrase = motion_phrases.get(motion_name, "")
+        forced_opening = " ".join(filter(None, (style_phrase, motion_phrase)))
+        if forced_opening:
+            body, count = re.subn(
+                r"(?i)\[Shot\s+1\]\s*", f"[Shot 1] {forced_opening} ", body, count=1,
+            )
+            if count == 0:
+                body = f"[Shot 1] {forced_opening} {body}"
+
+        plan = str(shot_plan or "")
+        cut_match = re.search(r"(\d+)\s*(?:次切镜|Cuts?)", plan, flags=re.IGNORECASE)
+        target_shots = 1 if "Single Shot" in plan or "不切镜" in plan else (int(cut_match.group(1)) + 1 if cut_match else 0)
+        if target_shots:
+            def flatten_extra_shot(match: re.Match[str]) -> str:
+                return match.group(0) if int(match.group(1)) <= target_shots else "Within the same shot, "
+            body = re.sub(
+                r"(?i)\[Shot\s+(\d+)\](?:\s+At\s+\d{2}:\d{2}(?:\.\d{1,3})?)?\s*,?\s*",
+                flatten_extra_shot, body,
+            )
+            existing = max((int(value) for value in re.findall(r"(?i)\[Shot\s+(\d+)\]", body)), default=1)
+            for shot_number in range(existing + 1, target_shots + 1):
+                seconds = max(0.001, float(duration) * (shot_number - 1) / target_shots)
+                minutes = int(seconds // 60)
+                remainder = seconds - minutes * 60
+                body += (
+                    f" [Shot {shot_number}] At {minutes:02d}:{remainder:06.3f}, the shot cuts to a complementary "
+                    "angle while the same subjects, action, spatial continuity, and selected visual treatment continue."
+                )
+        result = result[:body_match.start()] + body_match.group(1) + body + result[body_match.end():]
+
+    music_name = str(music_style or "").split(" / ", 1)[0].strip()
+    if music_name and music_name not in {"自动", "Auto"}:
+        music_descriptions = {
+            "无配乐": "N/A", "Piano": "Sparse piano notes at a moderate tempo with a gentle fade at the end.",
+            "Orchestral": "A measured orchestral score with strings and restrained brass, building gradually before fading.",
+            "Acoustic": "A steady acoustic-guitar pattern at a moderate tempo with a soft final cadence.",
+            "Electronic": "A steady electronic pulse with layered synthesizers and a controlled gradual build.",
+            "Ambient": "Sustained ambient synthesizer tones with slow movement and minimal percussion.",
+            "Jazz": "A moderate jazz rhythm led by piano, upright bass, and restrained brushed drums.",
+            "Chinese Folk": "A measured Chinese folk arrangement using plucked strings and bamboo flute.",
+            "Guqin": "Sparse guqin phrases at a slow tempo with long pauses and a gentle decay.",
+        }
+        music_value = music_descriptions.get(
+            music_name, f"A {music_name.lower()} score at a moderate tempo with controlled dynamics and a gradual fade.",
+        )
+        result = re.sub(
+            r"(?s)(non_diegetic_music:\s*).*?$", lambda match: match.group(1) + music_value, result,
+        )
+    return result.strip()
+
+
 def _officialize_prompt_without_reasoning(
     prompt: str, mode: str, duration: float, picture_count: int, dialogue_language: str = "中文",
 ) -> str:
     """不加载文本模型时，用确定性规则整理为 MiniMax H3 官方提示词结构。"""
-    source = str(prompt or "").strip()
+    source, _ = _collapse_repeated_prose(str(prompt or "").strip())
     if not source:
         source = "一个连贯的电影化场景在完整视频时长内自然展开。"
     official_fields = ("integrated_multimodal_description:", "subject_definitions:", "detailed_description:")
@@ -1617,6 +1842,11 @@ class GJJ_MiniMaxH3Studio:
                     for index in range(1, MAX_REFERENCE_MEDIA_2 + 1)
                 },
                 "external_prompt": ("STRING", {"forceInput": True, "display_name": "外部提示词", "tooltip": "连接后覆盖面板文本框内容，并在富文本框中实时预览。"}),
+                "prompt_structure": (["自动", "基础三字段", "参考六字段"], {"default": "自动", "display_name": "提示词结构", "tooltip": "最终由节点固定拼接官方字段；自动按媒体分支选择，或强制使用基础三字段/参考六字段。"}),
+                "visual_style": (["自动 / Auto", "Cinematic / 电影感", "Live-action / 实拍", "Vintage film / 复古胶片", "Black & White / 黑白电影", "Documentary / 纪录片", "Minimalist commercial / 极简广告", "Macro photography / 微距摄影", "Aerial drone / 航拍", "2D-animated / 二维动画", "3D CG / 三维CG", "Anime / 日系二次元", "American Comic / 美式漫画", "Pixar-style 3D / 皮克斯3D", "Stop-motion / 定格动画", "Cyberpunk / 赛博朋克", "Watercolor / 水彩", "Claymation / 粘土动画", "Ink wash / 水墨", "Oil painting / 油画", "Paper cutout / 剪纸", "Pencil sketch / 铅笔素描"], {"default": "自动 / Auto", "display_name": "视觉风格"}),
+                "shot_plan": (["自动 / Auto", "不切镜 / Single Shot", "1 次切镜 / 1 Cut", "2 次切镜 / 2 Cuts", "3 次切镜 / 3 Cuts", "4 次切镜 / 4 Cuts", "5 次切镜 / 5 Cuts", "6 次切镜 / 6 Cuts", "7 次切镜 / 7 Cuts", "8 次切镜 / 8 Cuts", "9 次切镜 / 9 Cuts"], {"default": "自动 / Auto", "display_name": "分镜"}),
+                "camera_motion": (["自动 / Auto", "Static Shot / 静止镜头", "Push In / 前推", "Pull Out / 后拉", "Pan Left / 向左摇摄", "Pan Right / 向右摇摄", "Truck Left / 向左横移", "Truck Right / 向右横移", "Tilt Up / 上摇", "Tilt Down / 下摇", "Pedestal Up / 上升", "Pedestal Down / 下降", "Arc Shot / 环绕", "Tracking Shot / 跟拍", "Zoom In / 变焦推近", "Zoom Out / 变焦拉远", "POV / 主观视角", "Shake Slightly / 轻微手持晃动"], {"default": "自动 / Auto", "display_name": "运镜"}),
+                "music_style": (["自动 / Auto", "无配乐 / N/A", "Piano / 钢琴", "Orchestral / 管弦乐", "Acoustic / 原声吉他", "Electronic / 电子", "Ambient / 氛围", "Synthwave / 合成器浪潮", "Chiptune / 芯片音乐", "Lo-fi / Lo-fi", "Epic / 史诗", "Suspense / 悬疑", "Romantic Strings / 浪漫弦乐", "Rock / 摇滚", "Jazz / 爵士", "Hip-Hop / 嘻哈", "Funk / 放克", "Acapella Choir / 纯人声合唱", "Minimalist Foley / 极简拟音", "Chinese Folk / 国风民乐", "Chinese Opera / 戏曲", "Guqin / 古琴"], {"default": "自动 / Auto", "display_name": "音乐"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_info": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1938,6 +2168,23 @@ class GJJ_MiniMaxH3Studio:
         else:
             official_prompt_mode = "R2VA"
 
+        requested_prompt_structure = str(first("prompt_structure", "自动") or "自动")
+        if requested_prompt_structure == "参考六字段":
+            official_prompt_mode = "R2VA"
+        elif requested_prompt_structure == "基础三字段" and official_prompt_mode == "R2VA":
+            official_prompt_mode = "T2VA"
+        final_prompt_structure = (
+            requested_prompt_structure
+            if requested_prompt_structure in {"基础三字段", "参考六字段"}
+            else ("参考六字段" if official_prompt_mode == "R2VA" else "基础三字段")
+        )
+        prompt_option_directive = _prompt_option_directive(
+            str(first("visual_style", "自动 / Auto")),
+            str(first("shot_plan", "自动 / Auto")),
+            str(first("camera_motion", "自动 / Auto")),
+            str(first("music_style", "自动 / Auto")),
+        )
+
         if bool(first("reasoning_enabled", False)):
             from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
 
@@ -1951,6 +2198,7 @@ class GJJ_MiniMaxH3Studio:
                     picture_count=image_count,
                     dialogue_language=str(first("dialogue_language", "中文")),
                 ),
+                prompt_option_directive,
             )))
             reasoning_cache_payload = {
                 "prompt_parts": prompt_parts,
@@ -2004,7 +2252,7 @@ class GJJ_MiniMaxH3Studio:
         else:
             prompt_parts = [
                 _officialize_prompt_without_reasoning(
-                    prompt=raw_part,
+                    prompt="\n\n".join(filter(None, (raw_part, prompt_option_directive))),
                     mode=official_prompt_mode,
                     duration=duration,
                     picture_count=len(segmented_library_media[index][1]["images"]),
@@ -2020,8 +2268,22 @@ class GJJ_MiniMaxH3Studio:
                 len(segmented_library_media[index][1]["images"]),
                 str(first("dialogue_language", "中文")),
                 segmented_library_media[index][0],
+                len(segmented_library_media[index][1]["videos"]),
+                len(segmented_library_media[index][1]["audios"]),
             )
             for index, item in enumerate(prompt_parts)
+        ]
+        prompt_parts = [
+            _apply_prompt_option_selections(
+                _assemble_fixed_prompt_fields(item, final_prompt_structure),
+                final_prompt_structure,
+                duration,
+                str(first("visual_style", "自动 / Auto")),
+                str(first("shot_plan", "自动 / Auto")),
+                str(first("camera_motion", "自动 / Auto")),
+                str(first("music_style", "自动 / Auto")),
+            )
+            for item in prompt_parts
         ]
         constrained_prompt_parts: list[str] = []
         for index, item in enumerate(prompt_parts):
