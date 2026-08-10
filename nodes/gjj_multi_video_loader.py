@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 import uuid
 from fractions import Fraction
 from pathlib import Path
@@ -201,12 +204,9 @@ def _video_meta_cv2(path: Path) -> dict[str, Any]:
 def _video_meta_ffprobe(path: Path) -> dict[str, Any]:
     """Use ffprobe as a fallback/stronger parser when cv2 cannot read metadata."""
     try:
-        import imageio_ffmpeg
-        ffprobe = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).with_name("ffprobe.exe" if Path(imageio_ffmpeg.get_ffmpeg_exe()).suffix.lower() == ".exe" else "ffprobe"))
-        if not Path(ffprobe).exists():
-            ffprobe = "ffprobe"
+        ffprobe = _get_ffprobe_path()
     except Exception:
-        ffprobe = "ffprobe"
+        return {"width": 0, "height": 0, "fps": 0.0, "frames": 0, "duration": 0.0}
 
     cmd = [
         ffprobe,
@@ -890,8 +890,44 @@ def _frame_to_tensor(frame: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array[..., :3]).unsqueeze(0)
 
 
+def _media_tool_candidates(executable: str) -> list[Path]:
+    """Return common FFmpeg locations used by ComfyUI desktop and portable installs."""
+    exe_name = f"{executable}.exe" if os.name == "nt" else executable
+    python_dir = Path(sys.executable).resolve().parent
+    comfy_dir = Path(getattr(folder_paths, "base_path", Path(folder_paths.__file__).resolve().parent)).resolve()
+    roots = [python_dir, python_dir.parent, comfy_dir, comfy_dir.parent]
+    candidates: list[Path] = []
+    for env_name in ("IMAGEIO_FFMPEG_EXE", "FFMPEG_BINARY", "FFMPEG_PATH"):
+        configured = str(os.environ.get(env_name, "") or "").strip().strip('"')
+        if configured:
+            configured_path = Path(configured)
+            candidates.append(configured_path.with_name(exe_name) if executable != "ffmpeg" else configured_path)
+    discovered = shutil.which(exe_name) or shutil.which(executable)
+    if discovered:
+        candidates.append(Path(discovered))
+    for root in roots:
+        candidates.extend((
+            root / exe_name,
+            root / "bin" / exe_name,
+            root / "Library" / "bin" / exe_name,
+            root / "ffmpeg" / "bin" / exe_name,
+            root / "python_embeded" / exe_name,
+            root / "python_embeded" / "Library" / "bin" / exe_name,
+            root / ".ce" / ".pixi" / "envs" / "comfyui" / "Library" / "bin" / exe_name,
+            root / ".ce" / "pixi" / "envs" / "comfyui" / "Library" / "bin" / exe_name,
+        ))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
 def _get_ffmpeg_path() -> str:
-    """获取 FFmpeg 可执行文件路径"""
+    """Resolve FFmpeg without assuming that ComfyUI inherited the user's PATH."""
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -899,7 +935,25 @@ def _get_ffmpeg_path() -> str:
             return str(ffmpeg_exe)
     except Exception:
         pass
-    return "ffmpeg"
+    for candidate in _media_tool_candidates("ffmpeg"):
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError(
+        "未找到 FFmpeg。请安装 imageio-ffmpeg，或将 ffmpeg.exe 放到 ComfyUI 同级的 "
+        "ffmpeg/bin、当前 Python 的 Library/bin，或通过 IMAGEIO_FFMPEG_EXE 指定完整路径。"
+    )
+
+
+def _get_ffprobe_path() -> str:
+    """Prefer the ffprobe shipped beside the resolved FFmpeg executable."""
+    ffmpeg_path = Path(_get_ffmpeg_path())
+    companion = ffmpeg_path.with_name("ffprobe.exe" if os.name == "nt" else "ffprobe")
+    if companion.is_file():
+        return str(companion)
+    for candidate in _media_tool_candidates("ffprobe"):
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("已找到 FFmpeg，但没有找到同套 ffprobe 可执行文件。")
 
 
 def decode_video_cv2(
