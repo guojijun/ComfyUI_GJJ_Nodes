@@ -437,6 +437,13 @@ def _model_matches_required(candidate: Any, required_name: str) -> bool:
         return True
     if not _is_keyword_model_name(required_name):
         return False
+    # Qwen3-VL and the text-only Qwen3 encoder are different architectures.
+    # A loose token match (qwen + 3 + 4b) used to admit qwen3vl_4b here,
+    # which then failed inside the text encoder with incompatible matrix sizes.
+    candidate_compact = re.sub(r"[^a-z0-9]+", "", candidate_key)
+    required_compact = re.sub(r"[^a-z0-9]+", "", required_key)
+    if "qwen3vl" in candidate_compact and "qwen3vl" not in required_compact:
+        return False
     if required_key in candidate_key:
         return True
     tokens = [token.lower() for token in re.split(r"[^A-Za-z0-9]+", str(required_name or "")) if token]

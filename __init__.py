@@ -3766,7 +3766,13 @@ def _register_gjj_scene_library_api():
 		generator = GJJ_360PanoramaGenerator()
 		context_unique_id = unique_id or f"gjj_scene_import_{uuid.uuid4().hex[:10]}"
 		with _GJJTemporaryPromptId(server, context_unique_id):
-			result = generator.generate(
+			# This route runs the node in an asyncio worker thread instead of through
+			# ComfyUI's executor, so reproduce the executor's inference context here.
+			# Tiled VAE decoding can create inference tensors and then normalize them
+			# in-place; without this context PyTorch rejects that final update.
+			import torch
+			with torch.inference_mode():
+				result = generator.generate(
 				positive_prompt=f"Convert this scene image into a natural seamless 360-degree equirectangular panorama. Scene name: {scene_name}",
 				negative_prompt="low quality, distorted, text, watermark",
 				unet_name=selected_model("unet_name", "panorama_unet", "qwen_image_edit_2511_int4_convrot.safetensors"),
