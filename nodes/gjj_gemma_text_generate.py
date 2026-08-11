@@ -66,8 +66,8 @@ except Exception:
 NODE_NAME = "GJJ_GemmaTextGenerate"
 NODE_DISPLAY_NAME = "GJJ·💛Gemma🧠图片反推提示词推理"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
-MODEL_FAMILY_KEYWORDS = ("qwen3.5", "qwen35", "gemma4", "qwen3vl")
-MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl"
+MODEL_FAMILY_KEYWORDS = ("qwen3.5", "qwen35", "gemma4", "qwen3vl","ernie")
+MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl|ernie"
 MISSING_CLIP_PLACEHOLDER = "未找到匹配的反推模型"
 DEFAULT_CLIP_NAME = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
