@@ -625,21 +625,47 @@ app.registerExtension({
 
 		let rebuildTimer = null;
 		let pointerIsDown = false;
-		const markPointerDown = () => { pointerIsDown = true; };
-		const markPointerUp = () => { pointerIsDown = false; };
+		let pointerDownTime = 0;
+		const POINTER_DOWN_TIMEOUT_MS = 2000;
+		const MAX_REBUILD_RETRIES = 5;
+		let rebuildRetries = 0;
+
+		const markPointerDown = () => {
+			pointerIsDown = true;
+			pointerDownTime = Date.now();
+			rebuildRetries = 0;
+		};
+		const markPointerUp = () => {
+			pointerIsDown = false;
+			rebuildRetries = 0;
+		};
+		const forceResetPointer = () => {
+			pointerIsDown = false;
+			rebuildRetries = 0;
+		};
+
 		document.addEventListener("pointerdown", markPointerDown, true);
 		document.addEventListener("pointerup", markPointerUp, true);
 		document.addEventListener("pointercancel", markPointerUp, true);
 		document.addEventListener("mouseup", markPointerUp, true);
+		window.addEventListener("blur", forceResetPointer, true);
+
 		const scheduleRebuild = () => {
 			if (rebuildTimer) {
 				clearTimeout(rebuildTimer);
 			}
 			rebuildTimer = setTimeout(() => {
-				if (pointerIsDown) {
+				const now = Date.now();
+				const pointerStuck = pointerIsDown && (now - pointerDownTime) > POINTER_DOWN_TIMEOUT_MS;
+				if (pointerStuck) {
+					pointerIsDown = false;
+				}
+				if (pointerIsDown && rebuildRetries < MAX_REBUILD_RETRIES) {
+					rebuildRetries++;
 					scheduleRebuild();
 					return;
 				}
+				rebuildRetries = 0;
 				for (const group of getGroups()) {
 					group?.recomputeInsideNodes?.();
 				}

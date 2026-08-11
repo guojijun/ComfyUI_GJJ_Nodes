@@ -1669,12 +1669,21 @@ import { app } from "/scripts/app.js";
 				console.warn("[GJJ] 工作流修复：跳过空 workflow 加载。", graphData);
 				return undefined;
 			}
-			const fixedLinks = sanitizeSerializedWorkflowLinks(loadData);
+			// 1) 对整体 graphData 做一次深拷贝，用于分析。
+			//    后续 sanitize / prepare 分析都在副本上进行，绝不回写原始 graphData。
+			//    这一步的目的是：避免污染 workflowManager 持有的引用对象，
+			//    防止关闭工作流时 workflowManager 误判工作流被修改，
+			//    触发保存等待导致标签栏不实时刷新。
+			// 2) 再对 graphData 做一次完整深拷贝（workingCopyForOriginal），用来传给 original。
+			//    这样 original 内部对对象的任何原地修改都不会反映到 GJJ 的分析引用上，
+			//    也不会污染 workflowManager 持有的引用。
+			const workingCopyForAnalysis = cloneWorkflow(loadData) || loadData;
+			const fixedLinks = sanitizeSerializedWorkflowLinks(workingCopyForAnalysis);
 			if (fixedLinks) {
 				console.warn(`[GJJ] 工作流修复：已清理 ${fixedLinks} 个悬空链接。`);
 			}
 			try {
-				plan = prepareWorkflowRepair(loadData);
+				plan = prepareWorkflowRepair(workingCopyForAnalysis);
 				if (plan.repairable.length || plan.unresolved.length) {
 					console.log("[GJJ] 工作流修复：发现缺失节点，等待用户点击修复。", {
 						repairable: plan.repairable,
@@ -1687,7 +1696,12 @@ import { app } from "/scripts/app.js";
 			}
 
 			try {
-				const result = original.call(this, loadData, ...rest);
+				// 传克隆后的完整 graphData 给原始函数：
+				// - 保留外层元数据（version/name/lastModified 等），避免标签栏刷新异常
+				// - 用深拷贝隔离引用，避免任何 side-effect 污染到 workflowManager 的引用对象
+				const graphDataCloned = cloneWorkflow(graphData);
+				const passData = graphDataCloned || graphData;
+				const result = original.call(this, passData, ...rest);
 				if (result && typeof result.then === "function") {
 					return result.then((value) => {
 						scheduleNotice(plan);

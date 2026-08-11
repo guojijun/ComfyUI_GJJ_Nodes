@@ -786,6 +786,9 @@ def _trim_runaway_action_text(value: str) -> tuple[str, int]:
         return marker
 
     working = re.sub(r"(?is)<d>.*?</d>", reserve_dialogue, source)
+    # The outer generation pass may still carry protected user dialogue as a marker.
+    # Keep it through runaway-tail trimming and restore it only after final formatting.
+    protected_markers = re.findall(r"__GJJ_DIALOGUE_\d{4}__", working, flags=re.IGNORECASE)
     compact_length = len(re.sub(r"\s+", "", working))
     if compact_length <= 220:
         return source, 0
@@ -814,6 +817,9 @@ def _trim_runaway_action_text(value: str) -> tuple[str, int]:
             trimmed = f"{trimmed} {marker}".strip()
     for marker, dialogue in protected_dialogue:
         trimmed = trimmed.replace(marker, dialogue)
+    for marker in protected_markers:
+        if marker not in trimmed:
+            trimmed = f"{trimmed} {marker}".strip()
     if trimmed and not re.search(r"(?:[。！？.!?]|</d>)$", trimmed, flags=re.IGNORECASE):
         trimmed += "。"
     removed = max(0, len(source) - len(trimmed))
@@ -1442,6 +1448,8 @@ Required reference inventory:
 User request:
 {protected_request.strip()}
 
+Dialogue placeholder rule: every __GJJ_DIALOGUE_####__ token is immutable user dialogue. Keep it exactly once in the matching spoken-action position inside detailed_description; it will be converted to the official <d>[Language] exact dialogue</d> tag after generation. Never translate, paraphrase, move into overall_soundscape, or delete it.
+
 MANDATORY ACTION PLAN FOR JSON action_segments:
 Return exactly {target_action_beat_count} action_segments. Use the following shot/time plan only to understand duration and continuity; do not copy its [Shot] headers, time labels or bracket placeholders into segment text because the formatter adds them. Write one array item for every placeholder in this exact order. A combat request must show completed attack, defense or evasion exchanges and visible consequences—not merely posing, staring, confronting or preparing. Each item must advance from the previous item's exact end state.
 {detail_skeleton}"""
@@ -1494,7 +1502,6 @@ Return exactly {target_action_beat_count} action_segments. Use the following sho
         raw = _dedupe_generated_blocks(
             payload[0] if isinstance(payload, (list, tuple)) and payload else payload or ""
         )
-        raw = _restore_reasoning_dialogue(raw, protected_dialogue)
         parsed = _extract_json(raw)
         structured_prompt = _structured_segment_prompt(
             parsed, official_mode, float(时长), target_shot_count, target_action_beat_count,
@@ -1550,6 +1557,9 @@ Return exactly {target_action_beat_count} action_segments. Use the following sho
         positive_prompt = _force_visual_style(positive_prompt, 视觉风格, content_language)
         positive_prompt = _force_music_style(positive_prompt, 音乐风格, content_language)
         positive_prompt = _dedupe_generated_blocks(positive_prompt)
+        # Restore only after every normalizer has completed, so quoted dialogue is
+        # never translated, normalized, truncated or deduplicated as prose.
+        positive_prompt = _restore_reasoning_dialogue(positive_prompt, protected_dialogue)
         if not positive_prompt:
             raise RuntimeError("提示词模型没有返回可用的正面提示词，请检查模型或输入内容。")
         result = (positive_prompt,)

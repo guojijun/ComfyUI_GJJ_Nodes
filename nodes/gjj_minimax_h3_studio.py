@@ -202,7 +202,7 @@ def _force_dialogue_language(prompt: str, dialogue_language: str) -> str:
 
 
 def _protect_reasoning_dialogue(prompt: str) -> tuple[str, list[tuple[str, str]]]:
-    """推理前隐藏对白原文，防止文本模型翻译中文台词、歌词或画面文字。"""
+    """推理前隐藏对白原文，防止文本模型翻译或改写引号内台词。"""
     protected = str(prompt or "")
     values: list[tuple[str, str]] = []
 
@@ -217,20 +217,35 @@ def _protect_reasoning_dialogue(prompt: str) -> tuple[str, list[tuple[str, str]]
         protected,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    protected = re.sub(r"“[^”\r\n]*[\u3400-\u9fff][^”\r\n]*”", reserve, protected)
-    protected = re.sub(r'"[^"\r\n]*[\u3400-\u9fff][^"\r\n]*"', reserve, protected)
+    # 用户用引号包住的内容按逐字对白处理；不要以语言种类为条件，避免外语台词被重写。
+    protected = re.sub(r"“[^”\r\n]+”", reserve, protected)
+    protected = re.sub(r'(?<!\\)"[^"\r\n]+(?<!\\)"', reserve, protected)
     return protected, values
 
 
+def _dialogue_tag_from_quoted_text(value: str) -> str:
+    """Turn user-quoted dialogue into the H3 dialogue-only tag without rewriting it."""
+    original = str(value or "").strip()
+    if re.fullmatch(r"(?is)<d>\s*(?:\[[^\]\r\n]+\]\s*)?.*?</d>", original):
+        return original
+    quote_match = re.fullmatch(r"“([^”\r\n]+)”", original)
+    if quote_match is None:
+        quote_match = re.fullmatch(r'"([^"\r\n]+)"', original)
+    if quote_match is None:
+        return original
+    dialogue = quote_match.group(1)
+    return f"<d>[{_spoken_language(dialogue)}] {dialogue}</d>"
+
+
 def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, str]]) -> str:
-    """推理后恢复保护内容；正文不变，中文弯引号统一转换为英文半角引号。"""
+    """推理后逐字恢复对白，并将引号内台词写成 H3 的 <d> 专属标签。"""
     restored = str(prompt or "")
     missing: list[str] = []
     for marker, original in protected_values:
-        normalized_original = str(original).replace("“", '"').replace("”", '"')
+        restored_dialogue = _dialogue_tag_from_quoted_text(str(original))
         restored, count = re.subn(
             re.escape(marker),
-            lambda _match, text=normalized_original: text,
+            lambda _match, text=restored_dialogue: text,
             restored,
             count=1,
             flags=re.IGNORECASE,
@@ -239,13 +254,25 @@ def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, s
         # 第一处恢复原文，其余重复占位符必须删除，不能泄漏到最终提示词。
         restored = re.sub(re.escape(marker), "", restored, flags=re.IGNORECASE)
         if count == 0:
-            missing.append(normalized_original)
+            missing.append(restored_dialogue)
     if missing:
-        restored = "\n\n".join(filter(None, (
-            restored.strip(),
-            "受保护的对白或画面文字（必须逐字保留，禁止翻译）："
-            + " ".join(missing),
-        )))
+        fallback_lines = " ".join(
+            f"An on-screen speaker (S{index}) says: {dialogue}"
+            for index, dialogue in enumerate(missing, start=1)
+        )
+        # A dropped placeholder must still remain inside the timeline field; do
+        # not append dialogue after non_diegetic_music, where H3 cannot use it.
+        sound_field = re.search(r"(?im)^overall_soundscape:\s*", restored)
+        if sound_field:
+            restored = (
+                restored[:sound_field.start()].rstrip()
+                + "\n"
+                + fallback_lines
+                + "\n\n"
+                + restored[sound_field.start():].lstrip()
+            )
+        else:
+            restored = "\n\n".join(filter(None, (restored.strip(), fallback_lines)))
     return restored
 
 

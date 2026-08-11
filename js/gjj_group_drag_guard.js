@@ -2,6 +2,8 @@ import { app } from "/scripts/app.js";
 
 let clearMovingTimer = null;
 let pointerIsDown = false;
+let pointerDownTime = 0;
+const POINTER_DOWN_TIMEOUT_MS = 2000;
 
 function setGroupMoving(value) {
 	const canvas = app?.canvas;
@@ -12,18 +14,29 @@ function setGroupMoving(value) {
 function scheduleClearMoving(delay = 350) {
 	if (clearMovingTimer) clearTimeout(clearMovingTimer);
 	clearMovingTimer = setTimeout(() => {
-		if (!pointerIsDown) setGroupMoving(false);
+		const now = Date.now();
+		const pointerStuck = pointerIsDown && (now - pointerDownTime) > POINTER_DOWN_TIMEOUT_MS;
+		if (!pointerIsDown || pointerStuck) {
+			pointerIsDown = false;
+			setGroupMoving(false);
+		}
 		clearMovingTimer = null;
 	}, delay);
 }
 
 function markPointerDown() {
 	pointerIsDown = true;
+	pointerDownTime = Date.now();
 }
 
 function markPointerUp() {
 	pointerIsDown = false;
 	scheduleClearMoving(80);
+}
+
+function forceResetPointer() {
+	pointerIsDown = false;
+	scheduleClearMoving(0);
 }
 
 function numberPair(value) {
@@ -81,7 +94,7 @@ function installPointerTracking() {
 	document.addEventListener("pointerup", markPointerUp, true);
 	document.addEventListener("pointercancel", markPointerUp, true);
 	document.addEventListener("mouseup", markPointerUp, true);
-	window.addEventListener("blur", markPointerUp, true);
+	window.addEventListener("blur", forceResetPointer, true);
 }
 
 app.registerExtension({

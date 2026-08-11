@@ -1024,7 +1024,10 @@ import { api } from "/scripts/api.js";
 	function sanitizeFilename(value, fallback = "GJJ_workflow.png") {
 		let text = String(value || "").trim();
 		if (!text) text = fallback;
-		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
+		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_")
+			.replace(/[()\[\]{}'`~!@#$%^&*+=,;]+/g, "_")
+			.replace(/\s+/g, "_")
+			.trim();
 		text = text.replace(/[. ]+$/g, "");
 		if (!text) text = fallback;
 		if (!/\.(png|jpe?g)$/i.test(text)) text += ".png";
@@ -1062,7 +1065,10 @@ import { api } from "/scripts/api.js";
 		text = text.replace(/\s*[-|–—]\s*ComfyUI$/i, "");
 		text = text.replace(/\\/g, "/").split("/").filter(Boolean).pop() || text;
 		text = text.replace(/\.(json|workflow)$/i, "");
-		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
+		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_")
+			.replace(/[()\[\]{}'`~!@#$%^&*+=,;]+/g, "_")
+			.replace(/\s+/g, " ")
+			.trim();
 		text = text.replace(/[. ]+$/g, "");
 		return /^(?:comfyui|untitled|未命名|未保存的工作流|unsaved workflow(?:\s*\(\d+\))?)$/i.test(text) ? "" : text;
 	}
@@ -3194,7 +3200,11 @@ import { api } from "/scripts/api.js";
 	}
 
 	function workflowFilenameForTitle(title) {
-		const text = cleanWorkflowDisplayTitle(title).replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/[. ]+$/g, "");
+		const text = cleanWorkflowDisplayTitle(title)
+			.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_")
+			.replace(/[()\[\]{}'`~!@#$%^&*+=,;]+/g, "_")
+			.replace(/\s+/g, "_")
+			.replace(/[. ]+$/g, "");
 		const name = text || "GJJ_workflow";
 		return /\.json$/i.test(name) ? name : `${name}.json`;
 	}
@@ -3238,14 +3248,26 @@ import { api } from "/scripts/api.js";
 			graph.workflow_name = text;
 			graph.workflowName = text;
 			graph.filename = filename;
-			graph.path = filename;
+			graph.path = `workflows/${filename}`;
+			graph.file_path = `workflows/${filename}`;
+			graph.fullPath = `workflows/${filename}`;
 			graph.extra = graph.extra && typeof graph.extra === "object" ? graph.extra : {};
 			graph.extra.name = text;
 			graph.extra.title = text;
 			graph.extra.workflow_name = text;
 			graph.extra.workflowName = text;
 			graph.extra.filename = filename;
-			graph.extra.path = filename;
+			graph.extra.path = `workflows/${filename}`;
+			graph.extra.file_path = `workflows/${filename}`;
+			// 清除 dirty 状态
+			try {
+				graph.dirty = false;
+				graph._dirty = false;
+				graph.dirty_canvas = false;
+				graph.dirty_bgcanvas = false;
+				if (typeof graph.clearDirty === "function") graph.clearDirty();
+				if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+			} catch (_) {}
 		}
 		const managers = [
 			app?.workflowManager,
@@ -3269,7 +3291,9 @@ import { api } from "/scripts/api.js";
 				workflowName: text,
 				filename,
 				fileName: filename,
-				path: filename,
+				path: `workflows/${filename}`,
+				file_path: `workflows/${filename}`,
+				fullPath: `workflows/${filename}`,
 			})) {
 				try { target[key] = value; } catch (_) {}
 			}
@@ -3517,6 +3541,38 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
+	async function saveWorkflowToUserWorkflows(workflow, filename) {
+		// 通过 ComfyUI 原生 /userdata API 把 workflow JSON 保存到
+		// user/<user>/workflows/ 目录，使其成为 ComfyUI workflowManager
+		// 可识别的真实工作流文件。这样打开后标签页会有真实文件关联，
+		// workflowManager 的 dirty check、关闭、自动保存等机制都能正常工作。
+		if (!api?.fetchApi || !workflow) return null;
+		const safeName = String(filename || "GJJ_workflow")
+			.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_")
+			.replace(/[()\[\]{}'`~!@#$%^&*+=,;]+/g, "_")
+			.replace(/\s+/g, "_")
+			.trim()
+			.replace(/[. ]+$/g, "");
+		const finalName = /\.json$/i.test(safeName) ? safeName : `${safeName}.json`;
+		// 只对文件名进行 URL 编码，保留路径分隔符
+		const path = `workflows/${encodeURIComponent(finalName)}`;
+		const body = JSON.stringify(workflow);
+		const resp = await api.fetchApi(
+			`/userdata/${path}?overwrite=true`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body,
+			}
+		);
+		if (!resp?.ok) {
+			let detail = "";
+			try { detail = await resp.text(); } catch (_) {}
+			throw new Error(`保存工作流到 workflows 目录失败：HTTP ${resp?.status || "?"}${detail ? ` ${detail}` : ""}`);
+		}
+		return { path, filename: finalName };
+	}
+
 	async function loadWorkflowFromPreview(item) {
 		if (!item?.workflow) {
 			alert("这张截图没有找到可加载的 workflow 元数据。");
@@ -3526,20 +3582,335 @@ import { api } from "/scripts/api.js";
 			const title = previewItemDisplayTitle(item);
 			closePreviewOverlay();
 			const workflow = workflowWithDisplayTitle(item.workflow, title);
-			// Newer ComfyUI versions reserve the fourth argument for a Workflow object.
-			// Passing the display title there makes the workflow manager try to load a
-			// string as a workflow record, which ends in "Failed to fetch".  The title
-			// is restored explicitly below, so only pass the stable graph-load options.
-			await app.loadGraphData(workflow, true, true);
-			applyLoadedWorkflowTitle(title);
-			setTimeout(() => applyLoadedWorkflowTitle(title), 80);
-			setTimeout(() => applyLoadedWorkflowTitle(title), 300);
+			const filename = workflowFilenameForTitle(title);
+
+			// 先把 workflow 保存为 user/<user>/workflows/<filename>.json 真实文件
+			let savedInfo = null;
+			try {
+				savedInfo = await saveWorkflowToUserWorkflows(workflow, filename);
+			} catch (saveError) {
+				console.warn("[GJJ] 保存工作流到 workflows 目录失败，回退到直接加载：", saveError);
+			}
+
+			const manager = app?.workflowManager;
+
+			if (savedInfo && manager) {
+				// 方案 A：通过 WorkflowManager 原生机制加载保存的文件
+				const loaded = await tryLoadWorkflowViaManager(manager, savedInfo, title);
+				if (!loaded) {
+					// 方案 B：回退 — 从内存加载 + 手动关联
+					await app.loadGraphData(workflow, true, true);
+					await associateSavedFileToWorkflow(savedInfo, title);
+				}
+			} else {
+				// 方案 C：无 WorkflowManager 或保存失败，直接从内存加载
+				await app.loadGraphData(workflow, true, true);
+				applyLoadedWorkflowTitle(title);
+				// 清除 dirty 状态
+				try {
+					const graph = app?.graph;
+					if (graph) {
+						graph.dirty = false;
+						graph._dirty = false;
+						if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+					}
+				} catch (_) {}
+			}
+
 			app?.canvas?.setDirty?.(true, true);
 			app?.graph?.setDirtyCanvas?.(true, true);
+			// 最终确保 canvas 重绘
+			setTimeout(() => {
+				try { app?.canvas?.draw?.(true, true); } catch (_) {}
+			}, 100);
 		} catch (error) {
 			console.error("[GJJ] 打开截图工作流失败：", error);
 			alert(`打开工作流失败：\n${error?.message || error}`);
 		}
+	}
+
+	async function tryLoadWorkflowViaManager(manager, savedInfo, displayTitle) {
+		const filePath = savedInfo.path || `workflows/${savedInfo.filename}`;
+		const filename = savedInfo.filename;
+
+		// 先刷新工作流列表
+		try {
+			if (typeof manager.refreshWorkflowsList === "function") {
+				await manager.refreshWorkflowsList();
+			}
+		} catch (_) {}
+
+		// 尝试通过 WorkflowManager 的原生 load 方法加载文件
+		try {
+			const loadMethods = [
+				{ method: "loadWorkflow", args: [filename] },
+				{ method: "loadWorkflow", args: [filePath] },
+				{ method: "load", args: [filename] },
+				{ method: "load", args: [filePath] },
+				{ method: "openWorkflow", args: [filename] },
+				{ method: "openWorkflow", args: [filePath] },
+				{ method: "loadFile", args: [filePath] },
+				{ method: "loadFile", args: [filename] },
+			];
+
+			for (const { method, args } of loadMethods) {
+				if (typeof manager[method] !== "function") continue;
+				try {
+					const result = manager[method](...args);
+					if (result && typeof result.then === "function") {
+						await result;
+						// 成功通过 WorkflowManager 原生机制加载
+						// 设置显示标题
+						applyLoadedWorkflowTitle(displayTitle);
+						// 清除 dirty 状态
+						clearGraphDirty();
+						// 通知 UI 刷新
+						managerUpdateUI(manager, displayTitle);
+						return true;
+					} else if (result !== undefined && result !== false) {
+						applyLoadedWorkflowTitle(displayTitle);
+						clearGraphDirty();
+						managerUpdateUI(manager, displayTitle);
+						return true;
+					}
+				} catch (_) {
+					// 尝试下一个方法
+				}
+			}
+		} catch (_) {}
+
+		// 尝试通过 API 读取保存的文件，然后用 loadGraphData 加载
+		try {
+			const fetchPath = `workflows/${encodeURIComponent(filename)}`;
+			const resp = await api.fetchApi(`/userdata/${fetchPath}`);
+			if (resp?.ok) {
+				const fileWorkflow = await resp.json();
+				if (fileWorkflow && typeof fileWorkflow === "object") {
+					// 清除当前画布
+					try {
+						if (typeof app?.graph?.clear === "function") app.graph.clear();
+					} catch (_) {}
+					// 从文件重新加载（这会让 WorkflowManager 自然关联）
+					await app.loadGraphData(fileWorkflow, true, true);
+					// 设置文件关联
+					applyLoadedWorkflowTitle(displayTitle);
+					const graph = app?.graph;
+					if (graph) {
+						graph.filename = filename;
+						graph.path = filePath;
+						graph.file_path = filePath;
+						graph.fullPath = filePath;
+					}
+					// 设置 WorkflowManager 的 activeWorkflowInfo
+					if (manager.activeWorkflowInfo && typeof manager.activeWorkflowInfo === "object") {
+						const info = manager.activeWorkflowInfo;
+						info.name = displayTitle;
+						info.title = displayTitle;
+						info.filename = filename;
+						info.path = filePath;
+						info.fileName = filename;
+						info.file_path = filePath;
+						info.fullPath = filePath;
+						info.workflow_name = displayTitle;
+						info.workflowName = displayTitle;
+					}
+					clearGraphDirty();
+					managerUpdateUI(manager, displayTitle);
+					return true;
+				}
+			}
+		} catch (_) {}
+
+		return false;
+	}
+
+	function clearGraphDirty() {
+		try {
+			const graph = app?.graph;
+			if (!graph) return;
+			graph.dirty = false;
+			graph._dirty = false;
+			graph.dirty_canvas = false;
+			graph.dirty_bgcanvas = false;
+			if (typeof graph.clearDirty === "function") graph.clearDirty();
+			if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+		} catch (_) {}
+	}
+
+	function managerUpdateUI(manager, displayTitle) {
+		try {
+			if (typeof manager?.updateTopbar === "function") manager.updateTopbar();
+			if (typeof manager?.updateTopBar === "function") manager.updateTopBar();
+			if (typeof manager?.setWorkflowName === "function") manager.setWorkflowName(displayTitle);
+			if (typeof manager?.setWorkflowTitle === "function") manager.setWorkflowTitle(displayTitle);
+		} catch (_) {}
+
+		// 多次延迟刷新，确保 Vue 响应式更新完成
+		setTimeout(() => {
+			try {
+				applyLoadedWorkflowTitle(displayTitle);
+				clearGraphDirty();
+				app?.canvas?.draw?.(true, true);
+			} catch (_) {}
+		}, 200);
+
+		setTimeout(() => {
+			try {
+				applyLoadedWorkflowTitle(displayTitle);
+				clearGraphDirty();
+				if (typeof manager?.refreshWorkflowsList === "function") manager.refreshWorkflowsList();
+				app?.canvas?.draw?.(true, true);
+			} catch (_) {}
+		}, 500);
+	}
+
+	async function associateSavedFileToWorkflow(savedInfo, displayTitle) {
+		const manager = app?.workflowManager;
+		if (!manager) {
+			applyLoadedWorkflowTitle(displayTitle);
+			return;
+		}
+
+		// 清除图节点的 dirty 状态（重要！防止标签显示为未保存）
+		const graph = app?.graph;
+		if (graph) {
+			try {
+				graph.dirty = false;
+				graph._dirty = false;
+				graph.dirty_canvas = false;
+				graph.dirty_bgcanvas = false;
+				if (typeof graph.clearDirty === "function") graph.clearDirty();
+				if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+			} catch (_) {}
+		}
+
+		// 1. 先刷新工作流列表，让 WorkflowManager 发现新保存的文件
+		try {
+			if (typeof manager.refreshWorkflowsList === "function") {
+				await manager.refreshWorkflowsList();
+			} else if (typeof manager.reloadWorkflows === "function") {
+				await manager.reloadWorkflows();
+			}
+		} catch (_) {}
+
+		// 2. 尝试通过 WorkflowManager 的 load/loadWorkflow 方法加载
+		const filePath = savedInfo.path || `workflows/${savedInfo.filename}`;
+		const filename = savedInfo.filename;
+		let loaded = false;
+
+		try {
+			// 尝试各种可能的 load 方法
+			const loadMethods = ["loadWorkflow", "load", "openWorkflow", "loadFile"];
+			for (const method of loadMethods) {
+				if (typeof manager[method] === "function") {
+					const result = manager[method](filename) || manager[method](filePath);
+					if (result && typeof result.then === "function") {
+						await result;
+						loaded = true;
+						break;
+					} else if (result !== undefined) {
+						loaded = true;
+						break;
+					}
+				}
+			}
+		} catch (_) {}
+
+		// 3. 如果没有 load 方法可用，手动建立文件关联
+		if (!loaded) {
+			// 手动设置 activeWorkflowInfo 的文件路径关联
+			const info = manager.activeWorkflowInfo || {};
+			info.name = displayTitle;
+			info.title = displayTitle;
+			info.filename = filename;
+			info.path = filePath;
+			info.fileName = filename;
+			info.file_path = filePath;
+			info.fullPath = filePath;
+			info.workflow_name = displayTitle;
+			info.workflowName = displayTitle;
+			info._gjj_saved = true;
+
+			try {
+				manager.activeWorkflowInfo = info;
+			} catch (_) {
+				try { Object.assign(manager.activeWorkflowInfo, info); } catch (_) {}
+			}
+
+			// 设置 activeWorkflow 的属性
+			if (manager.activeWorkflow && typeof manager.activeWorkflow === "object") {
+				try {
+					manager.activeWorkflow.filename = filename;
+					manager.activeWorkflow.path = filePath;
+					manager.activeWorkflow.name = displayTitle;
+					manager.activeWorkflow.title = displayTitle;
+					manager.activeWorkflow.file_path = filePath;
+					manager.activeWorkflow.fullPath = filePath;
+				} catch (_) {}
+			}
+
+			// 设置 dirty=false，因为这是从文件加载的
+			try {
+				if (typeof manager.setDirty === "function") {
+					manager.setDirty(false);
+				} else {
+					manager.dirty = false;
+					manager._dirty = false;
+				}
+			} catch (_) {}
+
+			// 设置当前工作流的文件关联
+			try {
+				if (typeof manager.setWorkflowName === "function") {
+					manager.setWorkflowName(displayTitle);
+				}
+			} catch (_) {}
+
+			// 更新所有 UI 相关的引用
+			applyLoadedWorkflowTitle(displayTitle);
+		}
+
+		// 4. 通知 UI 刷新
+		try {
+			if (typeof manager.updateTopbar === "function") manager.updateTopbar();
+			if (typeof manager.updateTopBar === "function") manager.updateTopBar();
+		} catch (_) {}
+
+		// 5. 延迟再次刷新，确保 Vue 响应式更新完成
+		setTimeout(() => {
+			try {
+				if (typeof manager.updateTopbar === "function") manager.updateTopbar();
+				if (typeof manager.updateTopBar === "function") manager.updateTopBar();
+				applyLoadedWorkflowTitle(displayTitle);
+				// 再次清除 dirty 状态
+				if (graph) {
+					try {
+						graph.dirty = false;
+						graph._dirty = false;
+						if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+					} catch (_) {}
+				}
+				app?.canvas?.draw?.(true, true);
+			} catch (_) {}
+		}, 200);
+
+		setTimeout(() => {
+			try {
+				applyLoadedWorkflowTitle(displayTitle);
+				// 最终刷新，确保标签页完全正确
+				if (typeof manager.refreshWorkflowsList === "function") {
+					manager.refreshWorkflowsList();
+				}
+				if (graph) {
+					try {
+						graph.dirty = false;
+						graph._dirty = false;
+						if (typeof graph.setDirty === "function") graph.setDirty(false, false);
+					} catch (_) {}
+				}
+				app?.canvas?.draw?.(true, true);
+			} catch (_) {}
+		}, 600);
 	}
 
 	async function workflowFromImageUrl(url) {
