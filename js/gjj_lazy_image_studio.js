@@ -3257,7 +3257,7 @@ function lazyModelTreeEntries(node) {
 			label: "UNET 主模型",
 			folder: "models/diffusion_models",
 			icon: "🟣",
-			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "gguf"],
+			anyKeywords: ["flux", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "gguf", "ernie"],
 			searchValue: familySearchValue,
 			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
 			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
@@ -3267,7 +3267,7 @@ function lazyModelTreeEntries(node) {
 			label: "CLIP 编码器",
 			folder: "models/text_encoders",
 			icon: "🟡",
-			anyKeywords: ["qwen", "t5", "clip", "mistral"],
+			anyKeywords: ["qwen", "t5", "clip", "mistral", "ministral", "ernie"],
 			searchValue: modelFamilyStem(
 				widgetValue(node, "clip_name1") || (preset?.clipNames || [])[0],
 			),

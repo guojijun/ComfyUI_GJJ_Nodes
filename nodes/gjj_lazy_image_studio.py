@@ -2801,7 +2801,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "gguf"]
+        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "gguf", "ernie"]
         _filtered = [
             m
             for m in _raw_diffusion_models
