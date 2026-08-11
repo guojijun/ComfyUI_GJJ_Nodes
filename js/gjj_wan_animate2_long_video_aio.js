@@ -351,9 +351,9 @@ function createSizePanel(node) {
 	const fitRow = choiceRow("resize_fit_mode", "🧲", ["拉伸", "补边", "留边", "裁剪"]);
 	const anchorRow = choiceRow("resize_anchor", "📍", ["上", "下", "左", "右", "中"]);
 	const ratios = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"];
-	const ratioSources = ["视频", "首图"];
+	const ratioSources = ["首图", "视频"];
 	const ratioRow = document.createElement("div"); ratioRow.style.cssText = "display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:4px;margin:12px 0;";
-	const ratioSourceButtons = ratioSources.map((value) => { const button = makeButton(value, () => { setWidgetValue(node, "megapixel_ratio_source", value); sync(); }); button.style.minHeight = "38px"; button.style.fontSize = "11px"; button.style.padding = "4px 1px"; return button; });
+	const ratioSourceButtons = ratioSources.map((value) => { const button = makeButton(value, () => { setWidgetValue(node, "megapixel_ratio_source", value); sync(); }); button.style.minHeight = "38px"; button.style.fontSize = "11px"; button.style.padding = "4px 1px"; button.title = `百万像素按${value}宽高比例计算`; return button; });
 	const ratioButtons = ratios.map((ratio) => { const button = makeButton(ratio, () => { setWidgetValue(node, "megapixel_ratio_source", "预设"); setWidgetValue(node, "megapixel_aspect", ratio); sync(); }); button.style.minHeight = "38px"; button.style.fontSize = "11px"; button.style.padding = "4px 1px"; return button; }); ratioRow.append(...ratioSourceButtons, ...ratioButtons);
 	const mediaDimensions = {};
 	const probeMediaDimensions = (kind) => {
@@ -397,13 +397,15 @@ function createSizePanel(node) {
 		for (const [name, controls] of Object.entries(dimensionControls)) controls.range.value = controls.number.value = String(widget(node, name)?.value || (name === "width" ? 832 : 480));
 		dimensions.style.display = source === "画板尺寸" ? "" : "none"; mpPanel.style.display = source === "百万像素" ? "" : "none";
 		let width = Number(widget(node, "width")?.value || 832), height = Number(widget(node, "height")?.value || 480);
+		let ratioHint = "";
 		if (source === "百万像素") {
 			let [rw, rh] = aspect.split(":").map(Number);
 			const selectedDimensions = ratioSource === "视频" ? mediaDimensions.video : ratioSource === "首图" ? mediaDimensions.image : null;
-			if (selectedDimensions) { rw = selectedDimensions.width; rh = selectedDimensions.height; }
+			if (selectedDimensions) { rw = selectedDimensions.width; rh = selectedDimensions.height; ratioHint = `（${ratioSource}比例）`; }
+			else if (ratioSource !== "预设") ratioHint = `（运行时按${ratioSource}比例）`;
 			const pixels = mp * 1024 * 1024; width = Math.max(256, Math.min(2048, Math.round(Math.sqrt(pixels * rw / rh) / 16) * 16)); height = Math.max(256, Math.min(2048, Math.round(Math.sqrt(pixels * rh / rw) / 16) * 16));
 		}
-		result.textContent = source === "首图尺寸" ? "实际尺寸：跟随人物参考图" : source === "视频尺寸" ? "实际尺寸：跟随动作视频" : `实际尺寸：${width} × ${height}`;
+		result.textContent = source === "首图尺寸" ? "实际尺寸：跟随人物参考图" : source === "视频尺寸" ? "实际尺寸：跟随动作视频" : `实际尺寸：${width} × ${height}${ratioHint}`;
 	};
 	host.append(tabs, fitRow, anchorRow, dimensions, mpPanel, result); sync(); probeMediaDimensions("video"); probeMediaDimensions("image"); return host;
 }

@@ -180,11 +180,11 @@ def _component_value(value: Any, key: str) -> Any:
     return getattr(value, key, None)
 
 
-def _video_components(value: Any) -> dict[str, Any] | None:
+def _video_components(value: Any) -> Any | None:
     if hasattr(value, "get_components"):
         try:
             components = value.get_components()
-            if isinstance(components, dict):
+            if isinstance(components, dict) or hasattr(components, "images"):
                 return components
         except Exception:
             return None
@@ -198,7 +198,8 @@ def _as_path_from_text(value: Any) -> Path | None:
     expanded = Path(os.path.expandvars(os.path.expanduser(text)))
     candidates = [expanded]
     if not expanded.is_absolute():
-        candidates.extend([_output_root() / expanded, _temp_root() / expanded, Path.cwd() / expanded])
+        input_root = Path(folder_paths.get_input_directory()) if folder_paths is not None else Path.cwd() / "input"
+        candidates.extend([input_root / expanded, _output_root() / expanded, _temp_root() / expanded, Path.cwd() / expanded])
     for candidate in candidates:
         try:
             if candidate.exists() and candidate.is_file():
@@ -221,7 +222,12 @@ def _path_from_comfy_item(value: Any) -> Path | None:
         return None
     subfolder = str(value.get("subfolder") or "").strip().replace("\\", "/")
     item_type = str(value.get("type") or "output").strip().lower()
-    root = _temp_root() if item_type == "temp" else _output_root()
+    if item_type == "temp":
+        root = _temp_root()
+    elif item_type == "input":
+        root = Path(folder_paths.get_input_directory()) if folder_paths is not None else Path.cwd() / "input"
+    else:
+        root = _output_root()
     candidate = (root / subfolder / filename).resolve()
     return candidate if candidate.exists() and candidate.is_file() else None
 
@@ -300,8 +306,9 @@ def _collect_media_paths(value: Any, suffixes: set[str] | None = None) -> list[P
         components = _video_components(item)
         if components is not None:
             for key in ("path", "filename", "video", "videos", "source", "stream_source"):
-                if key in components:
-                    walk(components.get(key))
+                child = _component_value(components, key)
+                if child is not None:
+                    walk(child)
             return
         for attr in ("videos", "video_paths", "paths", "files", "items", "selected", "value", "values"):
             child = getattr(item, attr, None)
@@ -365,8 +372,44 @@ def _tensor_from_media(value: Any) -> tuple[torch.Tensor | None, Any | None, flo
             if isinstance(candidate, torch.Tensor):
                 tensor = candidate
                 break
-    elif isinstance(source, (list, tuple)) and source and all(isinstance(item, torch.Tensor) for item in source):
-        tensor = torch.cat([item if item.ndim == 4 else item.unsqueeze(0) for item in source], dim=0)
+    elif isinstance(source, (list, tuple)):
+        tensors: list[torch.Tensor] = []
+
+        def collect_tensors(item: Any, visited: set[int]) -> None:
+            if item is None:
+                return
+            if isinstance(item, torch.Tensor):
+                tensors.append(item if item.ndim == 4 else item.unsqueeze(0) if item.ndim == 3 else item)
+                return
+            identity = id(item)
+            if identity in visited:
+                return
+            visited.add(identity)
+            nested_components = _video_components(item)
+            if nested_components is not None:
+                collect_tensors(_component_value(nested_components, "images"), visited)
+                return
+            if isinstance(item, dict):
+                for key in ("images", "frames", "samples", "items", "values", "result", "results"):
+                    if key in item:
+                        collect_tensors(item.get(key), visited)
+                return
+            if isinstance(item, (list, tuple, set)):
+                for child in item:
+                    collect_tensors(child, visited)
+                return
+            for key in ("images", "frames", "samples", "items", "values"):
+                child = getattr(item, key, None)
+                if child is not None and child is not item:
+                    collect_tensors(child, visited)
+
+        collect_tensors(source, set())
+        valid = [item for item in tensors if item.ndim == 4]
+        if valid:
+            shape = tuple(valid[0].shape[1:])
+            if any(tuple(item.shape[1:]) != shape for item in valid[1:]):
+                raise RuntimeError("GJJ_BATCH_IMAGE 中的图片尺寸不一致，无法组成统一帧批次。")
+            tensor = torch.cat(valid, dim=0)
     else:
         for key in ("images", "frames", "samples"):
             candidate = getattr(source, key, None)
@@ -1048,31 +1091,65 @@ class GJJ_VideoFramesLoader:
     SEARCH_ALIASES = ["video frames", "ffmpeg", "视频抽帧"]
     RETURN_TYPES = ("IMAGE", "FLOAT", "FLOAT", "INT")
     RETURN_NAMES = ("视频帧", "原始帧率", "输出帧率", "总帧数")
-    OUTPUT_TOOLTIPS = ("抽取出的 IMAGE 批次。", "原视频帧率。", "按间隔抽帧后的帧率。", "原视频总帧数估算。")
+    OUTPUT_TOOLTIPS = ("抽取出的 IMAGE 批次。", "原视频帧率。", "按总帧数均匀取帧后的等效帧率。", "原视频总帧数估算。")
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_path": ("STRING", {"default": "", "display_name": "视频路径", "tooltip": "本地视频文件路径。"}),
-                "frame_interval": ("INT", {"default": 1, "min": 1, "max": 1000, "display_name": "抽帧间隔", "tooltip": "每隔多少帧取一帧。"}),
-                "max_frames": ("INT", {"default": 0, "min": 0, "max": 10000, "display_name": "最大帧数", "tooltip": "0 表示不限制。"}),
-                "ffmpeg_path": ("STRING", {"default": "ffmpeg", "display_name": "ffmpeg路径", "tooltip": "ffmpeg 可执行文件路径，默认使用 PATH。"}),
-                "ffprobe_path": ("STRING", {"default": "ffprobe", "display_name": "ffprobe路径", "tooltip": "ffprobe 可执行文件路径，默认使用 PATH。"}),
-            }
+                "video_path": ("STRING", {"default": "", "display_name": "视频路径", "tooltip": "由 📁 打开视频按钮写入；媒体输入连接时忽略。", "hidden": True, "display": "hidden"}),
+                "frame_interval": ("INT", {"default": 1, "min": 1, "max": 1000, "display_name": "抽帧间隔", "tooltip": "每隔多少帧取一帧。", "hidden": True, "display": "hidden"}),
+                "max_frames": ("INT", {"default": 0, "min": 0, "max": 10000, "display_name": "总帧数", "tooltip": "最终需要获取的帧数；从完整源媒体首尾之间均匀取帧。0 表示获取全部帧。", "hidden": True, "display": "hidden"}),
+                "ffmpeg_path": ("STRING", {"default": "ffmpeg", "display_name": "ffmpeg路径", "tooltip": "ffmpeg 可执行文件路径，默认使用 PATH。", "hidden": True, "display": "hidden"}),
+                "ffprobe_path": ("STRING", {"default": "ffprobe", "display_name": "ffprobe路径", "tooltip": "ffprobe 可执行文件路径，默认使用 PATH。", "hidden": True, "display": "hidden"}),
+            },
+            "optional": {
+                "media": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "媒体输入", "tooltip": "支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO；连接后优先于 📁 打开的视频。"}),
+                "total_frames": ("INT", {"default": 0, "min": 0, "max": 10000, "display_name": "总帧数", "tooltip": "需要获取的总帧数量；大于 0 时从完整源媒体首尾之间均匀取帧，并覆盖抽帧间隔和最大帧数。0 表示使用原抽帧规则。", "hidden": True, "display": "hidden"}),
+            },
         }
 
-    def load(self, video_path: str, frame_interval: int, max_frames: int, ffmpeg_path: str, ffprobe_path: str):
+    def load(self, video_path: str, frame_interval: int, max_frames: int, ffmpeg_path: str, ffprobe_path: str, media: Any = None, total_frames: int = 0):
+        interval = max(1, int(frame_interval))
+        requested_total = max(0, int(total_frames)) or max(0, int(max_frames))
+        if media is not None:
+            frames, _audio, media_fps = _tensor_from_media(media)
+            if isinstance(frames, torch.Tensor) and frames.ndim == 4 and int(frames.shape[0]) > 0:
+                total = int(frames.shape[0])
+                fps = float(media_fps or 0.0)
+                if requested_total > 0:
+                    selected_count = min(requested_total, total)
+                    indices = torch.linspace(0, total - 1, steps=selected_count).round().long()
+                    selected = frames.index_select(0, indices)
+                    output_fps = fps * selected_count / total if fps > 0 else 0.0
+                else:
+                    selected = frames[::interval]
+                    output_fps = fps / interval if fps > 0 else 0.0
+                return (selected.contiguous(), fps, output_fps, total)
+            resolved_media = _resolve_media_path(media, VIDEO_SUFFIXES)
+            if resolved_media is None:
+                raise RuntimeError("媒体输入不包含可读取的 GJJ_BATCH_IMAGE、IMAGE 或 VIDEO。")
+            video_path = str(resolved_media)
+
+        resolved_path = _resolve_media_path(video_path, VIDEO_SUFFIXES)
+        if resolved_path is None:
+            raise RuntimeError("请连接媒体输入，或点击 📁 打开视频。")
+        video_path = str(resolved_path)
         info = GJJ_VideoInfo().probe(video_path, ffprobe_path)
         fps = float(info[3])
         total = int(info[4])
-        output_fps = fps / max(1, int(frame_interval)) if fps > 0 else 0.0
+        selected_count = min(requested_total, total) if requested_total > 0 and total > 0 else 0
+        output_fps = fps * selected_count / total if selected_count > 0 and fps > 0 else (fps / interval if fps > 0 else 0.0)
         with tempfile.TemporaryDirectory() as tmp:
             pattern = str(Path(tmp) / "frame_%06d.png")
-            select = f"not(mod(n\\,{max(1, int(frame_interval))}))"
-            command = [ffmpeg_path or "ffmpeg", "-y", "-i", str(video_path), "-vf", f"select='{select}'", "-vsync", "vfr"]
-            if int(max_frames) > 0:
-                command.extend(["-frames:v", str(int(max_frames))])
+            if selected_count > 0:
+                indices = np.linspace(0, total - 1, num=selected_count).round().astype(np.int64).tolist()
+                select = "+".join(f"eq(n\\,{index})" for index in indices)
+            else:
+                select = f"not(mod(n\\,{interval}))"
+            filter_script = Path(tmp) / "select_filter.txt"
+            filter_script.write_text(f"select={select}", encoding="utf-8")
+            command = [ffmpeg_path or "ffmpeg", "-y", "-i", str(video_path), "-filter_script:v", str(filter_script), "-vsync", "vfr"]
             command.append(pattern)
             _run(command)
             frames = []

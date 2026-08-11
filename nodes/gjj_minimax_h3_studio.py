@@ -389,9 +389,10 @@ def _sanitize_reasoned_prompt(
             detailed_value_start = detailed_start + len("detailed_description:")
             detailed_value = cleaned[detailed_value_start:sound_start].strip()
             if not re.search(r"\[Shot\s+1\]", detailed_value, flags=re.IGNORECASE):
+                safe_detail = source_text.strip() or detailed_value
                 cleaned = (
                     cleaned[:detailed_value_start]
-                    + f" [Shot 1] {detailed_value}\n\n"
+                    + f" [Shot 1] {safe_detail}\n\n"
                     + cleaned[sound_start:]
                 )
 
@@ -458,11 +459,22 @@ def _sanitize_reasoned_prompt(
                     f"<Picture {number}>：fully_preserved - 完整保留其定义的核心视觉特征。"
                     for number in picture_numbers
                 ) or "N/A"
+                shot_match = re.search(
+                    r"(?is)(\[Shot\s+1\].*?)(?=\boverall_soundscape:|\bnon_diegetic_music:|$)",
+                    cleaned,
+                )
+                fallback_detail = (
+                    shot_match.group(1).strip()
+                    if shot_match else
+                    f"[Shot 1] {source_text.strip()}"
+                )
                 defaults = {
                     "subject_definitions:": definitions,
                     "summary:": "[reference generation] 按用户要求生成目标视频并保持参考关系。",
                     "retention_analysis:": retention,
-                    "detailed_description:": cleaned,
+                    # Never pour the entire malformed six-field response into the
+                    # action body; that duplicates definitions and retention text.
+                    "detailed_description:": fallback_detail,
                     "overall_soundscape:": "自然环境声与动作声随画面同步变化，不重复对白。",
                     "non_diegetic_music:": "N/A",
                 }
@@ -1799,7 +1811,7 @@ class GJJ_MiniMaxH3Studio:
         "最终生成并保存的视频。",
         "本次实际使用的外部输入、角色库、场景库及导演台原图；保持原始分辨率，按首次使用顺序去重并以独立单帧资源传给下游。",
     )
-    DESCRIPTION = "MiniMax H3 单节点工作室：按图片数量显示参考、首帧、尾帧、首尾帧或分段首尾帧分支；多图分段会按相邻图片生成并去重边界首帧。"
+    DESCRIPTION = "MiniMax H3 单节点工作室：多图可选参考、首尾帧或分镜；分镜按原有 --- 提示词段落逐段对应，每张图片分别作为一段视频的首帧。"
     SEARCH_ALIASES = ["MiniMax H3 Studio", "海螺单节点", "T2V I2V Ref2V"]
     GJJ_UI = {"style_reference": "GJJ_BerniniStudio", "model_keyword": "minimax_h3"}
     _MODEL_CACHE: dict[tuple[str, ...], tuple[Any, Any, Any, Any]] = {}
@@ -1862,8 +1874,8 @@ class GJJ_MiniMaxH3Studio:
                 "resize_anchor": (["上", "下", "左", "右", "中"], {"default": "上", "display_name": "保留位置"}),
                 "reference_media_2": (MEDIA_TYPE, {"display_name": "参考媒体 2", "tooltip": "第二个递归媒体入口；外部链接优先于📁内部媒体。"}),
                 "internal_media_json": ("STRING", {"default": "[]", "display_name": "内部媒体记录"}),
-                "image_branch": (["参考", "首帧", "尾帧", "首尾帧", "分段首尾帧"], {"default": "参考", "display_name": "图片分支", "tooltip": "由提示词下方的互斥按钮控制；实际可用选项随输入图片数量变化。"}),
-                "reasoning_enabled": ("BOOLEAN", {"default": False, "display_name": "启用推理", "tooltip": "开启后使用 GJJ_GemmaTextGenerate 在生成视频前优化提示词；关闭时不会加载推理模型。"}),
+                "image_branch": (["参考", "首帧", "尾帧", "首尾帧", "分段首尾帧", "分镜"], {"default": "参考", "display_name": "图片分支", "tooltip": "由提示词下方的互斥按钮控制；分镜按现有 --- 段落匹配图片，每张图作为一段视频的首帧。"}),
+                "reasoning_enabled": ("BOOLEAN", {"default": False, "display_name": "启用推理", "tooltip": "开启后使用 GJJ_GemmaTextGenerate 优化提示词；关闭时仅替换图片/角色/场景引用并沿用源正向提示词，不加载模型、不格式化或改写提示词。"}),
                 "reasoning_model": (reasoning_models, {"default": reasoning_default, "display_name": "推理模型", "gjj_default_model": reasoning_default, "gjj_model_folder": "text_encoders", "gjj_model_icon": "🟡", "gjj_model_keywords": [DEFAULT_REASONING_KEYWORD]}),
                 "reasoning_system_prompt": ("STRING", {"default": DEFAULT_REASONING_SYSTEM_PROMPT, "multiline": True, "display_name": "推理系统提示词"}),
                 "reference_media_3": (MEDIA_TYPE, {"display_name": "参考媒体 3", "tooltip": "旧工作流兼容入口；新界面不再显示。"}),
@@ -2215,9 +2227,9 @@ class GJJ_MiniMaxH3Studio:
         elif image_count == 1:
             image_branch = requested_branch if requested_branch in {"参考", "首帧", "尾帧"} else "参考"
         elif image_count == 2:
-            image_branch = requested_branch if requested_branch in {"参考", "首尾帧"} else "参考"
+            image_branch = requested_branch if requested_branch in {"参考", "首尾帧", "分镜"} else "参考"
         elif image_count > 2:
-            image_branch = requested_branch if requested_branch in {"参考", "分段首尾帧"} else "参考"
+            image_branch = requested_branch if requested_branch in {"参考", "分段首尾帧", "分镜"} else "参考"
         else:
             image_branch = "参考"
 
@@ -2226,6 +2238,8 @@ class GJJ_MiniMaxH3Studio:
             official_prompt_mode = "R2VA"
         elif image_branch in {"首尾帧", "分段首尾帧"}:
             official_prompt_mode = "FL2VA"
+        elif image_branch == "分镜":
+            official_prompt_mode = "I2VA"
         elif image_branch == "尾帧":
             official_prompt_mode = "L2VA"
         elif image_count == 1:
@@ -2252,7 +2266,8 @@ class GJJ_MiniMaxH3Studio:
             str(first("music_style", "自动 / Auto")),
         )
 
-        if bool(first("reasoning_enabled", False)):
+        reasoning_enabled = bool(first("reasoning_enabled", False))
+        if reasoning_enabled:
             from .gjj_gemma_text_generate import GJJ_GemmaTextGenerate
 
             reasoning_model_name = str(first("reasoning_model", DEFAULT_REASONING_KEYWORD))
@@ -2337,62 +2352,54 @@ class GJJ_MiniMaxH3Studio:
                 prompt_parts = inferred_parts
                 if reasoning_cache_slot:
                     self._REASONING_CACHE[reasoning_cache_slot] = (reasoning_signature, tuple(prompt_parts))
-        else:
             prompt_parts = [
-                _officialize_prompt_without_reasoning(
-                    prompt="\n\n".join(filter(None, (raw_part, prompt_option_directive))),
-                    mode=official_prompt_mode,
-                    duration=duration,
-                    picture_count=len(segmented_library_media[index][1]["images"]),
-                    dialogue_language=str(first("dialogue_language", "中文")),
+                _sanitize_reasoned_prompt(
+                    item,
+                    official_prompt_mode,
+                    duration,
+                    len(segmented_library_media[index][1]["images"]),
+                    str(first("dialogue_language", "中文")),
+                    segmented_library_media[index][0],
+                    len(segmented_library_media[index][1]["videos"]),
+                    len(segmented_library_media[index][1]["audios"]),
                 )
-                for index, raw_part in enumerate(prompt_parts)
+                for index, item in enumerate(prompt_parts)
             ]
-        prompt_parts = [
-            _sanitize_reasoned_prompt(
-                item,
-                official_prompt_mode,
-                duration,
-                len(segmented_library_media[index][1]["images"]),
-                str(first("dialogue_language", "中文")),
-                segmented_library_media[index][0],
-                len(segmented_library_media[index][1]["videos"]),
-                len(segmented_library_media[index][1]["audios"]),
-            )
-            for index, item in enumerate(prompt_parts)
-        ]
-        prompt_parts = [
-            _apply_prompt_option_selections(
-                _assemble_fixed_prompt_fields(item, final_prompt_structure),
-                final_prompt_structure,
-                duration,
-                str(first("visual_style", "自动 / Auto")),
-                str(first("shot_plan", "自动 / Auto")),
-                str(first("camera_motion", "自动 / Auto")),
-                str(first("music_style", "自动 / Auto")),
-                raw_prompt_parts[min(index, len(raw_prompt_parts) - 1)] if raw_prompt_parts else "",
-            )
-            for index, item in enumerate(prompt_parts)
-        ]
+            prompt_parts = [
+                _apply_prompt_option_selections(
+                    _assemble_fixed_prompt_fields(item, final_prompt_structure),
+                    final_prompt_structure,
+                    duration,
+                    str(first("visual_style", "自动 / Auto")),
+                    str(first("shot_plan", "自动 / Auto")),
+                    str(first("camera_motion", "自动 / Auto")),
+                    str(first("music_style", "自动 / Auto")),
+                    raw_prompt_parts[min(index, len(raw_prompt_parts) - 1)] if raw_prompt_parts else "",
+                )
+                for index, item in enumerate(prompt_parts)
+            ]
         constrained_prompt_parts: list[str] = []
         for index, item in enumerate(prompt_parts):
-            normalized_prompt = _force_dialogue_language(
-                _normalize_picture_reference_tags(item),
-                str(first("dialogue_language", "中文")),
-            )
+            normalized_prompt = _normalize_picture_reference_tags(item)
             segment_media = segmented_library_media[index][1]
             if not segment_media["images"]:
                 normalized_prompt = re.sub(r"(?i)<Picture\s+\d+>", "", normalized_prompt)
-            if segment_media["videos"] and segment_media["images"]:
-                normalized_prompt = _apply_video_replacement_constraints(
+            if reasoning_enabled:
+                normalized_prompt = _force_dialogue_language(
                     normalized_prompt,
-                    len(segment_media["images"]),
+                    str(first("dialogue_language", "中文")),
                 )
-            constrained_prompt_parts.append(_apply_prompt_constraints(
-                prompt=normalized_prompt,
-                global_prompt=str(first("global_prompt", "") or ""),
-                negative_prompt=str(first("negative_prompt", "") or ""),
-            ))
+                if segment_media["videos"] and segment_media["images"]:
+                    normalized_prompt = _apply_video_replacement_constraints(
+                        normalized_prompt,
+                        len(segment_media["images"]),
+                    )
+                normalized_prompt = _apply_prompt_constraints(
+                    prompt=normalized_prompt,
+                    global_prompt=str(first("global_prompt", "") or ""),
+                    negative_prompt=str(first("negative_prompt", "") or ""),
+                )
+            constrained_prompt_parts.append(normalized_prompt)
         prompt_parts = constrained_prompt_parts
 
         jobs: list[tuple[str, dict[str, list[Any]]]] = []
@@ -2409,6 +2416,11 @@ class GJJ_MiniMaxH3Studio:
                     "images": [media["images"][index], media["images"][index + 1]],
                     "videos": [], "audios": [],
                 }))
+        elif image_branch == "分镜":
+            for index, image in enumerate(media["images"]):
+                jobs.append((prompt_parts[min(index, len(prompt_parts) - 1)], {
+                    "images": [image], "videos": [], "audios": [],
+                }))
         else:
             distribute_images = len(prompt_parts) > 1 and image_count == len(prompt_parts) and image_branch != "参考"
             for index, segment_prompt in enumerate(prompt_parts):
@@ -2417,7 +2429,7 @@ class GJJ_MiniMaxH3Studio:
                     "videos": list(media["videos"]), "audios": list(media["audios"]),
                 }))
         queued_audios = list(media["audios"])
-        if len(queued_audios) > 1 and jobs:
+        if len(queued_audios) > 1 and jobs and image_branch != "分镜":
             source_jobs = list(jobs)
             jobs = [
                 (
@@ -2436,6 +2448,8 @@ class GJJ_MiniMaxH3Studio:
         def segment_mode(segment: dict[str, list[Any]]) -> str:
             image_count = len(segment["images"])
             has_reference_av = bool(segment["videos"] or segment["audios"] or segment.get("voice_audios"))
+            if image_branch == "分镜" and image_count == 1:
+                return "I2V"
             if image_branch in {"首尾帧", "分段首尾帧"} and image_count == 2 and not has_reference_av:
                 return "首尾帧"
             if image_branch == "参考" and image_count > 0:

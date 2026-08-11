@@ -74,6 +74,92 @@ MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 _OFFICIAL_TEXT_GENERATE_LOCK = threading.RLock()
 
 
+def _find_generation_sampler(clip: Any) -> Any:
+    queue = [clip]
+    visited: set[int] = set()
+    while queue:
+        current = queue.pop(0)
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if callable(getattr(current, "sample_token", None)):
+            stop_tokens = getattr(getattr(getattr(current, "model", None), "config", None), "stop_tokens", None)
+            if stop_tokens:
+                return current
+        for name in ("cond_stage_model", "transformer"):
+            child = getattr(current, name, None)
+            if child is not None:
+                queue.append(child)
+        dynamic_name = getattr(current, "clip", None)
+        if isinstance(dynamic_name, str):
+            child = getattr(current, dynamic_name, None)
+            if child is not None:
+                queue.append(child)
+    return None
+
+
+def _token_cycle_period(tokens: list[Any], max_period: int = 256) -> int:
+    count = len(tokens)
+    for period in range(1, min(max_period, count // 3) + 1):
+        repetitions = 8 if period < 4 else 3
+        width = period * repetitions
+        if count < width:
+            continue
+        tail = tokens[-width:]
+        unit = tail[:period]
+        if all(tail[offset:offset + period] == unit for offset in range(period, width, period)):
+            return period
+    return 0
+
+
+def _install_token_cycle_guard(clip: Any):
+    sampler = _find_generation_sampler(clip)
+    if sampler is None:
+        return None
+    original = sampler.sample_token
+    had_instance_value = "sample_token" in vars(sampler)
+    instance_value = vars(sampler).get("sample_token")
+    base_history_length: int | None = None
+    stopped = False
+
+    def guarded(*args, **kwargs):
+        nonlocal base_history_length, stopped
+        history = kwargs.get("token_history")
+        if history is None and len(args) > 6:
+            history = args[6]
+        if history is not None:
+            if base_history_length is None:
+                base_history_length = len(history)
+            generated = list(history[base_history_length:])
+            period = _token_cycle_period(generated)
+            if period:
+                import torch
+                stop_tokens = list(getattr(sampler.model.config, "stop_tokens", []) or [])
+                if stop_tokens:
+                    if not stopped:
+                        print(
+                            f"[GJJ GemmaTextGenerate] 检测到 token 循环（周期={period}），已提前结束生成。",
+                            flush=True,
+                        )
+                        stopped = True
+                    logits = args[0] if args else kwargs["logits"]
+                    return torch.full(
+                        (int(logits.shape[0]), 1), int(stop_tokens[0]),
+                        dtype=torch.long, device=logits.device,
+                    )
+        return original(*args, **kwargs)
+
+    sampler.sample_token = guarded
+
+    def restore():
+        if had_instance_value:
+            sampler.sample_token = instance_value
+        else:
+            delattr(sampler, "sample_token")
+
+    return restore
+
+
 class AnyMediaType(str):
     def __ne__(self, _other: object) -> bool:
         return False
@@ -407,6 +493,7 @@ def _generate_text(
     seed: int = 0,
     presence_penalty: float = 0.0,
     add_output_rules: bool = True,
+    anti_loop: bool = False,
 ) -> str:
     import time
 
@@ -451,7 +538,12 @@ def _generate_text(
                 setattr(server, "last_prompt_id", f"gjj_gemma_{time.time_ns()}")
             try:
                 official_started = time.perf_counter()
-                output = TextGenerate.execute(**usable_kwargs)
+                restore_cycle_guard = _install_token_cycle_guard(clip) if anti_loop else None
+                try:
+                    output = TextGenerate.execute(**usable_kwargs)
+                finally:
+                    if restore_cycle_guard is not None:
+                        restore_cycle_guard()
                 official_seconds = time.perf_counter() - official_started
             finally:
                 if server is not None:
@@ -1238,6 +1330,7 @@ class GJJ_GemmaTextGenerate:
         workflow_values_json: str = "{}",
         model_filter_keywords: str = MODEL_FILTER_EXPRESSION,
         external_prompt: Any = None,
+        anti_loop: bool = False,
     ):
         received_thinking = thinking
         try:
@@ -1346,6 +1439,7 @@ class GJJ_GemmaTextGenerate:
                 seed=effective_seed,
                 presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
                 add_output_rules=not audio_only,
+                anti_loop=_as_bool(anti_loop, False),
             )
             if not str(text or "").strip():
                 raise RuntimeError(

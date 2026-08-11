@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sort_mode": "category",
+  "sort_mode": "frequency",
   "use_colors_enabled": true,
   "use_colors": [
     {
@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 64,
-      "last_used": 1786363239813
+      "use_count": 65,
+      "last_used": 1786420393713
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -126,8 +126,8 @@
       "last_used": 1786267203566
     },
     "GJJ_BatchOutpaint": {
-      "use_count": 1,
-      "last_used": 1786363292428
+      "use_count": 2,
+      "last_used": 1786376573765
     },
     "GJJ_Krea2VisualOutpaint": {
       "use_count": 3,

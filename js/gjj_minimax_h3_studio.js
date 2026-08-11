@@ -55,7 +55,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "use_source_size", label: "首图尺寸", type: "BOOLEAN", aliases: ["source_size", "首图尺寸"] },
 	{ name: "resize_fit_mode", label: "适配方式", type: "STRING", aliases: ["resize", "fit", "适配"] },
 	{ name: "resize_anchor", label: "保留位置", type: "STRING", aliases: ["anchor", "保留位置", "对齐"] },
-	{ name: "image_branch", label: "图片分支", type: "STRING", aliases: ["image_branch", "分支", "首尾帧", "参考"] },
+	{ name: "image_branch", label: "图片分支", type: "STRING", aliases: ["image_branch", "分支", "首尾帧", "参考", "分镜"] },
 	{ name: "reasoning_enabled", label: "启用推理", type: "BOOLEAN", aliases: ["reasoning", "thinking", "推理"] },
 	{ name: "reasoning_model", label: "推理模型", type: "STRING", aliases: ["reasoning_model", "推理模型"] },
 	{ name: "reasoning_system_prompt", label: "推理系统提示词", type: "STRING", aliases: ["system_prompt", "系统提示词"] },
@@ -1447,8 +1447,8 @@ function currentImageCount(node) {
 }
 function branchChoices(count) {
 	if (count === 1) return ["参考", "首帧", "尾帧"];
-	if (count === 2) return ["参考", "首尾帧"];
-	if (count > 2) return ["参考", "分段首尾帧"];
+	if (count === 2) return ["参考", "首尾帧", "分镜"];
+	if (count > 2) return ["参考", "分段首尾帧", "分镜"];
 	return [];
 }
 function syncBranchButtons(node) {
