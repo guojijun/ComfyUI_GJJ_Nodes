@@ -2,7 +2,7 @@
   "version": 1,
   "workflow_screenshot": {
     "directory": "workflows",
-    "filename_template": "_title___yyyy_MM_dd___HH_mm_ss_.png",
+    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
     "search_text": "",
