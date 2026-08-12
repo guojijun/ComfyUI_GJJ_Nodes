@@ -417,6 +417,12 @@ LTX23_GGUF_GEMMA_NAMES = ["gemma-3-12b-it-Q2_K.gguf", "gemma-3-12b-it.gguf"]
 LTX23_GGUF_TEXT_CONNECTOR_NAMES = ["ltx-2.3-22b-dev_embeddings_connectors.safetensors"]
 LTX23_GGUF_VIDEO_VAE_NAMES = ["ltx-2.3-22b-dev_video_vae.safetensors"]
 LTX23_GGUF_AUDIO_VAE_NAMES = ["ltx-2.3-22b-dev_audio_vae.safetensors"]
+# LTX 2.5 模型名称常量
+LTX25_MODEL_NAMES = ["ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"]
+LTX25_VIDEO_VAE_NAMES = ["ltx-2.5-video-vae-bf16.safetensors"]
+LTX25_AUDIO_VAE_NAMES = ["ltx-2.5-audio-vae-bf16.safetensors"]
+LTX25_CLIP_NAMES = ["gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"]
+LTX25_SPATIAL_UPSCALER_NAMES = ["ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"]
 MINIMAX_H3_MODEL_NAMES = ["minimax_h3_fl2va_pruned_int8_convrot.safetensors"]
 MINIMAX_H3_TEXT_ENCODER_NAMES = ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]
 MINIMAX_H3_VIDEO_VAE_NAMES = ["minimax_h3_video_vae_fp16.safetensors"]
@@ -1089,6 +1095,75 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 strict=True,
                 preferred_name=MINIMAX_H3_TEXT_ENCODER_NAMES[0],
                 official_names=MINIMAX_H3_TEXT_ENCODER_NAMES,
+            ),
+        ],
+    },
+    "ltx25_i2v_t2v_kj": {
+        "label": "LTX 2.5 I2V / T2V KJ流",
+        "clip_type": "ltxv",
+        "slots": [
+            S(
+                "model",
+                "UNET主模型",
+                "diffusion_models",
+                "diffusion",
+                ["ltx-2.5"],
+                loader="unet",
+                required_name=LTX25_MODEL_NAMES[0],
+                preferred_name=LTX25_MODEL_NAMES[0],
+                official_names=LTX25_MODEL_NAMES,
+                download_url=MODEL_DOWNLOAD_URL,
+            ),
+            S(
+                "clip",
+                "Gemma4 CLIP编码器（含Projection）",
+                "text_encoders",
+                "clip",
+                ["gemma4-12b","ltx-2.5"],
+                strict=True,
+                preferred_name=LTX25_CLIP_NAMES[0],
+                official_names=LTX25_CLIP_NAMES,
+                download_url=MODEL_DOWNLOAD_URL,
+            ),
+            S(
+                "video_vae",
+                "视频VAE",
+                "vae",
+                "vae",
+                ["ltx-2.5-video-vae"],
+                loader="gjj_vae",
+                device="main_device",
+                weight_dtype="bf16",
+                required_name=LTX25_VIDEO_VAE_NAMES[0],
+                preferred_name=LTX25_VIDEO_VAE_NAMES[0],
+                official_names=LTX25_VIDEO_VAE_NAMES,
+                download_url=MODEL_DOWNLOAD_URL,
+            ),
+            S(
+                "audio_vae",
+                "音频VAE",
+                "vae",
+                "vae",
+                ["ltx-2.5-audio-vae"],
+                loader="gjj_vae",
+                device="main_device",
+                weight_dtype="bf16",
+                required_name=LTX25_AUDIO_VAE_NAMES[0],
+                preferred_name=LTX25_AUDIO_VAE_NAMES[0],
+                official_names=LTX25_AUDIO_VAE_NAMES,
+                download_url=MODEL_DOWNLOAD_URL,
+            ),
+            S(
+                "spatial_upscaler",
+                "空间放大模型",
+                "latent_upscale_models",
+                "latent_upscale_model",
+                ["ltx-2.5-spatial-upscaler-x2"],
+                search_folders=["upscale_models"],
+                required_name=LTX25_SPATIAL_UPSCALER_NAMES[0],
+                preferred_name=LTX25_SPATIAL_UPSCALER_NAMES[0],
+                official_names=LTX25_SPATIAL_UPSCALER_NAMES,
+                download_url=MODEL_DOWNLOAD_URL,
             ),
         ],
     },

@@ -121,6 +121,7 @@ function omitObjectKeys(value, omittedKeys, visited = new WeakMap()) {
 function collectWorkflowModels() {
 	const items = [];
 	for (const graphNode of app.graph?._nodes || []) {
+		const graphNodeType = String(graphNode?.comfyClass || graphNode?.type || graphNode?.constructor?.nodeData?.name || "");
 		if (graphNode?.type === NODE_NAME) continue;
 		const nodeTitle = String(graphNode?.title || graphNode?.type || "");
 		const lazyModelSource = graphNode?.type === "GJJ_LazyImageStudio"
@@ -184,14 +185,20 @@ function collectWorkflowModels() {
 				folder: "translation",
 			});
 		}
-		if (graphNode?.type === "GJJ_CLIPPromptEncodePanel") {
+		if (graphNodeType === "GJJ_CLIPPromptEncodePanel") {
 			const translationWidget = graphNode.widgets?.find((widget) => widget?.name === "translation_enabled");
-			const savedValues = graphNode?.properties?.gjj_clip_prompt_encode_panel_values;
-			const translationValue = translationWidget?.value ?? savedValues?.translation_enabled;
+			let savedValues = graphNode?.properties?.gjj_clip_prompt_encode_panel_values;
+			if (typeof savedValues === "string") {
+				try { savedValues = JSON.parse(savedValues); } catch (_) { savedValues = {}; }
+			}
+			const translationValue = translationWidget?.value
+				?? savedValues?.translation_enabled
+				?? graphNode?.properties?.gjj_clip_prompt_value_translation_enabled
+				?? graphNode?.__gjjClipTranslate?.dataset?.value;
 			if (translationValue === true || String(translationValue || "").toLowerCase() === "true") {
 				items.push({
 					node_id: graphNode.id,
-					node_type: graphNode.type,
+					node_type: graphNodeType,
 					node_title: nodeTitle,
 					widget_name: "translation",
 					name: "opus-mt-zh-en.safetensors",

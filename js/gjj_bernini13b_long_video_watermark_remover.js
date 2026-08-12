@@ -14,6 +14,8 @@ const REMEMBERED_LINK = "gjj_bernini13b_remembered_media_link";
 const REF_LINKS_PROP = "gjj_bernini13b_reference_virtual_media_links";
 const REMEMBERED_REF_LINKS_PROP = "gjj_bernini13b_remembered_reference_virtual_media_links";
 const MINIMAX_NODE = "GJJ_MiniMaxH3Studio";
+const LTX2_PROMPT_NODE = "GJJ_TextGenerateLTX2Prompt";
+const LTX2_PROMPT_REF_LINKS_PROP = "gjj_ltx2_prompt_reference_virtual_media_links";
 const MINIMAX_REF_LINKS_PROP = "gjj_minimax_h3_reference_media_2_virtual_links";
 const MAX_REFERENCE_MEDIA = 15;
 const NODES = new Set();
@@ -35,8 +37,10 @@ function mediaLinked(node) { const i = mediaInputIndex(node); return i >= 0 && n
 function dirty(node) { node?.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); }
 function isReferenceUpscaler(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === "GJJ_Bernini13BVideoReferenceUpscaler"; }
 function isMiniMaxStudio(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === MINIMAX_NODE; }
-function isMultiReferenceTarget(node) { return isReferenceUpscaler(node) || isMiniMaxStudio(node); }
+function isLtx2Prompt(node) { return String(node?.comfyClass || node?.type || node?.constructor?.nodeData?.name || "") === LTX2_PROMPT_NODE; }
+function isMultiReferenceTarget(node) { return isReferenceUpscaler(node) || isMiniMaxStudio(node) || isLtx2Prompt(node); }
 function referenceConfig(node) {
+	if (isLtx2Prompt(node)) return { input: "reference_resources", property: LTX2_PROMPT_REF_LINKS_PROP, transport: "reference_media_" };
 	return isMiniMaxStudio(node)
 		? { input: "reference_media_2", property: MINIMAX_REF_LINKS_PROP, transport: "reference_media_2_" }
 		: { input: REFERENCE_INPUT, property: REF_LINKS_PROP, transport: "reference_media_" };
@@ -372,7 +376,7 @@ function referenceMediaKind(sourceType, sourceNode = null) {
 }
 
 function addReferenceVirtualLink(targetNode, sourceNode, sourceSlot, sourceType) {
-	if (!isMultiReferenceTarget(targetNode) || !sourceNode || !isReferenceMediaType(sourceType, isMiniMaxStudio(targetNode))) return false;
+	if (!isMultiReferenceTarget(targetNode) || !sourceNode || !isReferenceMediaType(sourceType, isMiniMaxStudio(targetNode) || isLtx2Prompt(targetNode))) return false;
 	const links = normalizeReferenceLinks(targetNode, false);
 	if (links.length >= MAX_REFERENCE_MEDIA) return false;
 	if (links.some((link) => Number(link.source_id) === Number(sourceNode.id) && Number(link.source_slot) === Number(sourceSlot))) return false;
@@ -562,6 +566,8 @@ function pruneReferenceTransportInputs(nodeData) {
 	} else if (nodeData?.name === MINIMAX_NODE) {
 		delete optional.reference_media_3;
 		for (const name of Object.keys(optional)) if (/^reference_media_2_\d+$/.test(name)) delete optional[name];
+	} else if (nodeData?.name === LTX2_PROMPT_NODE) {
+		for (const name of Object.keys(optional)) if (/^reference_media_\d+$/.test(name)) delete optional[name];
 	}
 }
 
@@ -699,7 +705,7 @@ app.registerExtension({
 	name: "GJJ.Bernini13BLongVideoWatermarkRemover",
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		pruneReferenceTransportInputs(nodeData);
-		if (nodeData?.name === MINIMAX_NODE) {
+		if (nodeData?.name === MINIMAX_NODE || nodeData?.name === LTX2_PROMPT_NODE) {
 			patchReferenceCanvas();
 			patchReferenceGraphToPrompt();
 			const created = nodeType.prototype.onNodeCreated;

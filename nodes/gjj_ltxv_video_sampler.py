@@ -164,20 +164,20 @@ def _make_sampling_callback(model_patcher: Any, steps: int, x0_output: dict[str,
         if x0_output is not None:
             x0_output["x0"] = x0
 
-        preview_bytes = None
         image_data_url = ""
         if previewer:
             try:
                 now = time.monotonic()
                 is_last = int(step) + 1 >= int(total_steps)
                 if is_last or now - last_sent >= 0.35:
-                    preview_bytes, image_data_url = _decode_preview_payload(previewer, preview_format, x0)
+                    _, image_data_url = _decode_preview_payload(previewer, preview_format, x0)
                     last_sent = now
             except Exception:
-                preview_bytes = None
                 image_data_url = ""
 
-        pbar.update_absolute(step + 1, total_steps, preview_bytes)
+        # 注意：不把 preview_bytes 传给 pbar.update_absolute，
+        # 避免 ComfyUI 原生预览与 GJJ 自定义预览面板重复出现。
+        pbar.update_absolute(step + 1, total_steps, None)
         if image_data_url:
             progress = (int(step) + 1) / max(1, int(total_steps))
             _send_sampling_preview(unique_id, image_data_url, int(step) + 1, int(total_steps), progress)

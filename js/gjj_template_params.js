@@ -556,14 +556,30 @@ function mimeForMediaType(mediaType) {
 }
 
 async function downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo) {
-	const response = await fetch(originalUrl, { cache: "no-store" });
-	if (!response?.ok) {
-		throw new Error(`浏览器下载 HTTP ${response?.status || "?"}`);
+	const errors = [];
+	const attempts = [
+		{ name: "标准", opts: { cache: "no-store", mode: "cors" } },
+		{ name: "禁用缓存", opts: { cache: "no-store", mode: "cors", credentials: "omit", redirect: "follow" } },
+	];
+	for (const attempt of attempts) {
+		try {
+			const response = await fetch(originalUrl, attempt.opts);
+			if (response?.ok) {
+				const blob = await response.blob();
+				if (blob && blob.size > 0) {
+					const filename = cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, mediaType);
+					const file = new File([blob], filename, { type: blob.type || mimeForMediaType(mediaType) });
+					return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+				}
+				errors.push(`${attempt.name}：响应 Blob 为空`);
+			} else {
+				errors.push(`${attempt.name}：HTTP ${response?.status || "?"}`);
+			}
+		} catch (err) {
+			errors.push(`${attempt.name}：${err?.message || err}`);
+		}
 	}
-	const blob = await response.blob();
-	const filename = cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, mediaType);
-	const file = new File([blob], filename, { type: blob.type || mimeForMediaType(mediaType) });
-	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+	throw new Error(errors.join("；"));
 }
 
 function canvasExportFilename(filename = "") {
@@ -578,46 +594,92 @@ function imageToCanvasBlob(image) {
 	const canvas = document.createElement("canvas");
 	canvas.width = width;
 	canvas.height = height;
-	const ctx = canvas.getContext("2d");
+	const ctx = canvas.getContext("2d", { willReadFrequently: true });
 	if (!ctx) throw new Error("当前浏览器无法创建 canvas");
 	ctx.drawImage(image, 0, 0, width, height);
+	// 先尝试读取一个像素检测画布是否被跨域污染
+	try {
+		ctx.getImageData(0, 0, 1, 1);
+	} catch (securityErr) {
+		throw new Error("画布被跨域保护阻止（CORS 未授权），无法读取像素数据");
+	}
 	return new Promise((resolve, reject) => {
+		const timeoutId = setTimeout(() => reject(new Error("canvas 导出超时（可能跨域）")), 8000);
 		try {
 			canvas.toBlob((blob) => {
+				clearTimeout(timeoutId);
 				if (blob) resolve(blob);
 				else reject(new Error("canvas 导出为空，可能被跨域保护阻止"));
 			}, "image/png");
 		} catch (err) {
+			clearTimeout(timeoutId);
 			reject(err);
 		}
 	});
 }
 
-async function downloadNetworkImageViaCanvas(originalUrl, cacheInfo) {
-	const image = new Image();
-	image.crossOrigin = "anonymous";
-	image.referrerPolicy = "no-referrer";
-	image.decoding = "async";
-	const loaded = new Promise((resolve, reject) => {
-		image.onload = () => resolve();
-		image.onerror = () => reject(new Error("浏览器图片加载成功但跨域导出加载失败"));
+function _loadImageElement(url, options = {}) {
+	const { crossOrigin = null, referrerPolicy = "no-referrer", timeoutMs = 20000 } = options;
+	return new Promise((resolve, reject) => {
+		const image = new Image();
+		image.decoding = "async";
+		if (referrerPolicy) image.referrerPolicy = referrerPolicy;
+		if (crossOrigin) image.crossOrigin = crossOrigin;
+		const cacheBust = url + (url.includes("?") ? "&" : "?") + "_gjj_cb=" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+		const timer = setTimeout(() => reject(new Error(`图片加载超时（${timeoutMs}ms）`)), Math.max(1000, Number(timeoutMs) || 20000));
+		const cleanup = () => clearTimeout(timer);
+		image.onload = () => { cleanup(); resolve(image); };
+		image.onerror = () => {
+			cleanup();
+			reject(new Error(crossOrigin ? "带 CORS 请求图片加载失败（服务器可能未授权 CORS）" : "图片加载失败"));
+		};
+		try { image.src = cacheBust; } catch (_) { image.src = url; }
 	});
-	image.src = originalUrl;
-	await loaded;
-	const blob = await imageToCanvasBlob(image);
-	const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
-	const file = new File([blob], filename, { type: "image/png" });
-	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+}
+
+async function downloadNetworkImageViaCanvas(originalUrl, cacheInfo) {
+	const errors = [];
+	// 策略1：尝试带 crossOrigin=anonymous 加载（推荐，canvas 导出不会污染）
+	try {
+		const image = await _loadImageElement(originalUrl, { crossOrigin: "anonymous", timeoutMs: 20000 });
+		const blob = await imageToCanvasBlob(image);
+		const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
+		const file = new File([blob], filename, { type: "image/png" });
+		return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+	} catch (err1) {
+		errors.push(`带 CORS 画布导出：${err1?.message || err1}`);
+	}
+	// 策略2：不带 crossOrigin 重新加载，再 try canvas（多数情况仍会 CORS 污染，但给个机会）
+	try {
+		const image = await _loadImageElement(originalUrl, { crossOrigin: null, timeoutMs: 20000 });
+		const blob = await imageToCanvasBlob(image);
+		const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
+		const file = new File([blob], filename, { type: "image/png" });
+		return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+	} catch (err2) {
+		errors.push(`无 CORS 画布导出：${err2?.message || err2}`);
+	}
+	throw new Error(errors.join("；"));
 }
 
 async function uploadLoadedPreviewImage(image, originalUrl, cacheInfo) {
 	if (!image || !image.complete || !Number(image.naturalWidth || 0) || !Number(image.naturalHeight || 0)) {
 		throw new Error("预览图尚未加载完成");
 	}
-	const blob = await imageToCanvasBlob(image);
-	const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
-	const file = new File([blob], filename, { type: "image/png" });
-	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+	// 先用当前已加载的预览图尝试 canvas 导出（如果之前是 anonymous 加载的，就能成功）
+	try {
+		const blob = await imageToCanvasBlob(image);
+		const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
+		const file = new File([blob], filename, { type: "image/png" });
+		return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+	} catch (currentCanvasErr) {
+		// 当前预览图可能被污染，重新走一次带 crossOrigin 的加载尝试
+		try {
+			return await downloadNetworkImageViaCanvas(originalUrl, cacheInfo);
+		} catch (retryErr) {
+			throw new Error(`已加载预览图：${currentCanvasErr?.message || currentCanvasErr}；重新加载：${retryErr?.message || retryErr}`);
+		}
+	}
 }
 
 function saveFieldValue(node, field, values, nextValue) {
@@ -665,6 +727,7 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			setPreviewMessage(preview, `正在下载到 ComfyUI input：${filename}`);
 			let uploadedName = "";
 			let backendError = null;
+			let browserError = null;
 			try {
 				uploadedName = await downloadNetworkMediaViaBackend(originalUrl, mediaType);
 			} catch (backendErr) {
@@ -673,23 +736,14 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 				try {
 					uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo);
 				} catch (browserErr) {
+					browserError = browserErr;
 					if (mediaType === "IMAGE") {
-						try {
-							uploadedName = await uploadLoadedPreviewImage(loadedPreviewImage, originalUrl, cacheInfo);
-						} catch (previewCanvasErr) {
-							try {
-								uploadedName = await downloadNetworkImageViaCanvas(originalUrl, cacheInfo);
-							} catch (canvasErr) {
-								const backendMessage = backendError?.message || backendError || "未知错误";
-								const browserMessage = browserErr?.message || browserErr || "未知错误";
-								const previewCanvasMessage = previewCanvasErr?.message || previewCanvasErr || "未知错误";
-								const canvasMessage = canvasErr?.message || canvasErr || "未知错误";
-								throw new Error(`后端下载失败：${backendMessage}；浏览器下载失败：${browserMessage}；预览图导出失败：${previewCanvasMessage}；画布导出失败：${canvasMessage}`);
-							}
-						}
+						// uploadLoadedPreviewImage 内部已包含：预览图 canvas 失败 -> 重试带/不带 CORS 的新 Image canvas
+						// 所以这里不需要再额外嵌套 downloadNetworkImageViaCanvas
+						uploadedName = await uploadLoadedPreviewImage(loadedPreviewImage, originalUrl, cacheInfo);
 					} else {
 						const backendMessage = backendError?.message || backendError || "未知错误";
-						const browserMessage = browserErr?.message || browserErr || "未知错误";
+						const browserMessage = browserError?.message || browserError || "未知错误";
 						throw new Error(`后端下载失败：${backendMessage}；浏览器下载失败：${browserMessage}`);
 					}
 				}

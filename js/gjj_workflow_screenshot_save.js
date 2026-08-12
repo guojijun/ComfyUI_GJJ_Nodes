@@ -35,6 +35,7 @@ import { api } from "/scripts/api.js";
 	const SETTINGS_KEY = "gjj_workflow_screenshot_settings";
 	const LEGACY_FILENAME_TEMPLATE = "GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
 	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
+	const MANGLED_DEFAULT_FILENAME_TEMPLATE = "_title___yyyy_MM_dd___HH_mm_ss_.png";
 	const DEFAULT_JPEG_QUALITY = 0.86;
 	const SAVED_WORKFLOW_IMAGE_SIZE = 256;
 	const DEFAULT_SORT_MODE = "mtime_desc";
@@ -1003,14 +1004,16 @@ import { api } from "/scripts/api.js";
 
 	function normalizeDefaultFilenameTemplate(value) {
 		const text = String(value || "").trim();
-		if (!text || text === LEGACY_FILENAME_TEMPLATE || text === "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg") {
+		if (!text || text === LEGACY_FILENAME_TEMPLATE || text === MANGLED_DEFAULT_FILENAME_TEMPLATE || text === "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg") {
 			return DEFAULT_FILENAME_TEMPLATE;
 		}
 		return text;
 	}
 
 	function normalizeFilenameTemplate(value) {
-		return pngFilename(normalizeDefaultFilenameTemplate(value), DEFAULT_FILENAME_TEMPLATE);
+		let template = normalizeDefaultFilenameTemplate(value);
+		if (!/\.(png|jpe?g)$/i.test(template)) template += ".png";
+		return template.replace(/\.(jpe?g)$/i, ".png").slice(0, 180);
 	}
 
 	function screenshotFormatFromFilename(value) {

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler, urlopen
 
 import folder_paths
 
@@ -178,17 +178,46 @@ def _network_media_headers(url: str, media_type: str, user_agent: str) -> dict[s
 
 
 def _download_with_urllib(url: str, tmp: Path, headers: dict[str, str], timeout: int) -> None:
+    timeout_val = max(1, int(timeout))
     request = Request(url, headers=headers)
-    with urlopen(request, timeout=max(1, int(timeout))) as response:
-        status = int(getattr(response, "status", 200) or 200)
-        if status >= 400:
-            raise RuntimeError(f"HTTP {status}")
-        with open(tmp, "wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
+    errors: list[str] = []
+
+    # 先尝试走默认（可能带系统代理），失败则尝试禁用代理直连
+    strategies = [
+        ("default", None),
+        ("no_proxy", ProxyHandler({})),
+    ]
+
+    last_error: Exception | None = None
+    for strategy_name, proxy_handler in strategies:
+        try:
+            if proxy_handler is not None:
+                opener = build_opener(proxy_handler)
+                context_response = opener.open(request, timeout=timeout_val)
+            else:
+                context_response = urlopen(request, timeout=timeout_val)
+            with context_response as response:
+                status = int(getattr(response, "status", 200) or 200)
+                if status >= 400:
+                    raise RuntimeError(f"HTTP {status}")
+                with open(tmp, "wb") as handle:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                return
+        except Exception as exc:
+            last_error = exc
+            errors.append(f"{strategy_name}：{exc}")
+
+    detail = "; ".join(errors)
+    raise RuntimeError(detail) from last_error
+
+
+def _run_curl_once(curl_exe: str, base_cmd: list[str], timeout: int) -> tuple[int, str, str]:
+    result = subprocess.run(base_cmd, capture_output=True, text=True, timeout=max(5, int(timeout) + 10))
+    return result.returncode, (result.stderr or result.stdout or "").strip(), (result.stdout or "").strip()
 
 
 def _download_with_curl(
@@ -201,30 +230,52 @@ def _download_with_curl(
     curl = shutil.which("curl.exe") or shutil.which("curl")
     if not curl:
         raise RuntimeError("未找到 curl.exe")
-    cmd = [
+
+    connect_timeout = str(max(1, min(30, int(timeout))))
+    max_time = str(max(1, int(timeout)))
+    retries = max(0, int(retries))
+    retry_args = ["--retry", str(retries), "--retry-delay", "1"] if retries > 0 else []
+    header_args: list[str] = []
+    for key, value in headers.items():
+        if value:
+            header_args.extend(["--header", f"{key}: {value}"])
+
+    base_cmd = [
         curl,
         "--location",
         "--fail",
         "--silent",
         "--show-error",
         "--connect-timeout",
-        str(max(1, min(30, int(timeout)))),
+        connect_timeout,
         "--max-time",
-        str(max(1, int(timeout))),
+        max_time,
         "--output",
         str(tmp),
+        *retry_args,
+        *header_args,
+        url,
     ]
-    retries = max(0, int(retries))
-    if retries > 0:
-        cmd.extend(["--retry", str(retries), "--retry-delay", "1"])
-    for key, value in headers.items():
-        if value:
-            cmd.extend(["--header", f"{key}: {value}"])
-    cmd.append(url)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=max(5, int(timeout) + 10))
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"curl 失败：{detail or result.returncode}")
+
+    # 先尝试默认（系统代理），失败则加 --noproxy 禁用代理直连
+    strategies = [
+        ("curl_default", base_cmd),
+        ("curl_noproxy", [*base_cmd[:1], "--noproxy", "*", *base_cmd[1:]]),
+    ]
+
+    errors: list[str] = []
+    for name, cmd in strategies:
+        try:
+            code, stderr, stdout = _run_curl_once(cmd[0], cmd, timeout)
+            if code == 0:
+                return
+            errors.append(f"{name}：{stderr or stdout or f'退出码 {code}'}")
+        except subprocess.TimeoutExpired as exc:
+            errors.append(f"{name}：超时（超过 {timeout + 10} 秒）")
+        except Exception as exc:
+            errors.append(f"{name}：{exc}")
+
+    raise RuntimeError(f"curl 失败：{'; '.join(errors)}")
 
 
 def gjjutils_media_file_starts_like_html(path: str | os.PathLike[str]) -> bool:

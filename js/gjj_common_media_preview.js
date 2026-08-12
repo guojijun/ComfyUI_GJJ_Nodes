@@ -709,7 +709,44 @@ function createMediaElement(item, isSingle, options = {}) {
 		return stage;
 	}
 	const image = document.createElement("img");
-	image.src = url;
+	const isNetworkRemote = /^(?:https?:)/i.test(String(url || ""));
+	image.decoding = "async";
+	image.referrerPolicy = "no-referrer";
+	if (isNetworkRemote) {
+		// 对于网络图片，先尝试带 crossOrigin=anonymous 加载（便于后续 canvas 导出），
+		// 失败则清除 crossOrigin 重试，保证预览一定能显示。
+		let attemptedAnonymous = false;
+		const tryLoad = () => {
+			if (!attemptedAnonymous) {
+				attemptedAnonymous = true;
+				image.crossOrigin = "anonymous";
+			} else if (image.crossOrigin) {
+				// 回退：取消 crossOrigin，只用于显示
+				image.removeAttribute("crossOrigin");
+				image.crossOrigin = null;
+			}
+			const src = url + (url.includes("?") ? "&" : "?") + "_gjj_t=" + Date.now();
+			try { image.src = src; } catch (_) { image.src = url; }
+		};
+		let firstLoadOk = false;
+		image.addEventListener("load", () => {
+			firstLoadOk = true;
+			onLayout?.();
+		});
+		image.addEventListener("error", () => {
+			if (attemptedAnonymous && image.crossOrigin) {
+				// 带 CORS 加载失败，回退无 CORS 模式再次加载
+				tryLoad();
+				return;
+			}
+			onLayout?.();
+		});
+		tryLoad();
+	} else {
+		image.src = url;
+		image.addEventListener("load", () => onLayout?.());
+		image.addEventListener("error", () => onLayout?.());
+	}
 	image.draggable = Boolean(options.enableAnyPreviewDrag && item?.filename);
 	if (image.draggable) {
 		image.title = options.anyPreviewDragTitle || "拖到空白画布可创建 GJJ_AnyPreview；也可拖到已有 GJJ_AnyPreview。";
@@ -728,8 +765,6 @@ function createMediaElement(item, isSingle, options = {}) {
 			event.dataTransfer.setData("text/plain", String(item.filename));
 		});
 	}
-	image.addEventListener("load", () => onLayout?.());
-	image.addEventListener("error", () => onLayout?.());
 	stage.appendChild(image);
 	return stage;
 }

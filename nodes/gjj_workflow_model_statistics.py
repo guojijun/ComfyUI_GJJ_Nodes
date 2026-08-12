@@ -399,6 +399,19 @@ class GJJ_WorkflowModelStatistics:
                 inputs = node_data.get("inputs")
                 if not isinstance(inputs, dict):
                     continue
+                if node_type == "GJJ_CLIPPromptEncodePanel":
+                    translation_value = inputs.get("translation_enabled", False)
+                    translation_enabled = translation_value is True or str(translation_value or "").strip().lower() in {
+                        "1", "true", "yes", "on", "开", "开启", "启用",
+                    }
+                    if translation_enabled:
+                        items.append({
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "widget_name": "translation",
+                            "name": "opus-mt-zh-en.safetensors",
+                            "folder": "translation",
+                        })
                 for widget_name, value in inputs.items():
                     if str(widget_name).lower() not in MODEL_WIDGETS:
                         continue
