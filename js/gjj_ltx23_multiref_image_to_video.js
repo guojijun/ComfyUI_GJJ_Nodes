@@ -4,6 +4,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const NODE_CLASS = "GJJ_LTX23ImageToVideoMultiRef";
+const NODE_CLASS_25 = "GJJ_LTX25ImageToVideoMultiRef";
 const CONFIG_KEY = "gjj_ltx23_config";
 const SCENE_COUNT_PROP = "__gjj_ltx_scene_count";
 const SCENE_LINKS_PROP = "__gjj_ltx_scene_links";
@@ -62,6 +63,11 @@ const DEFAULT_CONFIG = {
   auto_transition_prompt: false,
   transition_prompt_model: "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
   size_source: "面板尺寸",
+  size_mode: "宽高",
+  resize_fit_mode: "裁剪",
+  resize_anchor: "上",
+  megapixel_aspect: "16:9",
+  megapixels: 0.4,
   seed_mode: "固定",
   global_prompt: "",
   lora_slots: [],
@@ -237,7 +243,16 @@ function wireNativeMainWidgets(node) {
 
 function isTarget(node) {
   const text = `${node?.comfyClass || ""} ${node?.type || ""} ${node?.title || ""}`;
-  return text.includes(NODE_CLASS) || /GJJ.*LTX.*多图/i.test(text);
+  return text.includes(NODE_CLASS) || text.includes(NODE_CLASS_25) || /GJJ.*LTX.*多图/i.test(text);
+}
+
+function isLtx25(node) {
+  const text = `${node?.comfyClass || ""} ${node?.type || ""} ${node?.title || ""}`;
+  return text.includes(NODE_CLASS_25) || /LTX\s*2[._]?5/i.test(text);
+}
+
+function modelApi(node) {
+  return isLtx25(node) ? "/gjj/ltx25/models" : "/gjj/ltx23/models";
 }
 
 function stopCanvasEvents(root) {
@@ -249,14 +264,28 @@ function stopCanvasEvents(root) {
   }
 }
 
+function configDefaults(node) {
+  if (!isLtx25(node)) return DEFAULT_CONFIG;
+  return {
+    ...DEFAULT_CONFIG,
+    size_source: "首图尺寸",
+    ltx_text_projection_name: "",
+    transition_lora_name: "",
+    transition_lora_enabled: false,
+    test_lora_name: "",
+    test_lora_enabled: false,
+  };
+}
+
 function getConfig(node) {
   if (!node.properties) node.properties = {};
   const raw = node.properties[CONFIG_KEY];
-  if (raw && typeof raw === "object") return { ...DEFAULT_CONFIG, ...raw };
+  const defaults = configDefaults(node);
+  if (raw && typeof raw === "object") return { ...defaults, ...raw };
   if (typeof raw === "string") {
-    try { return { ...DEFAULT_CONFIG, ...JSON.parse(raw) }; } catch (_) {}
+    try { return { ...defaults, ...JSON.parse(raw) }; } catch (_) {}
   }
-  const cfg = { ...DEFAULT_CONFIG };
+  const cfg = { ...defaults };
   writeConfigJson(node, cfg, false);
   return cfg;
 }
@@ -1028,9 +1057,69 @@ function makeSelect(node, label, key, options) {
   return { row, select };
 }
 
+function createLtx25SizePanel(node) {
+  const host = document.createElement("div");
+  host.className = "gjj-ltx25-size-panel";
+  const button = (text, onClick) => {
+    const el = document.createElement("button"); el.type = "button"; el.textContent = text;
+    el.className = "gjj-ltx25-size-choice"; el.addEventListener("click", onClick); return el;
+  };
+  const tabs = document.createElement("div"); tabs.className = "gjj-ltx25-size-tabs";
+  const source = button("首图尺寸", () => { setConfig(node, { size_source: "首图尺寸" }); sync(); });
+  const video = button("视频尺寸", () => { setConfig(node, { size_source: "视频尺寸" }); sync(); });
+  const canvas = button("画板尺寸", () => { setConfig(node, { size_source: "画板尺寸", size_mode: "宽高" }); sync(); });
+  const megapixel = button("百万像素", () => { setConfig(node, { size_source: "画板尺寸", size_mode: "百万像素" }); sync(); });
+  tabs.append(source, video, canvas, megapixel);
+  const makeChoices = (icon, key, values) => {
+    const row = document.createElement("div"); row.className = "gjj-ltx25-choice-row"; row.style.setProperty("--count", values.length);
+    const mark = document.createElement("span"); mark.textContent = icon; row.appendChild(mark);
+    const buttons = values.map(value => { const el = button(value, () => { setConfig(node, { [key]: value }); sync(); }); row.appendChild(el); return el; });
+    return { row, key, values, buttons };
+  };
+  const fit = makeChoices("🧲", "resize_fit_mode", ["拉伸", "补边", "留边", "裁剪"]);
+  const anchor = makeChoices("📍", "resize_anchor", ["上", "下", "左", "右", "中"]);
+  const ratios = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"];
+  const ratioRow = document.createElement("div"); ratioRow.className = "gjj-ltx25-ratios";
+  const ratioButtons = ratios.map(value => { const el = button(value, () => { setConfig(node, { megapixel_aspect: value }); sync(); }); ratioRow.appendChild(el); return el; });
+  const mpPanel = document.createElement("div");
+  const mpRow = document.createElement("label"); mpRow.className = "gjj-ltx25-slider-row";
+  const mpLabel = document.createElement("span"); mpLabel.textContent = "📐 MP";
+  const mpRange = document.createElement("input"); mpRange.type = "range"; mpRange.min = "0.2"; mpRange.max = "2"; mpRange.step = "0.1";
+  const mpNumber = document.createElement("input"); mpNumber.type = "number"; mpNumber.min = "0.2"; mpNumber.max = "2"; mpNumber.step = "0.1";
+  const result = document.createElement("div"); result.className = "gjj-ltx25-size-result";
+  mpRow.append(mpLabel, mpRange, mpNumber); mpPanel.append(ratioRow, mpRow, result);
+  const dimensions = document.createElement("div");
+  const dimControls = {};
+  for (const [key, label] of [["width", "宽度"], ["height", "高度"]]) {
+    const row = document.createElement("label"); row.className = "gjj-ltx25-slider-row";
+    const caption = document.createElement("span"); caption.textContent = label;
+    const range = document.createElement("input"); range.type = "range"; range.min = "64"; range.max = "2048"; range.step = "32";
+    const number = document.createElement("input"); number.type = "number"; number.min = "64"; number.max = "8192"; number.step = "32";
+    const apply = raw => { const value = Math.max(64, Math.round((Number(raw) || 480) / 32) * 32); setConfig(node, { [key]: value }); sync(); };
+    range.addEventListener("input", () => apply(range.value)); number.addEventListener("change", () => apply(number.value));
+    row.append(caption, range, number); dimensions.appendChild(row); dimControls[key] = { range, number };
+  }
+  const applyMp = raw => { setConfig(node, { megapixels: Math.round(Math.max(.2, Math.min(2, Number(raw) || .4)) * 10) / 10 }); sync(); };
+  mpRange.addEventListener("input", () => applyMp(mpRange.value)); mpNumber.addEventListener("change", () => applyMp(mpNumber.value));
+  const sync = () => {
+    const cfg = getConfig(node); const sourceMode = cfg.size_source === "首图尺寸"; const videoMode = cfg.size_source === "视频尺寸";
+    const mpMode = !sourceMode && !videoMode && cfg.size_mode === "百万像素";
+    [source, video, canvas, megapixel].forEach((el, i) => el.classList.toggle("active", [sourceMode, videoMode, !sourceMode && !videoMode && !mpMode, mpMode][i]));
+    for (const group of [fit, anchor]) group.buttons.forEach((el, i) => el.classList.toggle("active", cfg[group.key] === group.values[i]));
+    dimensions.style.display = sourceMode || videoMode || mpMode ? "none" : ""; mpPanel.style.display = mpMode ? "" : "none";
+    for (const key of ["width", "height"]) dimControls[key].range.value = dimControls[key].number.value = String(cfg[key]);
+    const aspect = String(cfg.megapixel_aspect || "16:9"); ratioButtons.forEach((el, i) => el.classList.toggle("active", ratios[i] === aspect));
+    const mp = Math.max(.2, Math.min(2, Number(cfg.megapixels) || .4)); mpRange.value = mpNumber.value = String(mp);
+    const [rw, rh] = aspect.split(":").map(Number); const pixels = mp * 1024 * 1024;
+    const w = Math.round(Math.sqrt(pixels * rw / rh) / 32) * 32; const h = Math.round(Math.sqrt(pixels * rh / rw) / 32) * 32;
+    result.textContent = `实际尺寸：${w} × ${h}`;
+  };
+  host.append(tabs, fit.row, anchor.row, dimensions, mpPanel); sync(); return host;
+}
+
 async function fetchModels(node, select) {
   try {
-    const res = await api.fetchApi("/gjj/ltx23/models");
+    const res = await api.fetchApi(modelApi(node));
     const data = await res.json();
     const cfg = getConfig(node);
     const models = Array.isArray(data.models) ? data.models : [];
@@ -1048,8 +1137,8 @@ async function fetchModels(node, select) {
   }
 }
 
-async function fetchModelFields() {
-  const res = await api.fetchApi("/gjj/ltx23/models");
+async function fetchModelFields(node) {
+  const res = await api.fetchApi(modelApi(node));
   const data = await res.json();
   return Array.isArray(data.fields) ? data.fields : [];
 }
@@ -1313,34 +1402,7 @@ function createLoraInlineControls(node, entry) {
 }
 
 function createLtxModelTreeView(node, entries, callbacks = {}) {
-  const root = document.createElement("div");
-  root.style.cssText = "display:flex;flex-direction:column;gap:1px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;overflow:auto;";
-  const folderMap = new Map();
-  for (const entry of entries || []) {
-    const folder = GJJ_Utils._modelTreeFolder(entry?.folder || entry?.path || entry?.directory || "");
-    if (!folderMap.has(folder)) folderMap.set(folder, []);
-    folderMap.get(folder).push(entry);
-  }
-  const { row: rootLine } = GJJ_Utils._modelTreeLine("", "📁", "models/");
-  root.appendChild(rootLine);
-  Array.from(folderMap.keys()).forEach((folder, folderIndex, folders) => {
-    const folderPrefix = folderIndex === folders.length - 1 ? "└─" : "├─";
-    const { row: folderLine } = GJJ_Utils._modelTreeLine(folderPrefix, "📁", `${folder || "models"}/`);
-    root.appendChild(folderLine);
-    const items = folderMap.get(folder) || [];
-    items.forEach((entry, index) => {
-      const branch = index === items.length - 1 ? "└─" : "├─";
-      const host = GJJ_Utils._modelTreeFileNode(node, { ...entry, prefix: `│　${branch}` }, callbacks);
-      const inline = createLoraInlineControls(node, entry);
-      if (inline && host.firstElementChild) {
-        const row = host.firstElementChild;
-        row.style.gridTemplateColumns = "minmax(0,1fr) 118px 24px";
-        row.insertBefore(inline, row.lastElementChild);
-      }
-      root.appendChild(host);
-    });
-  });
-  return root;
+  return GJJ_Utils.createModelTreeView({ node, entries, ...callbacks });
 }
 
 function normalizeLtxLoraSlots(value) {
@@ -1453,7 +1515,7 @@ function showModelTreePanel(node, anchor) {
     loading.textContent = "读取模型树...";
     loading.style.cssText = "color:#9fb0b8;padding:4px 0;";
     body.appendChild(loading);
-    fetchModelFields().then((fields) => {
+    fetchModelFields(node).then((fields) => {
       body.replaceChildren();
       if (!fields.length) {
         const empty = document.createElement("div");
@@ -1463,7 +1525,7 @@ function showModelTreePanel(node, anchor) {
         return;
       }
       const entries = modelTreeEntriesFromFields(node, fields);
-      body.appendChild(modelGroupTitle("🧠 LTX 2.3 模型树", "点击模型文件可搜索并切换"));
+      body.appendChild(modelGroupTitle(`🧠 LTX ${isLtx25(node) ? "2.5" : "2.3"} 模型树`, "点击模型文件可搜索并切换"));
       body.appendChild(createConvrotInstallPanel(node));
       body.appendChild(createLtxModelTreeView(node, entries, {
         node,
@@ -1697,7 +1759,7 @@ async function translateLtxPrompts(node, options = {}) {
       maxLength: 512,
       batchSize: 8,
       unloadAfterUse: false,
-      nodeName: "GJJ_LTX23ImageToVideoMultiRef",
+      nodeName: isLtx25(node) ? NODE_CLASS_25 : NODE_CLASS,
     });
     setConfig(node, {
       positive_prompt: String(data?.positive ?? positive),
@@ -2253,6 +2315,10 @@ function buildPanel(node) {
     ));
   }, { width: 460 }));
   const sizeBtn = makeToolButton("📐", "尺寸设置", (button) => showFloatingPanel(node, button, "尺寸", (body) => {
+    if (isLtx25(node)) {
+      body.appendChild(createLtx25SizePanel(node));
+      return;
+    }
     const widthControl = configSliderNumber(node, "width", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 });
     const heightControl = configSliderNumber(node, "height", { min: 64, max: 2048, hardMax: 8192, step: 32, inputStep: 8 });
     const widthRow = panelRow("宽度", widthControl);
@@ -2495,7 +2561,12 @@ function installExecutionPreviewHooks(node) {
     this.__gjjLtxRunInFlight = false;
     setStatus(this, { text: "执行完成", progress: 1 });
     const modelTestActive = Number(this.__gjjLtxModelTestRemaining || 0) > 0;
-    setVideoPreview(this, message || {}, modelTestActive);
+    if (isLtx25(this)) {
+      clearNativePreview(this);
+      setVideoPreview(this, message || {}, false);
+    } else {
+      setVideoPreview(this, message || {}, modelTestActive);
+    }
     if (modelTestActive) this.__gjjLtxModelTestRemaining = Math.max(0, Number(this.__gjjLtxModelTestRemaining || 0) - 1);
     advanceSeedAfterExecution(this);
     refreshToolbarState(this);
@@ -2615,6 +2686,7 @@ function injectStyles() {
     .gjj-ltx-model-test-name{overflow-wrap:anywhere;line-height:1.35;}
     .gjj-ltx-model-test-size{color:#9fb0b8;font-size:12px;line-height:1.35;white-space:nowrap;text-align:right;}
     .gjj-ltx-model-test-empty,.gjj-ltx-model-test-status{color:#9fb0b8;line-height:1.4;white-space:normal;overflow-wrap:anywhere;}
+    .gjj-ltx25-size-tabs,.gjj-ltx25-ratios{display:grid;gap:8px}.gjj-ltx25-size-tabs{grid-template-columns:repeat(4,1fr);margin:4px 0 14px}.gjj-ltx25-ratios{grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;margin:8px 0 12px}.gjj-ltx25-size-choice{min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;cursor:pointer}.gjj-ltx25-size-choice.active{border-color:#19d8df;background:#0d8fb0;color:#fff}.gjj-ltx25-size-tabs .active{background:#12964d;border-color:#27dda0}.gjj-ltx25-choice-row{display:grid;grid-template-columns:42px repeat(var(--count),1fr);gap:8px;margin:8px 0}.gjj-ltx25-choice-row>span{display:grid;place-items:center;font-size:20px}.gjj-ltx25-ratios .gjj-ltx25-size-choice{min-width:0;min-height:34px;padding:3px 1px;font-size:11px}.gjj-ltx25-slider-row{display:grid;grid-template-columns:62px minmax(0,1fr) 90px;gap:10px;align-items:center;margin:13px 0;color:#c9d7da;font-weight:700}.gjj-ltx25-slider-row input[type=range]{width:100%;accent-color:#19b7d0}.gjj-ltx25-slider-row input[type=number]{width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800}.gjj-ltx25-size-result{padding:9px;border:1px solid #31535b;border-radius:7px;background:#091215;color:#8fe1d5;text-align:center;font-weight:900;font-size:15px}
   `;
   document.head.appendChild(style);
 }
@@ -2653,7 +2725,7 @@ app.registerExtension({
   },
   beforeRegisterNodeDef(nodeType, nodeData) {
     const typeName = nodeData?.name || nodeData?.display_name || nodeData?.title || "";
-    if (!String(typeName).includes(NODE_CLASS) && !/GJJ.*LTX.*多图/i.test(String(typeName))) return;
+    if (!String(typeName).includes(NODE_CLASS) && !String(typeName).includes(NODE_CLASS_25) && !/GJJ.*LTX.*多图/i.test(String(typeName))) return;
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (...args) {
       onNodeCreated?.apply(this, args);

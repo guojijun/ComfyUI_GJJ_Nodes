@@ -130,6 +130,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_OllamaAssistant",
 	"GJJ_LazyImageStudio",
 	"GJJ_LTX23ImageToVideoMultiRef",
+	"GJJ_LTX25ImageToVideoMultiRef",
 	"GJJ_LongCatAvatarGenerator",
 	"GJJ_LoraFaceMaterialGenerator",
 	"GJJ_OldPhotoRestorer",
