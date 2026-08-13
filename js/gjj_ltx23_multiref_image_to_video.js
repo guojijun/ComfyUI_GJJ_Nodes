@@ -60,6 +60,8 @@ const DEFAULT_CONFIG = {
   test_lora_name: "LTX-2.3-Licon-MSR-V2.safetensors",
   test_lora_enabled: true,
   test_lora_strength: 1.0,
+  msr_lora_name: "",
+  msr_lora_strength: 1.0,
   auto_transition_prompt: false,
   transition_prompt_model: "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors",
   size_source: "面板尺寸",
@@ -70,7 +72,7 @@ const DEFAULT_CONFIG = {
   megapixels: 0.4,
   seed_mode: "固定",
   global_prompt: "",
-  lora_slots: [],
+  lora_slots: [{ enabled: true, name: "LTX/LTX-2.3-Licon-MSR-V2.safetensors", strength: 1.0 }],
   stage1_sampler: "euler_ancestral_cfg_pp",
   stage2_sampler: "euler_cfg_pp",
   stage1_steps: 0,
@@ -1427,10 +1429,81 @@ function createLtxLoraSlots(node, fields) {
     .filter((item) => item && item.toLowerCase().includes("ltx")))]
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
 
+  // 关键词过滤状态：默认显示 MSR 相关 LoRA，用户可修改。
+  // 持久化到 node.properties 避免刷新后丢失。
+  node.properties = node.properties || {};
+  let filterText = node.properties["_lora_filter_text"] || "msr";
+  const matchesFilter = (name) => {
+    const text = String(name || "").toLowerCase();
+    const words = String(filterText || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return true;
+    return words.every((word) => text.includes(word));
+  };
+  const filteredModels = () => ltxModels.filter(matchesFilter);
+
+  // 顶部搜索栏：输入即过滤，change/blur 时保存状态，避免 input 事件频繁触发重建。
+  const searchBar = document.createElement("div");
+  searchBar.className = "gjj-ltx-lora-search-bar";
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.value = filterText;
+  searchInput.placeholder = "输入关键词过滤 LoRA（例如：msr、2.3、licon）";
+  searchInput.title = "按关键词实时过滤下拉列表；留空显示全部 LTX 系列 LoRA";
+  const searchHint = document.createElement("span");
+  searchHint.className = "gjj-ltx-lora-search-hint";
+  const updateHint = () => {
+    const total = ltxModels.length;
+    const shown = filteredModels().length;
+    searchHint.textContent = `${shown}/${total}`;
+    searchHint.title = `当前过滤后显示 ${shown} 个，共 ${total} 个 LTX LoRA`;
+  };
+  const applyFilter = () => {
+    filterText = String(searchInput.value || "");
+    node.properties["_lora_filter_text"] = filterText;
+    updateHint();
+    refreshSelects();
+  };
+  searchInput.addEventListener("input", applyFilter);
+  searchInput.addEventListener("change", applyFilter);
+  searchInput.addEventListener("blur", applyFilter);
+  searchBar.append(searchInput, searchHint);
+  root.appendChild(searchBar);
+
+  const slotsRoot = document.createElement("div");
+  slotsRoot.className = "gjj-ltx-lora-rows";
+  root.appendChild(slotsRoot);
+
+  // 仅刷新下拉选项，不重建整个 DOM，避免正在编辑的 select/strength 丢失焦点。
+  const refreshSelects = () => {
+    const models = filteredModels();
+    for (const select of slotsRoot.querySelectorAll("select")) {
+      const current = select.value;
+      select.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "未选择";
+      select.appendChild(empty);
+      for (const name of models) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      }
+      // 已配置但被过滤掉的 LoRA 仍要保留为可选项，避免值丢失。
+      if (current && !models.includes(current)) {
+        const option = document.createElement("option");
+        option.value = current;
+        option.textContent = `${current}（被过滤）`;
+        select.appendChild(option);
+      }
+      select.value = current;
+    }
+  };
+
   const render = () => {
     const configured = normalizeLtxLoraSlots(getConfig(node).lora_slots);
     const rows = [...configured, { enabled: true, name: "", strength: 1.0 }];
-    root.replaceChildren();
+    slotsRoot.replaceChildren();
     rows.forEach((row, index) => {
       const line = document.createElement("div");
       line.className = "gjj-ltx-general-lora-row";
@@ -1447,16 +1520,16 @@ function createLtxLoraSlots(node, fields) {
       empty.value = "";
       empty.textContent = "未选择";
       select.appendChild(empty);
-      for (const name of ltxModels) {
+      for (const name of filteredModels()) {
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
         select.appendChild(option);
       }
-      if (row.name && !ltxModels.includes(row.name)) {
+      if (row.name && !filteredModels().includes(row.name)) {
         const option = document.createElement("option");
         option.value = row.name;
-        option.textContent = row.name;
+        option.textContent = `${row.name}（被过滤）`;
         select.appendChild(option);
       }
       select.value = row.name;
@@ -1501,8 +1574,9 @@ function createLtxLoraSlots(node, fields) {
       const number = document.createElement("span");
       number.textContent = `LoRA ${index + 1}`;
       line.append(number, select, enabled, strength);
-      root.appendChild(line);
+      slotsRoot.appendChild(line);
     });
+    updateHint();
   };
   render();
   return root;
@@ -1539,7 +1613,7 @@ function showModelTreePanel(node, anchor) {
           setConfig(node, { [entry.widget]: value });
         },
       }));
-      body.appendChild(modelGroupTitle("🧬 通用 LoRA", "仅显示名称包含 ltx 的模型；始终保留一个空插槽"));
+      body.appendChild(modelGroupTitle("🧬 通用 LoRA", "顶部输入关键词过滤；默认显示 MSR 相关模型；始终保留一个空插槽"));
       body.appendChild(createLtxLoraSlots(node, fields));
     }).catch((error) => {
       body.replaceChildren();
@@ -2446,6 +2520,15 @@ function buildPanel(node) {
       panelRow("VAE 时序块", configInput(node, "vae_temporal_size", "number", { min: 8, max: 4096, step: 8 })),
       panelRow("VAE 时序重叠", configInput(node, "vae_temporal_overlap", "number", { min: 0, max: 256, step: 1 })),
     );
+    // MSR 分支专用 LoRA 设置（仅在人物参考有链接时生效）
+    const msrTitle = document.createElement("div");
+    msrTitle.className = "gjj-ltx-advanced-note";
+    msrTitle.textContent = "── MSR 身份 LoRA（仅人物参考分支生效）──";
+    body.appendChild(msrTitle);
+    body.append(
+      panelRow("MSR LoRA名称", configInput(node, "msr_lora_name", "text", { placeholder: "例如：LTX/LTX-2.3-Licon-MSR-V2.safetensors" })),
+      panelRow("MSR LoRA强度", configInput(node, "msr_lora_strength", "number", { min: 0, max: 5, step: 0.05 })),
+    );
     const note = document.createElement("div");
     note.className = "gjj-ltx-advanced-note";
     note.textContent = "步数为 0：保留内置 Sigma 数量；填写步数：按当前 Sigma 曲线重采样。留空 Sigma 使用分支默认曲线；NAG 三项为 -1 时使用普通/首尾帧分支默认值。";
@@ -2661,6 +2744,11 @@ function injectStyles() {
     .gjj-ltx-lora-strength{width:82px!important;height:24px;text-align:center;padding:3px 5px!important;}
     .gjj-ltx-lora-strength:disabled{cursor:not-allowed;color:#879197;background:#10171b;border-color:#2b3940;}
     .gjj-ltx-general-lora-slots{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #33454c;border-radius:8px;background:#0f171b;}
+    .gjj-ltx-lora-search-bar{display:flex;gap:6px;align-items:center;padding-bottom:4px;border-bottom:1px dashed #2b3940;margin-bottom:4px;}
+    .gjj-ltx-lora-search-bar input{flex:1 1 auto;min-width:0;height:28px;box-sizing:border-box;border:1px solid #3d535d;border-radius:5px;background:#111d22;color:#e7f3f3;padding:2px 8px;font-size:12px;}
+    .gjj-ltx-lora-search-bar input:focus{outline:none;border-color:#2f7d67;background:#13202a;}
+    .gjj-ltx-lora-search-hint{flex:0 0 auto;min-width:48px;text-align:right;font-size:11px;color:#7e8e96;font-variant-numeric:tabular-nums;}
+    .gjj-ltx-lora-rows{display:flex;flex-direction:column;gap:6px;}
     .gjj-ltx-general-lora-row{display:grid;grid-template-columns:58px minmax(0,1fr) 28px 82px;gap:6px;align-items:center;color:#b8c8cf;font-size:11px;}
     .gjj-ltx-general-lora-row select,.gjj-ltx-general-lora-row input{box-sizing:border-box;height:26px;min-width:0;border:1px solid #3d535d;border-radius:5px;background:#111d22;color:#e7f3f3;padding:2px 6px;}
     .gjj-ltx-general-lora-row input{text-align:center;}

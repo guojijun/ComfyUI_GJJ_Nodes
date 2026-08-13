@@ -2903,8 +2903,9 @@ function addSetBroadcastToggleWidget(node) {
 }
 
 function selectedNodesValues() {
-	const selected = app.canvas?.selected_nodes;
+	const selected = app.canvas?.selected_nodes ?? app.canvas?.selectedNodes;
 	if (!selected) return [];
+	if (selected instanceof Set) return [...selected.values()];
 	if (selected instanceof Map) return [...selected.values()];
 	if (Array.isArray(selected)) return selected;
 	if (typeof selected === "object") return Object.values(selected);
@@ -2913,15 +2914,22 @@ function selectedNodesValues() {
 
 function isNodeSelected(node) {
 	if (!node) return false;
-	if (node.selected) return true;
-	const selected = app.canvas?.selected_nodes;
+	if (node.selected || node.flags?.selected || node.__selected || node.is_selected) return true;
+	const selected = app.canvas?.selected_nodes ?? app.canvas?.selectedNodes;
+	if (selected instanceof Set) {
+		return selected.has(node) || selected.has(node.id) || selected.has(String(node.id))
+			|| [...selected].some((item) => item === node || String(item?.id ?? item) === String(node.id));
+	}
 	if (selected instanceof Map) {
-		return selected.has(node.id) || selected.has(String(node.id)) || selected.has(node);
+		if (selected.has(node.id) || selected.has(String(node.id)) || selected.has(node)) return true;
+		return [...selected.entries()].some(([key, value]) => (
+			value === node || String(value?.id ?? key) === String(node.id)
+		));
 	}
 	if (selected && typeof selected === "object" && (selected[node.id] || selected[String(node.id)])) {
 		return true;
 	}
-	return selectedNodesValues().some((item) => item === node || String(item?.id) === String(node.id));
+	return selectedNodesValues().some((item) => item === node || String(item?.id ?? item) === String(node.id));
 }
 
 function connectionPosition(node, isInput, slotIndex) {

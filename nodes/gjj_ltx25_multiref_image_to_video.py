@@ -50,11 +50,59 @@ def _model_fields() -> list[dict[str, Any]]:
             "defaultModel": state["default_model"],
             "missingDefault": state["missing"],
         })
+    # 添加通用 LoRA 条目（不做关键词过滤，让前端自行按 "ltx" 过滤并允许手动输入任意名）
+    try:
+        import folder_paths as _fp
+        _all_loras = list(_fp.get_filename_list("loras") or [])
+    except Exception:
+        _all_loras = []
+    # 回退：如果 folder_paths 返回的列表太少，直接扫描磁盘补充
+    if len(_all_loras) < 10:
+        try:
+            import os as _os
+            _loras_dir = _os.path.join(
+                str(getattr(_fp, "models_dir", "") or "models"),
+                "loras",
+            )
+            if not _os.path.isabs(_loras_dir):
+                _loras_dir = _os.path.join(os.getcwd(), "models", "loras")
+            if _os.path.isdir(_loras_dir):
+                _scanned = []
+                for _root, _dirs, _files in _os.walk(_loras_dir):
+                    for _f in _files:
+                        if _f.endswith((".safetensors", ".gguf", ".pt", ".bin")):
+                            _rel = _os.path.relpath(_os.path.join(_root, _f), _loras_dir).replace("\\", "/")
+                            _scanned.append(_rel)
+                if _scanned:
+                    _existing = set(_all_loras)
+                    for _item in _scanned:
+                        if _item not in _existing:
+                            _all_loras.append(_item)
+                    print(f"[GJJ LTX2.5] LoRA 列表已从磁盘补充：{len(_all_loras)} 个文件", flush=True)
+        except Exception:
+            pass
+    fields.append({
+        "name": "ltx_general_loras",
+        "label": "通用 LoRA",
+        "folder": "loras",
+        "path": "models/loras",
+        "models": _all_loras,
+        "keywords": [],
+        "fallback": "",
+        "filename": "",
+        "required": False,
+        "description": "通用 LoRA 列表；前端仅展示名称包含 ltx 的条目，未列出的文件可手动输入完整相对路径。",
+        "defaultModel": "",
+        "missingDefault": False,
+    })
     return fields
 
 
 def _defaults() -> dict[str, str]:
-    return {field["name"]: str(field["fallback"]) for field in _model_fields()}
+    result = {field["name"]: str(field["fallback"]) for field in _model_fields()}
+    result.setdefault("msr_lora_name", "LTX/LTX-2.3-Licon-MSR-V2.safetensors")
+    result.setdefault("msr_lora_strength", "1.0")
+    return result
 
 
 def _resolve_size_config(config: dict[str, Any], scenes: list[Any]) -> dict[str, Any]:
@@ -106,43 +154,127 @@ def _sample(rt, model, positive, negative, video_latent, audio_latent, seed, sam
     return rt.LTXVSeparateAVLatent.execute(sampled)[0:2]
 
 
-def _apply_character_reference(model, video_vae, video_latent, character_reference, rt):
+def _apply_character_reference_branch(
+    positive,
+    negative,
+    video_vae,
+    video_latent,
+    character_reference,
+    background,
+    rt,
+):
+    """Follow LTX2.3_MSR多图参考.json's character-reference branch literally."""
     references = [item for item in list(character_reference or []) if item is not None]
     if not references:
-        return model
+        return positive, negative, video_latent
     from .gjj_add_video_iclora_guide import GJJ_AddVideoICLoRAGuide
-    from .gjj_ltx_identity_overlap_conditioning import apply_ltx_reference_latent_tokens
+    from .gjj_batch_crop_resize import GJJ_BatchCropResize
 
     reference_batch = rt.torch.cat([rt._ensure_image_batch(item) for item in references], dim=0).contiguous()
     samples = video_latent["samples"]
     scale_factors = video_vae.downscale_index_formula
-    guide = GJJ_AddVideoICLoRAGuide()
-    guide_frames = guide._build_msr_guide_frames(
-        reference_batch,
-        None,
-        int(samples.shape[-1] * scale_factors[1]),
-        int(samples.shape[-2] * scale_factors[2]),
-        rt._msr_guide_frame_count_for_latent(video_latent, video_vae, preferred=41),
+    target_width = int(samples.shape[-1] * scale_factors[1])
+    target_height = int(samples.shape[-2] * scale_factors[2])
+    processed = GJJ_BatchCropResize().crop_resize(
+        align_multiple=16,
+        width=target_width,
+        height=target_height,
+        media_01=reference_batch,
+        media_02=background,
     )
-    if guide_frames is None:
-        raise RuntimeError("LTX2.5 人物参考分支没有取得有效参考帧。")
-    _, reference_latent = guide.encode(
-        video_vae,
-        int(samples.shape[-1]),
-        int(samples.shape[-2]),
-        guide_frames,
-        scale_factors,
-        1.0,
-        "disabled",
-        False,
-        256,
-        64,
+    reference_images = processed[2]
+    background_image = processed[3] if background is not None and len(processed) > 3 else None
+    frame_count = rt._msr_guide_frame_count_for_latent(video_latent, video_vae, preferred=41)
+    return GJJ_AddVideoICLoRAGuide().generate(
+        positive=positive,
+        negative=negative,
+        vae=video_vae,
+        latent=video_latent,
+        image=reference_images,
+        background=background_image,
+        frame_idx=0,
+        strength=1.0,
+        latent_downscale_factor=1.0,
+        crop="disabled",
+        use_tiled_encode=False,
+        tile_size=256,
+        tile_overlap=64,
+        bypass=False,
+        frame_count=str(frame_count),
+        guide_mode="写入Latent",
     )
-    return apply_ltx_reference_latent_tokens(
-        model,
-        reference_latent,
-        layout="st_drc",
-        source_phase=0.0,
+
+
+def _apply_msr_guide(
+    positive,
+    negative,
+    video_vae,
+    video_latent,
+    character_reference,
+    scene_images,
+    rt,
+):
+    """严格对齐 LTX2.5_MSR多图参考1.json 工作流拓扑。
+
+    工作流映射（关键：人物参考是 image/引导帧，场景是 background）：
+      GJJ_MultiImageLoader(人物参考) → BatchCropResize media_01 → result_01 → image(引导帧)
+      GJJ_TemplateParams(场景)       → BatchCropResize media_02 → result_02 → background
+
+    MSR LoRA 训练使得模型将 guide 帧作为身份参考令牌，而非画面主体内容。
+    guide_mode="写入Latent" 将引导帧编码写入视频 Latent 前部，
+    采样后由 LTXVCropGuides 裁掉引导帧区域，只保留生成内容。
+    """
+    from .gjj_add_video_iclora_guide import GJJ_AddVideoICLoRAGuide
+    from .gjj_batch_crop_resize import GJJ_BatchCropResize
+
+    character_items = [item for item in list(character_reference or []) if item is not None]
+    scene_items = [item for item in list(scene_images or []) if item is not None]
+    if not character_items and not scene_items:
+        return positive, negative, video_latent
+
+    samples = video_latent["samples"]
+    scale_factors = video_vae.downscale_index_formula
+    target_width = int(samples.shape[-1] * scale_factors[1])
+    target_height = int(samples.shape[-2] * scale_factors[2])
+
+    # 对齐工作流：media_01=人物参考, media_02=场景
+    character_batch = None
+    scene_batch = None
+    if character_items:
+        character_batch = rt.torch.cat([rt._ensure_image_batch(item) for item in character_items], dim=0).contiguous()
+    if scene_items:
+        scene_batch = rt.torch.cat([rt._ensure_image_batch(item) for item in scene_items], dim=0).contiguous()
+
+    processed = GJJ_BatchCropResize().crop_resize(
+        align_multiple=16,
+        width=target_width,
+        height=target_height,
+        media_01=character_batch,
+        media_02=scene_batch,
+    )
+    # result_01 (index 2) → image (人物参考引导帧)
+    # result_02 (index 3) → background (场景)
+    guide_image = processed[2] if character_batch is not None else None
+    guide_background = processed[3] if scene_batch is not None and len(processed) > 3 else None
+
+    # 工作流 widget_values 固定 frame_count=41，对齐 MSR LoRA 训练预期
+    return GJJ_AddVideoICLoRAGuide().generate(
+        positive=positive,
+        negative=negative,
+        vae=video_vae,
+        latent=video_latent,
+        image=guide_image,
+        background=guide_background,
+        frame_idx=0,
+        strength=1.0,
+        latent_downscale_factor=1.0,
+        crop="disabled",
+        use_tiled_encode=False,
+        tile_size=256,
+        tile_overlap=64,
+        bypass=False,
+        frame_count="41",
+        guide_mode="写入Latent",
     )
 
 
@@ -180,7 +312,15 @@ def _run_source_workflow(*, config: dict[str, Any], scenes: list[Any], character
     positive, negative = rt.LTXVConditioning.execute(positive_raw, negative_raw, float(fps))[0:2]
     video_latent = rt.EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
     audio_latent = rt.LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[0]
-    model = _apply_character_reference(model, video_vae, video_latent, character_reference, rt)
+    positive, negative, video_latent = _apply_character_reference_branch(
+        positive,
+        negative,
+        video_vae,
+        video_latent,
+        character_reference,
+        scenes[0] if scenes else None,
+        rt,
+    )
     seed = int(config["seed"])
 
     if len(scenes) == 2:
@@ -232,6 +372,117 @@ def _run_source_workflow(*, config: dict[str, Any], scenes: list[Any], character
         temporal_overlap = 32
 
     frames = rt.VAEDecodeTiled().decode(video_vae, video_result, 768, 64, 4096, temporal_overlap)[0]
+    try:
+        audio = rt.LTXVAudioVAEDecode.execute(audio_result, audio_vae)[0]
+    except Exception:
+        audio = None
+    video = rt._create_video(frames, float(fps), audio)
+    preview = rt._save_final_video_preview(
+        frames=frames,
+        audio=audio,
+        fps=float(fps),
+        save_preset=config.get("segment_save_preset") or "video/GJJ_LTX多图分段",
+        format_name=config.get("segment_video_format") or "video/h264-mp4",
+        unique_id=unique_id,
+        output_width=int(frames.shape[2]),
+        output_height=int(frames.shape[1]),
+        model_name=config.get("ltx_model_name") or "",
+    )
+    return {
+        "ui": {
+            "preview_main_path": (preview.get("path") or "",),
+            "preview_media": (preview.get("media") or {},),
+            "preview_is_video": (True,),
+            "final_video": (preview,),
+        },
+        "result": (video, frames),
+    }
+
+
+def _build_lora_chain_config_from_name(lora_name: str, strength: float = 1.0) -> str:
+    """从单个 LoRA 文件名构建 LoRA 串联配置 JSON。"""
+    name = str(lora_name or "").strip()
+    if not name:
+        return ""
+    import json as _json
+    return _json.dumps([{
+        "enabled": True,
+        "name": name,
+        "strength": float(strength),
+    }], ensure_ascii=False)
+
+
+def _run_msr_workflow(*, config: dict[str, Any], scenes: list[Any], character_reference, lora_chain_config: Any = "", msr_lora_name: str = "", msr_lora_strength: float = 1.0, unique_id: Any = None):
+    """当【人物参考】有链接时，按 LTX2.5_MSR多图参考.json 字面执行。
+
+    单阶段 euler 采样（sigmas 1.0→0）→ LTXVSeparateAVLatent → LTXVCropGuides →
+    VAEDecode → 音频解码 → 合成。不做二阶段 latent 放大，也不走 FLF ancestral。
+    支持两种 LoRA 传入方式：
+      1. lora_chain_config：外部 GJJ_LoraChainConfig 节点输出的 JSON 配置
+      2. msr_lora_name：直接指定 LoRA 文件名，自动构建串联配置
+      优先使用 lora_chain_config；为空时回退到 msr_lora_name。
+    """
+    rt = importlib.import_module(".gjj_ltx23_multiref_runtime", __package__)
+    loader = importlib.import_module(".gjj_video_universal_model_loader", __package__)
+    rt._ensure_runtime_dependencies()
+
+    model = loader._load_unet_model(str(config["ltx_model_name"]), "fp16", unique_id=unique_id)
+    clip = loader._load_clip(str(config["ltx_text_encoder_name"]), "ltxv", "bf16")
+
+    # 合并 LoRA 配置：优先 lora_chain_config，其次 msr_lora_name 直接指定
+    effective_lora_config = str(lora_chain_config or "").strip()
+    if not effective_lora_config:
+        effective_lora_config = _build_lora_chain_config_from_name(
+            str(msr_lora_name or ""),
+            float(msr_lora_strength),
+        )
+    if effective_lora_config:
+        print(f"[GJJ LTX2.5 MSR] 加载 LoRA 配置: {effective_lora_config}", flush=True)
+        model, clip = rt._apply_chain_loras(model, clip, effective_lora_config)
+    else:
+        print("[GJJ LTX2.5 MSR] ⚠️ 未加载任何 MSR LoRA！人物参考可能作为画面主体出现，请检查 msr_lora_name 或 lora_chain_config 是否配置。", flush=True)
+
+    video_vae = loader._load_gjj_vae(str(config["ltx_video_vae_name"]), "main_device", "bf16")
+    audio_vae = loader._load_gjj_vae(str(config["ltx_audio_vae_name"]), "main_device", "bf16")
+
+    fps = max(1, int(round(float(config["fps"]))))
+    duration = max(0.1, float(config["segment_seconds"]))
+    output_width = max(64, int(config["width"]))
+    output_height = max(64, int(config["height"]))
+    # MSR 帧数公式严格对齐 LTX2.5_MSR多图参考1.json 的 GJJ_MultifunctionCalculator：
+    #   widget formula = "int(x1 *x2 )+1"，x1=帧率，x2=时长 → int(fps*duration)+1
+    frame_count = max(9, int(fps * duration) + 1)
+    # 单阶段全分辨率采样，latent 像素尺寸按 32 对齐。
+    sample_width = max(64, int(round(output_width / 32.0)) * 32)
+    sample_height = max(64, int(round(output_height / 32.0)) * 32)
+
+    positive_raw = rt.CLIPTextEncode().encode(clip, str(config["positive_prompt"]))[0]
+    negative_raw = _zero_conditioning(positive_raw)
+    positive, negative = rt.LTXVConditioning.execute(positive_raw, negative_raw, float(fps))[0:2]
+    video_latent = rt.EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
+    audio_latent = rt.LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[0]
+    print(f"[GJJ LTX2.5 MSR] fps={fps} duration={duration}s frame_count={frame_count} sample={sample_width}x{sample_height}", flush=True)
+    # 严格对齐 LTX2.5_MSR多图参考1.json 工作流：
+    # 人物参考 → BatchCropResize media_01 → result_01 → image(引导帧)
+    # 场景图   → BatchCropResize media_02 → result_02 → background
+    # 两者经 GJJ_AddVideoICLoRAGuide 写入 Latent，MSR LoRA 使模型将其作为身份参考。
+    print(f"[GJJ LTX2.5 MSR] character_reference={len(list(character_reference or []))}张 scenes={len(list(scenes or []))}张", flush=True)
+    positive, negative, video_latent = _apply_msr_guide(
+        positive, negative, video_vae, video_latent,
+        character_reference, scenes, rt,
+    )
+    seed = int(config["seed"])
+
+    # 单阶段 euler 采样，sigmas 与 LTX2.5_MSR多图参考.json 的 GJJ_LTXVVideoSampler 一致。
+    video_result, audio_result = _sample(
+        rt, model, positive, negative, video_latent, audio_latent, seed,
+        "euler",
+        "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0",
+    )
+    # LTXVCropGuides 去掉 guide 引导帧区域，对齐源工作流。
+    _, _, video_result = rt.LTXVCropGuides.execute(positive, negative, video_result)[0:3]
+
+    frames = rt.VAEDecodeTiled().decode(video_vae, video_result, 768, 64, 4096, 64)[0]
     try:
         audio = rt.LTXVAudioVAEDecode.execute(audio_result, audio_vae)[0]
     except Exception:
@@ -378,6 +629,19 @@ class GJJ_LTX25ImageToVideoMultiRef(ltx23.GJJ_LTX23ImageToVideoMultiRef):
         character_reference, _ = ltx23._filter_valid_scene_images(
             ltx23._split_scene_batch(kwargs.get("character_reference"))
         )
+
+        # 当【人物参考】有链接且携带有效图片时，走 LTX2.5_MSR多图参考.json 分支：
+        # 单阶段 euler 采样 + LTXVCropGuides，不做二阶段 latent 放大。
+        if character_reference:
+            return _run_msr_workflow(
+                config=config,
+                scenes=scenes,
+                character_reference=character_reference,
+                lora_chain_config=kwargs.get("lora_chain_config", ""),
+                msr_lora_name=str(config.get("msr_lora_name", "") or ""),
+                msr_lora_strength=float(config.get("msr_lora_strength", 1.0) or 1.0),
+                unique_id=ltx23._unwrap_single_value(unique_id),
+            )
 
         if len(scenes) in (0, 2):
             return _run_source_workflow(
