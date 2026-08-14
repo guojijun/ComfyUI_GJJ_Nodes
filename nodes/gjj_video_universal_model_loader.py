@@ -1953,6 +1953,11 @@ def _is_convrot_quantized_model(model_name: str) -> bool:
     return bool(_convrot_quantization_from_model_name(model_name))
 
 
+def _is_minimax_music3_model(model_name: str) -> bool:
+    text = str(model_name or "").replace("\\", "/").lower()
+    return "minimax_music3" in text
+
+
 def _decode_comfy_quant_config(value: Any) -> dict[str, Any]:
     try:
         raw = value.detach().cpu().tolist() if hasattr(value, "detach") else value
@@ -2233,6 +2238,95 @@ def _load_convrot_quantized_diffusion_model(model_name: str, weight_dtype: str =
     return model
 
 
+def _load_minimax_music3_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
+    path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+    dtype = _torch_dtype(weight_dtype)
+    sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+
+    # CUI78 的 model_detection.detect_unet_config 有原生 Music3 检测路径，
+    # 检查 cond_layer_logits、latent_conditioners.0.weight、
+    # diffusion_transformer.transformer.layers.0.self_attn.to_qkv.weight 这三个键。
+    # 这些键名包含 "diffusion_transformer." 作为完整键名的一部分（不是可剥离的前缀），
+    # 因此不能剥离前缀，否则 Music3 检测失败会落到 StableAudio 路径。
+    # 直接把原始 state dict 传给 load_diffusion_model_state_dict，
+    # 让 CUI78 原生 Music3 检测和加载逻辑处理。
+
+    # nvfp4 量化会把 FourierFeatures 等小权重也量化（如 timestep_features
+    # 原始 [128,1] → padding 到 [128,8]），但这些层是 nn.Parameter 不是 Linear，
+    # 不使用量化 ops，导致 load_state_dict 形状不匹配。
+    # 这里反量化这些小层并裁剪到原始形状。
+    _fix_nvfp4_small_params(sd, metadata)
+
+    model_options: dict[str, Any] = {}
+    if dtype is not None:
+        model_options["dtype"] = dtype
+    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+    if model is None:
+        raise RuntimeError(f"ERROR: 无法识别 MiniMax Music3 模型架构：{path}")
+    model.cached_patcher_init = (_load_minimax_music3_diffusion_model, (model_name, weight_dtype, unique_id))
+    return model
+
+
+# nvfp4 量化会 padding 小权重的最后一维到 16 的倍数（再 pack 2 值/字节）。
+# 这些层是 nn.Parameter（不是 Linear），不使用量化 ops，需要反量化并裁剪。
+# 已知需要修复的层名后缀及其原始最后一维大小。
+_NVFP4_SMALL_PARAM_FIXES = {
+    "timestep_features.weight": 1,
+}
+
+
+def _fix_nvfp4_small_params(sd: dict[str, Any], metadata: dict[str, Any] | None):
+    """反量化 nvfp4 量化的小 nn.Parameter 权重，裁剪到原始形状。"""
+    if not metadata or "_quantization_metadata" not in metadata:
+        return
+
+    try:
+        qm = json.loads(metadata["_quantization_metadata"])
+        layers = qm.get("layers", {})
+    except Exception:
+        return
+
+    import torch
+
+    fixed = False
+    for suffix, orig_last_dim in _NVFP4_SMALL_PARAM_FIXES.items():
+        # 找到匹配的权重键
+        for k in list(sd.keys()):
+            if not k.endswith(suffix):
+                continue
+            prefix = k[:-7]  # strip .weight
+            scale_key = f"{prefix}.weight_scale"
+            scale2_key = f"{prefix}.weight_scale_2"
+            quant_key = f"{prefix}.comfy_quant"
+            if scale_key not in sd or scale2_key not in sd:
+                continue
+
+            try:
+                import comfy_kitchen as ck
+                qdata = sd[k].to(torch.uint8)
+                block_scale = sd[scale_key]
+                tensor_scale = sd[scale2_key]
+                deq = ck.dequantize_nvfp4(qdata, tensor_scale, block_scale)
+                deq = deq.to(torch.float32)
+                # 裁剪到原始形状
+                if deq.shape[-1] > orig_last_dim:
+                    deq = deq[..., :orig_last_dim].contiguous()
+                sd[k] = deq
+                sd.pop(scale_key, None)
+                sd.pop(scale2_key, None)
+                sd.pop(quant_key, None)
+                # 从 metadata 中移除该层
+                layers.pop(prefix, None)
+                fixed = True
+                print(f"[GJJ] nvfp4 小参数反量化: {k} → {tuple(deq.shape)}")
+            except Exception as exc:
+                print(f"[GJJ] nvfp4 小参数反量化失败 {k}: {exc}")
+
+    if fixed:
+        qm["layers"] = layers
+        metadata["_quantization_metadata"] = json.dumps(qm, separators=(",", ":"))
+
+
 def _load_unet_gguf(model_name: str, unique_id: Any = None):
     _ensure_gguf_dependency(model_name, unique_id=unique_id, model_kind="UNET")
     try:
@@ -2323,6 +2417,8 @@ def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique
         return _load_asym_w4a8_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     if _is_convrot_quantized_model(model_name):
         return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
+    if _is_minimax_music3_model(model_name):
+        return _load_minimax_music3_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     dtype = _torch_dtype(weight_dtype)
     if dtype is not None:
         try:
@@ -2344,6 +2440,8 @@ def _load_unet_model(model_name: str, weight_dtype: str = "default", unique_id: 
         return _load_asym_w4a8_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     if _is_convrot_quantized_model(model_name):
         return _load_convrot_quantized_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
+    if _is_minimax_music3_model(model_name):
+        return _load_minimax_music3_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
     import importlib
 
     official_dtype = str(weight_dtype or "default").strip()
@@ -2400,7 +2498,9 @@ def _clip_type_from_text(clip_type: str):
         "hunyuan_video": ["HUNYUAN_VIDEO", "hunyuan_video"],
         "flux": ["FLUX", "flux"],
         "stable_diffusion": ["STABLE_DIFFUSION", "SD1", "stable_diffusion"],
+        "minimax": ["MINIMAX", "MINIMAX_H3", "MINIMAXH3", "minimax"],
         "minimax_h3": ["MINIMAX", "MINIMAX_H3", "MINIMAXH3", "minimax_h3"],
+        "acestep": ["ACESTEP", "ACE_STEP", "acestep", "ace_step"],
     }.get(raw, [raw, raw.upper()])
     for name in candidates:
         if hasattr(enum, name):
@@ -2417,6 +2517,23 @@ def _load_clip(name: str, clip_type: str = "wan", weight_dtype: str = "default")
     if not path:
         path = folder_paths.get_full_path_or_raise("text_encoders", name)
     dtype = _torch_dtype(weight_dtype)
+
+    # 量化文本编码器的 Embedding 层不能做矩阵乘法，需在加载前反量化。
+    # int4_convrot / nvfp4_awq 会把 Embedding 也量化（导致形状减半），
+    # 这里检测并还原所有 Embedding 权重为原始精度。
+    sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
+    if _dequantize_text_encoder_embeddings(sd, metadata):
+        # 反量化后需要重新生成 .comfy_quant 标记给剩余的 Linear 量化层
+        sd, metadata = comfy.utils.convert_old_quants(sd, model_prefix="", metadata=metadata)
+        clip_data = [sd]
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_data,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            clip_type=_clip_type_from_text(clip_type),
+            model_options={"dtype": dtype} if dtype is not None else {},
+        )
+        return clip
+
     kwargs: dict[str, Any] = {
         "embedding_directory": folder_paths.get_folder_paths("embeddings"),
         "clip_type": _clip_type_from_text(clip_type),
@@ -2428,6 +2545,108 @@ def _load_clip(name: str, clip_type: str = "wan", weight_dtype: str = "default")
     except TypeError:
         kwargs.pop("model_options", None)
         return comfy.sd.load_clip([path], **kwargs)
+
+
+# Embedding 层名称后缀，这些层不能被量化。
+_EMBEDDING_LAYER_SUFFIXES = (
+    "embed_tokens_prefill.weight",
+    "embed_tokens_audio.weight",
+    "audio_extra_embedding.weight",
+    "audio_decoder.pos_embedding.weight",
+    "embed_tokens.weight",
+)
+
+# MiniMax Music3 模型各 Embedding 层期望的行数（vocab_size），
+# 用于裁剪 nvfp4 量化 padding 后的多余行。
+_EXPECTED_EMBEDDING_ROWS = {
+    "model.embed_tokens_prefill.weight": 151675,   # AUDIO_CODE_OFFSET
+    "model.embed_tokens_audio.weight": 16384,       # C0_VOCAB_SIZE
+    "model.audio_extra_embedding.weight": 7168,     # audio_vocab_size * (num_codebooks - 1)
+    "model.audio_decoder.pos_embedding.weight": 16,
+}
+
+
+def _dequantize_text_encoder_embeddings(sd: dict[str, Any], metadata: dict[str, Any] | None) -> bool:
+    """检测并反量化文本编码器中被错误量化的 Embedding 层，直接修改 sd 字典。返回是否有修改。"""
+    try:
+        import torch
+    except Exception:
+        return False
+
+    # 找出被量化的 Embedding 层（dtype 为 int8/uint8）
+    embed_keys = []
+    for k in list(sd.keys()):
+        if not k.endswith(".weight"):
+            continue
+        if any(k.endswith(s) for s in _EMBEDDING_LAYER_SUFFIXES):
+            t = sd[k]
+            if hasattr(t, "dtype") and t.dtype in (torch.int8, torch.uint8):
+                embed_keys.append(k)
+
+    if not embed_keys:
+        return False
+
+    print(f"[GJJ] 检测到文本编码器 Embedding 层被量化，正在反量化 {len(embed_keys)} 个层...")
+    fixed_count = 0
+
+    for k in embed_keys:
+        prefix = k[:-7]  # strip .weight
+        quant_key = f"{prefix}.comfy_quant"
+        scale_key = f"{prefix}.weight_scale"
+        scale2_key = f"{prefix}.weight_scale_2"
+
+        # int4_convrot: 有 .comfy_quant 和 .weight_scale
+        if quant_key in sd and scale_key in sd:
+            try:
+                conf = json.loads(bytes(sd[quant_key].detach().cpu().tolist()).decode("utf-8"))
+                if str(conf.get("format", "")).lower() == "convrot_w4a4":
+                    orig_dim = int(sd[k].shape[1]) * 2
+                    orig_shape = (int(sd[k].shape[0]), orig_dim)
+                    restored = _dequantize_convrot_weight_tensor(sd, prefix, orig_shape, torch.bfloat16)
+                    if restored is not None:
+                        sd[k] = restored
+                        sd.pop(quant_key, None)
+                        sd.pop(scale_key, None)
+                        fixed_count += 1
+            except Exception as exc:
+                print(f"[GJJ] convrot 反量化 {k} 失败：{exc}")
+
+        # nvfp4: 有 .weight_scale 和 .weight_scale_2，无 .comfy_quant
+        elif scale_key in sd and scale2_key in sd:
+            try:
+                import comfy_kitchen as ck
+                qdata = sd[k].to(torch.uint8)
+                block_scale = sd[scale_key]  # 已是 float8_e4m3fn
+                tensor_scale = sd[scale2_key]  # per-tensor scale
+                # dequantize_nvfp4(qx, per_tensor_scale, block_scales, output_type, hi_first)
+                deq = ck.dequantize_nvfp4(qdata, tensor_scale, block_scale)
+                deq = deq.to(torch.bfloat16)
+                # nvfp4 量化时会 padding 到 16 的倍数，需要裁剪到原始大小
+                expected_rows = _EXPECTED_EMBEDDING_ROWS.get(k)
+                if expected_rows is not None and deq.shape[0] > expected_rows:
+                    deq = deq[:expected_rows, :].contiguous()
+                sd[k] = deq
+                sd.pop(scale_key, None)
+                sd.pop(scale2_key, None)
+                fixed_count += 1
+            except Exception as exc:
+                print(f"[GJJ] nvfp4 反量化 {k} 失败：{exc}")
+
+    if fixed_count > 0:
+        print(f"[GJJ] Embedding 反量化完成，已修复 {fixed_count} 个层")
+        # 清除 metadata 中的量化信息，避免影响后续加载
+        if metadata and "_quantization_metadata" in metadata:
+            try:
+                qm = json.loads(metadata["_quantization_metadata"])
+                layers = qm.get("layers", {})
+                for k in embed_keys:
+                    prefix = k[:-7]
+                    layers.pop(prefix, None)
+                qm["layers"] = layers
+                metadata["_quantization_metadata"] = json.dumps(qm, separators=(",", ":"))
+            except Exception:
+                pass
+    return fixed_count > 0
 
 
 def _load_dual_clip(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default", unique_id: Any = None):

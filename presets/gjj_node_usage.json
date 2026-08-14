@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 71,
-      "last_used": 1786631842723
+      "use_count": 72,
+      "last_used": 1786680930346
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -132,6 +132,10 @@
     "GJJ_Krea2VisualOutpaint": {
       "use_count": 3,
       "last_used": 1786363808137
+    },
+    "GJJ_AudioUniversalModelLoader": {
+      "use_count": 1,
+      "last_used": 1786678323722
     }
   },
   "sort_reverse": true
