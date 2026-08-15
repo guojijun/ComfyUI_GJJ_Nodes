@@ -418,11 +418,31 @@ LTX23_GGUF_TEXT_CONNECTOR_NAMES = ["ltx-2.3-22b-dev_embeddings_connectors.safete
 LTX23_GGUF_VIDEO_VAE_NAMES = ["ltx-2.3-22b-dev_video_vae.safetensors"]
 LTX23_GGUF_AUDIO_VAE_NAMES = ["ltx-2.3-22b-dev_audio_vae.safetensors"]
 # LTX 2.5 模型名称常量
-LTX25_MODEL_NAMES = ["ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"]
-LTX25_VIDEO_VAE_NAMES = ["ltx-2.5-video-vae-bf16.safetensors"]
-LTX25_AUDIO_VAE_NAMES = ["ltx-2.5-audio-vae-bf16.safetensors"]
-LTX25_CLIP_NAMES = ["gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"]
-LTX25_SPATIAL_UPSCALER_NAMES = ["ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"]
+LTX25_MODEL_NAMES = [
+    "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+    "ltx-2.5-22b-distilled-transformer-comfy-bf16.safetensors",
+    "ltx-2.5-22b-distilled-transformer-comfy-fp16.safetensors",
+    "ltx-2.5-22b-distilled-transformer-comfy-fp8.safetensors",
+    "ltx-2.5-22b-distilled-transformer-comfy.safetensors",
+]
+LTX25_VIDEO_VAE_NAMES = [
+    "ltx-2.5-video-vae-bf16.safetensors",
+    "ltx-2.5-video-vae-fp16.safetensors",
+]
+LTX25_AUDIO_VAE_NAMES = [
+    "ltx-2.5-audio-vae-bf16.safetensors",
+    "ltx-2.5-audio-vae-fp16.safetensors",
+]
+LTX25_CLIP_NAMES = [
+    "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+    "gemma4-12b-with-proj-ltx-2.5-comfy-bf16.safetensors",
+    "gemma4-12b-with-proj-ltx-2.5-comfy-fp16.safetensors",
+    "gemma4-12b-with-proj-ltx-2.5-comfy.safetensors",
+]
+LTX25_SPATIAL_UPSCALER_NAMES = [
+    "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+    "ltx-2.5-latent-spatial-upscaler-x2-fp16-1.0.safetensors",
+]
 MINIMAX_H3_MODEL_NAMES = ["minimax_h3_fl2va_pruned_int8_convrot.safetensors"]
 MINIMAX_H3_TEXT_ENCODER_NAMES = ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]
 MINIMAX_H3_VIDEO_VAE_NAMES = ["minimax_h3_video_vae_fp16.safetensors"]
@@ -1616,9 +1636,9 @@ def _clean_search_token(token: str) -> str:
         return value
     if value == "wan2":
         return "wan"
-    if value in {"ltx23"}:
+    if value in {"ltx23", "ltx25"}:
         return value
-    if re.fullmatch(r"ltx(?:2(?:3)?)", value):
+    if re.fullmatch(r"ltx(?:2(?:3|5)?)", value):
         return "ltx"
     if re.fullmatch(r"gemma\d+", value):
         return "gemma"
@@ -1646,8 +1666,10 @@ def _search_tokens(value: Any) -> list[str]:
     text = re.sub(r"\bwan[\s._-]*21(?=$|[\s._-])", " wan21 wan ", text)
     text = re.sub(r"\bwan[\s._-]*22(?=$|[\s._-])", " wan22 wan ", text)
     text = re.sub(r"\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])", " ltx23 ltx ", text)
+    text = re.sub(r"\bltx[\s._-]*2[\s._-]*5(?=$|[\s._-])", " ltx25 ltx ", text)
     text = re.sub(r"\bltx23(?=$|[\s._-])", " ltx23 ltx ", text)
-    text = re.sub(r"\bgemma[\s._-]*3\b", " gemma ", text)
+    text = re.sub(r"\bltx25(?=$|[\s._-])", " ltx25 ltx ", text)
+    text = re.sub(r"\bgemma[\s._-]*[34]\b", " gemma ", text)
     parts = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", text).split()
     tokens: list[str] = []
     seen: set[str] = set()
@@ -1759,6 +1781,8 @@ def _official_match_key(value: Any) -> str:
     text = re.sub(r"\bwan[\s._-]*21(?=$|[\s._-])", " wan21 ", text)
     text = re.sub(r"\bwan[\s._-]*22(?=$|[\s._-])", " wan22 ", text)
     text = re.sub(r"\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])", " ltx23 ", text)
+    text = re.sub(r"\bltx[\s._-]*2[\s._-]*5(?=$|[\s._-])", " ltx25 ", text)
+    text = re.sub(r"\bgemma[\s._-]*[34]\b", " gemma ", text)
     parts = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", text).split()
     kept: list[str] = []
     for part in parts:

@@ -585,10 +585,11 @@ def _generate_text(
                 flush=True,
             )
             return recovered
+        _has_think_end = bool(re.search(r"</think\s*>", raw_text, flags=re.IGNORECASE))
         print(
             "[GJJ GemmaTextGenerate] 输出为空诊断: "
             f"raw_length={len(raw_text)} "
-            f"has_think_end={bool(re.search(r'</think\\s*>', raw_text, flags=re.IGNORECASE))} "
+            f"has_think_end={_has_think_end} "
             f"official_output_type={type(official_output).__name__}",
             flush=True,
         )

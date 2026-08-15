@@ -161,9 +161,9 @@ function cleanSearchToken(token) {
 	let value = String(token || "").trim().toLowerCase();
 	if (!value) return "";
 	if (SEARCH_KEEP_TOKENS.has(value)) return value;
-	if (["wan21", "wan22", "ltx23"].includes(value)) return value;
+	if (["wan21", "wan22", "ltx23", "ltx25"].includes(value)) return value;
 	if (value === "wan2") return "wan";
-	if (/^ltx(?:2(?:3)?)$/.test(value)) return "ltx";
+	if (/^ltx(?:2(?:3|5)?)?$/.test(value)) return "ltx";
 	if (/^gemma\d+$/.test(value)) return "gemma";
 	if (SEARCH_DROP_TOKENS.has(value)) return "";
 	if (/^v?\d+(?:\.\d+)*$/.test(value)) return "";
@@ -183,8 +183,10 @@ function cleanSearchTokens(value) {
 		.replace(/\bwan[\s._-]*21(?=$|[\s._-])/g, " wan21 wan ")
 		.replace(/\bwan[\s._-]*22(?=$|[\s._-])/g, " wan22 wan ")
 		.replace(/\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])/g, " ltx23 ltx ")
+		.replace(/\bltx[\s._-]*2[\s._-]*5(?=$|[\s._-])/g, " ltx25 ltx ")
 		.replace(/\bltx23(?=$|[\s._-])/g, " ltx23 ltx ")
-		.replace(/\bgemma[\s._-]*3\b/g, " gemma ");
+		.replace(/\bltx25(?=$|[\s._-])/g, " ltx25 ltx ")
+		.replace(/\bgemma[\s._-]*[34]\b/g, " gemma ");
 	const seen = new Set();
 	const tokens = [];
 	for (const part of text.replace(/[^0-9a-z\u4e00-\u9fff]+/g, " ").split(/\s+/)) {
@@ -278,7 +280,10 @@ function officialMatchKey(value) {
 		.replace(/\bwan[\s._-]*21(?=$|[\s._-])/g, " wan21 ")
 		.replace(/\bwan[\s._-]*22(?=$|[\s._-])/g, " wan22 ")
 		.replace(/\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])/g, " ltx23 ")
-		.replace(/\bltx23(?=$|[\s._-])/g, " ltx23 ");
+		.replace(/\bltx[\s._-]*2[\s._-]*5(?=$|[\s._-])/g, " ltx25 ")
+		.replace(/\bltx23(?=$|[\s._-])/g, " ltx23 ")
+		.replace(/\bltx25(?=$|[\s._-])/g, " ltx25 ")
+		.replace(/\bgemma[\s._-]*[34]\b/g, " gemma ");
 	const kept = [];
 	for (const part of text.replace(/[^0-9a-z\u4e00-\u9fff]+/g, " ").split(/\s+/)) {
 		const token = part.trim().toLowerCase();
