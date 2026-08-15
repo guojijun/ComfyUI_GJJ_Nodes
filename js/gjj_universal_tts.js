@@ -76,6 +76,7 @@ const BRANCH_PRIVATE = {
 	"IndexTTS-v1.5": new Set(["device", "precision", "seed"]),
 	"IndexTTS-v1.0": new Set(["device", "precision", "seed"]),
 	"IndexTTS-v2": new Set(["emotion_prompt", "device", "precision", "seed"]),
+	"IndexTTS2.5": new Set(["device", "precision", "seed", "it25_lang", "it25_duration_factor", "it25_temperature", "it25_top_p", "it25_top_k", "it25_num_beams", "it25_repetition_penalty", "it25_length_penalty", "it25_max_mel_tokens", "it25_max_text_tokens", "it25_emo_alpha", "it25_emo_vector_json", "it25_use_emo_text", "it25_emo_text", "it25_use_random", "it25_use_qwen_emo"]),
 	VoxCPM2: new Set(["model_name", "emotion_prompt", "device", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
 };
 
@@ -92,6 +93,7 @@ const BRANCH_DISPLAY = {
 	"IndexTTS-v1.5": "🎙️ 克隆 · IndexTTS-v1.5",
 	"IndexTTS-v1.0": "🎙️ 克隆 · IndexTTS-v1.0",
 	"IndexTTS-v2": "🎙️ 克隆 · IndexTTS-v2",
+	"IndexTTS2.5": "🎙️ 克隆 · IndexTTS2.5",
 	VoxCPM2: "🎙️ 克隆/设计 · VoxCPM2",
 };
 const CHOICE_DEFAULTS = {
@@ -1074,9 +1076,9 @@ function ensurePanel(node) {
 	const terms = button("👨‍🎨", "编辑术语库");
 	const output = button("🔌", "选择输出口内容");
 	const settings = button("⚙️", "显示/隐藏其它参数");
-	const generate = button("🎤", "生成语音");
+	const generate = button("▶️", "生成语音");
 	const reset = button("🔄", "清空预览音频并初始化节点");
-	toolbar.append(open, keep, branch, link, seed, mp3, terms, output, settings, generate, reset);
+	toolbar.append(open, keep, branch, link, seed, mp3, terms, output, settings, reset, generate);
 
 	const progress = document.createElement("div");
 	progress.style.cssText = "display:none;padding:6px 8px;border:1px solid #41535b;border-radius:7px;background:#121a1f";

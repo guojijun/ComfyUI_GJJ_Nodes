@@ -33,6 +33,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .common_utils import (
+    DEFAULT_MODEL_URL as _GJJ_MODEL_DOWNLOAD_URL,
+)
 from .common_utils.dependency_checker import (
     build_dependency_model_report,
     build_node_help_payload,
@@ -61,7 +64,7 @@ AUDIO_FORMAT_OPTIONS = ["MP3", "WAV"]
 BRANCHES = [
     "EdgeTTS", "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
     "Qwen3-CustomVoice", "Qwen3-VoiceDesign", "Qwen3-VoiceClone", "IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2",
-    "VoxCPM2",
+    "IndexTTS2.5", "VoxCPM2",
 ]
 TEXT_FORMATS = ["SRT", "VTT", "LRC", "JSON"]
 AUDIO_OUTPUT_MODES = ["整体合并", "单个队列"]
@@ -156,6 +159,15 @@ BRANCH_DEPENDENCIES = {
         {"module_name": "sentencepiece", "package_name": "sentencepiece", "display_name": "sentencepiece", "description": "IndexTTS tokenizer 依赖。"},
         {"module_name": "textstat", "package_name": "textstat", "display_name": "textstat", "description": "文本处理依赖。"},
     ],
+    "IndexTTS2.5": [
+        {"module_name": "indextts", "package_name": "", "display_name": "indextts (IndexTTS 2.5)", "description": "IndexTTS-2.5 推理库；无法直接 pip install，需要从 GitHub 源码安装。"},
+        {"module_name": "omegaconf", "package_name": "omegaconf", "display_name": "omegaconf", "description": "IndexTTS-2.5 配置解析依赖。"},
+        {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "音频读写依赖。"},
+        {"module_name": "fugashi", "package_name": "fugashi", "display_name": "fugashi", "description": "IndexTTS-2.5 日文分词依赖，需配合 unidic-lite。"},
+        {"module_name": "unidic_lite", "package_name": "unidic-lite", "display_name": "unidic-lite", "description": "fugashi 的日文词典。"},
+        {"module_name": "modelscope", "package_name": "modelscope", "display_name": "modelscope", "description": "情感模型推理依赖（可选，仅 use_qwen_emo 时需要）。"},
+        {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "情感模型推理依赖（可选，仅 use_qwen_emo 时需要）。"},
+    ],
     "VoxCPM2": [
         {"module_name": "transformers", "package_name": "transformers", "display_name": "transformers", "description": "VoxCPM2 文本与模型运行时。"},
         {"module_name": "safetensors", "package_name": "safetensors", "display_name": "safetensors", "description": "VoxCPM2 权重读取依赖。"},
@@ -178,8 +190,11 @@ BRANCH_MODEL_HINTS = {
     "IndexTTS-v1.5": ("TTS", "IndexTTS-1.5"),
     "IndexTTS-v1.0": ("TTS", "Index-TTS-1.0"),
     "IndexTTS-v2": ("TTS", "IndexTTS-2"),
+    "IndexTTS2.5": ("TTS", "IndexTTS2.5"),
     "VoxCPM2": ("TTS", "VoxCPM2"),
 }
+
+INDEXTTS25_MODEL_FOLDER_NAME = "TTS/IndexTTS2.5"
 
 QWEN_BRANCH_MODEL_TYPES = {
     "Qwen3-CustomVoice": "custom_voice",
@@ -233,13 +248,14 @@ LONGCAT_BRANCH_PREFIXES = {
 }
 LONGCAT_UNSUPPORTED_MODEL_MARKERS = ("nvfp4",)
 BRANCH_MODEL_DOWNLOAD_URLS = {
-    "Qwen3-CustomVoice": "https://huggingface.co/Qwen",
-    "Qwen3-VoiceDesign": "https://huggingface.co/Qwen",
-    "Qwen3-VoiceClone": "https://huggingface.co/Qwen",
-    "IndexTTS-v1.5": "https://github.com/index-tts/index-tts",
-    "IndexTTS-v1.0": "https://github.com/index-tts/index-tts",
-    "IndexTTS-v2": "https://github.com/index-tts/index-tts",
-    "VoxCPM2": "https://github.com/OpenBMB/VoxCPM",
+    "Qwen3-CustomVoice": _GJJ_MODEL_DOWNLOAD_URL,
+    "Qwen3-VoiceDesign": _GJJ_MODEL_DOWNLOAD_URL,
+    "Qwen3-VoiceClone": _GJJ_MODEL_DOWNLOAD_URL,
+    "IndexTTS-v1.5": _GJJ_MODEL_DOWNLOAD_URL,
+    "IndexTTS-v1.0": _GJJ_MODEL_DOWNLOAD_URL,
+    "IndexTTS-v2": _GJJ_MODEL_DOWNLOAD_URL,
+    "IndexTTS2.5": _GJJ_MODEL_DOWNLOAD_URL,
+    "VoxCPM2": _GJJ_MODEL_DOWNLOAD_URL,
 }
 QWEN_GENERATION_PRESETS = {
     "Qwen3-CustomVoice": {
@@ -270,6 +286,7 @@ QWEN_GENERATION_PRESETS = {
 REFERENCE_REQUIRED_BRANCHES = {
     "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
     "Qwen3-VoiceClone", "IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2",
+    "IndexTTS2.5",
 }
 REFERENCE_TEXT_ASR_BRANCHES = {
     "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
@@ -277,10 +294,46 @@ REFERENCE_TEXT_ASR_BRANCHES = {
 }
 
 
+def _indextts25_model_dir() -> Path:
+    # 优先从 folder_paths 注册的 "TTS" 子目录中查找 IndexTTS2.5
+    try:
+        dirs = folder_paths.get_folder_paths("TTS")
+        if dirs:
+            candidate = Path(dirs[0]) / "IndexTTS2.5"
+            if candidate.is_dir():
+                return candidate
+    except Exception:
+        pass
+    # 回退到 models/TTS/IndexTTS2.5
+    base = Path(folder_paths.models_dir) / "TTS" / "IndexTTS2.5"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _indextts25_check_exists(model_dir: Path) -> bool:
+    if not model_dir.is_dir():
+        return False
+    required = ["config.yaml", "gpt.pth", "s2mel.pth", "codec.pth"]
+    return all((model_dir / name).is_file() for name in required)
+
+
+def _indextts25_download_model(target_dir: Path, unique_id: Any = None) -> bool:
+    """已弃用：IndexTTS-2.5 现直接使用本地 models/TTS/IndexTTS2.5/，不再自动下载。"""
+    return False
+
+
 def universal_tts_branch_model_specs(branch: str) -> list[dict[str, str]]:
     hint = BRANCH_MODEL_HINTS.get(branch)
     if not hint:
         return []
+    if branch == "IndexTTS2.5":
+        return [{
+            "label": "IndexTTS-2.5 模型目录",
+            "subdir": INDEXTTS25_MODEL_FOLDER_NAME,
+            "filename": "IndexTTS2.5",
+            "description": "IndexTTS-2.5 主模型目录；需包含 config.yaml、gpt.pth、s2mel.pth、codec.pth。请预先放置到 models/TTS/IndexTTS2.5/。",
+            "required": True,
+        }]
     if branch.startswith("Qwen3-"):
         expected_type = _qwen_expected_model_type(branch)
         return [{
@@ -579,6 +632,8 @@ def _branch_model_choices(branch: str) -> list[str]:
     if not hint:
         return [""]
     root = _models_root(hint[0])
+    if branch == "IndexTTS2.5":
+        return [hint[1]]
     if branch.startswith("Qwen3-"):
         choices = [path.name for path in _qwen_compatible_model_dirs(branch)]
         return choices or [hint[1]]
@@ -619,6 +674,17 @@ def _missing_models(branch: str, model_name: str = "") -> list[dict[str, str]]:
         return specs
     if branch.startswith("IndexTTS"):
         missing: list[dict[str, str]] = []
+        if branch == "IndexTTS2.5":
+            model_dir = _indextts25_model_dir()
+            if not _indextts25_check_exists(model_dir):
+                missing.append({
+                    "label": "IndexTTS-2.5 模型目录",
+                    "subdir": INDEXTTS25_MODEL_FOLDER_NAME,
+                    "filename": "IndexTTS2.5",
+                    "description": "请预先下载并放置到 models/TTS/IndexTTS2.5/，需包含 config.yaml、gpt.pth、s2mel.pth、codec.pth。",
+                    "required": True,
+                })
+            return missing
         if branch == "IndexTTS-v1.5":
             specs = [{
                 "label": "IndexTTS-v1.5 目录",
@@ -710,10 +776,26 @@ def _missing_models(branch: str, model_name: str = "") -> list[dict[str, str]]:
     }]
 
 
+def _indextts25_install_command() -> tuple[str, str]:
+    """生成 IndexTTS2.5 的 PowerShell 兼容一键安装命令。返回 (copy_text, copy_label)。"""
+    py = f'& "{sys.executable}"' if os.name == "nt" else sys.executable
+    target_dir = f'"{os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages")}"'
+    mirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    github_zip = "https://github.com/index-tts/index-tts/archive/refs/heads/main.zip"
+    copy_text = (
+        f"{py} -m pip install -i {mirror} --target {target_dir} --ignore-installed "
+        "hatchling omegaconf soundfile fugashi unidic-lite pyyaml torchaudio librosa "
+        "modelscope huggingface_hub "
+        f"{py} -m pip install --no-deps --ignore-requires-python --no-build-isolation --target {target_dir} "
+        f"{github_zip}"
+    )
+    return copy_text, "📋 复制安装命令"
+
+
 def _build_branch_report(branch: str, model_name: str = "", original_error: str = "") -> dict[str, Any]:
     missing_deps = _missing_dependencies(branch)
     missing_models = _missing_models(branch, model_name)
-    return build_dependency_model_report(
+    report = build_dependency_model_report(
         node_name=NODE_DISPLAY_NAME,
         missing_dependencies=missing_deps,
         missing_models=missing_models,
@@ -722,6 +804,12 @@ def _build_branch_report(branch: str, model_name: str = "", original_error: str 
         original_error=original_error,
         model_download_url=BRANCH_MODEL_DOWNLOAD_URLS.get(branch),
     )
+    if branch == "IndexTTS2.5" and any(spec.get("module_name") == "indextts" for spec in missing_deps):
+        # IndexTTS2.5 的 indextts 包没有对应的 PyPI 名，直接用 GitHub 源码 URL 填充安装命令
+        copy_text, copy_label = _indextts25_install_command()
+        report["copy_text"] = copy_text
+        report["copy_label"] = copy_label or report.get("copy_label", "")
+    return report
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -754,6 +842,32 @@ def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any], text: str = ""
         pass
 
 
+def _save_wav_results(audio: dict[str, Any], filename_prefix: str) -> list[dict[str, Any]]:
+    """直接用标准库 wave + numpy 写出 WAV，返回 ComfyUI SavedAudios 兼容列表。"""
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        str(filename_prefix or "audio/GJJ_UniversalTTS"), folder_paths.get_output_directory()
+    )
+    waveform = audio["waveform"].detach().cpu()
+    sample_rate = int(audio["sample_rate"])
+    results: list[dict[str, Any]] = []
+    for batch_number, wav in enumerate(waveform):
+        filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
+        file = f"{filename_with_batch_num}_{counter:05}.wav"
+        output_path = os.path.join(full_output_folder, file)
+        # 单声道，归一化并转 16-bit PCM
+        mono = wav.squeeze(0) if wav.dim() >= 2 and wav.shape[0] >= 1 else wav
+        mono = mono.reshape(-1)
+        mono = torch.clamp(mono, -1.0, 1.0)
+        pcm = (mono * 32767.0).to(torch.int16).cpu().numpy()
+        with wave.open(output_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm.tobytes())
+        results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+    return results
+
+
 def _save_audio_ui(
     audio: dict[str, Any],
     filename_prefix: str,
@@ -761,10 +875,15 @@ def _save_audio_ui(
     quality: str = "320k",
 ) -> dict[str, Any]:
     try:
-        from comfy_api.latest import UI
-
         selected_format = _coerce_choice(audio_format, AUDIO_FORMAT_OPTIONS, "WAV")
         selected_quality = quality if quality in MP3_QUALITY_OPTIONS else "320k"
+
+        # ComfyUI 内置 AudioSaveHelper 仅支持 flac / mp3 / opus，WAV 需节点内自行保存
+        if selected_format.upper() == "WAV":
+            return {"audio": _save_wav_results(audio, str(filename_prefix or "audio/GJJ_UniversalTTS"))}
+
+        from comfy_api.latest import UI
+
         return UI.AudioSaveHelper.get_save_audio_ui(
             audio,
             filename_prefix=str(filename_prefix or "audio/GJJ_UniversalTTS"),
@@ -2289,6 +2408,7 @@ def _patch_indextts_torchaudio_load():
 
                 data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
                 tensor = torch.from_numpy(data.T.copy())
+                tensor = torch.clamp(tensor, -1.0, 1.0)
                 return tensor, int(sample_rate)
 
         load._gjj_soundfile_fallback = True
@@ -2307,7 +2427,14 @@ def _patch_indextts_torchaudio_load():
                 raise
             import soundfile as sf
 
-            tensor = src.detach().cpu().float()
+            tensor = src.detach().cpu()
+            # 关键：int16 直接写出，不要再转 float 乘 32767，否则二次缩放爆音
+            if tensor.dtype == torch.int16:
+                pass
+            else:
+                tensor = tensor.float()
+                tensor = torch.clamp(tensor, -1.0, 1.0)
+                tensor = (tensor * 32767.0).to(torch.int16)
             if tensor.ndim == 3:
                 tensor = tensor.squeeze(0)
             if tensor.ndim == 1:
@@ -2359,6 +2486,28 @@ def _patch_indextts_audio_cache_manager():
     manager_cls._cache_audio_tensor = _cache_audio_tensor
 
 
+def _patch_indextts_model_tokenizer(model):
+    """在 IndexTTS 模型实例上补齐 split_sentences 方法。
+
+    indextts 2.5 把 TextTokenizer.split_sentences 改名为 split_segments，
+    但 indexttsnode.py 仍在调用旧方法名。在**实例**上绑定方法，
+    不污染全局类定义，避免影响其他分支。
+    """
+    import types
+    tokenizer = getattr(model, "tokenizer", None)
+    if tokenizer is None:
+        return
+    if hasattr(tokenizer, "split_sentences"):
+        return
+    split_segments = getattr(tokenizer, "split_segments", None)
+    if split_segments is None:
+        return
+    tokenizer.split_sentences = types.MethodType(
+        lambda self, *args, **kwargs: split_segments(*args, **kwargs),
+        tokenizer,
+    )
+
+
 def _patch_transformers_offloaded_cache_compat():
     try:
         import transformers.cache_utils as cache_utils
@@ -2397,6 +2546,11 @@ def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None)
         pass
     _install_indextts_audio_compat()
     _patch_transformers_offloaded_cache_compat()
+    # 先应用 IndexTTS2.5 的 transformers 兼容补丁，防止 import indextts 时失败
+    _it25_patch_transformers_compat()
+    _it25_patch_bigvgan_compat()
+    _it25_patch_librosa_numba_compat()
+    _it25_patch_torchaudio_save()
     try:
         from indexttsnode import AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir
         _patch_indextts_deepspeed_fallback()
@@ -2451,6 +2605,7 @@ def _load_indextts(branch: str, device: str, precision: str, unique_id: Any = No
             return _MODEL_CACHE[cache_key]
         _send_status(unique_id, f"正在加载 {branch}", 0.12)
         model = IndexTTS2(is_fp16=is_fp16, device=None if str(device or "auto") == "auto" else str(device), use_cuda_kernel=False)
+        _patch_indextts_model_tokenizer(model)
         _MODEL_CACHE[cache_key] = (model, AudioCacheManager(cache_dir))
         return _MODEL_CACHE[cache_key]
     model_dir = _indextts_v1_model_dir(branch)
@@ -2465,6 +2620,7 @@ def _load_indextts(branch: str, device: str, precision: str, unique_id: Any = No
         is_fp16=is_fp16,
         device=None if str(device or "auto") == "auto" else str(device),
     )
+    _patch_indextts_model_tokenizer(model)
     _MODEL_CACHE[cache_key] = (model, AudioCacheManager(cache_dir))
     return _MODEL_CACHE[cache_key]
 
@@ -2519,6 +2675,835 @@ def _indextts_audio(
     elif tensor.ndim == 2:
         tensor = tensor.unsqueeze(0)
     return {"waveform": tensor.contiguous(), "sample_rate": out_sr}
+
+
+# ---------------------------------------------------------------------------
+# IndexTTS-2.5 分支：独立 PyPI 包 + 独立模型目录；兼容 transformers 5.x / HF 1.x / librosa numba
+# ---------------------------------------------------------------------------
+def _it25_clear_cached_modules():
+    keys = [k for k in sys.modules if k == "indextts" or k.startswith("indextts.")]
+    for k in keys:
+        del sys.modules[k]
+
+
+def _it25_patch_transformers_compat():
+    """补齐 indextts 需要但当前 transformers 版本中缺失的符号。
+
+    注意：不能用 tf_major 版本号做短路判断，因为 QuantizedCacheConfig 等符号
+    在 transformers 4.57 里也不存在，必须按需逐个检查并补齐。
+    """
+    try:
+        import transformers
+        _ = transformers.__version__
+    except Exception:
+        return
+
+    # --- 补齐 transformers.cache_utils 缺失符号（所有版本都要检查） ---
+    try:
+        import transformers.cache_utils as _cu
+
+        _cache_stub_classes = {
+            "QuantizedCacheConfig": None,
+            "DynamicCacheConfig": None,
+            "StaticCacheConfig": None,
+            "SlidingWindowCacheConfig": None,
+        }
+
+        for _name in _cache_stub_classes:
+            if not hasattr(_cu, _name):
+                class _CfgStub:
+                    def __init__(self, *args, **kwargs):
+                        for k, v in kwargs.items():
+                            setattr(self, k, v)
+                    def __getattr__(self, name):
+                        return None
+                setattr(_cu, _name, _CfgStub)
+    except Exception:
+        pass
+
+    # --- 补齐 candidate_generator 缺失符号 ---
+    try:
+        import transformers.generation.candidate_generator as _cg
+        if not hasattr(_cg, "_crop_past_key_values"):
+            def _crop_past_key_values(cache, length, beam_idx=None):
+                try:
+                    if hasattr(cache, "crop"):
+                        return cache.crop(length, beam_idx)
+                except Exception:
+                    pass
+                return cache
+            _cg._crop_past_key_values = _crop_past_key_values
+    except Exception:
+        pass
+
+    # --- 补齐 configuration_utils 缺失符号 ---
+    try:
+        import transformers.generation.configuration_utils as _gcu
+        if not hasattr(_gcu, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
+            _gcu.NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+        if not hasattr(_gcu, "QUANT_BACKEND_CLASSES_MAPPING"):
+            _gcu.QUANT_BACKEND_CLASSES_MAPPING = {}
+    except Exception:
+        pass
+
+    # --- 补齐 modeling_utils.SequenceSummary ---
+    try:
+        import transformers.modeling_utils as _mu
+        if not hasattr(_mu, "SequenceSummary"):
+            class SequenceSummary:
+                def __init__(self, *args, **kwargs):
+                    for k, v in kwargs.items():
+                        setattr(self, k, v)
+                    self.summary = None
+                def __call__(self, *args, **kwargs):
+                    return self.summary
+            _mu.SequenceSummary = SequenceSummary
+    except Exception:
+        pass
+
+    # --- 补齐 BaseTypicalLogitsWarper ---
+    try:
+        import transformers
+        if not hasattr(transformers, "BaseTypicalLogitsWarper"):
+            try:
+                from transformers.generation.logits_process import LogitsWarper
+            except Exception:
+                class LogitsWarper:
+                    pass
+
+            class BaseTypicalLogitsWarper(LogitsWarper):
+                def __init__(self, *args, **kwargs):
+                    for k, v in kwargs.items():
+                        setattr(self, k, v)
+                def __call__(self, *args, **kwargs):
+                    return args[0] if args else None
+            transformers.BaseTypicalLogitsWarper = BaseTypicalLogitsWarper
+    except Exception:
+        pass
+
+    # --- 补齐 transformers.generation 缺失符号 ---
+    try:
+        import transformers.generation.utils as _gu
+        if not hasattr(_gu, "GenerationMode"):
+            try:
+                from transformers.generation import GenerationMode
+            except Exception:
+                class GenerationMode:
+                    GREEDY_SEARCH = "greedy_search"
+                    SAMPLE = "sample"
+                    BEAM_SEARCH = "beam_search"
+                    BEAM_SAMPLE = "beam_sample"
+                    CONSTRAINED_BEAM_SEARCH = "constrained_beam_search"
+                    def __init__(self, v="greedy_search"):
+                        self.value = v
+                _gu.GenerationMode = GenerationMode
+    except Exception:
+        pass
+
+    # --- 补齐 GenerationConfig 缺失属性 ---
+    try:
+        from transformers import GenerationConfig as _GC
+        for _attr, _val in [
+            ("decoder_start_token_id", None),
+            ("eos_token_id", None),
+            ("pad_token_id", None),
+            ("bos_token_id", None),
+            ("forced_decoder_ids", None),
+            ("suppress_tokens", None),
+            ("seed", None),
+            ("index", 0),
+            ("prompt_lookup_num_tokens", None),
+            ("max_matching_seq_len", None),
+        ]:
+            if not hasattr(_GC, _attr):
+                setattr(_GC, _attr, _val)
+    except Exception:
+        pass
+
+    # ExtensionsTrie
+    try:
+        import transformers.tokenization_utils as _tu
+        if not hasattr(_tu, "ExtensionsTrie"):
+            try:
+                from transformers.tokenization_python import ExtensionsTrie
+                _tu.ExtensionsTrie = ExtensionsTrie
+            except Exception:
+                class ExtensionsTrie:
+                    def __init__(self, vocab=None):
+                        self.data = {}
+                        if vocab:
+                            for token in vocab:
+                                self.add(token)
+
+                    def add(self, word):
+                        node = self.data
+                        for ch in word:
+                            if ch not in node:
+                                node[ch] = {}
+                            node = node[ch]
+                        node[None] = word
+
+                    def split(self, text):
+                        states = [(self.data, 0)]
+                        results = []
+                        for i, ch in enumerate(text):
+                            new_states = []
+                            for state, start in states:
+                                if ch in state:
+                                    new_states.append((state[ch], start))
+                                if None in state:
+                                    results.append((state[None], start, i))
+                            if ch in self.data:
+                                new_states.append((self.data[ch], i))
+                            states = new_states
+                        for state, start in states:
+                            if None in state:
+                                results.append((state[None], start, len(text)))
+                        return results
+
+                _tu.ExtensionsTrie = ExtensionsTrie
+    except Exception:
+        pass
+
+    # PretrainedConfig._get_non_default_generation_parameters
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+        from transformers import GenerationConfig
+
+        if not hasattr(PretrainedConfig, "_get_non_default_generation_parameters"):
+            def _gndgp(self):
+                cd = self.to_dict() if hasattr(self, "to_dict") else {}
+                try:
+                    gc = GenerationConfig()
+                except Exception:
+                    return {}
+                out = {}
+                for k, v in cd.items():
+                    if k == "is_decoder":
+                        continue
+                    if hasattr(gc, k) and getattr(gc, k) != v:
+                        out[k] = v
+                return out
+
+            PretrainedConfig._get_non_default_generation_parameters = _gndgp
+    except Exception:
+        pass
+
+    # GenerationConfig attributes
+    try:
+        from transformers import GenerationConfig as _GC
+        from transformers.configuration_utils import PretrainedConfig as _PC
+        for attr, default in [
+            ("return_legacy_cache", False),
+            ("_original_object_hash", 0),
+            ("_bos_token_tensor", None),
+            ("_eos_token_tensor", None),
+            ("_pad_token_tensor", None),
+            ("_decoder_start_token_tensor", None),
+        ]:
+            if not hasattr(_GC, attr):
+                setattr(_GC, attr, default)
+        for attr, default in [("_pre_quantization_dtype", None), ("sliding_window", None)]:
+            if not hasattr(_PC, attr):
+                setattr(_PC, attr, default)
+    except Exception:
+        pass
+
+    # BeamSearchScorer.is_done
+    try:
+        beam_search_mod = sys.modules.get("transformers.generation.beam_search")
+        if beam_search_mod is not None:
+            BSS = getattr(beam_search_mod, "BeamSearchScorer", None)
+            if BSS is not None and not hasattr(BSS, "is_done"):
+                orig_init = BSS.__init__
+
+                def _patched_init(self, *args, **kwargs):
+                    orig_init(self, *args, **kwargs)
+                    if not hasattr(self, "_done"):
+                        batch_size = getattr(self, "batch_size", 1)
+                        num_beam_groups = getattr(self, "num_beam_groups", 1)
+                        device = getattr(self, "device", "cpu")
+                        self._done = torch.tensor(
+                            [False for _ in range(batch_size * num_beam_groups)],
+                            dtype=torch.bool, device=device,
+                        )
+
+                @property
+                def _is_done(self):
+                    return self._done.all()
+
+                BSS.__init__ = _patched_init
+                BSS.is_done = _is_done
+    except Exception:
+        pass
+
+
+def _it25_patch_bigvgan_compat():
+    try:
+        import huggingface_hub
+        if int(huggingface_hub.__version__.split(".")[0]) < 1:
+            return
+    except Exception:
+        return
+    for _mp in ["indextts.s2mel.modules.bigvgan.bigvgan", "indextts.BigVGAN.bigvgan"]:
+        try:
+            _mod = __import__(_mp, fromlist=["BigVGAN"])
+            _BVG = getattr(_mod, "BigVGAN", None)
+            if _BVG is None:
+                continue
+            orig_fp = _BVG._from_pretrained
+            if getattr(orig_fp, "_gjj_patched_it25", False):
+                continue
+
+            @classmethod
+            def _patched_fp(cls, **kwargs):
+                kwargs.setdefault("proxies", None)
+                kwargs.setdefault("resume_download", False)
+                return orig_fp.__func__(cls, **kwargs)
+
+            _patched_fp._gjj_patched_it25 = True
+            _BVG._from_pretrained = _patched_fp
+        except Exception:
+            continue
+
+
+def _it25_search_local_aux_models(model_dir: str | Path) -> dict[str, str] | None:
+    """在 models/TTS/ 下任意子目录模糊搜索 IndexTTS2.5 的三个子模型。
+
+    返回 {"w2v_bert": path, "campplus": path, "bigvgan": path} 或 None（有任何缺失）。
+    搜索规则：
+      - 搜索根：ComfyUI 标准 models/TTS/ + IndexTTS2.5 主模型目录的父目录（去重）
+      - 递归搜索任意子目录（限制深度 5 层，避免性能问题）
+      - 三个子模型全部找到才返回，否则返回 None（让外层走原下载逻辑）
+
+    识别规则（按目录名/文件名匹配，不限制路径）：
+      - w2v-bert-2.0/ 目录：必须含 model.safetensors
+      - campplus_cn_common.bin 文件：大于 1KB
+      - bigvgan/ 或 bigvgan_v2_22khz_80band_256x/ 目录：必须含 config.json + bigvgan_generator.pt
+    """
+    import os as _os
+
+    search_roots: list[Path] = []
+    try:
+        search_roots.append(_models_root("TTS"))
+    except Exception:
+        pass
+    try:
+        parent = Path(model_dir).parent
+        if parent.exists() and parent not in search_roots:
+            search_roots.append(parent)
+    except Exception:
+        pass
+
+    MAX_DEPTH = 5
+    w2v_path: Path | None = None
+    campplus_path: Path | None = None
+    bigvgan_path: Path | None = None
+
+    for root in search_roots:
+        if w2v_path and campplus_path and bigvgan_path:
+            break
+        for dirpath, dirnames, filenames in _os.walk(root):
+            rel = _os.path.relpath(dirpath, root)
+            depth = 0 if rel == "." else rel.count(_os.sep) + 1
+            if depth > MAX_DEPTH:
+                # 修改 in-place 阻止继续下钻，节省性能
+                dirnames[:] = []
+                continue
+
+            dirpath_p = Path(dirpath)
+
+            # 1. 检查 w2v-bert-2.0 目录（含 model.safetensors）
+            if w2v_path is None and dirpath_p.name == "w2v-bert-2.0":
+                if (dirpath_p / "model.safetensors").is_file():
+                    w2v_path = dirpath_p
+
+            # 2. 检查 campplus_cn_common.bin 文件（大于 1KB）
+            if campplus_path is None and "campplus_cn_common.bin" in filenames:
+                candidate = dirpath_p / "campplus_cn_common.bin"
+                try:
+                    if candidate.is_file() and candidate.stat().st_size > 1000:
+                        campplus_path = candidate
+                except Exception:
+                    pass
+
+            # 3. 检查 bigvgan 目录（含 config.json + bigvgan_generator.pt）
+            if bigvgan_path is None and dirpath_p.name in ("bigvgan_v2_22khz_80band_256x", "bigvgan"):
+                if (dirpath_p / "config.json").is_file() and (dirpath_p / "bigvgan_generator.pt").is_file():
+                    bigvgan_path = dirpath_p
+
+            # 三个全部找到就提前结束扫描
+            if w2v_path and campplus_path and bigvgan_path:
+                break
+
+    if w2v_path is None or campplus_path is None or bigvgan_path is None:
+        return None
+
+    return {
+        "w2v_bert": str(w2v_path),
+        "campplus": str(campplus_path),
+        "bigvgan": str(bigvgan_path),
+    }
+
+
+def _it25_patch_model_download_local_search():
+    """Patch indextts.utils.model_download.ensure_models_available，
+    让它在调用真正的下载逻辑之前，先在本地 models/TTS/ 下模糊搜索。
+
+    找到全部三个子模型（w2v-bert-2.0 / campplus / bigvgan）就直接返回本地路径，
+    不复制到 hf_cache、不联网下载，省 ~5GB 磁盘空间并加快启动。
+
+    indextts.infer_v2_5.IndexTTS2 的初始化流程是：
+        w2v_bert_dir = model_dir/hf_cache/w2v-bert-2.0
+        if not exists:
+            aux_paths = ensure_models_available(model_dir)
+            w2v_bert_dir = aux_paths["w2v_bert"]
+
+    所以只要 ensure_models_available 返回本地路径，infer_v2_5 就会直接用本地路径。
+    """
+    try:
+        import indextts.utils.model_download as _md
+    except Exception:
+        return
+    if getattr(_md.ensure_models_available, "_gjj_local_search_patched", False):
+        return
+    _original = _md.ensure_models_available
+
+    def _patched(model_dir, bigvgan_repo=None, _original=_original):
+        result = _it25_search_local_aux_models(model_dir)
+        if result is not None:
+            return result
+        # 本地找不到才回退原下载逻辑（会下载到 model_dir/hf_cache/）
+        try:
+            if bigvgan_repo is not None:
+                return _original(model_dir, bigvgan_repo)
+            return _original(model_dir)
+        except TypeError:
+            return _original(model_dir)
+
+    _patched._gjj_local_search_patched = True
+    _md.ensure_models_available = _patched
+
+
+def _it25_patch_librosa_numba_compat():
+    """Patch librosa.zero_crossings with numpy fallback for numba compatibility.
+
+    numba 0.66+ 与 numpy 2.x 的 @stencil 装饰器不兼容，导致 zero_crossings
+    报错。本补丁包装原始实现，出错时回退到纯 numpy 版本。
+    """
+    try:
+        import numba as _numba, numpy as _np
+        if int(_np.__version__.split(".")[0]) < 2:
+            return
+    except Exception:
+        return
+    try:
+        import librosa.core.audio as _lca
+        if getattr(_lca.zero_crossings, "_gjj_patched_it25", False):
+            return
+
+        _orig_zc = _lca.zero_crossings
+
+        def _zc(y, *, threshold=1e-10, ref_magnitude=None, pad=True, zero_pos=True, axis=-1):
+            try:
+                return _orig_zc(
+                    y, threshold=threshold, ref_magnitude=ref_magnitude,
+                    pad=pad, zero_pos=zero_pos, axis=axis,
+                )
+            except Exception:
+                if callable(ref_magnitude):
+                    threshold = threshold * ref_magnitude(_np.abs(y))
+                elif ref_magnitude is not None:
+                    threshold = threshold * ref_magnitude
+                yi = y.swapaxes(-1, axis).copy()
+                mask = _np.abs(yi) <= threshold
+                yi[mask] = 0
+                signs = _np.signbit(yi) if zero_pos else _np.sign(yi)
+                z = _np.empty(yi.shape, dtype=bool)
+                z[..., 1:] = signs[..., 1:] != signs[..., :-1]
+                z[..., 0] = pad
+                return z.swapaxes(-1, axis)
+
+        _zc._gjj_patched_it25 = True
+        _lca.zero_crossings = _zc
+        try:
+            import librosa
+            librosa.zero_crossings = _zc
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _it25_patch_torchaudio_save():
+    """Patch 全局 torchaudio.save + torchaudio.load，使用 soundfile 后端。
+
+    torchaudio 2.11+ 强制使用 torchcodec 作为 save/load 后端，但 torchcodec
+    不是标准依赖且可能不存在。IndexTTS-2.5 内部（infer_v2_5.IndexTTS2）会直接
+    调用全局 torchaudio.save/load 读写临时 WAV 文件，因此必须全局打补丁。
+
+    关键细节（回音/失真来源之一）：
+      - indextts 内部可能传入 int16 或 float32/float16 的 waveform；
+      - 如果 src 已经是 int16，直接写出即可，不要转 float 再乘 32767，
+        否则会出现「二次缩放」——int16 的 32767 被当 float 的 32767.0 后又乘 32767，
+        写出的内容全是满幅削波噪声，听起来就是严重回音/金属声。
+    """
+    try:
+        import torchaudio as _ta
+    except Exception:
+        return
+
+    # ---------- torchaudio.load ----------
+    original_load = getattr(_ta, "load", None)
+    if original_load is not None and not getattr(original_load, "_gjj_it25_sf_fallback", False):
+        def load(path, *args, _original=original_load, **kwargs):
+            try:
+                return _original(path, *args, **kwargs)
+            except Exception as exc:
+                message = str(exc)
+                if "TorchCodec is required" not in message and "load_with_torchcodec" not in message:
+                    raise
+                import soundfile as sf
+                # dtype="float32"：soundfile 读 PCM16 时自动归一化到 [-1.0, 1.0]，
+                # 直接取 float32 即可，避免 float64。
+                data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+                tensor = torch.from_numpy(data.T.copy())
+                # 防御越界
+                tensor = torch.clamp(tensor, -1.0, 1.0)
+                return tensor, int(sample_rate)
+
+        load._gjj_it25_sf_fallback = True
+        _ta.load = load
+
+    # ---------- torchaudio.save ----------
+    original_save = getattr(_ta, "save", None)
+    if original_save is None or getattr(original_save, "_gjj_it25_sf_fallback", False):
+        return
+
+    def save(path, src, sample_rate, *args, _original=original_save, **kwargs):
+        try:
+            return _original(path, src, sample_rate, *args, **kwargs)
+        except Exception as exc:
+            message = str(exc)
+            if "TorchCodec is required" not in message and "save_with_torchcodec" not in message:
+                raise
+            import soundfile as sf
+
+            tensor = src.detach().cpu()
+            # 关键：已经是 int16 就直接写，不要再转 float 缩放（否则二次缩放爆音）
+            if tensor.dtype == torch.int16:
+                pass
+            else:
+                tensor = tensor.float()
+                tensor = torch.clamp(tensor, -1.0, 1.0)
+                tensor = (tensor * 32767.0).to(torch.int16)
+            if tensor.ndim == 3:
+                tensor = tensor.squeeze(0)
+            if tensor.ndim == 1:
+                data = tensor.numpy()
+            else:
+                data = tensor.numpy().T
+            sf.write(str(path), data, int(sample_rate), subtype="PCM_16")
+
+    save._gjj_it25_sf_fallback = True
+    _ta.save = save
+
+
+def _ensure_indextts25_runtime(unique_id: Any = None):
+    """确保 indextts 包 + transformers 兼容补丁可用。"""
+    deps = BRANCH_DEPENDENCIES.get("IndexTTS2.5", [])
+    try:
+        _it25_patch_transformers_compat()
+        _it25_patch_bigvgan_compat()
+        _it25_patch_model_download_local_search()
+        _it25_patch_librosa_numba_compat()
+        _it25_patch_torchaudio_save()
+        from indextts.infer_v2_5 import IndexTTS2  # type: ignore
+        return IndexTTS2
+    except Exception as exc:
+        copy_text, copy_label = _indextts25_install_command()
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=deps,
+            install_packages=[],
+            description=(
+                "IndexTTS-2.5 运行时导入失败：indextts 库没有发布到 PyPI，"
+                "需从 GitHub 源码安装；并且构建后端依赖 hatchling，必须先装 hatchling "
+                "再 --no-build-isolation 安装。在 PowerShell 中用分号(;)连接命令，"
+                "不要用反引号(`) 包裹 URL。"
+            ),
+            original_error=str(exc),
+            unique_id=unique_id,
+            copy_text=copy_text,
+            copy_label=copy_label,
+        )
+
+
+def _find_local_model_dir(dirname: str, search_roots: list[Path]) -> Path | None:
+    """在多个搜索根目录中查找指定名称的目录（非递归，只看第一层）。"""
+    for root in search_roots:
+        if not root.exists():
+            continue
+        candidate = root / dirname
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _ensure_indextts25_hf_cache(model_dir: Path, unique_id: Any = None) -> None:
+    """确保 IndexTTS2.5 子模型可用（新版：复用本地路径，不复制不下载）。
+
+    新策略：
+      - 通过 patch indextts.utils.model_download.ensure_models_available，
+        让 indextts 内部 infer_v2_5.py 直接用 models/TTS/ 下的本地原路径，
+        不再要求 hf_cache/w2v-bert-2.0、hf_cache/campplus_cn_common.bin、
+        hf_cache/bigvgan 三个副本。
+      - 只有在本地完全找不到时，才回退到 hf-mirror.com 在线下载，
+        下载内容仍会写入 hf_cache/（按 indextts 原逻辑）。
+
+    旧 hf_cache/ 目录可以放心删除（约 5GB），下次启动会自动用本地原路径。
+    """
+    # 确保 patch 已生效（若 _ensure_indextts25_runtime 没跑过也会兜底）
+    _it25_patch_model_download_local_search()
+
+    _send_status(unique_id, "正在检查 IndexTTS2.5 子模型本地路径...", 0.05)
+
+    # 清理 .incomplete 残留（如果有）
+    hf_cache = model_dir / "hf_cache"
+    if hf_cache.is_dir():
+        for p in hf_cache.rglob("*.incomplete"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+    # 先尝试本地模糊搜索：找到全部三个就直接返回，不复制、不下载
+    result = _it25_search_local_aux_models(model_dir)
+    if result is not None:
+        _send_status(
+            unique_id,
+            f"IndexTTS2.5 子模型就绪（复用本地：w2v={Path(result['w2v_bert']).name}, "
+            f"bigvgan={Path(result['bigvgan']).name}）",
+            0.12,
+        )
+        return
+
+    # 本地找不到：走原下载逻辑（patch 后的 ensure_models_available 会回退到在线下载）
+    _send_status(
+        unique_id,
+        "本地未找到 w2v-bert-2.0 / campplus / bigvgan，使用 hf-mirror.com 下载...",
+        0.13,
+    )
+
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    try:
+        import indextts.utils.network_detection as _nd
+        if not getattr(_nd.need_proxy, "_gjj_patched", False):
+            def _patched_need_proxy(*args, **kwargs):
+                return False
+            _patched_need_proxy._gjj_patched = True
+            _nd.need_proxy = _patched_need_proxy
+            try:
+                import indextts.utils.model_download as _md
+                _md._USING_MODELSCOPE = False
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        from indextts.utils.model_download import ensure_models_available
+        _send_status(unique_id, "正在从 hf-mirror.com 下载...", 0.15)
+        ensure_models_available(str(model_dir))
+        _send_status(unique_id, "IndexTTS2.5 子模型下载完成", 0.18)
+    except Exception as exc:
+        raise RuntimeError(
+            f"IndexTTS2.5 子模型下载失败：{exc}\n\n"
+            f"请把以下文件放到 models/TTS/ 下（任意子目录均可自动识别）：\n"
+            f"  1. w2v-bert-2.0/ 整个目录（含 model.safetensors）\n"
+            f"     从 https://hf-mirror.com/facebook/w2v-bert-2.0 下载\n"
+            f"  2. campplus_cn_common.bin\n"
+            f"     从 https://hf-mirror.com/funasr/campplus 下载\n"
+            f"  3. bigvgan/ 目录 (config.json + bigvgan_generator.pt)\n"
+            f"     从 https://hf-mirror.com/nvidia/bigvgan_v2_22khz_80band_256x 下载\n\n"
+            f"或使用 GJJ 网盘链接：{_GJJ_MODEL_DOWNLOAD_URL}"
+        ) from exc
+
+
+def _load_indextts25(
+    device: str,
+    precision: str,
+    use_qwen_emo: bool = False,
+    unique_id: Any = None,
+):
+    IndexTTS2 = _ensure_indextts25_runtime(unique_id)
+    model_dir = _indextts25_model_dir()
+    # 直接使用本地模型，不进行自动下载
+    if not _indextts25_check_exists(model_dir):
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[{
+                "label": "IndexTTS-2.5 模型目录",
+                "subdir": INDEXTTS25_MODEL_FOLDER_NAME,
+                "filename": "IndexTTS2.5",
+                "description": "请把 config.yaml、gpt.pth、s2mel.pth、codec.pth 放入 models/TTS/IndexTTS2.5/ 目录。",
+            }],
+            install_packages=[],
+            description="未找到 IndexTTS-2.5 本地模型，请预先下载并放置到 models/TTS/IndexTTS2.5/。",
+            unique_id=unique_id,
+            model_download_url=_GJJ_MODEL_DOWNLOAD_URL,
+        )
+    cfg_path = model_dir / "config.yaml"
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"IndexTTS-2.5 缺失配置：{cfg_path}")
+
+    # 确保 hf_cache 子模型完整（在加载 GPT 之前检查，避免慢速下载阻塞）
+    _ensure_indextts25_hf_cache(model_dir, unique_id)
+
+    precision_value = str(precision or "auto").strip().lower()
+    # 关键：IndexTTS-2.5 内部 use_bf16 只是把 model.to(bfloat16)，但推理时
+    # 并没有统一用 torch.autocast 包裹所有算子，导致混合精度时部分算子在 FP32、
+    # 部分在 BF16，出现数值不稳定 → 回音/金属声。
+    # 因此只有用户显式选择 bf16 时才启用；auto 模式一律使用 FP32（和 BSAI 实际推理一致）。
+    use_bf16 = bool(precision_value == "bf16")
+    cache_key = f"indextts25:{use_bf16}:{device}:{use_qwen_emo}:{model_dir}"
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+    _send_status(unique_id, f"正在加载 IndexTTS-2.5（BF16={use_bf16}）", 0.1)
+    model = IndexTTS2(
+        cfg_path=str(cfg_path),
+        model_dir=str(model_dir),
+        use_bf16=use_bf16,
+        device=None if str(device or "auto") == "auto" else str(device),
+        use_qwen_emo=use_qwen_emo,
+    )
+    _MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _it25_save_temp_wav(waveform: torch.Tensor, sample_rate: int, dirpath: Path, name: str) -> Path:
+    wf = waveform.detach().cpu()
+    if wf.ndim == 3:
+        wf = wf[0]
+    if wf.ndim == 2 and wf.shape[0] > 1:
+        wf = wf.mean(dim=0, keepdim=True)
+    if wf.ndim == 1:
+        wf = wf.unsqueeze(0)
+    mono = wf.reshape(-1)
+    mono = torch.clamp(mono, -1.0, 1.0)
+    pcm = (mono * 32767.0).to(torch.int16).cpu().numpy()
+    out_path = dirpath / name
+    with wave.open(str(out_path), "wb") as wf_obj:
+        wf_obj.setnchannels(1)
+        wf_obj.setsampwidth(2)
+        wf_obj.setframerate(int(sample_rate))
+        wf_obj.writeframes(pcm.tobytes())
+    return out_path
+
+
+def _it25_load_wav_as_dict(path: Path) -> dict[str, Any]:
+    """Load IndexTTS-2.5 生成的 WAV 输出为 ComfyUI AUDIO dict。
+
+    注意：
+    - soundfile 读 PCM_16 WAV 默认返回 float64，并自动归一化到 [-1.0, 1.0]。
+    - 但如果 WAV 是用非标准方式写出（如直接写 float 数据标记成 PCM_16），
+      可能出现超出范围的值，需要 clamp，否则传到下游节点会爆音/回音。
+    """
+    import soundfile as sf
+
+    data, sr = sf.read(str(path), always_2d=False)
+    tensor = torch.from_numpy(data).float()
+    # soundfile 默认归一化到 [-1, 1]，做一次 clamp 防御越界
+    tensor = torch.clamp(tensor, -1.0, 1.0)
+    if tensor.dim() == 1:
+        tensor = tensor.unsqueeze(0)
+    else:
+        tensor = tensor.T
+    if tensor.shape[0] > 1:
+        tensor = tensor.mean(dim=0, keepdim=True)
+    return {"waveform": tensor.reshape(1, 1, -1).contiguous(), "sample_rate": int(sr)}
+
+
+_INDEXTTS25_LANGS = ["ZH", "EN", "JA", "ES", "AR", "zhen"]
+
+
+def _indextts25_audio(
+    text: str,
+    reference: dict[str, Any] | None,
+    device: str,
+    precision: str,
+    lang: str = "ZH",
+    duration_factor: float = 1.0,
+    temperature: float = 0.8,
+    top_p: float = 0.8,
+    top_k: int = 30,
+    num_beams: int = 3,
+    repetition_penalty: float = 10.0,
+    length_penalty: float = 0.0,
+    max_mel_tokens: int = 1500,
+    max_text_tokens_per_segment: int = 100,
+    emo_alpha: float = 1.0,
+    emo_vector=None,
+    emo_audio: dict[str, Any] | None = None,
+    use_emo_text: bool = False,
+    emo_text: str = "",
+    use_random: bool = False,
+    use_qwen_emo: bool = False,
+    unique_id: Any = None,
+) -> dict[str, Any]:
+    if reference is None or not _valid_audio(reference.get("audio")):
+        raise RuntimeError("IndexTTS2.5 分支需要参考音频（音色克隆）。")
+    model = _load_indextts25(device, precision, use_qwen_emo=use_qwen_emo, unique_id=unique_id)
+    tmpdir = Path(tempfile.mkdtemp(prefix="gjj_it25_"))
+    try:
+        ref_audio = reference["audio"]
+        ref_path = _it25_save_temp_wav(ref_audio["waveform"], int(ref_audio["sample_rate"]), tmpdir, "ref.wav")
+        out_path = tmpdir / "out.wav"
+
+        # 情感参考音频
+        emo_audio_path = None
+        if emo_audio is not None and _valid_audio(emo_audio.get("audio")):
+            ea = emo_audio["audio"]
+            emo_audio_path = _it25_save_temp_wav(ea["waveform"], int(ea["sample_rate"]), tmpdir, "emo.wav")
+
+        generation_kwargs = {
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "length_penalty": float(length_penalty),
+            "num_beams": int(num_beams),
+            "repetition_penalty": float(repetition_penalty),
+            "max_mel_tokens": int(max_mel_tokens),
+            "do_sample": True,
+        }
+
+        lang_code = lang if lang in _INDEXTTS25_LANGS else "ZH"
+        emo_text_param = str(emo_text or "").strip() or None
+        emo_vector_param = list(emo_vector) if emo_vector is not None else None
+
+        model.infer(
+            spk_audio_prompt=str(ref_path),
+            text=str(text or ""),
+            output_path=str(out_path),
+            lang=lang_code,
+            emo_audio_prompt=str(emo_audio_path) if emo_audio_path else None,
+            emo_alpha=float(emo_alpha),
+            emo_vector=emo_vector_param,
+            use_emo_text=bool(use_emo_text),
+            emo_text=emo_text_param,
+            use_random=bool(use_random),
+            duration_factor=float(duration_factor),
+            verbose=False,
+            max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+            **generation_kwargs,
+        )
+        if not out_path.is_file():
+            raise RuntimeError("IndexTTS-2.5 推理完成但未找到输出文件。")
+        return _it25_load_wav_as_dict(out_path)
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _model_dir(subdir: str, model_name: str, default_name: str, unique_id: Any = None) -> Path:
@@ -2711,7 +3696,7 @@ def _raise_longcat_quantization_error(model_name: str, unique_id: Any = None) ->
         description="LongCat 模型权重格式暂不兼容。",
         original_error=str(model_name or ""),
         unique_id=unique_id,
-        model_download_url="https://huggingface.co/meituan-longcat",
+        model_download_url=_GJJ_MODEL_DOWNLOAD_URL,
     )
 
 
@@ -3317,7 +4302,16 @@ class GJJ_UniversalTTS:
         "dynamic_reference_pairs": True,
         "branch_presets_path": "presets/gjj_user_settings.json",
         "toolbar": ["📂", "🧠", "💱", "🔗", "🎲", "📢", "👨‍🎨", "🔌", "⚙️", "🎤", "🔄"],
-        "hidden_parameters": ["model_name", "local_audio_name", "custom_voice", "language", "device", "precision", "steps", "guidance_strength", "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only", "emotion_prompt", "audio_format", "qwen_instruct"],
+        "hidden_parameters": [
+            "model_name", "local_audio_name", "custom_voice", "language", "device", "precision",
+            "steps", "guidance_strength",
+            "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only",
+            "emotion_prompt", "audio_format", "qwen_instruct",
+            "it25_lang", "it25_duration_factor", "it25_temperature", "it25_top_p", "it25_top_k",
+            "it25_num_beams", "it25_repetition_penalty", "it25_length_penalty", "it25_max_mel_tokens",
+            "it25_max_text_tokens", "it25_emo_alpha", "it25_emo_vector_json",
+            "it25_use_emo_text", "it25_emo_text", "it25_use_random", "it25_use_qwen_emo",
+        ],
     }
 
     @classmethod
@@ -3362,6 +4356,23 @@ class GJJ_UniversalTTS:
                 "emotion_prompt": ("STRING", _hidden_widget({"multiline": True, "default": "", "display_name": "情感描述", "tooltip": "IndexTTS2 / VoxCPM2 的情感或风格描述；留空表示不额外控制。"})),
                 "audio_format": (AUDIO_FORMAT_OPTIONS, _hidden_widget({"default": "WAV", "display_name": "音频格式", "tooltip": "选择生成音频和分段预览的保存格式；默认 WAV。"})),
                 "qwen_instruct": ("STRING", _hidden_widget({"multiline": True, "default": "", "display_name": "Instruct", "tooltip": "Qwen3-VoiceDesign 的自然语言音色设计指令，例如：年轻温柔的女声，语速稍慢，带开心情绪。"})),
+                # --- IndexTTS-2.5 专属参数（在 ⚙️ 面板中按需显示） ---
+                "it25_lang": (_INDEXTTS25_LANGS, _hidden_widget({"default": "ZH", "display_name": "语言代码", "tooltip": "IndexTTS-2.5 合成目标语言：ZH / EN / JA / ES / AR / zhen（中英混合）。"})),
+                "it25_duration_factor": ("STRING", _hidden_widget({"multiline": False, "default": "1.0", "display_name": "时长倍率", "tooltip": "IndexTTS-2.5 全局时长因子；0.5～2.0，1.0 为原始长度。"})),
+                "it25_temperature": ("STRING", _hidden_widget({"multiline": False, "default": "0.8", "display_name": "Temperature", "tooltip": "IndexTTS-2.5 生成温度；越低越稳定，越高越多样。"})),
+                "it25_top_p": ("STRING", _hidden_widget({"multiline": False, "default": "0.8", "display_name": "Top-P", "tooltip": "IndexTTS-2.5 核采样概率。"})),
+                "it25_top_k": ("STRING", _hidden_widget({"multiline": False, "default": "30", "display_name": "Top-K", "tooltip": "IndexTTS-2.5 采样 Top-K。"})),
+                "it25_num_beams": ("STRING", _hidden_widget({"multiline": False, "default": "3", "display_name": "束搜索数量", "tooltip": "IndexTTS-2.5 num_beams；1 关闭束搜索。"})),
+                "it25_repetition_penalty": ("STRING", _hidden_widget({"multiline": False, "default": "10.0", "display_name": "重复惩罚", "tooltip": "IndexTTS-2.5 repetition_penalty；数值越大越不容易重复。"})),
+                "it25_length_penalty": ("STRING", _hidden_widget({"multiline": False, "default": "0.0", "display_name": "长度惩罚", "tooltip": "IndexTTS-2.5 length_penalty；正 = 偏好更长输出。"})),
+                "it25_max_mel_tokens": ("STRING", _hidden_widget({"multiline": False, "default": "1500", "display_name": "最大Mel帧数", "tooltip": "IndexTTS-2.5 max_mel_tokens；默认 1500。"})),
+                "it25_max_text_tokens": ("STRING", _hidden_widget({"multiline": False, "default": "100", "display_name": "分句最大Token", "tooltip": "IndexTTS-2.5 max_text_tokens_per_segment。"})),
+                "it25_emo_alpha": ("STRING", _hidden_widget({"multiline": False, "default": "1.0", "display_name": "情感融合系数", "tooltip": "IndexTTS-2.5 emo_alpha；仅在使用情感参考音频时有效。"})),
+                "it25_emo_vector_json": ("STRING", _hidden_widget({"multiline": True, "default": "[]", "display_name": "8D情感向量", "tooltip": "IndexTTS-2.5 8维情感向量 JSON；顺序：happy,angry,sad,fear,disgust,melancholy,surprise,calm。"})),
+                "it25_use_emo_text": ("BOOLEAN", _hidden_widget({"default": False, "display_name": "启用文本情感", "tooltip": "IndexTTS-2.5 是否按 emo_text 描述生成情感风格。"})),
+                "it25_emo_text": ("STRING", _hidden_widget({"multiline": True, "default": "", "display_name": "文本情感描述", "tooltip": "IndexTTS-2.5 use_emo_text=true 时生效，例如：开心、激动。"})),
+                "it25_use_random": ("BOOLEAN", _hidden_widget({"default": False, "display_name": "启用随机情感", "tooltip": "IndexTTS-2.5 使用随机情感风格。"})),
+                "it25_use_qwen_emo": ("BOOLEAN", _hidden_widget({"default": False, "display_name": "启用QwenEmo", "tooltip": "IndexTTS-2.5 加载 qwen0.6bemo4 分支，需模型目录内存在 qwen0.6bemo4-merge/。"})),
             },
             "optional": _build_reference_inputs(),
             "hidden": {
@@ -3399,6 +4410,22 @@ class GJJ_UniversalTTS:
         qwen_instruct: str,
         seed: int,
         unique_id: Any,
+        it25_lang: str = "ZH",
+        it25_duration_factor: float = 1.0,
+        it25_temperature: float = 0.8,
+        it25_top_p: float = 0.8,
+        it25_top_k: int = 30,
+        it25_num_beams: int = 3,
+        it25_repetition_penalty: float = 10.0,
+        it25_length_penalty: float = 0.0,
+        it25_max_mel_tokens: int = 1500,
+        it25_max_text_tokens: int = 100,
+        it25_emo_alpha: float = 1.0,
+        it25_emo_vector_json: str = "[]",
+        it25_use_emo_text: bool = False,
+        it25_emo_text: str = "",
+        it25_use_random: bool = False,
+        it25_use_qwen_emo: bool = False,
     ) -> dict[str, Any]:
         if branch == "EdgeTTS":
             voice_id = str(custom_voice or "").strip() or _edge_voice_id(str(edge_voice), "[中文] zh-CN Xiaoxiao 女声")
@@ -3440,6 +4467,44 @@ class GJJ_UniversalTTS:
             )
         if branch in {"IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2"}:
             return _indextts_audio(branch, text, reference, device, precision, emotion_prompt if branch == "IndexTTS-v2" else "", unique_id)
+        if branch == "IndexTTS2.5":
+            # 情感向量解析：支持 JSON 列表
+            emo_vector = None
+            raw_vec = str(it25_emo_vector_json or "[]").strip()
+            if raw_vec and raw_vec != "[]":
+                try:
+                    parsed = json.loads(raw_vec)
+                    if isinstance(parsed, (list, tuple)):
+                        nums = [float(x) for x in parsed[:8]]
+                        while len(nums) < 8:
+                            nums.append(0.0)
+                        emo_vector = nums
+                except Exception:
+                    emo_vector = None
+            return _indextts25_audio(
+                text=text,
+                reference=reference,
+                device=device,
+                precision=precision,
+                lang=str(it25_lang or "ZH"),
+                duration_factor=float(it25_duration_factor),
+                temperature=float(it25_temperature),
+                top_p=float(it25_top_p),
+                top_k=int(it25_top_k),
+                num_beams=int(it25_num_beams),
+                repetition_penalty=float(it25_repetition_penalty),
+                length_penalty=float(it25_length_penalty),
+                max_mel_tokens=int(it25_max_mel_tokens),
+                max_text_tokens_per_segment=int(it25_max_text_tokens),
+                emo_alpha=float(it25_emo_alpha),
+                emo_vector=emo_vector,
+                emo_audio=None,
+                use_emo_text=bool(it25_use_emo_text),
+                emo_text=str(it25_emo_text or ""),
+                use_random=bool(it25_use_random),
+                use_qwen_emo=bool(it25_use_qwen_emo),
+                unique_id=unique_id,
+            )
         if branch == "Fun-CosyVoice3-0.5B-2512":
             return _cosyvoice_tts(branch, model_name, text, reference, str((reference or {}).get("text") or DEFAULT_REFERENCE_TEXT), speed, seed, unique_id)
         if branch == "VoxCPM2":
@@ -3484,6 +4549,22 @@ class GJJ_UniversalTTS:
         qwen_instruct: str,
         seed: int,
         unique_id: Any,
+        it25_lang: str = "ZH",
+        it25_duration_factor: float = 1.0,
+        it25_temperature: float = 0.8,
+        it25_top_p: float = 0.8,
+        it25_top_k: int = 30,
+        it25_num_beams: int = 3,
+        it25_repetition_penalty: float = 10.0,
+        it25_length_penalty: float = 0.0,
+        it25_max_mel_tokens: int = 1500,
+        it25_max_text_tokens: int = 100,
+        it25_emo_alpha: float = 1.0,
+        it25_emo_vector_json: str = "[]",
+        it25_use_emo_text: bool = False,
+        it25_emo_text: str = "",
+        it25_use_random: bool = False,
+        it25_use_qwen_emo: bool = False,
     ) -> list[str]:
         if branch.startswith("IndexTTS") or branch in {"Fun-CosyVoice3-0.5B-2512", "VoxCPM2"}:
             return []
@@ -3521,6 +4602,22 @@ class GJJ_UniversalTTS:
                     qwen_instruct,
                     int(seed) + 10000 + index,
                     unique_id,
+                    it25_lang,
+                    it25_duration_factor,
+                    it25_temperature,
+                    it25_top_p,
+                    it25_top_k,
+                    it25_num_beams,
+                    it25_repetition_penalty,
+                    it25_length_penalty,
+                    it25_max_mel_tokens,
+                    it25_max_text_tokens,
+                    it25_emo_alpha,
+                    it25_emo_vector_json,
+                    it25_use_emo_text,
+                    it25_emo_text,
+                    it25_use_random,
+                    it25_use_qwen_emo,
                 )
                 stem = _audio_stem(f"{branch}_参考音频{index + 1}")
                 rel = _save_audio_to_models_mp3(audio, f"GJJ_UniversalTTS_{stem}.wav")
@@ -3568,6 +4665,22 @@ class GJJ_UniversalTTS:
         emotion_prompt: str = "",
         audio_format: str = "WAV",
         qwen_instruct: str = "",
+        it25_lang: str = "ZH",
+        it25_duration_factor: float = 1.0,
+        it25_temperature: float = 0.8,
+        it25_top_p: float = 0.8,
+        it25_top_k: int = 30,
+        it25_num_beams: int = 3,
+        it25_repetition_penalty: float = 10.0,
+        it25_length_penalty: float = 0.0,
+        it25_max_mel_tokens: int = 1500,
+        it25_max_text_tokens: int = 100,
+        it25_emo_alpha: float = 1.0,
+        it25_emo_vector_json: str = "[]",
+        it25_use_emo_text: bool = False,
+        it25_emo_text: str = "",
+        it25_use_random: bool = False,
+        it25_use_qwen_emo: bool = False,
         unique_id: Any = None,
         extra_pnginfo: dict[str, Any] | None = None,
         **kwargs,
@@ -3624,6 +4737,23 @@ class GJJ_UniversalTTS:
         qwen_x_vector_only = _coerce_bool(qwen_x_vector_only, False)
         emotion_prompt = _coerce_optional_prompt(emotion_prompt)
         qwen_instruct = str(qwen_instruct or "").strip()
+        # --- IndexTTS2.5 参数 coercion ---
+        it25_lang = _coerce_choice(it25_lang, _INDEXTTS25_LANGS, "ZH")
+        it25_duration_factor = _coerce_float(it25_duration_factor, 1.0, 0.5, 2.0)
+        it25_temperature = _coerce_float(it25_temperature, 0.8, 0.1, 2.0)
+        it25_top_p = _coerce_float(it25_top_p, 0.8, 0.0, 1.0)
+        it25_top_k = _coerce_int(it25_top_k, 30, 1, 100)
+        it25_num_beams = _coerce_int(it25_num_beams, 3, 1, 10)
+        it25_repetition_penalty = _coerce_float(it25_repetition_penalty, 10.0, 1.0, 20.0)
+        it25_length_penalty = _coerce_float(it25_length_penalty, 0.0, -2.0, 2.0)
+        it25_max_mel_tokens = _coerce_int(it25_max_mel_tokens, 1500, 100, 1815)
+        it25_max_text_tokens = _coerce_int(it25_max_text_tokens, 100, 20, 600)
+        it25_emo_alpha = _coerce_float(it25_emo_alpha, 1.0, 0.0, 1.0)
+        it25_emo_vector_json = str(it25_emo_vector_json or "[]").strip()
+        it25_use_emo_text = _coerce_bool(it25_use_emo_text, False)
+        it25_emo_text = str(it25_emo_text or "").strip()
+        it25_use_random = _coerce_bool(it25_use_random, False)
+        it25_use_qwen_emo = _coerce_bool(it25_use_qwen_emo, False)
         qwen_old_default = (2048, 0.8, 20, 1.0, 1.05, False)
         qwen_current = (
             qwen_max_new_tokens,
@@ -3701,6 +4831,22 @@ class GJJ_UniversalTTS:
                 qwen_instruct,
                 seed,
                 unique_id,
+                it25_lang,
+                it25_duration_factor,
+                it25_temperature,
+                it25_top_p,
+                it25_top_k,
+                it25_num_beams,
+                it25_repetition_penalty,
+                it25_length_penalty,
+                it25_max_mel_tokens,
+                it25_max_text_tokens,
+                it25_emo_alpha,
+                it25_emo_vector_json,
+                it25_use_emo_text,
+                it25_emo_text,
+                it25_use_random,
+                it25_use_qwen_emo,
             )
 
             pbar = None
@@ -3755,6 +4901,22 @@ class GJJ_UniversalTTS:
                     qwen_instruct,
                     actual_seed,
                     unique_id,
+                    it25_lang,
+                    it25_duration_factor,
+                    it25_temperature,
+                    it25_top_p,
+                    it25_top_k,
+                    it25_num_beams,
+                    it25_repetition_penalty,
+                    it25_length_penalty,
+                    it25_max_mel_tokens,
+                    it25_max_text_tokens,
+                    it25_emo_alpha,
+                    it25_emo_vector_json,
+                    it25_use_emo_text,
+                    it25_emo_text,
+                    it25_use_random,
+                    it25_use_qwen_emo,
                 )
                 audio_items.append(audio)
                 if len(turns) > 1:
