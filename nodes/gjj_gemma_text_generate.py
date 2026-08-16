@@ -238,43 +238,58 @@ def _default_clip_name(options: list[str]) -> str:
 
 def _resolve_available_clip_name(clip_name: str) -> str:
     requested = str(clip_name or "").strip()
-    if requested and _find_text_encoder_path(requested):
+
+    # 1. 优先使用用户明确指定且确实存在的模型
+    if requested and requested != MISSING_CLIP_PLACEHOLDER and _find_text_encoder_path(requested):
         return requested
 
+    # 2. 扫描所有满足条件且实际存在的模型
     compatible = [item for item in _text_encoder_options() if _find_text_encoder_path(item)]
-    if not compatible:
-        return requested or MISSING_CLIP_PLACEHOLDER
 
-    requested_name = _basename(requested).lower()
-    requested_tokens = {
-        token for token in re.split(r"[^a-z0-9.]+", requested_name)
-        if token and token not in {"safetensors", "mixed", "hybrid", "scaled"}
-    }
+    # 3. 如果有任何满足条件的可用模型，绝不返回占位符或失效名称
+    if compatible:
+        if not requested or requested == MISSING_CLIP_PLACEHOLDER:
+            # 没有有效请求名时，按默认优先级直接选第一个
+            fallback = _default_clip_name(compatible)
+            print(
+                f"[GJJ GemmaTextGenerate] 模型选择为空，自动选用可用模型：{fallback}",
+                flush=True,
+            )
+            return fallback
 
-    def score(candidate: str) -> tuple[int, int, int, int, str]:
-        name = _basename(candidate).lower()
-        tokens = {
-            token for token in re.split(r"[^a-z0-9.]+", name)
+        requested_name = _basename(requested).lower()
+        requested_tokens = {
+            token for token in re.split(r"[^a-z0-9.]+", requested_name)
             if token and token not in {"safetensors", "mixed", "hybrid", "scaled"}
         }
-        same_family = 0
-        if "gemma4" in requested_name and "gemma4" in name:
-            same_family = 200
-        else:
-            req_qwen3 = any(k in requested_name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
-            name_qwen3 = any(k in name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
-            if req_qwen3 and name_qwen3:
-                same_family = 200
-        return same_family, len(requested_tokens & tokens), -_text_encoder_size(candidate), 0, name
 
-    replacement = max(compatible, key=score)
-    if requested and replacement != requested:
-        print(
-            f"[GJJ GemmaTextGenerate] 模型名称已失效，自动替换："
-            f"{requested} -> {replacement}",
-            flush=True,
-        )
-    return replacement
+        def score(candidate: str) -> tuple[int, int, int, int, str]:
+            name = _basename(candidate).lower()
+            tokens = {
+                token for token in re.split(r"[^a-z0-9.]+", name)
+                if token and token not in {"safetensors", "mixed", "hybrid", "scaled"}
+            }
+            same_family = 0
+            if "gemma4" in requested_name and "gemma4" in name:
+                same_family = 200
+            else:
+                req_qwen3 = any(k in requested_name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
+                name_qwen3 = any(k in name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
+                if req_qwen3 and name_qwen3:
+                    same_family = 200
+            return same_family, len(requested_tokens & tokens), -_text_encoder_size(candidate), 0, name
+
+        replacement = max(compatible, key=score)
+        if replacement != requested:
+            print(
+                f"[GJJ GemmaTextGenerate] 模型名称已失效或不存在，自动替换："
+                f"{requested} -> {replacement}",
+                flush=True,
+            )
+        return replacement
+
+    # 4. 确实没有任何可用模型时，才返回原请求或占位符
+    return requested or MISSING_CLIP_PLACEHOLDER
 
 
 def _model_spec_for_clip(clip_name: str) -> dict[str, str]:
@@ -1359,6 +1374,19 @@ class GJJ_GemmaTextGenerate:
             flush=True,
         )
         clip_name = _resolve_available_clip_name(clip_name)
+        # 最后一道保险：只要满足条件的可用模型列表非空，就绝不报错
+        if not _find_text_encoder_path(clip_name):
+            compatible_fallback = [
+                item for item in _text_encoder_options()
+                if _find_text_encoder_path(item)
+            ]
+            if compatible_fallback:
+                # 自动选用可用列表中的第一个（优先匹配默认模型名）
+                clip_name = _default_clip_name(compatible_fallback)
+                print(
+                    f"[GJJ GemmaTextGenerate] 二次兜底：原模型查找失败，已切换到可用模型：{clip_name}",
+                    flush=True,
+                )
         if not _find_text_encoder_path(clip_name):
             missing = [_model_spec_for_clip(clip_name)]
             raise_dependency_model_error(

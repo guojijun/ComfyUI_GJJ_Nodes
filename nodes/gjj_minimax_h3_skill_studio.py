@@ -130,7 +130,7 @@ def _qwen35_model_options() -> list[str]:
     options = []
     for item in _text_encoder_options():
         normalized = re.sub(r"[^a-z0-9]+", "", str(item).casefold())
-        if "qwen35" in normalized:
+        if "qwen3" in normalized:
             options.append(str(item))
     return options or [DEFAULT_MODEL]
 
