@@ -66,8 +66,8 @@ except Exception:
 NODE_NAME = "GJJ_GemmaTextGenerate"
 NODE_DISPLAY_NAME = "GJJ·💛Gemma🧠图片反推提示词推理"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
-MODEL_FAMILY_KEYWORDS = ("qwen3.5", "qwen35", "gemma4", "qwen3vl","ernie")
-MODEL_FILTER_EXPRESSION = "qwen3.5|gemma4|qwen3vl|ernie"
+MODEL_FAMILY_KEYWORDS = ("qwen3.8", "qwen38", "qwen3.5", "qwen35", "gemma4", "qwen3vl","ernie")
+MODEL_FILTER_EXPRESSION = "qwen3.8|qwen38|qwen3.5|gemma4|qwen3vl|ernie"
 MISSING_CLIP_PLACEHOLDER = "未找到匹配的反推模型"
 DEFAULT_CLIP_NAME = "Qwen3.5-4B-Uncensored-FP8_E4M3FN.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
@@ -260,11 +260,11 @@ def _resolve_available_clip_name(clip_name: str) -> str:
         same_family = 0
         if "gemma4" in requested_name and "gemma4" in name:
             same_family = 200
-        elif (
-            ("qwen3.5" in requested_name or "qwen35" in requested_name)
-            and ("qwen3.5" in name or "qwen35" in name)
-        ):
-            same_family = 200
+        else:
+            req_qwen3 = any(k in requested_name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
+            name_qwen3 = any(k in name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
+            if req_qwen3 and name_qwen3:
+                same_family = 200
         return same_family, len(requested_tokens & tokens), -_text_encoder_size(candidate), 0, name
 
     replacement = max(compatible, key=score)
@@ -335,7 +335,8 @@ if PromptServer is not None and getattr(PromptServer, "instance", None) is not N
 
 def _qwen35_runtime_issue(clip_name: str) -> str:
     normalized_name = _basename(clip_name).lower().replace("_", "").replace("-", "")
-    if "qwen3.5" not in normalized_name and "qwen35" not in normalized_name:
+    has_qwen3 = any(k in normalized_name for k in ("qwen3.8", "qwen38", "qwen3.5", "qwen35"))
+    if not has_qwen3:
         return ""
 
     missing = []
@@ -1099,7 +1100,7 @@ class GJJ_GemmaTextGenerate:
                 "clip_name": (clip_options, {
                     "default": default_clip,
                     "display_name": "反推模型",
-                    "tooltip": "列出名称匹配 qwen3.5、gemma4 或 qwen3vl 的反推模型，并按文件体积从小到大排序。",
+                    "tooltip": "列出名称匹配 qwen3.5/qwen3.8、gemma4 或 qwen3vl 的反推模型，并按文件体积从小到大排序。",
                 }),
                 "clip_type": (CLIP_TYPES, {
                     "default": "stable_diffusion",
