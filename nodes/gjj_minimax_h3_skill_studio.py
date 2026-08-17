@@ -262,7 +262,7 @@ def _compact_generation_system(mode: str, content_language: str) -> str:
     return f"""You create content for one MiniMax H3 prompt in a single response.
 The final formatter will create these official fields: {fields}
 {structure}
-Return only one valid JSON object with exactly these keys: subject_definitions (array of strings), summary (string), retention_analysis (array of strings), action_segments (array of strings), overall_soundscape (string), non_diegetic_music (string). Do not output Markdown or any text outside JSON. action_segments must contain exactly the requested number of items in order. Each item contains continuous observable action, spatial continuity, environmental response and synchronized physical sound, but no shot scale, camera movement, [Shot N], timestamp or parenthesized time label; the formatter assigns a distinct shot scale and camera move and adds all labels. All content uses {content_language}, except immutable reference labels and original dialogue/text. Reference identity includes exact clothing and accessories: never redesign wardrobe from a role, faction, martial-arts school or action style. Each action segment must advance from the exact ending state of the previous item and complete a visible action change. overall_soundscape and non_diegetic_music contain only 1–3 concise sentences; never continue story action, analysis or associative prose inside them."""
+Return only one valid JSON object with exactly these keys: subject_definitions (array of strings), summary (string), retention_analysis (array of strings), action_segments (array of strings), overall_soundscape (string), non_diegetic_music (string). Do not output Markdown or any text outside JSON. action_segments must contain exactly the requested number of items in order. Each item contains continuous observable action, spatial continuity, environmental response and synchronized physical sound, but no shot scale, camera movement, [Shot N], timestamp or parenthesized time label; the formatter assigns a distinct shot scale and camera move and adds all labels. All content uses {content_language}, except immutable reference labels and original dialogue/text. Reference identity includes exact clothing and accessories: never redesign wardrobe from a role, faction, martial-arts school or action style. Each action segment must advance from the exact ending state of the previous item and complete a visible action change. overall_soundscape and non_diegetic_music contain only 1–3 concise sentences; never continue story action, analysis or associative prose inside them. When the user requests dialogue/voice, embed short natural spoken lines using the official MiniMax H3 tag format <d>[Language]spoken text</d> inside action_segments — for example <d>[中文]你好，很高兴见到你</d>. Each speaking character uses this format. Place dialogue naturally within the action flow, not as a separate section."""
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -690,6 +690,112 @@ def _shot_cut_times(duration: float, shot_count: int) -> list[float]:
     return [beats[index][0] for index in indices]
 
 
+def _estimate_dialogue_duration(text: str) -> float:
+    """估算一段文本中所有 <d>[语言]对白</d> 台词的朗读时长（秒）。
+
+    估算规则：
+    - 中文/日文/韩文：约 4 字/秒
+    - 英文：约 2.5 词/秒
+    - 每句台词额外加 0.3 秒停顿
+    - 无台词返回 0
+    """
+    if not text:
+        return 0.0
+    dialogue_pattern = re.compile(r"(?is)<d>\s*(?:\[[^\]\r\n]+\]\s*)?(.*?)\s*</d>")
+    matches = dialogue_pattern.findall(text)
+    if not matches:
+        return 0.0
+    total_seconds = 0.0
+    for line in matches:
+        line = line.strip()
+        if not line:
+            continue
+        # 检测语言：含中日韩字符视为 CJK，否则英文
+        cjk_chars = len(re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", line))
+        if cjk_chars > 0:
+            # CJK：4 字/秒
+            total_seconds += max(0.5, cjk_chars / 4.0)
+        else:
+            # 英文：2.5 词/秒
+            words = len(re.findall(r"\b[\w'-]+\b", line))
+            total_seconds += max(0.5, words / 2.5)
+        # 每句加 0.3 秒停顿
+        total_seconds += 0.3
+    return total_seconds
+
+
+def _weighted_beat_ranges(
+    duration: float, segments: list[str], min_beat: float = 1.0,
+) -> list[tuple[float, float]]:
+    """根据每段台词长度按权重分配时间，台词多的段落分到更多时间，避免台词说不完。
+
+    算法：
+    1. 每段的最低需求 = max(台词时长, 1.0秒)
+    2. 如果最低需求总和 <= 总时长：先满足最低需求，剩余时间按权重分配
+    3. 如果最低需求总和 > 总时长：按台词时长比例分配（台词多的多分）
+    """
+    total = max(0.001, float(duration))
+    count = len(segments)
+    if count == 0:
+        return [(0.0, total)]
+
+    # 计算每段台词时长和最低需求
+    dialogue_times = [_estimate_dialogue_duration(seg) for seg in segments]
+    min_requirements = [max(min_beat, dt) for dt in dialogue_times]
+    total_min = sum(min_requirements)
+
+    if total_min <= total:
+        # 情况1：时间够，先满足最低需求，剩余按权重分配
+        surplus = total - total_min
+        weights = [dt + 1.0 for dt in dialogue_times]  # 权重 = 台词时长 + 动作时间
+        total_weight = sum(weights)
+        allocations = []
+        for i in range(count):
+            base = min_requirements[i]
+            extra = surplus * weights[i] / total_weight if total_weight > 0 else 0
+            allocations.append(base + extra)
+    else:
+        # 情况2：时间不够，按台词时长比例分配（台词多的多分）
+        allocations = []
+        for i in range(count):
+            alloc = total * min_requirements[i] / total_min
+            allocations.append(alloc)
+
+    # 生成时间区间，处理浮点误差
+    ranges: list[tuple[float, float]] = []
+    accumulator = 0.0
+    for index in range(count):
+        start = accumulator
+        if index == count - 1:
+            end = total
+        else:
+            end = start + allocations[index]
+        ranges.append((start, end))
+        accumulator = end
+    return ranges
+
+
+def _weighted_shot_cut_times(
+    duration: float, shot_count: int, beat_ranges: list[tuple[float, float]],
+) -> list[float]:
+    """根据加权后的 beat 边界，按 shot_count 均分 beat 数量来放置切镜点。"""
+    count = max(1, int(shot_count))
+    if count <= 1:
+        return []
+    beat_count = len(beat_ranges)
+    if beat_count < count:
+        return [max(0.0, float(duration)) * index / count for index in range(1, count)]
+    indices: list[int] = []
+    previous = 0
+    for shot_index in range(1, count):
+        remaining_cuts = count - shot_index - 1
+        proposed = int(math.floor(beat_count * shot_index / count + 0.5))
+        boundary_index = max(previous + 1, min(beat_count - remaining_cuts - 1, proposed))
+        indices.append(boundary_index)
+        previous = boundary_index
+    return [beat_ranges[index][0] for index in indices]
+
+
 def _detail_density_directive(
     request: str, duration: float, picture_count: int, content_language: str, cut_selection: str = "",
 ) -> tuple[str, int, int]:
@@ -736,15 +842,15 @@ def _detail_density_directive(
     )
     directive = f"""最高优先级内容密度与时间轴规则：
 {picture_rule}
-这是唯一一次生成机会：必须在本次回答中直接完成全部字段、全部镜头和全部动作段，不得先给摘要、草稿或简版，不得请求后续补充，也不得用“其余类似”“持续战斗”等概括句替代细节。输出前在内部核对数量，但只输出最终成品。
+这是唯一一次生成机会：必须在本次回答中直接完成全部字段、全部镜头和全部动作段，不得先给摘要、草稿或简版，不得请求后续补充，也不得用"其余类似""持续……"等概括句替代细节。输出前在内部核对数量，但只输出最终成品。
 生成恰好 {shot_count} 个镜头。{timeline_rule}
 在这些镜头内部再按 1–1.5 秒拆成恰好 {len(action_beats)} 个连续动作段，完整覆盖且不得合并、跳过或重叠：{beat_labels}。
-动作段不是新分镜，不增加 [Shot N]；一个分镜允许并应当包含多个连续动作段。每段在所属 [Shot N] 内使用“起始时间–结束时间：具体画面变化”的自然句式，并让前一段的结束状态成为后一段的起始状态。
-每个动作段必须以“(起始秒-结束秒s)”开头，例如 (0-1.5s)、(1.5-3s)；禁止把动作段写成 00:00.000–00:01.500。每段只写 1–2 个完整句子并以明确句号结束；中文、日文或韩文单段严禁超过 140 个正文字符，英文单段严禁超过 60 个单词。写完当前动作结果后立刻进入下一时间段。
+动作段不是新分镜，不增加 [Shot N]；一个分镜允许并应当包含多个连续动作段。每段在所属 [Shot N] 内使用"起始时间–结束时间：具体画面变化"的自然句式，并让前一段的结束状态成为后一段的起始状态。
+每个动作段必须以"(起始秒-结束秒s)"开头，例如 (0-1.5s)、(1.5-3s)；禁止把动作段写成 00:00.000–00:01.500。每段只写 1–2 个完整句子并以明确句号结束；中文、日文或韩文单段严禁超过 140 个正文字符，英文单段严禁超过 60 个单词。写完当前动作结果后立刻进入下一时间段。
 {length_rule}；{per_shot_rule}，不得提前结束正文。每个镜头都必须同时写清：
 1. 景别、构图、前中后景、主体在画面中的左右与纵深位置；
 2. 当前可见的参考主体外观、服装材质、发丝或饰物动态以及身份连续性；
-3. 动作的起势、运动轨迹、接触或闪避、受力反应、重心转移和收势，核心动作必须真正完成；
+3. 动作的起势、运动轨迹、关键接触或姿态变化、表情与肢体反应、重心与朝向变化以及收势结束状态，核心动作必须真正完成；
 4. 场景结构、地面与背景、光源方向、明暗变化、空气或粒子以及动作对环境的可见影响；
 5. 运镜类型、方向、速度、幅度、焦点或景深变化，以及与上一镜头的连续衔接；
 6. 与当前动作逐拍同步的环境声、衣料声、脚步声、碰撞声、呼吸或非语言反应。
@@ -788,7 +894,8 @@ def _trim_runaway_action_text(value: str) -> tuple[str, int]:
     working = re.sub(r"(?is)<d>.*?</d>", reserve_dialogue, source)
     # The outer generation pass may still carry protected user dialogue as a marker.
     # Keep it through runaway-tail trimming and restore it only after final formatting.
-    protected_markers = re.findall(r"__GJJ_DIALOGUE_\d{4}__", working, flags=re.IGNORECASE)
+    # 兼容模型可能把序号写成 1–4 位数字（如 0001 / 01 / 1），不再限制必须 4 位。
+    protected_markers = re.findall(r"__GJJ_DIALOGUE_\d+__", working, flags=re.IGNORECASE)
     compact_length = len(re.sub(r"\s+", "", working))
     if compact_length <= 220:
         return source, 0
@@ -809,7 +916,9 @@ def _trim_runaway_action_text(value: str) -> tuple[str, int]:
     if cutoff >= len(working):
         return source, 0
     trimmed = working[:cutoff].rstrip(" \t\r\n,，;；:：")
-    trimmed = re.sub(r"__GJJ_BEAT_DIALOGUE_[0-9_]*$", "", trimmed).rstrip()
+    # 匹配任意位数的 BEAT_DIALOGUE 结尾残留，避免严格位数匹配漏删
+    trimmed = re.sub(r"__GJJ_BEAT_DIALOGUE_\d+__\s*$", "", trimmed).rstrip()
+    trimmed = re.sub(r"__GJJ_DIALOGUE_\d+__\s*$", "", trimmed).rstrip()
     # Dialogue supplied by the user is immutable. If a runaway tail pushed it beyond
     # the cut point, keep it once at the end of the same action beat.
     for marker, _dialogue in protected_dialogue:
@@ -1007,11 +1116,11 @@ def _force_distinct_shot_camera(prompt: str, content_language: str = "中文") -
     chinese_plans = [
         "大全景建立空间，缓慢前推并保持主体与环境关系清晰",
         "中全景呈现完整肢体动作，横向跟拍主体运动轨迹",
-        "中景突出攻防交换，沿主体外侧小幅弧形环绕",
+        "中景突出主体动作与环境互动，沿主体外侧小幅弧形环绕",
         "近景捕捉面部与上肢反应，手持式短距离跟随",
-        "低机位全身景强化受力方向，快速轨道推进后减速",
-        "高机位广角揭示空间变化，摇臂下降并向动作中心靠近",
-        "过肩中景建立双方轴线，平稳摇摄跟随动作转移",
+        "低机位全身景强化姿态变化，快速轨道推进后减速",
+        "高机位广角揭示空间变化，摇臂下降并向场景主体靠近",
+        "过肩中景建立人物关系轴线，平稳摇摄跟随动作转移",
         "特写强调接触与细节，微距推近并执行焦点转移",
         "侧面全景展示位移距离，反向移动跟拍保持速度差",
         "超大全景完成空间收束，摇臂升高并缓慢后拉",
@@ -1019,11 +1128,11 @@ def _force_distinct_shot_camera(prompt: str, content_language: str = "中文") -
     english_plans = [
         "extreme wide establishing view, slow push-in preserving clear subject-to-environment geography",
         "medium-wide full-body view, lateral tracking along the subject's motion path",
-        "medium view of the action exchange, a small orbital move around the subjects",
+        "medium view of subject action and environmental interaction, a small orbital move around the subject",
         "close view of facial and upper-body reactions, short handheld follow movement",
         "low-angle full-body view, fast dolly-in that decelerates at the action result",
-        "high-angle wide view, crane down toward the center of action",
-        "over-the-shoulder medium view preserving the axis, smooth pan following the transfer of action",
+        "high-angle wide view, crane down toward the main scene subject",
+        "over-the-shoulder medium view preserving the character axis, smooth pan following the transfer of action",
         "detail close-up of contact and texture, macro push-in with a rack focus",
         "side-on full view showing travel distance, reverse tracking that preserves speed contrast",
         "extreme wide closing view, crane up with a slow pull-back",
@@ -1158,16 +1267,18 @@ def _skill_detail_metrics(prompt: str, content_language: str) -> dict[str, int]:
 
 def _structured_segment_prompt(
     payload: dict[str, Any], mode: str, duration: float, shot_count: int, beat_count: int,
-    source_request: str,
+    source_request: str, user_wants_dialogue: bool = False, dialogue_language: str = "中文",
 ) -> str | None:
     """Attach all H3 shot/time labels to model-authored continuous action segments."""
     raw_segments = payload.get("action_segments") or payload.get("segments")
     if not isinstance(raw_segments, list):
         return None
     segments: list[str] = []
+    _dialogue_in_segments = 0
     for item in raw_segments:
         value = item.get("action") or item.get("text") if isinstance(item, dict) else item
-        cleaned = _clean_generated_value(value, 900).strip()
+        # 提高单段上限到 1200，避免截断带对白的长段
+        cleaned = _clean_generated_value(value, 1200).strip()
         cleaned = re.sub(
             r"(?i)\[Shot\s+\d+\](?:\s+At\s+[^,，\n]+[,，]?)?|"
             r"\(\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?s\s*\)",
@@ -1175,10 +1286,25 @@ def _structured_segment_prompt(
             cleaned,
         ).strip()
         if cleaned:
+            if re.search(r"(?is)<d>\s*.*?\s*</d>", cleaned) or re.search(r'"[^"]{2,80}"', cleaned):
+                _dialogue_in_segments += 1
             segments.append(cleaned)
     target = max(1, int(beat_count))
     if not segments:
         return None
+    # 日志：检查解析后的 segments 是否有对白
+    if _dialogue_in_segments == 0:
+        print(
+            f"[GJJ_MiniMaxH3SkillStudio] ⚠️ action_segments 解析后无对白段落："
+            f"共 {len(segments)} 段，含对白 0 段。",
+            flush=True,
+        )
+    else:
+        print(
+            f"[GJJ_MiniMaxH3SkillStudio] action_segments 解析：共 {len(segments)} 段，"
+            f"含对白 {_dialogue_in_segments} 段。",
+            flush=True,
+        )
     if len(segments) > target:
         groups = [[] for _ in range(target)]
         for index, value in enumerate(segments):
@@ -1186,19 +1312,61 @@ def _structured_segment_prompt(
         segments = [" ".join(group) for group in groups]
     while len(segments) < target:
         index = len(segments)
-        segments.append(
-            "承接上一动作段的准确结束姿态，完成下一步可见动作、受力变化和镜头响应，环境与同步声随结果变化。"
-            if index + 1 < target else
-            "承接上一动作段的准确结束姿态，完成最终动作并稳定收势，镜头与环境声同步收束。"
+        if user_wants_dialogue:
+            lang = dialogue_language if dialogue_language else "中文"
+            # 仅首个 fallback 段加完整对白，后续段保持通用
+            if index == 0:
+                dialogue_fallback = f'角色看向对方：<d>[{lang}]我们必须尽快行动。</d>另一角色点头：<d>[{lang}]明白，现在出发。</d>'
+                segments.append(
+                    f"承接上一动作段的准确结束姿态，完成下一步可见动作、姿态变化和镜头响应，环境与同步声随结果变化。{dialogue_fallback}"
+                    if index + 1 < target else
+                    f"承接上一动作段的准确结束姿态，完成最终动作并稳定收势，镜头与环境声同步收束。{dialogue_fallback}"
+                )
+            else:
+                segments.append(
+                    "承接上一动作段的准确结束姿态，完成下一步可见动作、姿态变化和镜头响应，环境与同步声随结果变化。"
+                    if index + 1 < target else
+                    "承接上一动作段的准确结束姿态，完成最终动作并稳定收势，镜头与环境声同步收束。"
+                )
+        else:
+            segments.append(
+                "承接上一动作段的准确结束姿态，完成下一步可见动作、姿态变化和镜头响应，环境与同步声随结果变化。"
+                if index + 1 < target else
+                "承接上一动作段的准确结束姿态，完成最终动作并稳定收势，镜头与环境声同步收束。"
+            )
+    # 按台词权重动态分配时间：台词多的段落分到更多时间，避免台词说不完
+    beats = _weighted_beat_ranges(duration, segments)[:target]
+    # 有效镜头数 = min(shot_count, beats 数)，避免出现空 Shot
+    effective_shot_count = min(shot_count, len(beats))
+    # 日志：输出加权后的时间分配，便于调试
+    _has_any_dialogue = any(_estimate_dialogue_duration(seg) > 0 for seg in segments)
+    if _has_any_dialogue:
+        _beat_summary = ", ".join(
+            f"({start:.2f}-{end:.2f}s,台词{ _estimate_dialogue_duration(seg):.2f}s)"
+            for (start, end), seg in zip(beats, segments)
         )
-    beats = _action_beat_ranges(duration, target)[:target]
-    cuts = _shot_cut_times(duration, shot_count)
+        print(f"[GJJ_MiniMaxH3SkillStudio] 加权时间分配：{_beat_summary}", flush=True)
+    # 把 beats 均分到 effective_shot_count 个镜头，每个镜头含 1 个或多个 beat
+    # 第一个 beat 归 Shot 1，后续按 beat 索引均分到各 shot
+    beat_count = len(beats)
+    if effective_shot_count <= 1:
+        shot_of_beat = [0] * beat_count
+    else:
+        shot_of_beat = []
+        for beat_index in range(beat_count):
+            # beat_index 属于哪个 shot：按 beat 数均分
+            shot_index = min(effective_shot_count - 1, beat_index * effective_shot_count // beat_count)
+            shot_of_beat.append(shot_index)
     lines: list[str] = []
     previous_shot = -1
     for index, ((start, end), action) in enumerate(zip(beats, segments)):
-        shot_index = min(shot_count - 1, sum(1 for cut in cuts if start >= cut - 0.0005))
+        shot_index = shot_of_beat[index]
         if shot_index != previous_shot:
-            header = "[Shot 1]" if shot_index == 0 else f"[Shot {shot_index + 1}] At {_format_timestamp(cuts[shot_index - 1])},"
+            if shot_index == 0:
+                header = "[Shot 1]"
+            else:
+                # Shot 头部时间戳 = 该 shot 第一个 beat 的 start（加权后的真实时间）
+                header = f"[Shot {shot_index + 1}] At {_format_timestamp(start)},"
             lines.append(header)
             previous_shot = shot_index
         transition = "切换镜头，" if shot_index > 0 and lines[-1].startswith("[Shot") else ""
@@ -1427,7 +1595,29 @@ class GJJ_MiniMaxH3SkillStudio:
             ]
         ) or "- use only references visible in the connected media"
         protected_request, protected_dialogue = _protect_reasoning_dialogue(str(需求 or ""))
-        instruction = f"""Creative treatment: {技能模式}. {profile}
+        # 检测用户是否主动要求生成对白/台词（但未提供具体文本）
+        raw_request = str(需求 or "")
+        user_wants_dialogue = bool(
+            re.search(r"(?:带|有|加|要|需|写|做|生成|加入|插入|含|包括).{0,6}(?:台词|对白|对话|说话|讲话|旁白|口播|独白|对谈)", raw_request)
+            or re.search(r"(?:台词|对白|对话|说话|讲话|旁白|口播|独白|对谈).{0,6}(?:带|有|加|要|需|写|做|生成|加入|插入|含|包括)", raw_request)
+        )
+        has_specific_dialogue = bool(protected_dialogue)
+        # —— 台词要求：同时放在指令顶部和底部，因为小模型对首尾关注度最高 ——
+        dialogue_headline = ""
+        dialogue_detail = ""
+        if user_wants_dialogue and not has_specific_dialogue:
+            dialogue_headline = f"""
+★★★ CRITICAL: This video MUST contain spoken dialogue/voice. Every shot group must have at least one character speaking. Use format <d>[{dialogue_language}]spoken text</d> in action_segments. No exceptions. ★★★
+"""
+            dialogue_detail = f"""
+CRITICAL DIALOGUE RULE — READ THIS LAST AND APPLY IT: The user explicitly requested dialogue/voice but provided no exact lines. You MUST invent natural dialogue in {dialogue_language}. Every action_segments item MUST contain at least one line of spoken dialogue using the official H3 format <d>[{dialogue_language}]exact spoken text</d>. Example: <d>[{dialogue_language}]你好，很高兴见到你</d>. Spread dialogue evenly across the video. Every character must speak at least once. If a shot has two characters, have them converse briefly. Dialogue must be natural, short (3-15 words), and integrated into the action flow.
+"""
+        elif has_specific_dialogue:
+            dialogue_headline = ""
+            dialogue_detail = """Dialogue placeholder rule: every __GJJ_DIALOGUE_####__ token is immutable user dialogue. Keep it exactly once in the matching spoken-action position inside action_segments; it will be converted to the official <d>[Language] exact dialogue</d> tag after generation. Never translate, paraphrase, move into overall_soundscape, or delete it.
+"""
+        instruction = f"""{dialogue_headline}
+Creative treatment: {技能模式}. {profile}
 Apply this treatment only inside the official H3 fields. Do not output a project brief, cards, tables, plans, alternatives or analysis.
 H3 mode: {official_mode}. {mode_rule}
 Exact target duration: {float(时长):.3f} seconds
@@ -1447,11 +1637,9 @@ Required reference inventory:
 
 User request:
 {protected_request.strip()}
-
-Dialogue placeholder rule: every __GJJ_DIALOGUE_####__ token is immutable user dialogue. Keep it exactly once in the matching spoken-action position inside detailed_description; it will be converted to the official <d>[Language] exact dialogue</d> tag after generation. Never translate, paraphrase, move into overall_soundscape, or delete it.
-
+{dialogue_detail}
 MANDATORY ACTION PLAN FOR JSON action_segments:
-Return exactly {target_action_beat_count} action_segments. Use the following shot/time plan only to understand duration and continuity; do not copy its [Shot] headers, time labels or bracket placeholders into segment text because the formatter adds them. Write one array item for every placeholder in this exact order. A combat request must show completed attack, defense or evasion exchanges and visible consequences—not merely posing, staring, confronting or preparing. Each item must advance from the previous item's exact end state.
+Return exactly {target_action_beat_count} action_segments. Use the following shot/time plan only to understand duration and continuity; do not copy its [Shot] headers, time labels or bracket placeholders into segment text because the formatter adds them. Write one array item for every placeholder in this exact order. Each item must follow the user's requested story tone—only use combat if the user explicitly requested fighting. Every action item must advance from the previous item's exact end state.
 {detail_skeleton}"""
         # The exact skeleton is already in the final user instruction. Keeping the
         # system contract compact prevents small local models from echoing manuals
@@ -1465,6 +1653,7 @@ Return exactly {target_action_beat_count} action_segments. Use the following sho
             tuple((item["name"], item["notes"]) for item in scene_records),
             视觉风格, 音乐风格, 切镜次数,
             _media_runtime_signature(参考媒体 if bool(启用媒体反推) else None),
+            bool(user_wants_dialogue), bool(has_specific_dialogue),
         )
         cache_signature = hashlib.sha256(repr(cache_payload).encode("utf-8")).hexdigest()
         cached = self._RESULT_CACHE.get(cache_slot)
@@ -1502,10 +1691,26 @@ Return exactly {target_action_beat_count} action_segments. Use the following sho
         raw = _dedupe_generated_blocks(
             payload[0] if isinstance(payload, (list, tuple)) and payload else payload or ""
         )
+        # 日志：追踪模型原始输出中的对白情况
+        _raw_has_d = bool(re.search(r"(?is)<d>\s*.*?\s*</d>", str(raw or "")))
+        _raw_has_quote = bool(re.search(r'"[^"]{2,80}"|[\u2018][^\u2019]{2,80}[\u2019]|[\u300c][^\u300d]{2,80}[\u300d]', str(raw or "")))
+        _raw_action_mentions_dialogue = bool(re.search(r'(?:dialogue|对白|台词|voice|spoken)', str(raw or ""), re.IGNORECASE))
+        print(
+            f"[GJJ_MiniMaxH3SkillStudio] 模型原始输出诊断："
+            f"长度={len(str(raw or ''))}, "
+            f"含<d>标签={_raw_has_d}, 含引号对白={_raw_has_quote}, "
+            f"含对白关键词={_raw_action_mentions_dialogue}. "
+            f"用户要求台词={user_wants_dialogue}, 用户指定对白={has_specific_dialogue}.",
+            flush=True,
+        )
+        if user_wants_dialogue and not _raw_has_d and not _raw_has_quote:
+            print("[GJJ_MiniMaxH3SkillStudio] ⚠️ 警告：模型输出中未检测到任何对白内容，可能需要检查指令或模型。", flush=True)
+            # 打印原始输出前 2000 字符供调试
+            print(f"[GJJ_MiniMaxH3SkillStudio] 原始输出预览：{str(raw or '')[:2000]}", flush=True)
         parsed = _extract_json(raw)
         structured_prompt = _structured_segment_prompt(
             parsed, official_mode, float(时长), target_shot_count, target_action_beat_count,
-            str(需求 or ""),
+            str(需求 or ""), user_wants_dialogue=user_wants_dialogue, dialogue_language=dialogue_language,
         ) if parsed else None
         generated_prompt = _dedupe_generated_blocks(_clean_generated_value(
             structured_prompt or (

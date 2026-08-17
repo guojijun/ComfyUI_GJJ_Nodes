@@ -237,31 +237,137 @@ def _dialogue_tag_from_quoted_text(value: str) -> str:
     return f"<d>[{_spoken_language(dialogue)}] {dialogue}</d>"
 
 
+def _dialogue_marker_variants(marker: str) -> list[str]:
+    """根据原始 4 位占位符序号，生成 1–4 位数字的所有可能变体。"""
+    match = re.search(r"__GJJ_DIALOGUE_(\d+)__", str(marker or ""), flags=re.IGNORECASE)
+    if not match:
+        return [str(marker or "")]
+    try:
+        seq = int(match.group(1))
+    except (TypeError, ValueError):
+        return [str(marker or "")]
+    variants: list[str] = []
+    for width in (4, 2, 1, 3):
+        variants.append(f"__GJJ_DIALOGUE_{seq:0{width}d}__")
+    # 去重但保持顺序
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in variants:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
 def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, str]]) -> str:
-    """推理后逐字恢复对白，并将引号内台词写成 H3 的 <d> 专属标签。"""
+    """推理后逐字恢复对白，并将引号内台词写成 H3 的 <d>[语言]对白</d> 专属标签。
+
+    恢复策略按优先级依次尝试：
+    1. 占位符在 <d>...</d> 标签内 → 把整个 <d> 标签替换为标准 <d>[语言]对白</d>（避免嵌套）
+    2. 占位符是裸的（不在 <d> 标签内）→ 替换为完整 <d>[语言]对白</d> 标签
+    3. 同序号不同宽度变体匹配（0001 / 01 / 1 / 001）—— 应对模型简化位数
+    4. 仍失败时，扫描正文内所有残留占位符，按出现顺序映射到未恢复的对白
+    5. 缺失对白以纯 <d>[语言]对白</d> 格式插入到时间轴字段（H3 官方格式）
+    6. 最后兜底清除一切残留占位符标记，防止泄漏到最终 H3 提示词
+    """
     restored = str(prompt or "")
-    missing: list[str] = []
-    for marker, original in protected_values:
-        restored_dialogue = _dialogue_tag_from_quoted_text(str(original))
-        restored, count = re.subn(
-            re.escape(marker),
-            lambda _match, text=restored_dialogue: text,
-            restored,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-        # 推理模型偶尔会把同一占位符复制到 soundscape 等附加字段。
-        # 第一处恢复原文，其余重复占位符必须删除，不能泄漏到最终提示词。
-        restored = re.sub(re.escape(marker), "", restored, flags=re.IGNORECASE)
+    unresolved_indices: list[int] = []
+
+    for idx, (marker, original) in enumerate(protected_values):
+        restored_dialogue_tag = _dialogue_tag_from_quoted_text(str(original))
+        variants = _dialogue_marker_variants(marker)
+        count = 0
+        for variant in variants:
+            if count > 0:
+                restored = re.sub(re.escape(variant), "", restored, flags=re.IGNORECASE)
+                continue
+
+            # 策略 1：占位符在 <d>...</d> 标签内
+            # 把包含此占位符的整个 <d> 标签替换为标准 <d>[语言]对白</d>，避免嵌套
+            # (?:(?!</?d>).)*? 确保不跨越其他 <d>/<\/d> 标签边界
+            d_wrapped_pattern = re.compile(
+                r"<d>\s*(?:\[[^\]\r\n]+\]\s*)?"
+                r"(?:(?!</?d[ >]).)*?" + re.escape(variant) +
+                r"(?:(?!</?d[ >]).)*?\s*</d>",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            restored, d_count = d_wrapped_pattern.subn(
+                lambda _m, text=restored_dialogue_tag: text,
+                restored,
+                count=1,
+            )
+            if d_count > 0:
+                count = d_count
+                for extra_variant in variants:
+                    restored = re.sub(
+                        re.escape(extra_variant), "", restored, flags=re.IGNORECASE,
+                    )
+                break
+
+            # 策略 2：占位符是裸的（不在 <d> 标签内）
+            restored, count = re.subn(
+                re.escape(variant),
+                lambda _m, text=restored_dialogue_tag: text,
+                restored,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if count > 0:
+                for extra_variant in variants:
+                    restored = re.sub(
+                        re.escape(extra_variant), "", restored, flags=re.IGNORECASE,
+                    )
+                break
+
         if count == 0:
-            missing.append(restored_dialogue)
+            unresolved_indices.append(idx)
+            for variant in variants:
+                restored = re.sub(re.escape(variant), "", restored, flags=re.IGNORECASE)
+
+    # 策略 4：模糊匹配 —— 残留占位符按出现顺序映射到未恢复的对白
+    if unresolved_indices:
+        any_marker_pattern = re.compile(r"__GJJ_DIALOGUE_\d+__", flags=re.IGNORECASE)
+        remaining_markers: list[tuple[int, str]] = [
+            (match.start(), match.group(0)) for match in any_marker_pattern.finditer(restored)
+        ]
+        matched: set[int] = set()
+        for (_pos, stray_marker), unresolved_idx in zip(
+            remaining_markers, unresolved_indices,
+        ):
+            _orig_marker, orig_value = protected_values[unresolved_idx]
+            dialogue_tag = _dialogue_tag_from_quoted_text(str(orig_value))
+            # 模糊匹配时同样需要处理 <d> 标签内和裸占位符两种情况
+            d_wrapped = re.compile(
+                r"<d>\s*(?:\[[^\]\r\n]+\]\s*)?"
+                r"(?:(?!</?d[ >]).)*?" + re.escape(stray_marker) +
+                r"(?:(?!</?d[ >]).)*?\s*</d>",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            restored, d_count = d_wrapped.subn(
+                lambda _m, text=dialogue_tag: text, restored, count=1,
+            )
+            if d_count > 0:
+                matched.add(unresolved_idx)
+                continue
+            restored, n_count = re.subn(
+                re.escape(stray_marker),
+                lambda _m, text=dialogue_tag: text,
+                restored, count=1, flags=re.IGNORECASE,
+            )
+            if n_count > 0:
+                matched.add(unresolved_idx)
+        unresolved_indices = [i for i in unresolved_indices if i not in matched]
+        restored = re.sub(any_marker_pattern, "", restored)
+
+    # 策略 5：缺失对白以 H3 官方 <d>[语言]对白</d> 格式插入时间轴字段
+    missing: list[str] = [
+        _dialogue_tag_from_quoted_text(str(protected_values[idx][1]))
+        for idx in unresolved_indices
+    ]
     if missing:
-        fallback_lines = " ".join(
-            f"An on-screen speaker (S{index}) says: {dialogue}"
-            for index, dialogue in enumerate(missing, start=1)
-        )
-        # A dropped placeholder must still remain inside the timeline field; do
-        # not append dialogue after non_diegetic_music, where H3 cannot use it.
+        # 直接用 <d> 标签，不加英文前缀，符合 H3 官方格式
+        fallback_lines = " ".join(missing)
         sound_field = re.search(r"(?im)^overall_soundscape:\s*", restored)
         if sound_field:
             restored = (
@@ -273,6 +379,9 @@ def _restore_reasoning_dialogue(prompt: str, protected_values: list[tuple[str, s
             )
         else:
             restored = "\n\n".join(filter(None, (restored.strip(), fallback_lines)))
+    # 最终兜底：清除任何残留的 GJJ_DIALOGUE / GJJ_BEAT_DIALOGUE 占位符，防止泄漏
+    restored = re.sub(r"__GJJ_DIALOGUE_\d+__", "", restored, flags=re.IGNORECASE)
+    restored = re.sub(r"__GJJ_BEAT_DIALOGUE_\d+__", "", restored, flags=re.IGNORECASE)
     return restored
 
 
@@ -325,6 +434,11 @@ def _sanitize_reasoned_prompt(
         re.search(r"(?is)<d>.*?</d>", source_text)
         or re.search(r"(?:说|说道|问|询问|回答|回复|喊|叫|台词)\s*[：:]", source_text)
     )
+    # 用户主动要求生成对白（但未提供具体台词文本）—— 检测 "带台词"、"有对话" 等模式
+    user_requests_dialogue = bool(
+        re.search(r"(?:带|有|加|要|需|写|做|生成|加入|插入).{0,6}(?:台词|对白|对话|说话|讲话|旁白|口播|独白|对谈)", source_text)
+        or re.search(r"(?:台词|对白|对话|说话|讲话|旁白|口播|独白|对谈).{0,6}(?:带|有|加|要|需|写|做|生成|加入|插入)", source_text)
+    )
     generated_speech_seconds = 0.0
 
     def keep_valid_dialogue(match: re.Match[str]) -> str:
@@ -332,13 +446,22 @@ def _sanitize_reasoned_prompt(
         dialogue = re.sub(r"^\s*\[[^\]\r\n]+\]\s*", "", match.group(1)).strip()
         if not dialogue:
             return ""
+        # 占位符是对白保护机制的一部分，后续由 _restore_reasoning_dialogue 恢复为
+        # 官方 <d>[语言] 对白</d> 格式。这里必须原样保留，不能因 "不在原文中" 而删除。
+        if re.search(r"__GJJ_DIALOGUE_\d+__", dialogue, flags=re.IGNORECASE):
+            return match.group(0)
         if source_has_dialogue:
             return match.group(0) if dialogue in source_text else ""
-        # 没有原台词时允许模型创作；按中文约 4 字/秒、外文约 2.5 词/秒估算完整口播时长。
+        # 用户主动要求台词但未提供具体内容 → 信任模型创作，不过度限制时长
+        if user_requests_dialogue:
+            return match.group(0)
+        # 没有原台词也没有主动要求时，允许模型创作但按口播时长做预算控制。
+        # 预算从视频时长的 50% 放宽到 80%，给模型更多创作空间。
         han_count = len(re.findall(r"[\u3400-\u9fff]", dialogue))
         latin_words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", dialogue))
         estimated_seconds = max(0.6, han_count / 4.0 + latin_words / 2.5)
-        if generated_speech_seconds + estimated_seconds > max(0.0, float(duration)) + 1e-6:
+        speech_budget = max(0.0, float(duration)) * 0.8
+        if generated_speech_seconds + estimated_seconds > speech_budget + 1e-6:
             return ""
         generated_speech_seconds += estimated_seconds
         return match.group(0)
@@ -348,7 +471,76 @@ def _sanitize_reasoned_prompt(
         keep_valid_dialogue,
         cleaned,
     )
-    # 官方格式中第一镜头没有时间戳；后续镜头才使用 At MM:SS.mmm。
+
+    # ============================================================
+    # FALLBACK: 小模型可能用自然格式（引号/角色名+冒号）写对白，
+    # 而不是用官方 <d> 标签。如果用户要求对白但未检测到 <d> 标签，
+    # 则自动从常见对白格式中提取并转换为 <d>[语言] 对白</d>。
+    # ============================================================
+    _has_d_tags = bool(re.search(r"(?is)<d>\s*.*?\s*</d>", cleaned))
+    if user_requests_dialogue and not _has_d_tags:
+        _lang_tag = dialogue_language if dialogue_language else "中文"
+
+        # 匹配中文引号对白："对白"、「对白」、"对白"
+        def _convert_quoted_to_d(match: re.Match[str]) -> str:
+            inner = match.group(1).strip()
+            if len(inner) < 2:
+                return match.group(0)
+            return f"<d>[{_lang_tag}]{inner}</d>"
+
+        # 中文双引号对白
+        cleaned = re.sub(
+            r'"([^"]{2,80})"',
+            _convert_quoted_to_d,
+            cleaned,
+        )
+        # 中文单引号对白 「」
+        cleaned = re.sub(
+            r'[\u2018]([^\u2019]{2,80})[\u2019]',
+            _convert_quoted_to_d,
+            cleaned,
+        )
+        # 中文书名号/引号 「」
+        cleaned = re.sub(
+            r'[\u300c]([^\u300d]{2,80})[\u300d]',
+            _convert_quoted_to_d,
+            cleaned,
+        )
+        # 英文单引号对白
+        cleaned = re.sub(
+            r"'([^']{2,80})'",
+            _convert_quoted_to_d,
+            cleaned,
+        )
+        # 角色名 + 冒号 + 对白（带引号）
+        # 格式：角色名: "对白" 或 角色名："对白"
+        def _convert_colon_dialogue(match: re.Match[str]) -> str:
+            speaker = match.group(1).strip()
+            dialogue_text = match.group(2).strip()
+            if len(dialogue_text) < 2:
+                return match.group(0)
+            return f"{speaker} <d>[{_lang_tag}]{dialogue_text}</d>"
+
+        cleaned = re.sub(
+            r'([\u4e00-\u9fffA-Za-z]{1,8})\s*[：:]\s*"([^"]{2,80})"',
+            _convert_colon_dialogue,
+            cleaned,
+        )
+        # 角色名 + 冒号 + 对白（无引号，直到句号/感叹号/问号/换行）
+        def _convert_colon_no_quote(match: re.Match[str]) -> str:
+            speaker = match.group(1).strip()
+            dialogue_text = match.group(2).strip()
+            if len(dialogue_text) < 2:
+                return match.group(0)
+            return f"{speaker} <d>[{_lang_tag}]{dialogue_text}</d>"
+
+        cleaned = re.sub(
+            r'([\u4e00-\u9fffA-Za-z]{1,6})\s*[：:]\s*([^\s，。！？.!?]{2,60}[。！？!?,，])',
+            _convert_colon_no_quote,
+            cleaned,
+        )
+
+    # 官方格式中第一镜头没有时间戳；后续镜头才使用 MM:SS.mmm。
     cleaned = re.sub(
         r"(?i)\[Shot\s+1\]\s+At\s+00:00(?:\.0{1,3})?\s*", "[Shot 1] ", cleaned,
     )
@@ -2124,6 +2316,14 @@ class GJJ_MiniMaxH3Studio:
                 part_library_assets("scene", part_scenes)
                 + part_library_assets("actor", part_actors)
             )[:max(0, 10 - external_image_count)]
+            # 日志：追踪角色替换情况
+            print(
+                f"[GJJ_MiniMaxH3Studio] 分段[{segment_index}] 角色替换："
+                f"prompt_actors={prompt_actors}, bare_prompt_actors={bare_prompt_actors}, "
+                f"part_actors={part_actors}, part_scenes={part_scenes}, "
+                f"part_assets数={len(part_assets)}, part_assets内容={[f'{k}:{n}' for k, i, n, _ in part_assets]}",
+                flush=True,
+            )
             part_images: list[torch.Tensor] = []
             part_references: list[tuple[str, str, int]] = []
             scene_lines: list[str] = []
@@ -2152,7 +2352,33 @@ class GJJ_MiniMaxH3Studio:
                 for audio, name in _library_reference_voices(speaking_actors)
             ]
             structured_part = _normalize_storyboard_segment(raw_part)
-            segment_prompt = _replace_library_picture_references(structured_part, part_references) if part_references else structured_part
+            # 如果 part_references 为空但 prompt 中有 @角色名，尝试从 actor_candidates 构建兜底引用
+            if not part_references and prompt_actors:
+                print(
+                    f"[GJJ_MiniMaxH3Studio] ⚠️ part_references 为空但 prompt 含角色引用 {prompt_actors}，"
+                    f"可能是资料库名字不匹配，actor_candidates={actor_candidates}",
+                    flush=True,
+                )
+                # 兜底：从 actor_candidates 和 part_assets 构建引用
+                _fallback_refs = []
+                for idx, (kind, _img, name, _notes) in enumerate(pooled_assets.get("actor", [])):
+                    if name.casefold() in [a.casefold() for a in actor_candidates]:
+                        _fallback_refs.append(("actor", name, external_image_count + idx + 1))
+                if _fallback_refs:
+                    print(f"[GJJ_MiniMaxH3Studio] 兜底替换：{_fallback_refs}", flush=True)
+                    segment_prompt = _replace_library_picture_references(structured_part, _fallback_refs)
+                else:
+                    segment_prompt = structured_part
+            else:
+                segment_prompt = _replace_library_picture_references(structured_part, part_references) if part_references else structured_part
+            # 检查替换后是否还有残留的 @角色名
+            _remaining_at_refs = re.findall(r"@[A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\u00d7-\u9fff]{0,8}", segment_prompt)
+            if _remaining_at_refs:
+                print(
+                    f"[GJJ_MiniMaxH3Studio] ⚠️ 分段[{segment_index}] 角色替换后残留 @引用：{_remaining_at_refs}, "
+                    f"part_references={part_references}",
+                    flush=True,
+                )
             if scene_lines:
                 segment_prompt = "\n".join([*scene_lines, segment_prompt]).strip()
             segmented_library_media.append((segment_prompt, {
