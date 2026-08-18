@@ -1401,8 +1401,9 @@ def _load_internal_media(raw: Any) -> tuple[dict[str, list[Any]], list[str]]:
 
 
 def _aligned_frames(duration: float, fps: float) -> int:
-    value = max(5, round(float(duration) * float(fps)))
-    return value + (5 - (value % 17)) % 17
+    return max(5, round(float(duration) * float(fps))) + (
+        5 - (max(5, round(float(duration) * float(fps))) % 17)
+    ) % 17
 
 
 def _audio_duration_seconds(value: Any) -> float | None:
@@ -1800,16 +1801,19 @@ def _attach_official_voice_references(prompt: str, media: dict[str, list[Any]]) 
         character_name = str(item.get("name") or "").strip()
         picture_number = int(item.get("picture_index") or 0)
         subject = f"<Picture {picture_number}>" if picture_number > 0 else character_name
-        speaker_id = speaker_by_picture.get(picture_number, "")
-        if not speaker_id and character_name:
+        speaker_id = ""
+        if character_name:
             named_speaker = re.search(
-                rf"\((S\d+)\)\s*{re.escape(character_name)}\s+"
+                rf"\((S\d+)\)\s*(?:<Picture\s+\d+>\s*)?"
+                rf"(?:\({re.escape(character_name)}\)|{re.escape(character_name)})\s+"
                 r"(?:says?|asks?|replies?|说|说道|问|询问|回答|回复|喊|叫)\s*[:：]",
                 str(prompt or ""),
                 flags=re.IGNORECASE,
             )
             if named_speaker:
                 speaker_id = named_speaker.group(1).upper()
+        if not speaker_id:
+            speaker_id = speaker_by_picture.get(picture_number, "")
         speaker_suffix = f" with stable speaker ID ({speaker_id})" if speaker_id else ""
         lines.append(
             f"<Audio {audio_number}> is the official reference voice/timbre for {subject}"
@@ -1827,11 +1831,15 @@ def _declare_official_picture_references(
     external_image_count: int,
     references: list[tuple[str, str, int]],
     dialogue_language: str,
+    first_frame_actor_names: list[str] | None = None,
 ) -> str:
     """Declare every Picture resource and normalize all picture-bound dialogue."""
     result = str(prompt or "").strip()
     definitions: list[str] = []
     retention: list[str] = []
+    first_frame_actors = list(dict.fromkeys(
+        str(name).strip() for name in (first_frame_actor_names or []) if str(name).strip()
+    ))
     typed_references = {int(number): (str(kind), str(name)) for kind, name, number in references}
     has_actor_references = any(str(kind) == "actor" for kind, _name, _number in references)
     for number in range(1, max(0, int(external_image_count)) + 1):
@@ -1846,6 +1854,15 @@ def _declare_official_picture_references(
                 "composition, character poses, camera framing, environment, lighting, spatial relationships, and scene state. "
                 + identity_rule
             )
+            if first_frame_actors:
+                bindings = "; ".join(
+                    f"<Picture 1> ({name}) identifies only the matching visible person named {name}"
+                    for name in first_frame_actors
+                )
+                definitions.append(
+                    "ROLE-NAME BINDINGS — mandatory: " + bindings + ". Every occurrence of these role names in "
+                    "visual directions, dialogue, and voice assignments must retain its <Picture 1> binding."
+                )
             retention.append(
                 "<Picture 1>: fully_preserved - preserve the opening composition, poses, camera framing, environment, "
                 "lighting, spatial layout, and scene state."
@@ -1911,6 +1928,20 @@ def _declare_official_picture_references(
     if not detailed_match:
         return result
     detail = detailed_match.group(2).strip()
+    # When StoryboardVideoGrid locks a generated first frame, actor asset cards
+    # stay out of ref_images. Bind every role name to the matching person already
+    # visible inside Picture 1 instead of inventing a new Picture resource.
+    for actor_name in sorted(first_frame_actors, key=len, reverse=True):
+        escaped_name = re.escape(actor_name)
+        binding = f"<Picture 1> ({actor_name})"
+        detail = re.sub(r"@\s*" + escaped_name, binding, detail, flags=re.IGNORECASE)
+        detail = re.sub(
+            rf"\((S\d+)\)\s*{escaped_name}\s+"
+            r"(says?|asks?|replies?|说|说道|问|询问|回答|回复|喊|叫)\s*[:：]",
+            lambda match, role_binding=binding: f"({match.group(1).upper()}) {role_binding} {match.group(2)}:",
+            detail,
+            flags=re.IGNORECASE,
+        )
     picture_order: list[int] = []
     for raw_number in re.findall(
         r"<Picture\s+(\d+)>\s*(?:says\s*:|[：:])", detail, flags=re.IGNORECASE,
@@ -1920,10 +1951,10 @@ def _declare_official_picture_references(
             picture_order.append(number)
     speaker_ids = {number: f"S{offset}" for offset, number in enumerate(picture_order, start=1)}
     detail = re.sub(
-        r"\(S\d+\)\s*<Picture\s+(\d+)>\s+says\s*:\s*<d>\s*(?:\[[^\]]+\]\s*)?(.*?)</d>",
+        r"\((S\d+)\)\s*<Picture\s+(\d+)>\s*(\([^\r\n()]+\)\s*)?says\s*:\s*<d>\s*(?:\[[^\]]+\]\s*)?(.*?)</d>",
         lambda match: (
-            f"({speaker_ids.get(int(match.group(1)), 'S1')}) <Picture {int(match.group(1))}> says: "
-            f"<d>[{language_tag}] {match.group(2).strip()}</d>"
+            f"({match.group(1).upper()}) <Picture {int(match.group(2))}> {str(match.group(3) or '').strip()} says:\n"
+            f"<d>[{language_tag}] {match.group(4).strip()}</d>"
         ),
         detail,
         flags=re.IGNORECASE | re.DOTALL,
@@ -1940,6 +1971,14 @@ def _declare_official_picture_references(
         ),
         detail,
     )
+    # Dialogue payload tags are always a standalone line. No visual instruction,
+    # speaker label, or trailing prose may share that line.
+    detail = re.sub(
+        r"[ \t]*<d>\s*(.*?)\s*</d>[ \t]*",
+        lambda match: f"\n<d>{match.group(1).strip()}</d>\n",
+        detail,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
     return result[:detailed_match.start(2)] + detail + result[detailed_match.end(2):]
 
 
@@ -1951,22 +1990,32 @@ def _replace_library_picture_references(
     # 名称按长度降序处理，避免短名称是长名称前缀时提前截断。
     for kind, name, picture_index in sorted(references, key=lambda item: len(item[1]), reverse=True):
         marker = r"@\s*" if kind == "actor" else r"🏕️?\s*"
+        replacement = f"<Picture {picture_index}> ({name})" if kind == "actor" else f"<Picture {picture_index}>"
         result = re.sub(
             marker + re.escape(str(name)),
-            f"<Picture {picture_index}>",
+            replacement,
             result,
             flags=re.IGNORECASE,
         )
     actor_references = [item for item in references if item[0] == "actor" and str(item[1]).strip()]
     if actor_references:
-        picture_by_name = {str(name).casefold(): picture_index for _kind, name, picture_index in actor_references}
+        picture_by_name = {
+            str(name).casefold(): (picture_index, str(name))
+            for _kind, name, picture_index in actor_references
+        }
         names_pattern = "|".join(re.escape(str(name)) for _kind, name, _index in sorted(actor_references, key=lambda item: len(item[1]), reverse=True))
-        protected = re.compile(r"(<d>.*?</d>|“[^”]*”|\"[^\"]*\")", flags=re.IGNORECASE | re.DOTALL)
+        protected = re.compile(
+            r"(<Picture\s+\d+>\s*\([^\r\n()]+\)|<d>.*?</d>|“[^”]*”|\"[^\"]*\")",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         chunks = protected.split(result)
         for index in range(0, len(chunks), 2):
             chunks[index] = re.sub(
                 names_pattern,
-                lambda match: f"<Picture {picture_by_name[match.group(0).casefold()]}>",
+                lambda match: (
+                    f"<Picture {picture_by_name[match.group(0).casefold()][0]}> "
+                    f"({picture_by_name[match.group(0).casefold()][1]})"
+                ),
                 chunks[index],
                 flags=re.IGNORECASE,
             )
@@ -2034,12 +2083,14 @@ def _normalize_storyboard_segment(prompt: str) -> str:
 
     parts = [
         (
-            "VISUAL SCENE DESCRIPTION ONLY — never speak, narrate, quote, lip-sync, or turn any words "
-            f"from this field into audio: {scene_description}"
+            f"VISUAL SCENE DESCRIPTION: {scene_description}\n"
+            "SILENCE LOCK FOR THE PRECEDING VISUAL SCENE — never speak, narrate, quote, lip-sync, "
+            "subtitle, or convert the preceding visual description into soundtrack speech."
         ),
         (
-            "VISUAL ACTION AND CAMERA DIRECTION ONLY — never speak, narrate, quote, lip-sync, or turn any "
-            f"words from this field into audio: {action_description}"
+            f"VISUAL ACTION AND CAMERA DIRECTION: {action_description}\n"
+            "SILENCE LOCK FOR THE PRECEDING VISUAL ACTION — never speak, narrate, quote, lip-sync, "
+            "subtitle, or convert the preceding visual direction into soundtrack speech."
         ),
     ]
     if dialogue:
@@ -2501,7 +2552,9 @@ class GJJ_MiniMaxH3Studio:
                 {
                     "audio": audio,
                     "name": name,
-                    "picture_index": actor_picture_numbers.get(name.casefold(), 0),
+                    "picture_index": actor_picture_numbers.get(
+                        name.casefold(), 1 if first_frame_reference_lock else 0
+                    ),
                 }
                 for audio, name in _library_reference_voices(speaking_actors)
             ]
@@ -2538,6 +2591,7 @@ class GJJ_MiniMaxH3Studio:
                 external_image_count,
                 effective_part_references,
                 str(first("dialogue_language", "中文")),
+                part_actors if first_frame_reference_lock else None,
             )
             # 检查替换后是否还有残留的 @角色名
             _remaining_at_refs = re.findall(r"@[A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\u00d7-\u9fff]{0,8}", segment_prompt)

@@ -67,8 +67,9 @@ import { bindGjjMediaDrag } from "./gjj_media_drag.js";
 
     function alignedSegmentFrames(duration, frameRate = 24) {
         const fps = Math.max(0.000001, Number(frameRate) || 24);
-        const requestedFrames = Math.max(5, Math.round(Math.max(MIN_SHOT_DURATION_SECONDS, Number(duration) || 0) * fps));
-        return requestedFrames + (5 - (requestedFrames % 17)) % 17;
+        const safeDuration = Math.max(MIN_SHOT_DURATION_SECONDS, Number(duration) || 0);
+        return Math.max(5, Math.round(safeDuration * fps))
+            + (5 - (Math.max(5, Math.round(safeDuration * fps)) % 17)) % 17;
     }
 
     function alignedSegmentDuration(duration, frameRate = 24) {

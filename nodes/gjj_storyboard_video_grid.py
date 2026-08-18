@@ -702,8 +702,9 @@ def _calculate_shot_duration(
 
     def aligned_duration(duration: float) -> float:
         requested_duration = max(MIN_SHOT_DURATION_SECONDS, float(duration))
-        frame_count = max(5, round(requested_duration * safe_fps))
-        frame_count += (5 - (frame_count % 17)) % 17
+        frame_count = max(5, round(requested_duration * safe_fps)) + (
+            5 - (max(5, round(requested_duration * safe_fps)) % 17)
+        ) % 17
         return frame_count / safe_fps
 
     if not dialogues:
@@ -812,15 +813,18 @@ def _build_h3_video_prompt(
         dialogue_parts: list[str] = []
         for d in sub.dialogues:
             speaker_id = speaker_map.get(d.speaker, "S1")
-            dialogue_parts.append(f"({speaker_id}) {d.speaker} says: <d>[{language_tag}] {d.text}</d>")
+            dialogue_parts.append(
+                f"({speaker_id}) {d.speaker} says:\n"
+                f"<d>[{language_tag}] {d.text}</d>"
+            )
         # 第 3 列只描述视觉动作。第 2 列关键帧提示词绝不进入视频正文；
         # 只有下面 dialogue_parts 中显式的 <d> 内容允许成为语音。
         prompt_section = ""
         if idx == 0 and video_prompt:
             prompt_section = (
-                "SILENT VISUAL ACTION AND CAMERA DIRECTION ONLY — never speak, narrate, quote, "
-                "lip-sync, subtitle, or turn any words in this visual direction into audio: "
-                f"{video_prompt}"
+                f"VISUAL ACTION AND CAMERA DIRECTION: {video_prompt}. "
+                "SILENCE LOCK FOR THE PRECEDING VISUAL DIRECTION — never speak, narrate, quote, "
+                "lip-sync, subtitle, or convert the preceding visual description into soundtrack speech."
             )
         parts = [shot_label, time_label, prompt_section, *dialogue_parts]
         shot_descriptions.append(" ".join(p for p in parts if p))
