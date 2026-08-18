@@ -276,6 +276,9 @@ function configDefaults(node) {
     transition_lora_enabled: false,
     test_lora_name: "",
     test_lora_enabled: false,
+    msr_lora_name: "LTX/LTX-2.5-Licon-MSR-V1.safetensors",
+    msr_lora_strength: 1.0,
+    lora_slots: [],
   };
 }
 
@@ -283,9 +286,16 @@ function getConfig(node) {
   if (!node.properties) node.properties = {};
   const raw = node.properties[CONFIG_KEY];
   const defaults = configDefaults(node);
-  if (raw && typeof raw === "object") return { ...defaults, ...raw };
+  const normalizeLoadedConfig = (value) => {
+    const config = { ...defaults, ...(value || {}) };
+    if (isLtx25(node) && /(?:LTX[\s_-]*)?2[._]?3/i.test(String(config.msr_lora_name || ""))) {
+      config.msr_lora_name = defaults.msr_lora_name;
+    }
+    return config;
+  };
+  if (raw && typeof raw === "object") return normalizeLoadedConfig(raw);
   if (typeof raw === "string") {
-    try { return { ...defaults, ...JSON.parse(raw) }; } catch (_) {}
+    try { return normalizeLoadedConfig(JSON.parse(raw)); } catch (_) {}
   }
   const cfg = { ...defaults };
   writeConfigJson(node, cfg, false);

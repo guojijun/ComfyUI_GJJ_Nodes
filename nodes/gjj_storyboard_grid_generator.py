@@ -59,6 +59,7 @@ SMART_REFERENCE_LAYOUT_VERSION = "smart_three_image_v1"
 CHARACTER_REFERENCE_CARD_CACHE_LIMIT = 32
 CHARACTER_REFERENCE_TENSOR_CACHE_LIMIT = 16
 CHARACTER_REFERENCE_CARD_LAYOUT_VERSION = "character_asset_card_v2"
+STORYBOARD_IMAGE_EDIT_LAYOUT_VERSION = "role_asset_reference_only_v4"
 _CHARACTER_REFERENCE_CARD_CACHE: OrderedDict[str, Image.Image] = OrderedDict()
 _CHARACTER_REFERENCE_TENSOR_CACHE: OrderedDict[str, torch.Tensor] = OrderedDict()
 _CHARACTER_REFERENCE_CACHE_LOCK = threading.RLock()
@@ -167,6 +168,7 @@ def _send_live_preview(
     total: int,
     prompt_text: Any = "",
     cache_signature: Any = "",
+    storyboard_plan_cells: Any = None,
 ) -> None:
     if unique_id is None or _safe_text(unique_id).strip() == "" or not isinstance(image, torch.Tensor):
         return
@@ -176,18 +178,22 @@ def _send_live_preview(
         source_image = Image.fromarray(array, "RGB")
         image_info = dict(gjjutils_write_persistent_pil_image(source_image, media_type="image"))
         image_info["cache_signature"] = _safe_text(cache_signature).strip()
+        image_info["storyboard_layout_version"] = STORYBOARD_IMAGE_EDIT_LAYOUT_VERSION
 
         from server import PromptServer
 
+        payload = {
+            "node": str(unique_id),
+            "index": int(index),
+            "total": int(total),
+            "prompt": _safe_text(prompt_text),
+            "image": image_info,
+        }
+        if isinstance(storyboard_plan_cells, list) and storyboard_plan_cells:
+            payload["plan_cells"] = storyboard_plan_cells
         PromptServer.instance.send_sync(
             "gjj_storyboard_grid_preview",
-            {
-                "node": str(unique_id),
-                "index": int(index),
-                "total": int(total),
-                "prompt": _safe_text(prompt_text),
-                "image": image_info,
-            },
+            payload,
         )
     except Exception as exc:
         print(f"[GJJ StoryboardGridGenerator] 发送实时预览失败: {exc}")
@@ -2924,11 +2930,12 @@ def _character_prompt_and_reference(
                 if len(display_names) == 1:
                     display_name = display_names[0]
                     prompt_lines.append(
-                        f"{display_name}：{image_ref} 是“{display_name}”的独立角色资产卡，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
-                        "可以包含大头照和多张等高全身参考；不要复制白底、裁切、站姿、多视图排版或原背景。"
+                        f"{display_name}：{image_ref} 是“{display_name}”的三视图角色资产卡，只用于任务级身份参考，锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                        "它不是首帧、不是构图、不是场景，也不是任何视频帧。最终画面只允许对应角色继承身份特征；"
+                        "严禁复制资产卡的白底、裁切、站姿、边框、多视图排版或原背景，严禁生成角色设定图、三视图、分栏或拼贴。"
                     )
                     qwen_bindings.append(
-                        f"- {image_ref} = character \"{display_name}\" ONLY. Use this single-character asset board for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
+                        f"- {image_ref} = the multi-view character asset card for \"{display_name}\" ONLY, used strictly as task-level identity reference. It is not a first frame, composition, scene, or any video frame. Transfer identity to the matching person in the requested shot; never reproduce its background, crop, poses, border, character-sheet/turntable layout, panels, or collage."
                     )
                 else:
                     names_text = "、".join(display_names)
@@ -3506,6 +3513,10 @@ def _storyboard_cache_signature(
     # tracked per cell so changing one storyboard cell does not invalidate others.
     payload = {
         "cell_normalize_version": "cover_crop_v2",
+        # Versioned reference-role semantics invalidate previews created before
+        # image1 was reserved for composition and character cards were marked as
+        # task-only identity resources.
+        "image_edit_reference_layout_version": STORYBOARD_IMAGE_EDIT_LAYOUT_VERSION,
         "negative_prompt": _safe_text(negative_prompt),
         "width": int(width),
         "height": int(height),
@@ -3536,6 +3547,31 @@ def _storyboard_cache_signature(
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _neutral_storyboard_generation_canvas(width: int, height: int) -> torch.Tensor:
+    """Return a content-free image1 for scene-less ImageEdit generation.
+
+    Qwen ImageEdit numbers visual resources in input order. If a cell has only
+    character-library assets, putting that asset in slot one makes the model
+    treat the reference board as its composition/base image. A flat, opaque
+    neutral canvas keeps image1 free of people, alpha checkerboards and card
+    layout while the actual identity assets start at image2.
+    """
+    return torch.full(
+        (1, max(8, int(height)), max(8, int(width)), 3),
+        0.5,
+        dtype=torch.float32,
+    ).contiguous()
+
+
+def _append_neutral_generation_canvas_prompt(prompt_text: str) -> str:
+    return (
+        f"{prompt_text}\n\n"
+        "无场景首图规则（强制）：image1 只是无人物、无场景、无身份信息的中性生成画布，不是人物参考图，也不是最终构图参考。"
+        "必须依据本格文字从零绘制完整场景、动作和镜头；不得保留或输出 image1 的纯灰底、空白底、色块或画布外观。"
+        "image2 及之后的图片才是资源参考，只能按各自绑定用途锁定人物身份、服装或道具，严禁把人物资产卡、透明棋盘格、白底、多视图排版直接复制成最终画面。"
+    )
 
 
 def _lazy_optional_images(scene: Any, reference: Any, width: int, height: int, fit_reference: bool = False) -> dict[str, torch.Tensor]:
@@ -4053,6 +4089,7 @@ class GJJ_StoryboardGridGenerator:
         tracked["character_library"] = _character_library_signature()
         tracked["scene_library"] = _scene_library_signature()
         tracked["costume_library"] = _costume_library_signature()
+        tracked["image_edit_reference_layout_version"] = STORYBOARD_IMAGE_EDIT_LAYOUT_VERSION
         text = json.dumps(tracked, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -4099,6 +4136,7 @@ class GJJ_StoryboardGridGenerator:
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
+        storyboard_plan_cells=None,
     ):
         prompt = _first_scalar(prompt)
         negative_prompt = _first_scalar(negative_prompt)
@@ -4287,6 +4325,7 @@ class GJJ_StoryboardGridGenerator:
                         geometry_count,
                         display_prompt,
                         cell_signatures.get(display_index, cache_signature),
+                        storyboard_plan_cells,
                     )
                 grid = _make_grid(output_images, width, height, layout_mode, gap, cell_fit, resize_method, size_alignment)
                 cells = torch.cat(output_images, dim=0).contiguous()
@@ -4308,6 +4347,9 @@ class GJJ_StoryboardGridGenerator:
                 )
             else:
                 _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
+        # Keep reference resolution cell-local. In single/selected mode the
+        # complete prompt snapshot is only for cache geometry/signatures; using
+        # it as character context leaks actors from other cells into this shot.
         storyboard_character_refs = _storyboard_character_context(prompts)
         is_next_scene_image_edit = _is_next_scene_image_edit_unet(unet_name)
         is_flux_storyboard = _is_flux_storyboard_unet(unet_name)
@@ -4348,17 +4390,44 @@ class GJJ_StoryboardGridGenerator:
                 storyboard_character_refs,
                 allow_storyboard_context=not is_next_scene_image_edit,
             )
-            image_edit_reference_slots = MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - len(character_refs_for_limits)
+            # With no scene/base/reference input, image1 must never be a
+            # character asset card. Reserve it for a neutral generation canvas
+            # and start all real resources at image2.
+            has_plain_reference_input = _media_count(reference) > 0
+            use_neutral_generation_canvas = bool(
+                is_next_scene_image_edit
+                and scene_reference_count <= 0
+                and library_scene_reference_count <= 0
+                and not has_plain_reference_input
+                and character_refs_for_limits
+            )
+            generation_canvas_count = 1 if use_neutral_generation_canvas else 0
+            image_edit_reference_slots = (
+                MULTI_REFERENCE_IMAGE_LIMIT
+                - generation_canvas_count
+                - scene_reference_count
+                - library_scene_reference_count
+                - len(character_refs_for_limits)
+            )
             effective_reference = reference
             if is_next_scene_image_edit:
                 effective_reference = _media_slice(reference, max(0, image_edit_reference_slots))
             reference_count = _media_count(effective_reference)
             plain_reference_count = reference_count + library_scene_reference_count
-            reference_start = scene_reference_count + library_scene_reference_count + 1
-            character_reference_start = scene_reference_count + plain_reference_count + 1
+            reference_start = generation_canvas_count + scene_reference_count + library_scene_reference_count + 1
+            character_reference_start = generation_canvas_count + scene_reference_count + plain_reference_count + 1
             character_reference_limit = None
             if is_next_scene_image_edit:
-                character_reference_limit = max(0, MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - reference_count)
+                character_reference_limit = max(
+                    0,
+                    MULTI_REFERENCE_IMAGE_LIMIT
+                    - generation_canvas_count
+                    - scene_reference_count
+                    - library_scene_reference_count
+                    - reference_count,
+                )
+            if use_neutral_generation_canvas:
+                line = _append_neutral_generation_canvas_prompt(line)
             if library_scene_reference is None:
                 line = _append_scene_reference_prompt(line, scene_reference_count)
             if reference_count:
@@ -4382,7 +4451,14 @@ class GJJ_StoryboardGridGenerator:
             )
             character_reference_count = _media_count(character_reference)
             costume_reference_start = character_reference_start + character_reference_count
-            remaining_image_edit_slots = MULTI_REFERENCE_IMAGE_LIMIT - scene_reference_count - library_scene_reference_count - reference_count - character_reference_count
+            remaining_image_edit_slots = (
+                MULTI_REFERENCE_IMAGE_LIMIT
+                - generation_canvas_count
+                - scene_reference_count
+                - library_scene_reference_count
+                - reference_count
+                - character_reference_count
+            )
             include_costume_reference = not is_next_scene_image_edit or remaining_image_edit_slots > 0
             if include_costume_reference:
                 line, costume_reference = _costume_prompt_and_reference(
@@ -4397,6 +4473,10 @@ class GJJ_StoryboardGridGenerator:
             line = _prefix_next_scene_prompt(line, unet_name)
             line = f"{line}\n\n{CELL_BLEED_PROMPT}"
             combined_reference_parts = []
+            if use_neutral_generation_canvas:
+                combined_reference_parts.append(
+                    _neutral_storyboard_generation_canvas(cell_w, cell_h)
+                )
             if library_scene_reference is not None:
                 combined_reference_parts.append(library_scene_reference)
             if effective_reference is not None:
@@ -4411,8 +4491,10 @@ class GJJ_StoryboardGridGenerator:
                 _write_debug_reference_images(unique_id, preview_index, refs)
             storyboard_main_image_index = 1 if refs.get("image_01") is not None else main_image_index
             if is_next_scene_image_edit:
-                image_edit_total_refs = scene_reference_count + library_scene_reference_count + reference_count + character_reference_count + _media_count(costume_reference)
+                image_edit_total_refs = generation_canvas_count + scene_reference_count + library_scene_reference_count + reference_count + character_reference_count + _media_count(costume_reference)
                 image_edit_parts = []
+                if generation_canvas_count:
+                    image_edit_parts.append("中性生成画布×1")
                 if scene_reference_count:
                     image_edit_parts.append(f"外部场景×{scene_reference_count}")
                 if library_scene_reference_count:
@@ -4471,6 +4553,7 @@ class GJJ_StoryboardGridGenerator:
                 preview_total,
                 preview_prompt_text,
                 cell_signatures.get(preview_index, cache_signature),
+                storyboard_plan_cells,
             )
 
         cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
@@ -4490,6 +4573,7 @@ class GJJ_StoryboardGridGenerator:
                         geometry_count,
                         display_prompt,
                         cell_signatures.get(display_index, cache_signature),
+                        storyboard_plan_cells,
                     )
             _send_status(unique_id, f"直接拼接缓存分镜：{len(output_images)}/{geometry_count}")
         else:

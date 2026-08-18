@@ -50,7 +50,7 @@ DEFAULT_CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 DEFAULT_REASONING_KEYWORD = "qwen3.5-4b"
-DEFAULT_ACCEL_LORA_KEYWORD = "minima_h3_turbo"
+DEFAULT_ACCEL_LORA_KEYWORD = "minimax_h3_fl2v_turbo"
 DEFAULT_ACCEL_STEPS = 4
 MAX_AUDIO_DRIVEN_DURATION = 15.0
 DIALOGUE_LANGUAGE_TAGS = {
@@ -1186,7 +1186,7 @@ def _mtv_audio_should_sing(audio: Any) -> bool:
     if "gjj_mtv_singing_segment" in audio:
         return bool(audio.get("gjj_mtv_singing_segment"))
     waveform = audio.get("waveform")
-    if not isinstance(waveform, torch.Tensor) or not waveform.numel():
+    if not isinstance(waveform, torch.Tensor) or int(waveform.numel()) <= 0:
         return False
     rms = waveform.detach().float().square().mean().sqrt().item()
     return rms > 10.0 ** (-55.0 / 20.0)
@@ -1346,7 +1346,7 @@ def _walk_media(value: Any, out: dict[str, list[Any]], seen: set[int]) -> None:
         return
     if isinstance(value, torch.Tensor):
         frames, _audio, _fps = _media_components(value)
-        if frames is not None:
+        if frames is not None and int(frames.numel()) > 0:
             for index in range(int(frames.shape[0])):
                 out["images"].append(frames[index : index + 1].contiguous())
 
@@ -1402,9 +1402,7 @@ def _load_internal_media(raw: Any) -> tuple[dict[str, list[Any]], list[str]]:
 
 def _aligned_frames(duration: float, fps: float) -> int:
     value = max(5, round(float(duration) * float(fps)))
-    while value % 17 != 5:
-        value += 1
-    return value
+    return value + (5 - (value % 17)) % 17
 
 
 def _audio_duration_seconds(value: Any) -> float | None:
@@ -1789,20 +1787,160 @@ def _attach_official_voice_references(prompt: str, media: dict[str, list[Any]]) 
     standalone_count = len(media.get("audios", []))
     available = max(0, 4 - standalone_count)
     lines: list[str] = []
+    speaker_by_picture = {
+        int(picture): speaker
+        for speaker, picture in re.findall(
+            r"\((S\d+)\)\s*<Picture\s+(\d+)>\s+says\s*:",
+            str(prompt or ""),
+            flags=re.IGNORECASE,
+        )
+    }
     for offset, item in enumerate(voices[:available], start=1):
         audio_number = video_audio_count + standalone_count + offset
         character_name = str(item.get("name") or "").strip()
         picture_number = int(item.get("picture_index") or 0)
         subject = f"<Picture {picture_number}>" if picture_number > 0 else character_name
+        speaker_id = speaker_by_picture.get(picture_number, "")
+        if not speaker_id and character_name:
+            named_speaker = re.search(
+                rf"\((S\d+)\)\s*{re.escape(character_name)}\s+"
+                r"(?:says?|asks?|replies?|说|说道|问|询问|回答|回复|喊|叫)\s*[:：]",
+                str(prompt or ""),
+                flags=re.IGNORECASE,
+            )
+            if named_speaker:
+                speaker_id = named_speaker.group(1).upper()
+        speaker_suffix = f" with stable speaker ID ({speaker_id})" if speaker_id else ""
         lines.append(
             f"<Audio {audio_number}> is the official reference voice/timbre for {subject}"
-            f" ({character_name}). Whenever this character speaks, preserve the voice identity from "
+            f" ({character_name}){speaker_suffix}. Whenever this character speaks, preserve the voice identity from "
             f"<Audio {audio_number}> and keep the assigned speaker ID consistent. Use it only as a timbre reference; "
             "never copy, replay, continue, quote, or output the reference recording's words, performance, timing, or waveform."
         )
     if not lines:
         return str(prompt or "")
     return "\n".join(("Reference voice assignments:", *lines, str(prompt or "").strip())).strip()
+
+
+def _declare_official_picture_references(
+    prompt: str,
+    external_image_count: int,
+    references: list[tuple[str, str, int]],
+    dialogue_language: str,
+) -> str:
+    """Declare every Picture resource and normalize all picture-bound dialogue."""
+    result = str(prompt or "").strip()
+    definitions: list[str] = []
+    retention: list[str] = []
+    typed_references = {int(number): (str(kind), str(name)) for kind, name, number in references}
+    has_actor_references = any(str(kind) == "actor" for kind, _name, _number in references)
+    for number in range(1, max(0, int(external_image_count)) + 1):
+        if number == 1:
+            identity_rule = (
+                "Use later official character reference pictures only to refine the matching people already visible here."
+                if has_actor_references else
+                "It is the sole visual authority for visible character identity, cast, pose, and composition."
+            )
+            definitions.append(
+                "<Picture 1> is the generated first-frame reference for the target video; preserve its opening "
+                "composition, character poses, camera framing, environment, lighting, spatial relationships, and scene state. "
+                + identity_rule
+            )
+            retention.append(
+                "<Picture 1>: fully_preserved - preserve the opening composition, poses, camera framing, environment, "
+                "lighting, spatial layout, and scene state."
+            )
+        elif number not in typed_references:
+            definitions.append(
+                f"<Picture {number}> is an auxiliary visual reference only. It does not request any new visible person or "
+                "change to the cast count, composition, pose, framing, or spatial layout established by <Picture 1>."
+            )
+            retention.append(
+                f"<Picture {number}>: partially_preserved - use only explicitly requested visual attributes; ignore its cast, pose, background, composition, and spatial layout."
+            )
+    for kind, name, number in sorted(references, key=lambda item: int(item[2])):
+        if kind == "actor":
+            definitions.append(
+                f"<Picture {number}> is an identity-only reference for {name}. Apply its face, hair, costume, colors, "
+                "and identity only to the matching person already visible in <Picture 1>. This reference does not request "
+                f"that {name} enter the frame and must never create a new person, duplicate, clone, extra body, or background figure. "
+                f"<Picture {number}> is task-reference material only: never use it as frame 0, a keyframe, any visible video frame, "
+                "a character sheet, turntable, split panel, or collage."
+            )
+            retention.append(
+                f"<Picture {number}>: partially_preserved - preserve {name}'s identity, face, hair, costume, and colors only if the matching person is already present in <Picture 1>; ignore pose, framing, background, and composition."
+            )
+        else:
+            definitions.append(
+                f"<Picture {number}> is an environment-detail reference for {name}; use it only to refine matching scene "
+                "details already established by <Picture 1>, without replacing the first-frame composition or adding people."
+            )
+            retention.append(
+                f"<Picture {number}>: partially_preserved - preserve matching architecture, terrain, lighting, and colors; keep <Picture 1> as the authority for composition, cast, layout, and spatial relationships."
+            )
+    if any(kind == "actor" for kind, _name, _number in references):
+        result = "\n".join((
+            "FIRST-FRAME CAST AND COMPOSITION LOCK — mandatory: <Picture 1> is the sole authority for which people "
+            "are visible, how many people are visible, their positions, poses, framing, and composition. Pictures 2 and "
+            "later are reference resources only and must never cause a referenced character to enter the frame. Apply an "
+            "actor reference only when matching a person already visible in <Picture 1>. Never add, clone, duplicate, mirror, "
+            "multiply, line up, or display alternate views of a referenced person. If dialogue belongs to a referenced actor "
+            "who is absent from <Picture 1>, keep that dialogue off-screen and do not show the actor. Character asset cards "
+            "are task references only and must never be used as frame 0, a keyframe, or any visible video frame.",
+            result,
+        ))
+    if definitions:
+        result = re.sub(
+            r"(?is)(subject_definitions:\s*).*?(?=\n\s*\nsummary:)",
+            lambda match: match.group(1) + "\n" + "\n".join(definitions),
+            result,
+            count=1,
+        )
+    if retention:
+        result = re.sub(
+            r"(?is)(retention_analysis:\s*).*?(?=\n\s*\ndetailed_description:)",
+            lambda match: match.group(1) + "\n" + "\n".join(retention),
+            result,
+            count=1,
+        )
+
+    language_tag = DIALOGUE_LANGUAGE_TAGS.get(str(dialogue_language), "Chinese")
+    detailed_match = re.search(
+        r"(?is)(detailed_description:\s*)(.*?)(?=\n\s*\noverall_soundscape:)", result,
+    )
+    if not detailed_match:
+        return result
+    detail = detailed_match.group(2).strip()
+    picture_order: list[int] = []
+    for raw_number in re.findall(
+        r"<Picture\s+(\d+)>\s*(?:says\s*:|[：:])", detail, flags=re.IGNORECASE,
+    ):
+        number = int(raw_number)
+        if number not in picture_order:
+            picture_order.append(number)
+    speaker_ids = {number: f"S{offset}" for offset, number in enumerate(picture_order, start=1)}
+    detail = re.sub(
+        r"\(S\d+\)\s*<Picture\s+(\d+)>\s+says\s*:\s*<d>\s*(?:\[[^\]]+\]\s*)?(.*?)</d>",
+        lambda match: (
+            f"({speaker_ids.get(int(match.group(1)), 'S1')}) <Picture {int(match.group(1))}> says: "
+            f"<d>[{language_tag}] {match.group(2).strip()}</d>"
+        ),
+        detail,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    raw_dialogue = re.compile(
+        r"<Picture\s+(\d+)>\s*[：:]\s*(.+?)"
+        r"(?=(?:\s+\(S\d+\)\s*)?<Picture\s+\d+>\s+says\s*:|\s+<Picture\s+\d+>\s*[：:]|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    detail = raw_dialogue.sub(
+        lambda match: (
+            f"({speaker_ids.get(int(match.group(1)), 'S1')}) <Picture {int(match.group(1))}> says: "
+            f"<d>[{language_tag}] {match.group(2).strip()}</d>"
+        ),
+        detail,
+    )
+    return result[:detailed_match.start(2)] + detail + result[detailed_match.end(2):]
 
 
 def _replace_library_picture_references(
@@ -1833,18 +1971,10 @@ def _replace_library_picture_references(
                 flags=re.IGNORECASE,
             )
         result = "".join(chunks)
-        unique_actor_pictures = list(dict.fromkeys(
-            int(picture_index)
-            for _kind, _name, picture_index in sorted(actor_references, key=lambda item: item[2])
-        ))
-        actor_tags = ", ".join(f"<Picture {picture_index}>" for picture_index in unique_actor_pictures)
         result = "\n".join((
-            "CAST IDENTITY AND COUNT LOCK — mandatory: "
-            f"The scene contains exactly {len(unique_actor_pictures)} referenced cast individual(s): {actor_tags}. "
-            "Each tag represents exactly one persistent physical person throughout the complete shot. Every repeated "
-            "mention of the same tag refers to that same person already present in the frame. Never create a second "
-            "instance, clone, twin, duplicate, mirrored copy, stand-in, background copy, or look-alike of any referenced "
-            "person. Do not add extra people unless the visual description explicitly requests them.",
+            "REFERENCE IDENTITY RULE — mandatory: Actor picture tags are identity-only resources, not cast-entry "
+            "instructions. A tag may modify only its matching person already present in <Picture 1>; it must never add, "
+            "duplicate, clone, mirror, multiply, or introduce that person into the target frame.",
             result,
         ))
     result = re.sub(r"(<Picture \d+>)\s*说\s*[：:]", r"\1：", result)
@@ -1864,12 +1994,26 @@ def _mentioned_library_names(text: str, names: list[str]) -> list[str]:
 
 
 def _speaking_library_names(text: str, names: list[str]) -> list[str]:
-    """只识别明确位于对白冒号前的角色；普通画面提及不加载其参考音色。"""
+    """识别本段真正说话的角色；普通画面提及不加载其参考音色。"""
     source = str(text or "")
     result: list[str] = []
     for name in names:
-        pattern = rf"@\s*{re.escape(str(name))}\s*(?:(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*)?[：:]"
-        if re.search(pattern, source, flags=re.IGNORECASE):
+        escaped = re.escape(str(name))
+        at_dialogue = (
+            rf"@\s*{escaped}\s*"
+            rf"(?:(?:说|说道|问|询问|回答|回复|喊|叫|says?|asks?|replies?)\s*)?[：:]"
+        )
+        # StoryboardVideoGrid emits official H3 dialogue as
+        # “(S1) 角色 says: <d>…</d>”. Treat it as the same explicit speech
+        # declaration so every storyboard cell reloads the correct character
+        # library voice instead of carrying an unrelated previous timbre.
+        official_dialogue = (
+            rf"(?:\(S\d+\)\s*)?{escaped}\s*"
+            rf"(?:says?|asks?|replies?|说|说道|问|询问|回答|回复|喊|叫)\s*[：:]"
+        )
+        if re.search(at_dialogue, source, flags=re.IGNORECASE) or re.search(
+            official_dialogue, source, flags=re.IGNORECASE
+        ):
             result.append(name)
     return result
 
@@ -1981,9 +2125,9 @@ def _reasoning_visual_signature(images: list[Any]) -> str:
         tensor = image.detach()
         digest.update(f"{tuple(tensor.shape)}|{tensor.dtype}|".encode("utf-8"))
         flat = tensor.reshape(-1)
-        if not flat.numel():
+        if int(flat.numel()) <= 0:
             continue
-        sample_count = min(1024, flat.numel())
+        sample_count = min(1024, int(flat.numel()))
         if sample_count == 1:
             indices = torch.zeros((1,), device=flat.device, dtype=torch.int64)
         else:
@@ -1991,7 +2135,7 @@ def _reasoning_visual_signature(images: list[Any]) -> str:
             # 精度舍入成 numel，进而导致 index_select 越界。
             indices = (
                 torch.arange(sample_count, device=flat.device, dtype=torch.int64)
-                * (flat.numel() - 1)
+                * (int(flat.numel()) - 1)
                 // (sample_count - 1)
             )
         sample = flat.index_select(0, indices).to(device="cpu", dtype=torch.float32).contiguous()
@@ -2268,6 +2412,10 @@ class GJJ_MiniMaxH3Studio:
         })
         external_images = list(media["images"])
         external_image_count = len(external_images)
+        # StoryboardVideoGrid 已经用角色三视图资产生成了 Picture 1。视频阶段锁定
+        # Picture 1 时，角色资产卡不得再进入 H3 的 ref_images；否则 R2V 会在后续
+        # 帧直接复现角色卡、三视图或拼贴布局。角色库仍用于音色规划。
+        first_frame_reference_lock = bool(first("first_frame_lock", False)) and external_image_count > 0
         panel_width, panel_height = int(first("width", 864)), int(first("height", 480))
         if str(first("size_mode", "宽高")) == "百万像素":
             aspect_text = str(first("megapixel_aspect", "16:9"))
@@ -2285,13 +2433,18 @@ class GJJ_MiniMaxH3Studio:
             actor_reference_height = max(64, round(panel_height * scale / 32.0) * 32)
         pooled_assets = {
             "scene": _library_reference_assets("scene", selected_scenes, panel_width, panel_height),
-            "actor": _library_reference_assets(
+            # With a generated first frame, the actor card has already served its
+            # task during keyframe generation. Do not even load it into this video
+            # job, so no later code path can accidentally feed it to H3.
+            "actor": [] if first_frame_reference_lock else _library_reference_assets(
                 "actor", actor_candidates, actor_reference_width, actor_reference_height,
             ),
         }
         original_pooled_assets = {
             "scene": _library_reference_assets("scene", selected_scenes, make_actor_board=False),
-            "actor": _library_reference_assets("actor", actor_candidates, make_actor_board=False),
+            "actor": [] if first_frame_reference_lock else _library_reference_assets(
+                "actor", actor_candidates, make_actor_board=False,
+            ),
         }
         original_asset_by_key = {
             kind: {name.casefold(): image for image, name, _notes in assets}
@@ -2312,15 +2465,16 @@ class GJJ_MiniMaxH3Studio:
             else:
                 part_actors = selected_actors
             part_scenes = _prompt_library_references(raw_part, "🏕️") if prompt_scenes else selected_scenes
-            part_assets = (
-                part_library_assets("scene", part_scenes)
-                + part_library_assets("actor", part_actors)
-            )[:max(0, 10 - external_image_count)]
+            part_assets = part_library_assets("scene", part_scenes)
+            if not first_frame_reference_lock:
+                part_assets += part_library_assets("actor", part_actors)
+            part_assets = part_assets[:max(0, 10 - external_image_count)]
             # 日志：追踪角色替换情况
             print(
                 f"[GJJ_MiniMaxH3Studio] 分段[{segment_index}] 角色替换："
                 f"prompt_actors={prompt_actors}, bare_prompt_actors={bare_prompt_actors}, "
                 f"part_actors={part_actors}, part_scenes={part_scenes}, "
+                f"角色资产卡进入视频ref_images={'否（首帧锁定）' if first_frame_reference_lock else '是'}, "
                 f"part_assets数={len(part_assets)}, part_assets内容={[f'{k}:{n}' for k, i, n, _ in part_assets]}",
                 flush=True,
             )
@@ -2351,9 +2505,16 @@ class GJJ_MiniMaxH3Studio:
                 }
                 for audio, name in _library_reference_voices(speaking_actors)
             ]
+            print(
+                f"[GJJ_MiniMaxH3Studio] 分段[{segment_index}] 音色规划："
+                f"说话角色={speaking_actors or ['无']}，"
+                f"角色库音色={[str(item.get('name') or '') for item in voice_audios] or ['未绑定']} ",
+                flush=True,
+            )
             structured_part = _normalize_storyboard_segment(raw_part)
+            effective_part_references = list(part_references)
             # 如果 part_references 为空但 prompt 中有 @角色名，尝试从 actor_candidates 构建兜底引用
-            if not part_references and prompt_actors:
+            if not part_references and prompt_actors and not first_frame_reference_lock:
                 print(
                     f"[GJJ_MiniMaxH3Studio] ⚠️ part_references 为空但 prompt 含角色引用 {prompt_actors}，"
                     f"可能是资料库名字不匹配，actor_candidates={actor_candidates}",
@@ -2367,10 +2528,17 @@ class GJJ_MiniMaxH3Studio:
                 if _fallback_refs:
                     print(f"[GJJ_MiniMaxH3Studio] 兜底替换：{_fallback_refs}", flush=True)
                     segment_prompt = _replace_library_picture_references(structured_part, _fallback_refs)
+                    effective_part_references = list(_fallback_refs)
                 else:
                     segment_prompt = structured_part
             else:
                 segment_prompt = _replace_library_picture_references(structured_part, part_references) if part_references else structured_part
+            segment_prompt = _declare_official_picture_references(
+                segment_prompt,
+                external_image_count,
+                effective_part_references,
+                str(first("dialogue_language", "中文")),
+            )
             # 检查替换后是否还有残留的 @角色名
             _remaining_at_refs = re.findall(r"@[A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\u00d7-\u9fff]{0,8}", segment_prompt)
             if _remaining_at_refs:
@@ -2379,8 +2547,6 @@ class GJJ_MiniMaxH3Studio:
                     f"part_references={part_references}",
                     flush=True,
                 )
-            if scene_lines:
-                segment_prompt = "\n".join([*scene_lines, segment_prompt]).strip()
             segmented_library_media.append((segment_prompt, {
                 "images": list(external_images) + part_images + director_images,
                 "videos": list(media["videos"]), "audios": list(media["audios"]),
@@ -2692,6 +2858,32 @@ class GJJ_MiniMaxH3Studio:
                 for index, audio in enumerate(queued_audios)
             ]
         segment_count = len(jobs)
+        has_outer_queue = "progress_queue_total" in kwargs
+        outer_queue_index = max(1, int(first("progress_queue_index", 1) or 1))
+        outer_queue_total = max(outer_queue_index, int(first("progress_queue_total", segment_count) or segment_count))
+        outer_sub_index = max(1, int(first("progress_sub_index", 1) or 1))
+        outer_sub_total = max(outer_sub_index, int(first("progress_sub_total", 1) or 1))
+
+        def progress_queue_position(local_index: int) -> tuple[int, int]:
+            if has_outer_queue:
+                return outer_queue_index, outer_queue_total
+            return local_index + 1, segment_count
+
+        def progress_queue_fraction(local_index: int, local_fraction: float = 0.0) -> float:
+            queue_index, queue_total = progress_queue_position(local_index)
+            if has_outer_queue:
+                local_job_fraction = (local_index + local_fraction) / max(1, segment_count)
+                sub_fraction = ((outer_sub_index - 1) + local_job_fraction) / max(1, outer_sub_total)
+                return min(1.0, max(0.0, ((queue_index - 1) + sub_fraction) / max(1, queue_total)))
+            return min(1.0, max(0.0, ((queue_index - 1) + local_fraction) / max(1, queue_total)))
+
+        def progress_queue_label(local_index: int) -> str:
+            queue_index, queue_total = progress_queue_position(local_index)
+            label = f"队列 {queue_index}/{queue_total}"
+            if has_outer_queue and outer_sub_total > 1:
+                label += f" · 子分镜 {outer_sub_index}/{outer_sub_total}"
+            return label
+
         filename_prefix = str(first("filename_prefix", "video/MiniMax_H3_Studio"))
         requested_format = str(first("format_name", DEFAULT_FORMAT) or "").strip()
         supported_formats = set(list_supported_formats())
@@ -2723,7 +2915,7 @@ class GJJ_MiniMaxH3Studio:
                 vae=None, audio=segment_audio, prompt=first("prompt_info"), extra_pnginfo=first("extra_pnginfo"), unique_id=unique_id,
             )
 
-        from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
+        from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide, MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
         from comfy_extras.nodes_custom_sampler import BasicGuider, RandomNoise, SamplerCustomAdvanced
         import nodes
         from comfy_extras.nodes_audio import VAEDecodeAudio
@@ -2746,10 +2938,12 @@ class GJJ_MiniMaxH3Studio:
                     else _apply_mtv_silent_performance(segment_prompt)
                 )
                 segment_prompt = _retime_official_prompt(segment_prompt, segment_duration)
-            if segment_duration > MAX_AUDIO_DRIVEN_DURATION + 1e-6:
+            aligned_duration_limit = _aligned_frames(MAX_AUDIO_DRIVEN_DURATION, fps) / max(1e-6, fps)
+            if segment_duration > aligned_duration_limit + 1e-6:
                 raise RuntimeError(
                     f"队列第 {index + 1} 段音频长 {segment_duration:.3f} 秒，超过 MiniMax H3 安全上限 "
-                    f"{MAX_AUDIO_DRIVEN_DURATION:.1f} 秒。请在上游按不超过该时长重新分段；"
+                    f"{MAX_AUDIO_DRIVEN_DURATION:.1f} 秒（合法帧对齐后 {aligned_duration_limit:.3f} 秒）。"
+                    "请在上游按不超过该时长重新分段；"
                     "禁止直接生成超长 latent，否则注意力遮罩会导致显存爆炸。"
                 )
             segment_length = _aligned_frames(duration=segment_duration, fps=fps)
@@ -2773,17 +2967,31 @@ class GJJ_MiniMaxH3Studio:
                 flush=True,
             )
             default_lora_data = _default_accel_lora_data()
-            configured_lora_data = str(first("lora_data", default_lora_data) or default_lora_data)
-            if configured_lora_data.strip() == "[]":
-                configured_lora_data = default_lora_data
-            turbo_lora_enabled = _uses_default_accel_lora(configured_lora_data)
             # 模型分支是严格白名单：只有文生、首帧、尾帧、首尾帧使用 FL2VA；
             # 参考图片/视频/音频、MTV 等其余模式一律使用 REF2VA。
             fl2va_modes = {"T2V", "I2V", "尾帧", "首尾帧"}
             model_field = "fl_model" if mode in fl2va_modes else "ref_model"
             model_default = DEFAULT_FL_MODEL if model_field == "fl_model" else DEFAULT_REF_MODEL
             model_name = str(first(model_field, model_default))
-            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · {display_mode} · {segment_duration:.3f}秒：加载模型...", index / segment_count)
+            configured_lora_data = str(first("lora_data", default_lora_data) or "[]")
+            # The bundled Turbo LoRA targets FL2VA and has no matching keys in
+            # REF2VA. Keep the historical automatic default only for FL modes;
+            # an empty REF configuration must genuinely mean no LoRA.
+            if configured_lora_data.strip() == "[]" and model_field == "fl_model":
+                configured_lora_data = default_lora_data
+            elif model_field == "ref_model" and configured_lora_data.strip() != "[]":
+                ref_lora_rows = [
+                    row for row in parse_lora_data(configured_lora_data)
+                    if "ref2v" in str(row.get("name", "")).casefold()
+                ]
+                if len(ref_lora_rows) != len(parse_lora_data(configured_lora_data)):
+                    print(
+                        "[GJJ_MiniMaxH3Studio] REF2V 已忽略不兼容的 FL2VA 视频 LoRA。",
+                        flush=True,
+                    )
+                configured_lora_data = json.dumps(ref_lora_rows, ensure_ascii=False) if ref_lora_rows else "[]"
+            turbo_lora_enabled = _uses_default_accel_lora(configured_lora_data)
+            _send_status(unique_id, f"{progress_queue_label(index)} · {display_mode} · {segment_duration:.3f}秒：加载模型...", progress_queue_fraction(index))
             if model_name not in runtime_models:
                 loaded_model, loaded_clip, loaded_video_vae, loaded_audio_vae = self._load_models(
                     model_name=model_name,
@@ -2794,12 +3002,13 @@ class GJJ_MiniMaxH3Studio:
                     unique_id=unique_id,
                 )
                 lora_events: list[dict[str, Any]] = []
-                loaded_model, _unused_lora_clip, _lora_cache = apply_lora_chain_config(
-                    loaded_model,
-                    None,
-                    configured_lora_data,
-                    on_lora_applied=lambda payload: lora_events.append(dict(payload)),
-                )
+                if configured_lora_data.strip() != "[]":
+                    loaded_model, _unused_lora_clip, _lora_cache = apply_lora_chain_config(
+                        loaded_model,
+                        None,
+                        configured_lora_data,
+                        on_lora_applied=lambda payload: lora_events.append(dict(payload)),
+                    )
                 for event in lora_events:
                     print(
                         "[GJJ_MiniMaxH3Studio] LoRA 已应用："
@@ -2828,15 +3037,26 @@ class GJJ_MiniMaxH3Studio:
                     缺SageAttention处理=str(first("patch_missing_sage_handling", "自动跳过SageAttention继续运行")),
                     unique_id=unique_id,
                 )
+                spectrum_requested = bool(first("spectrum_enabled", True))
+                spectrum_warmup = int(first("spectrum_warmup_steps", 5))
+                spectrum_sampling_steps = int(first("steps", DEFAULT_ACCEL_STEPS))
+                spectrum_effective = spectrum_requested and spectrum_sampling_steps > spectrum_warmup
+                if spectrum_requested and not spectrum_effective:
+                    print(
+                        "[GJJ_MiniMaxH3Studio] Spectrum 已自动跳过："
+                        f"采样 {spectrum_sampling_steps} 步 <= 预热 {spectrum_warmup} 步，"
+                        "不会产生预测收益，避免安装无效模型补丁。",
+                        flush=True,
+                    )
                 patched_model = GJJ_SpectrumApplyMiniMaxH3().apply(
                     model=patched_model,
-                    enabled=bool(first("spectrum_enabled", True)),
+                    enabled=spectrum_effective,
                     blend_weight=float(first("spectrum_blend_weight", 0.50)),
                     degree=int(first("spectrum_degree", 4)),
                     ridge_lambda=float(first("spectrum_ridge_lambda", 0.10)),
                     window_size=float(first("spectrum_window_size", 2.0)),
                     flex_window=float(first("spectrum_flex_window", 0.75)),
-                    warmup_steps=int(first("spectrum_warmup_steps", 5)),
+                    warmup_steps=spectrum_warmup,
                     tail_actual_steps=int(first("spectrum_tail_actual_steps", 1)),
                     max_history=int(first("spectrum_max_history", 8)),
                     debug=bool(first("spectrum_debug", False)),
@@ -2880,7 +3100,7 @@ class GJJ_MiniMaxH3Studio:
             cached_clip = self._CLIP_CONDITIONING_CACHE.get(clip_cache_slot) if cache_clip and clip_cache_slot else None
             if cached_clip and cached_clip[0] == clip_signature:
                 positive, latent = cached_clip[1], cached_clip[2]
-                _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 复用缓存CLIP", index / segment_count)
+                _send_status(unique_id, f"{progress_queue_label(index)} · 复用缓存CLIP", progress_queue_fraction(index))
                 print(f"[GJJ_MiniMaxH3Studio] 队列 {index + 1}/{segment_count}：提示词未变，复用缓存 CLIP conditioning。", flush=True)
             else:
                 if mode == "R2V":
@@ -2908,9 +3128,45 @@ class GJJ_MiniMaxH3Studio:
                         ref_video_audios=ref_video_audios,
                         ref_audios=ref_audios,
                     ))[:2]
+                    # StoryboardVideoGrid supplies Picture 1 as an actual
+                    # generated keyframe and later pictures as role/scene task
+                    # references. REF2V otherwise treats every picture as an
+                    # equal reference and may turn a character asset sheet into
+                    # the visible video composition. Add a frame-0 guide so
+                    # Picture 1 is the only video-frame anchor; Picture 2+ stay
+                    # reference blocks and never become keyframes themselves.
+                    if bool(first("first_frame_lock", False)) and current_media["images"]:
+                        first_frame_guide = current_media["images"][0]
+                        positive = _unwrap_node_output(MiniMaxH3AddGuide.execute(
+                            positive=positive,
+                            latent=latent,
+                            frame_idx=0,
+                            vae=video_vae,
+                            audio_vae=None,
+                            image=first_frame_guide,
+                            audio=None,
+                        ))[0]
+                        print(
+                            "[GJJ MiniMaxH3Studio] 已锁定 Picture 1 为第 0 帧；"
+                            "角色资产卡未进入视频 ref_images；其余 Picture 仅为场景参考。",
+                            flush=True,
+                        )
                 else:
                     first_frame = current_media["images"][0] if mode in {"I2V", "首尾帧"} else None
                     last_frame = current_media["images"][1] if mode == "首尾帧" else (current_media["images"][0] if mode == "尾帧" else None)
+                    # 验证 first_frame / last_frame 格式
+                    if first_frame is not None:
+                        if not isinstance(first_frame, torch.Tensor) or first_frame.ndim != 4:
+                            print(f"[GJJ MiniMaxH3Studio] 队列 {index + 1} first_frame 格式异常，跳过")
+                            first_frame = None
+                        else:
+                            first_frame = first_frame.detach().cpu().float().contiguous()
+                    if last_frame is not None:
+                        if not isinstance(last_frame, torch.Tensor) or last_frame.ndim != 4:
+                            print(f"[GJJ MiniMaxH3Studio] 队列 {index + 1} last_frame 格式异常，跳过")
+                            last_frame = None
+                        else:
+                            last_frame = last_frame.detach().cpu().float().contiguous()
                     positive, latent = _unwrap_node_output(MiniMaxH3ImageToVideo.execute(
                         clip=clip,
                         vae=video_vae,
@@ -2933,7 +3189,7 @@ class GJJ_MiniMaxH3Studio:
             sampler = _ksampler(sampler_name)
             sampling_steps = int(first("steps", DEFAULT_ACCEL_STEPS))
             sigmas = _basic_sigmas(model, scheduler_name, sampling_steps, sampling_denoise)
-            _send_status(unique_id, f"队列 {index + 1}/{segment_count} · 正在采样...", (index + 0.2) / segment_count)
+            _send_status(unique_id, f"{progress_queue_label(index)} · 正在采样...", progress_queue_fraction(index, 0.2))
             sampled = _unwrap_node_output(SamplerCustomAdvanced.execute(
                 noise=noise, guider=guider, sampler=sampler, sigmas=sigmas, latent_image=latent,
             ))[0]
@@ -2969,9 +3225,15 @@ class GJJ_MiniMaxH3Studio:
                 segment_combined = combine_segment(segment_images, segment_audio, f"{filename_prefix}_segment_{index + 1:03d}")
                 segment_ui = dict(segment_combined.get("ui") or {}) if isinstance(segment_combined, dict) else {}
                 segment_ui.update({"segment": index + 1, "segment_count": segment_count})
-                _send_status(unique_id, f"第 {index + 1}/{segment_count} 段已完成", (index + 1) / segment_count, segment_ui)
+                _send_status(unique_id, f"{progress_queue_label(index)} 已完成", progress_queue_fraction(index, 1.0), segment_ui)
 
-        _send_status(unique_id, "正在合并全部视频段...", 0.98)
+        final_local_index = max(0, segment_count - 1)
+        final_pack_progress = progress_queue_fraction(final_local_index, 0.98) if has_outer_queue else 0.98
+        final_pack_label = (
+            f"{progress_queue_label(final_local_index)} · 正在封装子分镜..."
+            if has_outer_queue else "正在合并全部视频段..."
+        )
+        _send_status(unique_id, final_pack_label, final_pack_progress)
         images = torch.cat(decoded_segments, dim=0) if len(decoded_segments) > 1 else decoded_segments[0]
         audio = _concat_audio_segments(audio_segments)
         combined = combine_segment(images, audio, filename_prefix)
@@ -2983,7 +3245,12 @@ class GJJ_MiniMaxH3Studio:
         ui = dict(combined.get("ui") or {}) if isinstance(combined, dict) else {}
         ui.update({"mode": [final_mode], "frame_count": [frame_count], "segment_count": [segment_count], "source_image_count": [image_count], "image_branch": [image_branch], "output_path": [str(output_path or "")], "preview_scope": ["final"], "parsed_actors": selected_actors, "parsed_scenes": selected_scenes})
         # 最终合并文件写出后再次推送完整预览字段，覆盖分段过程中显示的最后一段视频。
-        _send_status(unique_id, f"{final_mode} 完成：{frame_count} 帧", 1.0, ui)
+        final_done_progress = progress_queue_fraction(final_local_index, 1.0) if has_outer_queue else 1.0
+        final_done_label = (
+            f"{progress_queue_label(final_local_index)} · 子分镜完成：{frame_count} 帧"
+            if has_outer_queue else f"{final_mode} 完成：{frame_count} 帧"
+        )
+        _send_status(unique_id, final_done_label, final_done_progress, ui)
         _synchronize_comfy_cuda_streams("节点返回之前")
         return {"ui": ui, "result": (video, reference_resources)}
 

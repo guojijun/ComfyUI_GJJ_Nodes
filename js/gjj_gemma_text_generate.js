@@ -20,9 +20,11 @@ const MODEL_FILTER_WIDGET = "model_filter_keywords";
 const MODEL_SIZES_ENDPOINT = "/gjj/text_encoder_model_sizes";
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
 const SCENE_LIBRARY_ENDPOINT = "/gjj/scene_library/thumbnail_index";
+const COSTUME_LIBRARY_ENDPOINT = "/gjj/costume_library/list";
 const ACTORS_PROPERTY = "gjj_gemma_text_generate_actors";
 const ACTOR_PREFIXES_PROPERTY = "gjj_gemma_text_generate_actor_prefixes";
 const SCENES_PROPERTY = "gjj_gemma_text_generate_scenes";
+const COSTUMES_PROPERTY = "gjj_gemma_text_generate_costumes";
 const CLIP_TYPE_REFERENCE_MIGRATION = "gjj_text_generate_clip_type_reference_v1";
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "IMAGE,GJJ_BATCH_IMAGE,VIDEO,AUDIO";
@@ -144,16 +146,20 @@ document.addEventListener("visibilitychange", () => {
 });
 globalThis.addEventListener("gjj_character_library_updated", () => {
 	characterSummariesPromise = null;
+	costumeSummariesPromise = null;
 	for (const node of app.graph?._nodes || []) {
 		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
 		renderActorChips(node);
-		syncActorMentionMenu(node);
+		renderCostumeChips(node);
+		void syncMentionEditor(node, { force: true });
 	}
 });
 globalThis.addEventListener("gjj_scene_library_updated", () => {
+	sceneSummariesPromise = null;
 	for (const node of app.graph?._nodes || []) {
 		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
 		renderSceneChips(node);
+		void syncMentionEditor(node, { force: true });
 	}
 });
 document.addEventListener("pointerdown", (event) => {
@@ -161,9 +167,9 @@ document.addEventListener("pointerdown", (event) => {
 	for (const node of app.graph?._nodes || []) {
 		if (String(node?.comfyClass || node?.type || "") !== NODE_TYPE) continue;
 		const state = node?.__gjjGemmaPanel;
-		if (!state?.actorMentionMenu) continue;
-		if (state.actorMentionMenu.contains(event.target) || state.promptEditor?.contains(event.target)) continue;
-		closeActorMentionMenu(node);
+		if (!state?.mentionMenu) continue;
+		if (state.mentionMenu.contains(event.target) || state.promptEditor?.contains(event.target)) continue;
+		closeMentionMenu(node);
 	}
 }, true);
 
@@ -236,13 +242,6 @@ function characterCover(character) {
 	return gjjCharacterThumbnailPath(character);
 }
 
-function appendReferenceToPrompt(node, reference) {
-	const current = String(widgetValue(node, PROMPT_WIDGET, "") || "").trimEnd();
-	const value = String(reference || "").trim();
-	if (!value) return;
-	setWidgetValue(node, PROMPT_WIDGET, current ? `${current} ${value}` : value);
-}
-
 function sceneDisplayName(scene) {
 	return String(scene?.name || scene?.id || "未命名场景").trim();
 }
@@ -266,6 +265,23 @@ function saveScenes(node, scenes) {
 	}));
 	markChanged(node);
 	renderSceneChips(node);
+}
+
+function selectedCostumes(node) {
+	const costumes = node?.properties?.[COSTUMES_PROPERTY];
+	return Array.isArray(costumes) ? costumes.filter((item) => item && item.id) : [];
+}
+
+function saveCostumes(node, costumes) {
+	node.properties ||= {};
+	node.properties[COSTUMES_PROPERTY] = costumes.map((item) => ({
+		id: String(item.id),
+		name: costumeDisplayName(item),
+		notes: String(item.notes || ""),
+		thumbnail_url: costumeCover(item),
+	}));
+	markChanged(node);
+	renderCostumeChips(node);
 }
 
 function makeReferenceChipSortable(chip, items, index, kind, save) {
@@ -339,10 +355,65 @@ function renderSceneChips(node) {
 				saveScenes(node, scenes.filter((item) => String(item.id) !== String(scene.id)));
 				return;
 			}
-			appendReferenceToPrompt(node, `🏕️${sceneDisplayName(scene)}`);
+			insertMentionAtCursor(node, {
+				kind: "scene",
+				token: `🏕️${sceneDisplayName(scene)}`,
+				label: sceneDisplayName(scene),
+				detail: String(scene.notes || "").replace(/\s+/g, " ").trim(),
+				item: scene,
+			});
 		});
 		makeReferenceChipSortable(chip, scenes, index, "scene", (items) => saveScenes(node, items));
 		state.sceneChips.appendChild(chip);
+	}
+}
+
+function renderCostumeChips(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state?.costumeChips) return;
+	const costumes = selectedCostumes(node);
+	state.costumeChips.replaceChildren();
+	state.costumeChips.style.display = costumes.length ? "flex" : "none";
+	for (const [index, costume] of costumes.entries()) {
+		const coverUrl = costumeCover(costume);
+		const chip = document.createElement("button");
+		chip.type = "button";
+		chip.className = "gjj-gemma-actor-chip";
+		chip.title = `${costumeDisplayName(costume)}${costume.notes ? `：${costume.notes}` : ""}；点击添加引用，Ctrl/Cmd+点击移除`;
+		if (coverUrl) {
+			const image = prioritizeIconImage(document.createElement("img"));
+			image.src = coverUrl;
+			chip.appendChild(image);
+		}
+		const name = document.createElement("span");
+		name.textContent = `@${costumeDisplayName(costume)}`;
+		chip.appendChild(name);
+		chip.addEventListener("mouseenter", () => {
+			if (!coverUrl) return;
+			const notes = String(costume.notes || "").replace(/\s+/g, " ").trim();
+			showFloatingPreview(chip, coverUrl, `@${costumeDisplayName(costume)}${notes ? `（${notes}）` : ""}`);
+		});
+		chip.addEventListener("mouseleave", () => closeFloatingPreview(chip));
+		chip.addEventListener("click", (event) => {
+			if (chip.__gjjJustDragged) return;
+			closeFloatingPreview(chip);
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.ctrlKey || event.metaKey) {
+				saveCostumes(node, costumes.filter((item) => String(item.id) !== String(costume.id)));
+				return;
+			}
+			insertMentionAtCursor(node, {
+				kind: "costume",
+				token: `@${costumeDisplayName(costume)}`,
+				label: costumeDisplayName(costume),
+				detail: String(costume.notes || "").replace(/\s+/g, " ").trim(),
+				preview: coverUrl,
+				item: costume,
+			});
+		});
+		makeReferenceChipSortable(chip, costumes, index, "costume", (items) => saveCostumes(node, items));
+		state.costumeChips.appendChild(chip);
 	}
 }
 
@@ -421,25 +492,551 @@ function loadCharacterSummaries() {
 	return characterSummariesPromise;
 }
 
-function actorMentionRange(textarea) {
-	const caret = Number(textarea?.selectionStart ?? 0);
-	const before = String(textarea?.value || "").slice(0, caret);
-	const match = before.match(/(^|[\s\n，。；：、,.!?;:()[\]{}"'“”‘’])@([^\s@，。；：、,.!?;:()[\]{}"'“”‘’]*)$/);
-	if (!match) return null;
-	return {
-		start: before.length - match[2].length - 1,
-		end: caret,
-		query: match[2] || "",
-	};
+// ============ 统一 @ 引用编辑器（图片 / 角色库 / 场景库） ============
+
+function escapeRegExp(text) {
+	return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function closeActorMentionMenu(node) {
+function mediaInputLinks(node) {
+	const input = node?.inputs?.find((item) => String(item?.name || "") === MEDIA_INPUT);
+	if (!input) return [];
+	const linkIds = Array.isArray(input.link) ? input.link : [input.link];
+	const links = [];
+	for (const id of linkIds) {
+		if (id == null) continue;
+		const link = graphLink(node, id);
+		if (link) links.push(link);
+	}
+	return links;
+}
+
+function mentionSourcePreview(source) {
+	const image = (source?.imgs || []).find((item) => item?.src);
+	if (image?.src) return image.src;
+	for (const target of source?.widgets || []) {
+		const elementImage = target?.element?.matches?.("img") ? target.element : target?.element?.querySelector?.("img");
+		if (elementImage?.src) return elementImage.src;
+		const raw = target?.value;
+		const filename = typeof raw === "object" ? raw?.filename : raw;
+		if (!filename || !/\.(?:png|jpe?g|webp|gif|bmp)$/i.test(String(filename))) continue;
+		const params = new URLSearchParams({ filename: String(filename), type: typeof raw === "object" ? String(raw.type || "input") : "input" });
+		if (typeof raw === "object" && raw.subfolder) params.set("subfolder", String(raw.subfolder));
+		return api.apiURL(`/view?${params.toString()}`);
+	}
+	return "";
+}
+
+function mentionMediaItemUrl(item) {
+	const direct = String(item?.url || item?.preview_url || item?.src || "");
+	if (/^(?:blob:|data:|https?:)/i.test(direct)) return direct;
+	const filename = String(item?.filename || item?.name || "");
+	if (!filename) return "";
+	const params = new URLSearchParams({ filename, type: String(item?.type || "input") });
+	if (item?.subfolder) params.set("subfolder", String(item.subfolder));
+	return api.apiURL(`/view?${params.toString()}`);
+}
+
+function mentionSourceImages(source, sourceSlot = 0) {
+	const state = source?.__gjjMultiImageState || source?.__gjjMultiImageLoaderState || {};
+	let selected = [];
+	try {
+		const parsed = JSON.parse(String(widget(source, "selected_images")?.value || source?.properties?.selected_images || "[]"));
+		if (Array.isArray(parsed)) selected = parsed;
+	} catch (_) {}
+	let items = [];
+	for (const candidate of [state.executedImages, state.selection, selected]) {
+		if (Array.isArray(candidate) && candidate.length) { items = candidate; break; }
+	}
+	const output = source?.outputs?.[Number(sourceSlot)];
+	const outputName = String(output?.name || output?.label || "");
+	if (/(?:图片|导出图片|image)\s*0*\d+/i.test(outputName)) items = items.slice(0, 1);
+	let count = items.length;
+	if (!count) count = Math.max(0, Number(source?.properties?.gjj_batch_crop_resize_media_count || source?.properties?.gjj_image_batch_multi_input_count || 0));
+	count = Math.max(1, count);
+	const fallback = mentionSourcePreview(source);
+	return Array.from({ length: count }, (_, index) => ({
+		preview: mentionMediaItemUrl(items[index]) || fallback,
+		detail: String(items[index]?.original_name || items[index]?.filename || source?.title || source?.comfyClass || "连接图片"),
+	}));
+}
+
+let sceneSummariesPromise = null;
+
+function loadSceneSummaries() {
+	if (!sceneSummariesPromise) {
+		sceneSummariesPromise = api.fetchApi(SCENE_LIBRARY_ENDPOINT)
+			.then(async (response) => {
+				const data = await response.json();
+				if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取场景库失败");
+				return data;
+			})
+			.catch((error) => {
+				sceneSummariesPromise = null;
+				throw error;
+			});
+	}
+	return sceneSummariesPromise;
+}
+
+let costumeSummariesPromise = null;
+
+function costumeDisplayName(costume) {
+	return String(costume?.name || costume?.id || "未命名服化道").trim();
+}
+
+function costumeCover(costume) {
+	const cover = String(costume?.cover || "").trim();
+	if (cover) return cover;
+	const asset = (costume?.assets || [])[0];
+	if (asset?.url) return String(asset.url);
+	return "";
+}
+
+function loadCostumeSummaries() {
+	if (!costumeSummariesPromise) {
+		const params = new URLSearchParams({ page: "1", page_size: "80", category: "all", sort: "updated_desc" });
+		costumeSummariesPromise = api.fetchApi(`${COSTUME_LIBRARY_ENDPOINT}?${params.toString()}`)
+			.then(async (response) => {
+				const data = await response.json();
+				if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取服化道库失败");
+				return data;
+			})
+			.catch((error) => {
+				costumeSummariesPromise = null;
+				throw error;
+			});
+	}
+	return costumeSummariesPromise;
+}
+
+async function mentionEditorOptions(node) {
+	const options = [];
+	const seenSources = new Set();
+	let imageIndex = 0;
+
+	const addSource = (sourceId, sourceSlot = 0, declaredType = "") => {
+		const id = Number(sourceId);
+		const sourceKey = `${id}:${Number(sourceSlot)}`;
+		if (!Number.isFinite(id) || seenSources.has(sourceKey)) return;
+		const source = app.graph?.getNodeById?.(id);
+		if (!source) return;
+		const outputType = String(declaredType || source.outputs?.[Number(sourceSlot)]?.type || "").toUpperCase();
+		if (outputType && !outputType.includes("IMAGE") && !outputType.includes("GJJ_BATCH_IMAGE")) return;
+		seenSources.add(sourceKey);
+		for (const item of mentionSourceImages(source, sourceSlot)) {
+			imageIndex += 1;
+			options.push({
+				kind: "image",
+				token: `@图片${imageIndex}`,
+				label: `图片${imageIndex}`,
+				detail: item.detail,
+				preview: item.preview,
+			});
+		}
+	};
+
+	for (const link of mediaInputLinks(node)) {
+		const originId = Array.isArray(link) ? link[1] : (link?.origin_id ?? link?.originId);
+		const originSlot = Number(Array.isArray(link) ? link[2] : (link?.origin_slot ?? link?.originSlot));
+		const linkType = Array.isArray(link) ? link[5] : link?.type;
+		if (linkType && !String(linkType).toUpperCase().includes("IMAGE")) continue;
+		addSource(originId, originSlot, linkType);
+	}
+
+	try {
+		const data = await loadCharacterSummaries();
+		const characters = Array.isArray(data.characters) ? data.characters : [];
+		for (const character of characters) {
+			const label = characterDisplayName(character);
+			if (!label) continue;
+			options.push({
+				kind: "actor",
+				token: `@${label}`,
+				label,
+				detail: String(character?.notes || character?.id || "角色库").replace(/\s+/g, " ").trim(),
+				item: character,
+			});
+		}
+	} catch (_) {}
+
+	try {
+		const data = await loadSceneSummaries();
+		const scenes = Array.isArray(data.scenes) ? data.scenes : [];
+		for (const scene of scenes) {
+			const label = sceneDisplayName(scene);
+			if (!label) continue;
+			options.push({
+				kind: "scene",
+				token: `🏕️${label}`,
+				label,
+				detail: String(scene?.notes || scene?.id || "场景库").replace(/\s+/g, " ").trim(),
+				item: scene,
+			});
+		}
+	} catch (_) {}
+
+	try {
+		const data = await loadCostumeSummaries();
+		const costumes = Array.isArray(data.items) ? data.items : [];
+		for (const costume of costumes) {
+			const label = costumeDisplayName(costume);
+			if (!label) continue;
+			const tags = Array.isArray(costume.tags) ? costume.tags.join(" / ") : "";
+			options.push({
+				kind: "costume",
+				token: `@${label}`,
+				label,
+				detail: String([tags, costume?.notes || costume?.id || "服化道"].filter(Boolean).join(" · ")).replace(/\s+/g, " ").trim(),
+				preview: costumeCover(costume) || "",
+				item: costume,
+			});
+		}
+	} catch (_) {}
+
+	return options;
+}
+
+const MENTION_TABS = [
+	{ key: "actor", label: "角色库", kinds: ["image", "actor"], trigger: "@" },
+	{ key: "scene", label: "场景库", kinds: ["scene"], trigger: "🏕️" },
+	{ key: "costume", label: "服化道", kinds: ["costume"], trigger: "@" },
+];
+
+function defaultMentionTabFor(trigger) {
+	if (trigger === "🏕️") return "scene";
+	return "actor";
+}
+
+function mentionTabKinds(tabKey) {
+	const tab = MENTION_TABS.find((item) => item.key === tabKey);
+	return tab ? tab.kinds : ["image", "actor"];
+}
+
+function makeMentionImage(option) {
+	const image = prioritizeIconImage(document.createElement("img"));
+	image.alt = "";
+	image.draggable = false;
+	if (option.kind === "actor") {
+		setGjjLibraryThumbnail(image, api, "character", option.item);
+	} else if (option.kind === "scene") {
+		setGjjLibraryThumbnail(image, api, "scene", option.item);
+	} else if (option.preview) {
+		image.src = option.preview;
+	}
+	return image;
+}
+
+function setupMentionChipInteractions(chip, option) {
+	const editor = chip.closest(".gjj-gemma-mention-editor");
+	const node = editor?.__gjjNode || null;
+
+	const imageEl = chip.querySelector("img");
+	const previewUrl = option.preview || (imageEl ? imageEl.src : "");
+	const caption = `${option.token}${option.detail ? ` · ${option.detail}` : ""}`;
+
+	chip.addEventListener("mouseenter", () => {
+		if (!previewUrl) return;
+		showFloatingPreview(chip, previewUrl, caption);
+	});
+	chip.addEventListener("mouseleave", () => closeFloatingPreview(chip));
+
+	chip.draggable = true;
+	chip.addEventListener("dragstart", (event) => {
+		chip.classList.add("dragging");
+		event.stopPropagation();
+		event.dataTransfer.effectAllowed = "move";
+		event.dataTransfer.setData("text/gjj-mention-chip", option.token || chip.dataset.token || "");
+		if (editor) editor.__gjjDraggedChip = chip;
+		closeFloatingPreview(chip);
+	});
+	chip.addEventListener("dragend", () => {
+		chip.classList.remove("dragging");
+		if (editor?.__gjjDraggedChip === chip) editor.__gjjDraggedChip = null;
+	});
+}
+
+function makeInlineMention(option) {
+	const chip = document.createElement("span");
+	chip.className = "gjj-gemma-mention-chip";
+	chip.contentEditable = "false";
+	chip.dataset.token = option.token;
+	chip.dataset.kind = option.kind;
+	chip.title = option.detail || option.label;
+	const label = document.createElement("span");
+	label.textContent = option.token;
+	chip.append(makeMentionImage(option), label);
+	setupMentionChipInteractions(chip, option);
+	return chip;
+}
+
+function mentionEditorText(editor) {
+	let result = "";
+	const visit = (item) => {
+		if (item.nodeType === Node.TEXT_NODE) {
+			result += String(item.textContent || "").replaceAll("\u200B", "");
+			return;
+		}
+		if (item.nodeType !== Node.ELEMENT_NODE) return;
+		if (item.classList?.contains("gjj-gemma-mention-chip")) {
+			result += String(item.dataset.token || "");
+			return;
+		}
+		if (item.tagName === "BR") { result += "\n"; return; }
+		if (["DIV", "P"].includes(item.tagName) && result && !result.endsWith("\n")) result += "\n";
+		for (const child of item.childNodes || []) visit(child);
+	};
+	for (const child of editor?.childNodes || []) visit(child);
+	return result;
+}
+
+function renderMentionEditor(editor, text, options) {
+	const source = String(text || "");
+	const sorted = [...options].sort((a, b) => b.token.length - a.token.length);
+	const fragment = document.createDocumentFragment();
+	let cursor = 0;
+	while (cursor < source.length) {
+		const option = sorted.find((item) => source.startsWith(item.token, cursor));
+		if (option) {
+			fragment.append(makeInlineMention(option));
+			cursor += option.token.length;
+			continue;
+		}
+		let end = cursor + 1;
+		while (end < source.length && !sorted.some((item) => source.startsWith(item.token, end))) end += 1;
+		fragment.append(document.createTextNode(source.slice(cursor, end)));
+		cursor = end;
+	}
+	editor.replaceChildren(fragment);
+}
+
+function closeMentionMenu(node) {
 	const state = node?.__gjjGemmaPanel;
-	state?.actorMentionMenu?.remove?.();
+	state?.mentionMenu?.remove?.();
 	if (state) {
-		state.actorMentionMenu = null;
-		state.actorMentionOptions = [];
-		state.actorMentionActive = 0;
+		state.mentionMenu = null;
+		state.mentionOptions = [];
+		state.mentionActive = 0;
+		state.mentionQuery = "";
+		state.mentionMatch = null;
+	}
+}
+
+function positionMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const editor = state?.promptEditor;
+	const menu = state?.mentionMenu;
+	if (!editor || !menu) return;
+	const rect = editor.getBoundingClientRect();
+	const width = Math.min(360, Math.max(260, rect.width * 0.66));
+	menu.style.width = `${width}px`;
+	menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.left + 8))}px`;
+	menu.style.top = `${Math.max(8, Math.min(window.innerHeight - 360, rect.bottom - 4))}px`;
+}
+
+function filteredMentionOptions(node) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state) return [];
+	const tabKey = state.mentionTab || "actor";
+	const kinds = new Set(mentionTabKinds(tabKey));
+	const query = String(state.mentionQuery || "").trim().toLocaleLowerCase();
+	return (state.mentionOptions || [])
+		.filter((option) => kinds.has(option.kind))
+		.filter((option) => {
+			if (!query) return true;
+			const haystack = `${option.label} ${option.detail}`.toLocaleLowerCase();
+			return haystack.includes(query);
+		})
+		.slice(0, 40);
+}
+
+function renderMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const menu = state?.mentionMenu;
+	if (!state || !menu) return;
+	const options = filteredMentionOptions(node);
+	const active = Math.max(0, Math.min(Number(state.mentionActive || 0), Math.max(0, options.length - 1)));
+	state.mentionActive = active;
+	menu.replaceChildren();
+
+	const header = document.createElement("div");
+	header.className = "gjj-gemma-mention-header";
+
+	const tabs = document.createElement("div");
+	tabs.className = "gjj-gemma-mention-tabs";
+	for (const tab of MENTION_TABS) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = `gjj-gemma-mention-tab${state.mentionTab === tab.key ? " active" : ""}`;
+		button.textContent = tab.label;
+		button.title = `切换到${tab.label}`;
+		button.addEventListener("pointerdown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			if (state.mentionTab === tab.key) return;
+			state.mentionTab = tab.key;
+			state.mentionActive = 0;
+			renderMentionMenu(node);
+		});
+		tabs.appendChild(button);
+	}
+	header.appendChild(tabs);
+
+	const search = document.createElement("input");
+	search.type = "text";
+	search.className = "gjj-gemma-mention-filter";
+	search.placeholder = "过滤";
+	search.value = String(state.mentionQuery || "");
+	search.title = "按名称、备注或标签过滤候选项";
+	search.addEventListener("pointerdown", (event) => event.stopPropagation());
+	search.addEventListener("mousedown", (event) => event.stopPropagation());
+	search.addEventListener("keydown", (event) => event.stopPropagation());
+	search.addEventListener("input", () => {
+		state.mentionQuery = search.value;
+		state.mentionActive = 0;
+		const list = menu.querySelector(".gjj-gemma-mention-list");
+		if (list) renderMentionList(node, list);
+		positionMentionMenu(node);
+	});
+	search.addEventListener("keydown", (event) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			closeMentionMenu(node);
+			state.promptEditor?.focus?.();
+			return;
+		}
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			const opts = filteredMentionOptions(node);
+			const count = Math.max(1, opts.length);
+			state.mentionActive = (Number(state.mentionActive || 0) + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+			const list = menu.querySelector(".gjj-gemma-mention-list");
+			if (list) renderMentionList(node, list);
+		}
+		if (event.key === "Enter" || event.key === "Tab") {
+			const opts = filteredMentionOptions(node);
+			const option = opts?.[Number(state.mentionActive || 0)];
+			if (!option) return;
+			event.preventDefault();
+			chooseMention(node, option);
+		}
+	});
+	header.appendChild(search);
+	menu.appendChild(header);
+
+	const list = document.createElement("div");
+	list.className = "gjj-gemma-mention-list";
+	menu.appendChild(list);
+	renderMentionList(node, list);
+	positionMentionMenu(node);
+}
+
+function renderMentionList(node, list) {
+	const state = node?.__gjjGemmaPanel;
+	if (!state || !list) return;
+	const options = filteredMentionOptions(node);
+	const active = Math.max(0, Math.min(Number(state.mentionActive || 0), Math.max(0, options.length - 1)));
+	state.mentionActive = active;
+	list.replaceChildren();
+	if (!options.length) {
+		const empty = document.createElement("div");
+		empty.className = "gjj-gemma-mention-empty";
+		const tabLabel = MENTION_TABS.find((item) => item.key === state.mentionTab)?.label || "当前分类";
+		empty.textContent = `没有匹配项；可在${tabLabel}中创建条目或调整关键词`;
+		list.appendChild(empty);
+		return;
+	}
+	options.forEach((option, index) => {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = `gjj-gemma-mention-item${index === active ? " active" : ""}`;
+		const image = makeMentionImage(option);
+		const main = document.createElement("div");
+		main.className = "gjj-gemma-mention-main";
+		main.textContent = option.token;
+		const detail = document.createElement("div");
+		detail.className = "gjj-gemma-mention-detail";
+		detail.textContent = option.detail || "";
+		const text = document.createElement("span");
+		text.append(main, detail);
+		item.append(image, text);
+		item.addEventListener("pointermove", () => {
+			if (state.mentionActive === index) return;
+			state.mentionActive = index;
+			const activeItem = list.querySelector(".gjj-gemma-mention-item.active");
+			if (activeItem) activeItem.classList.remove("active");
+			item.classList.add("active");
+		});
+		item.addEventListener("pointerdown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			chooseMention(node, option);
+		});
+		list.appendChild(item);
+	});
+}
+
+async function syncMentionMenu(node) {
+	const state = node?.__gjjGemmaPanel;
+	const editor = state?.promptEditor;
+	if (!state || !editor) {
+		closeMentionMenu(node);
+		return;
+	}
+	const selection = window.getSelection?.();
+	if (!selection?.rangeCount) {
+		closeMentionMenu(node);
+		return;
+	}
+	const range = selection.getRangeAt(0);
+	if (!editor.contains(range.startContainer) || range.startContainer.nodeType !== Node.TEXT_NODE) {
+		closeMentionMenu(node);
+		return;
+	}
+	const before = String(range.startContainer.textContent || "").slice(0, range.startOffset);
+	const atMatch = /@([^\s@，。；：、,.!?;:()[\]{}"'“”‘’]*)$/u.exec(before);
+	const sceneMatch = /🏕️([^\s🏕️，。；：、,.!?;:()[\]{}"'“”‘’]*)$/u.exec(before);
+	if (!atMatch && !sceneMatch) {
+		closeMentionMenu(node);
+		return;
+	}
+	const trigger = sceneMatch ? "🏕️" : "@";
+	const queryFromText = (sceneMatch ? sceneMatch[1] : atMatch[1] || "");
+	const startOffset = before.length - (sceneMatch ? sceneMatch[0].length : atMatch[0].length);
+	state.mentionMatch = {
+		textNode: range.startContainer,
+		startOffset,
+		endOffset: range.startOffset,
+		fullText: String(range.startContainer.textContent || ""),
+	};
+	const expectedTab = defaultMentionTabFor(trigger);
+	const tabChanged = state.mentionTab !== expectedTab && (trigger === "🏕️" || (state.mentionTab !== "actor" && state.mentionTab !== "costume"));
+	if (tabChanged || !state.mentionTab) state.mentionTab = expectedTab;
+	state.mentionQuery = queryFromText || "";
+	let options;
+	try {
+		options = await mentionEditorOptions(node);
+	} catch (error) {
+		console.warn("[GJJ GemmaTextGenerate] 读取 @ 候选失败：", error);
+		return;
+	}
+	state.mentionOptions = options;
+	state.mentionActive = Math.min(Number(state.mentionActive || 0), Math.max(0, filteredMentionOptions(node).length - 1));
+	if (!state.mentionMenu) {
+		const menu = document.createElement("div");
+		menu.className = "gjj-gemma-mention-menu";
+		protect(menu);
+		document.body.appendChild(menu);
+		state.mentionMenu = menu;
+		renderMentionMenu(node);
+	} else if (tabChanged) {
+		renderMentionMenu(node);
+	} else {
+		const filterInput = state.mentionMenu.querySelector(".gjj-gemma-mention-filter");
+		if (filterInput && filterInput.value !== queryFromText) filterInput.value = queryFromText;
+		const list = state.mentionMenu.querySelector(".gjj-gemma-mention-list");
+		if (list) renderMentionList(node, list);
+		positionMentionMenu(node);
 	}
 }
 
@@ -454,157 +1051,290 @@ function saveActorIfNeeded(node, character) {
 	saveActors(node, actors);
 }
 
-function chooseActorMention(node, character) {
+function saveSceneIfNeeded(node, scene) {
+	const scenes = selectedScenes(node);
+	if (scenes.some((item) => String(item.id) === String(scene.id))) return;
+	scenes.push({
+		id: String(scene.id),
+		name: sceneDisplayName(scene),
+		notes: String(scene.notes || ""),
+		thumbnail_url: sceneCover(scene),
+	});
+	saveScenes(node, scenes);
+}
+
+function saveCostumeIfNeeded(node, costume) {
+	const costumes = selectedCostumes(node);
+	if (costumes.some((item) => String(item.id) === String(costume.id))) return;
+	costumes.push({
+		id: String(costume.id),
+		name: costumeDisplayName(costume),
+		notes: String(costume.notes || ""),
+		thumbnail_url: costumeCover(costume),
+	});
+	saveCostumes(node, costumes);
+}
+
+function chooseMention(node, option) {
 	const state = node?.__gjjGemmaPanel;
 	const editor = state?.promptEditor;
-	const range = actorMentionRange(editor);
-	if (!editor || !range) return;
-	const name = characterDisplayName(character);
-	const prefix = editor.value.slice(0, range.start);
-	const suffix = editor.value.slice(range.end);
-	const insert = `@${name}`;
-	const spacer = suffix && !/^[\s\n，。；：、,.!?;:]/.test(suffix) ? " " : "";
-	editor.value = `${prefix}${insert}${spacer}${suffix}`;
-	const nextCaret = prefix.length + insert.length + spacer.length;
+	if (!editor) return;
+	const match = state?.mentionMatch;
+	if (!match) return;
+	const textNode = match.textNode;
+	if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+	const currentText = String(textNode.textContent || "");
+	if (currentText !== match.fullText) {
+		// text changed since menu opened, try to re-match from current text
+		const before = currentText.slice(0, match.endOffset);
+		const rematch = /(?:@|🏕️)([^\s@🏕️，。；：、,.!?;:()[\]{}"'“”‘’]*)$/u.exec(before);
+		if (!rematch) {
+			closeMentionMenu(node);
+			return;
+		}
+		match.startOffset = before.length - rematch[0].length;
+		match.fullText = currentText;
+	}
+	const replacement = document.createRange();
+	replacement.setStart(textNode, match.startOffset);
+	replacement.setEnd(textNode, match.endOffset);
+	replacement.deleteContents();
+	const chip = makeInlineMention(option);
+	replacement.insertNode(chip);
+	const space = document.createTextNode("\u00a0");
+	chip.after(space);
 	editor.focus();
-	editor.setSelectionRange(nextCaret, nextCaret);
-	setWidgetValue(node, PROMPT_WIDGET, editor.value);
-	saveActorIfNeeded(node, character);
-	closeActorMentionMenu(node);
+	const prompt = mentionEditorText(editor);
+	editor.dataset.sourceText = prompt;
+	setWidgetValue(node, PROMPT_WIDGET, prompt);
+	markChanged(node);
+	closeMentionMenu(node);
+	if (option.kind === "actor" && option.item) {
+		saveActorIfNeeded(node, option.item);
+	} else if (option.kind === "scene" && option.item) {
+		saveSceneIfNeeded(node, option.item);
+	} else if (option.kind === "costume" && option.item) {
+		saveCostumeIfNeeded(node, option.item);
+	}
 }
 
-function positionActorMentionMenu(node) {
+function insertMentionAtCursor(node, option) {
 	const state = node?.__gjjGemmaPanel;
 	const editor = state?.promptEditor;
-	const menu = state?.actorMentionMenu;
-	if (!editor || !menu) return;
-	const rect = editor.getBoundingClientRect();
-	const width = Math.min(300, Math.max(210, rect.width * 0.58));
-	menu.style.width = `${width}px`;
-	menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, rect.left + 8))}px`;
-	menu.style.top = `${Math.max(8, Math.min(window.innerHeight - 280, rect.bottom - 4))}px`;
-}
-
-function renderActorMentionMenu(node) {
-	const state = node?.__gjjGemmaPanel;
-	const menu = state?.actorMentionMenu;
-	if (!state || !menu) return;
-	const options = state.actorMentionOptions || [];
-	const active = Math.max(0, Math.min(Number(state.actorMentionActive || 0), Math.max(0, options.length - 1)));
-	state.actorMentionActive = active;
-	menu.replaceChildren();
-	const title = document.createElement("div");
-	title.className = "gjj-gemma-mention-title";
-	title.textContent = "@角色库人物";
-	menu.appendChild(title);
-	if (!options.length) {
-		const empty = document.createElement("div");
-		empty.className = "gjj-gemma-mention-empty";
-		empty.textContent = "没有匹配的人物";
-		menu.appendChild(empty);
-		positionActorMentionMenu(node);
-		return;
+	if (!editor || !option) return;
+	editor.focus();
+	const selection = window.getSelection?.();
+	let inserted = false;
+	if (selection?.rangeCount) {
+		const range = selection.getRangeAt(0);
+		if (editor.contains(range.startContainer)) {
+			range.deleteContents();
+			const chip = makeInlineMention(option);
+			range.insertNode(chip);
+			const space = document.createTextNode("\u00a0");
+			chip.after(space);
+			const caret = document.createRange();
+			caret.setStart(space, 1);
+			caret.collapse(true);
+			selection.removeAllRanges();
+			selection.addRange(caret);
+			inserted = true;
+		}
 	}
-	options.forEach((character, index) => {
-		const item = document.createElement("button");
-		item.type = "button";
-		item.className = `gjj-gemma-mention-item${index === active ? " active" : ""}`;
-		const image = prioritizeIconImage(document.createElement("img"));
-		setGjjLibraryThumbnail(image, api, "character", character);
-		const main = document.createElement("div");
-		main.className = "gjj-gemma-mention-main";
-		main.textContent = characterDisplayName(character);
-		const detail = document.createElement("div");
-		detail.className = "gjj-gemma-mention-detail";
-		detail.textContent = String(character?.notes || character?.id || "").replace(/\s+/g, " ").trim();
-		const text = document.createElement("span");
-		text.append(main, detail);
-		item.append(image, text);
-		item.addEventListener("pointermove", () => {
-			state.actorMentionActive = index;
-			renderActorMentionMenu(node);
-		});
-		item.addEventListener("pointerdown", (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			chooseActorMention(node, character);
-		});
-		menu.appendChild(item);
-	});
-	positionActorMentionMenu(node);
+	if (!inserted) {
+		const fragment = document.createDocumentFragment();
+		const lastText = editor.lastChild?.nodeType === Node.TEXT_NODE ? String(editor.lastChild.textContent || "") : "";
+		if (editor.childNodes.length > 0 && !/\s$/.test(lastText)) {
+			fragment.appendChild(document.createTextNode("\u00a0"));
+		}
+		fragment.appendChild(makeInlineMention(option));
+		fragment.appendChild(document.createTextNode("\u00a0"));
+		editor.appendChild(fragment);
+		const last = editor.lastChild;
+		if (last) {
+			const caret = document.createRange();
+			caret.setStart(last, 1);
+			caret.collapse(true);
+			const sel = window.getSelection?.();
+			if (sel) {
+				sel.removeAllRanges();
+				sel.addRange(caret);
+			}
+		}
+	}
+	const prompt = mentionEditorText(editor);
+	editor.dataset.sourceText = prompt;
+	setWidgetValue(node, PROMPT_WIDGET, prompt);
+	markChanged(node);
+	closeMentionMenu(node);
 }
 
-async function syncActorMentionMenu(node) {
+function mentionContextKey(node) {
+	return mediaInputLinks(node).map((link) => {
+		if (Array.isArray(link)) return `${link[1]}:${link[2]}:${link[5]}`;
+		return `${link?.origin_id}:${link?.origin_slot}:${link?.type}`;
+	}).join(",");
+}
+
+async function syncMentionEditor(node, options = {}) {
 	const state = node?.__gjjGemmaPanel;
 	const editor = state?.promptEditor;
-	const range = actorMentionRange(editor);
-	if (!state || !editor || !range) {
-		closeActorMentionMenu(node);
-		return;
-	}
-	let data;
+	if (!editor) return;
+	const text = String(widgetValue(node, PROMPT_WIDGET, "") || "");
+	const context = mentionContextKey(node);
+	if (!options.force && document.activeElement === editor) return;
+	if (!options.force && editor.dataset.sourceText === text && editor.dataset.sourceContext === context) return;
+	editor.dataset.sourceText = text;
+	editor.dataset.sourceContext = context;
+	const expected = text;
+	let mentions;
 	try {
-		data = await loadCharacterSummaries();
+		mentions = await mentionEditorOptions(node);
 	} catch (error) {
-		console.warn("[GJJ GemmaTextGenerate] 读取角色库 @ 候选失败：", error);
+		console.warn("[GJJ GemmaTextGenerate] 同步 @ 编辑器失败：", error);
 		return;
 	}
-	const query = range.query.toLocaleLowerCase();
-	const characters = Array.isArray(data.characters) ? data.characters : [];
-	const options = characters
-		.filter((character) => {
-			const searchable = [characterDisplayName(character), character?.name, character?.id, character?.notes].filter(Boolean).join(" ").toLocaleLowerCase();
-			return !query || searchable.includes(query);
-		})
-		.sort((left, right) => Number(right?.updated_at || 0) - Number(left?.updated_at || 0))
-		.slice(0, 12);
-	state.actorMentionOptions = options;
-	state.actorMentionActive = Math.min(Number(state.actorMentionActive || 0), Math.max(0, options.length - 1));
-	if (!state.actorMentionMenu) {
-		const menu = document.createElement("div");
-		menu.className = "gjj-gemma-mention-menu";
-		protect(menu);
-		document.body.appendChild(menu);
-		state.actorMentionMenu = menu;
+	if (String(widgetValue(node, PROMPT_WIDGET, "") || "") !== expected) {
+		editor.dataset.sourceText = "";
+		return;
 	}
-	renderActorMentionMenu(node);
+	renderMentionEditor(editor, expected, mentions);
 }
 
-function bindActorMentionEditor(node, editor) {
+function createMentionPromptEditor(node) {
+	const editor = document.createElement("div");
+	editor.className = "gjj-gemma-prompt-editor gjj-gemma-mention-editor";
+	editor.contentEditable = "true";
+	editor.spellcheck = false;
+	editor.dataset.placeholder = "输入指令 / 原文；键入 @ 引用图片或角色库，键入 🏕️ 引用场景库";
+	editor.title = "发送给 Gemma 的用户指令 / 原文";
+	editor.__gjjNode = node;
+	protect(editor);
 	editor.addEventListener("input", () => {
-		window.setTimeout(() => syncActorMentionMenu(node), 0);
+		const text = mentionEditorText(editor);
+		editor.dataset.sourceText = text;
+		setWidgetValue(node, PROMPT_WIDGET, text);
+		markChanged(node);
+		void syncMentionMenu(node);
 	});
-	editor.addEventListener("click", () => syncActorMentionMenu(node));
+	editor.addEventListener("click", () => void syncMentionMenu(node));
 	editor.addEventListener("keyup", (event) => {
 		if (["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) return;
-		syncActorMentionMenu(node);
+		void syncMentionMenu(node);
 	});
 	editor.addEventListener("keydown", (event) => {
 		const state = node?.__gjjGemmaPanel;
-		const menu = state?.actorMentionMenu;
+		const menu = state?.mentionMenu;
+		event.stopPropagation();
 		if (!menu) {
-			if (event.key === "@") window.setTimeout(() => syncActorMentionMenu(node), 0);
+			if (event.key === "@" || event.key === "🏕️") {
+				window.setTimeout(() => syncMentionMenu(node), 0);
+			}
 			return;
 		}
 		if (event.key === "Escape") {
 			event.preventDefault();
-			closeActorMentionMenu(node);
+			closeMentionMenu(node);
 			return;
 		}
 		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 			event.preventDefault();
-			const count = Math.max(1, state.actorMentionOptions?.length || 1);
-			state.actorMentionActive = (Number(state.actorMentionActive || 0) + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
-			renderActorMentionMenu(node);
+			const count = Math.max(1, state.mentionOptions?.length || 1);
+			state.mentionActive = (Number(state.mentionActive || 0) + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+			renderMentionMenu(node);
 			return;
 		}
 		if (event.key === "Enter" || event.key === "Tab") {
-			const character = state.actorMentionOptions?.[Number(state.actorMentionActive || 0)];
-			if (!character) return;
+			const option = state.mentionOptions?.[Number(state.mentionActive || 0)];
+			if (!option) return;
 			event.preventDefault();
-			chooseActorMention(node, character);
+			chooseMention(node, option);
 		}
 	});
+	editor.addEventListener("paste", (event) => {
+		event.preventDefault();
+		document.execCommand("insertText", false, event.clipboardData?.getData("text/plain") || "");
+	});
+	editor.addEventListener("blur", () => {
+		window.setTimeout(() => {
+			const active = document.activeElement;
+			if (active && node.__gjjGemmaPanel?.mentionMenu?.contains(active)) return;
+			closeMentionMenu(node);
+		}, 180);
+	});
+	editor.addEventListener("dragover", (event) => {
+		if (!editor.__gjjDraggedChip) return;
+		event.preventDefault();
+		event.stopPropagation();
+		try {
+			const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+			if (caret) {
+				const sel = window.getSelection();
+				if (sel) {
+					sel.removeAllRanges();
+					sel.addRange(caret);
+				}
+			}
+		} catch (_) {}
+	});
+	editor.addEventListener("drop", (event) => {
+		const draggedChip = editor.__gjjDraggedChip;
+		if (!draggedChip) return;
+		event.preventDefault();
+		event.stopPropagation();
+		closeFloatingPreview(draggedChip);
+		try {
+			const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+			if (caret) {
+				editor.focus();
+				const parent = draggedChip.parentNode;
+				if (parent) parent.removeChild(draggedChip);
+				if (caret.startContainer.nodeType === Node.TEXT_NODE && caret.startOffset > 0) {
+					const textNode = caret.startContainer;
+					const before = String(textNode.textContent || "").slice(0, caret.startOffset);
+					if (/\s$/.test(before)) {
+						textNode.textContent = before.slice(0, -1) + String(textNode.textContent || "").slice(caret.startOffset);
+					}
+				}
+				caret.insertNode(draggedChip);
+				const after = document.createTextNode("\u00a0");
+				draggedChip.after(after);
+				const caretAfter = document.createRange();
+				caretAfter.setStart(after, 1);
+				caretAfter.collapse(true);
+				const sel = window.getSelection();
+				if (sel) {
+					sel.removeAllRanges();
+					sel.addRange(caretAfter);
+				}
+				const prompt = mentionEditorText(editor);
+				editor.dataset.sourceText = prompt;
+				setWidgetValue(node, PROMPT_WIDGET, prompt);
+				markChanged(node);
+			}
+		} catch (_) {
+			if (draggedChip.parentNode !== editor) {
+				editor.appendChild(draggedChip);
+			}
+		}
+		if (editor.__gjjDraggedChip === draggedChip) editor.__gjjDraggedChip = null;
+	});
+	editor.addEventListener("dragleave", (event) => {
+		if (event.target === editor) {
+			const sel = window.getSelection();
+			if (sel?.rangeCount) {
+				const range = sel.getRangeAt(0);
+				if (editor.contains(range.startContainer)) {
+					sel.removeAllRanges();
+					const endRange = document.createRange();
+					endRange.selectNodeContents(editor);
+					endRange.collapse(false);
+					sel.addRange(endRange);
+				}
+			}
+		}
+	});
+	return editor;
 }
 
 function renderActorChips(node) {
@@ -645,7 +1375,13 @@ function renderActorChips(node) {
 				saveActors(node, actors.filter((item) => String(item.id) !== String(actor.id)));
 				return;
 			}
-			appendReferenceToPrompt(node, actorPromptLine(actor));
+			insertMentionAtCursor(node, {
+				kind: "actor",
+				token: actorPromptLine(actor),
+				label: characterDisplayName(actor),
+				detail: String(actor.notes || "").replace(/\s+/g, " ").trim(),
+				item: actor,
+			});
 		});
 		makeReferenceChipSortable(chip, actors, index, "actor", (items) => saveActors(node, items));
 		state.actorChips.appendChild(chip);
@@ -943,6 +1679,9 @@ function collectWorkflowValues(node) {
 		.filter(Boolean);
 	values.selected_scenes = selectedScenes(node)
 		.map((scene) => sceneDisplayName(scene))
+		.filter(Boolean);
+	values.selected_costumes = selectedCostumes(node)
+		.map((costume) => costumeDisplayName(costume))
 		.filter(Boolean);
 	return values;
 }
@@ -2101,8 +2840,8 @@ function syncPanel(node) {
 	syncInputValue(state.templateEditor, widgetValue(node, TEMPLATE_WIDGET, ""));
 	syncInputValue(state.outputRule, widgetValue(node, OUTPUT_RULE_WIDGET, ""));
 	syncInputValue(state.systemPrompt, widgetValue(node, "system_prompt", ""));
-	if (state.promptEditor && document.activeElement !== state.promptEditor) {
-		syncInputValue(state.promptEditor, widgetValue(node, PROMPT_WIDGET, ""));
+	if (state.promptEditor) {
+		void syncMentionEditor(node);
 	}
 
 	const config = readTemplateConfig(node);
@@ -2162,8 +2901,15 @@ function createPanel(node) {
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings,.gjj-gemma-assistant-panel .gjj-ia-settings,.gjj-gemma-assistant-panel .gjj-gemma-model-panel { position:absolute; z-index:1000; top:62px; left:0; width:100%; max-height:min(520px,70vh); overflow:auto; box-shadow:0 12px 32px rgba(0,0,0,.55); }
 		.gjj-gemma-assistant-panel .gjj-ia-templates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; width:100%; min-width:0; overflow:visible; padding:1px 0 3px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chips { display:none; flex-wrap:wrap; align-items:center; gap:5px; padding:2px 0; }
-		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor { display:block; width:100%; height:74px; min-height:74px; box-sizing:border-box; resize:vertical; border:1px solid #334850; border-radius:7px; background:#10181c; color:#eef5f5; padding:7px 9px; outline:none; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }
+		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor { display:block; width:100%; height:88px; min-height:74px; max-height:240px; box-sizing:border-box; resize:vertical; overflow:auto; border:1px solid #334850; border-radius:7px; background:#10181c; color:#eef5f5; padding:7px 9px; outline:none; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; word-break:break-word; cursor:text; }
 		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor:focus { border-color:#6a9dae; background:#111e23; }
+		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor:empty::before { content:attr(data-placeholder); color:#75868b; pointer-events:none; }
+		.gjj-gemma-assistant-panel .gjj-gemma-prompt-editor * { cursor:text; }
+		.gjj-gemma-mention-chip { display:inline-flex; align-items:center; gap:3px; margin:0 2px; padding:1px 5px 1px 2px; border:1px solid #3f7a65; border-radius:999px; background:#173126; color:#9be0b5; vertical-align:baseline; white-space:nowrap; font:700 11px/1.2 system-ui,sans-serif; user-select:none; cursor:grab; transition:box-shadow .15s; }
+		.gjj-gemma-mention-chip:hover { box-shadow:0 0 0 1px rgba(111,198,150,.35); }
+		.gjj-gemma-mention-chip.dragging { opacity:.38; cursor:grabbing; }
+		.gjj-gemma-mention-chip img { width:18px; height:18px; border-radius:50%; object-fit:cover; background:#0c1518; }
+		.gjj-gemma-mention-chip[data-kind="image"] img { border-radius:4px; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip { display:flex; align-items:center; gap:5px; min-height:28px; padding:2px 8px 2px 3px; border:1px solid #4f7b68; border-radius:999px; background:#173126; color:#eafff3; cursor:pointer; font:700 11px/1.2 system-ui,sans-serif; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.dragging { opacity:.42; cursor:grabbing; }
 		.gjj-gemma-assistant-panel .gjj-gemma-actor-chip.drag-over { border-color:#ffd166; box-shadow:0 0 0 2px rgba(255,209,102,.32); }
@@ -2184,12 +2930,20 @@ function createPanel(node) {
 		.gjj-gemma-actor-preview { position:fixed; z-index:100003; width:280px; max-height:380px; padding:7px; border:1px solid #628278; border-radius:9px; background:#0d171b; color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.64); pointer-events:none; font:12px/1.4 system-ui,sans-serif; }
 		.gjj-gemma-actor-preview img { display:block; width:100%; max-height:320px; object-fit:contain; border-radius:6px; background:#071014; }
 		.gjj-gemma-actor-preview div { padding:6px 3px 1px; overflow-wrap:anywhere; }
-		.gjj-gemma-mention-menu { position:fixed; z-index:100004; max-height:270px; overflow:auto; display:flex; flex-direction:column; gap:3px; padding:6px; border:1px solid #58746d; border-radius:8px; background:rgba(13,22,25,.98); color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.62); font:12px/1.35 system-ui,sans-serif; }
-		.gjj-gemma-mention-title { padding:3px 6px 5px; color:#9fc8bd; font-size:11px; font-weight:800; }
+		.gjj-gemma-mention-menu { position:fixed; z-index:100004; max-height:360px; overflow:hidden; display:flex; flex-direction:column; padding:6px; border:1px solid #58746d; border-radius:8px; background:rgba(13,22,25,.98); color:#eaf6f1; box-shadow:0 16px 38px rgba(0,0,0,.62); font:12px/1.35 system-ui,sans-serif; }
+		.gjj-gemma-mention-header { display:flex; align-items:center; gap:6px; padding:0 0 5px; border-bottom:1px solid rgba(88,116,109,.4); }
+		.gjj-gemma-mention-tabs { display:flex; flex:0 0 auto; gap:2px; }
+		.gjj-gemma-mention-tab { border:0; border-radius:5px; background:transparent; color:#9fb0b5; padding:4px 9px; cursor:pointer; font:700 11px/1.2 system-ui,sans-serif; }
+		.gjj-gemma-mention-tab:hover { background:rgba(111,198,150,.12); color:#cfeede; }
+		.gjj-gemma-mention-tab.active { background:rgba(111,198,150,.22); color:#9be0b5; box-shadow:inset 0 -2px 0 #6fc696; }
+		.gjj-gemma-mention-filter { flex:1 1 auto; min-width:60px; height:24px; box-sizing:border-box; border:1px solid #40575f; border-radius:5px; background:#0c1519; color:#edf7f4; padding:2px 7px; outline:none; font:11px/1.3 system-ui,sans-serif; }
+		.gjj-gemma-mention-filter:focus { border-color:#6fc696; box-shadow:0 0 0 1px rgba(111,198,150,.25); }
+		.gjj-gemma-mention-filter::placeholder { color:#6e8489; }
+		.gjj-gemma-mention-list { flex:1 1 auto; overflow:auto; display:flex; flex-direction:column; gap:3px; padding-top:4px; }
 		.gjj-gemma-mention-empty { padding:10px 8px; color:#91a6aa; text-align:center; }
 		.gjj-gemma-mention-item { width:100%; min-height:42px; display:grid; grid-template-columns:34px minmax(0,1fr); gap:7px; align-items:center; border:0; border-radius:6px; background:transparent; color:#eaf6f1; padding:4px 6px; text-align:left; cursor:pointer; }
 		.gjj-gemma-mention-item:hover,.gjj-gemma-mention-item.active { background:rgba(111,198,150,.18); }
-		.gjj-gemma-mention-item img { width:34px; height:34px; border-radius:50%; object-fit:cover; background:#071014; }
+		.gjj-gemma-mention-item img { width:34px; height:34px; border-radius:6px; object-fit:cover; background:#071014; }
 		.gjj-gemma-mention-main { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:800; }
 		.gjj-gemma-mention-detail { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px; color:#9fb0b5; font-size:11px; }
 		.gjj-gemma-assistant-panel .gjj-ia-template-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.96); }
@@ -2241,18 +2995,9 @@ function createPanel(node) {
 	actorChips.className = "gjj-gemma-actor-chips";
 	const sceneChips = document.createElement("div");
 	sceneChips.className = "gjj-gemma-actor-chips";
-	const promptEditor = document.createElement("textarea");
-	promptEditor.className = "gjj-gemma-prompt-editor";
-	promptEditor.placeholder = "输入指令 / 原文；也可连接外部 STRING";
-	promptEditor.title = "发送给 Gemma 的用户指令 / 原文";
-	promptEditor.addEventListener("input", () => {
-		const target = widget(node, PROMPT_WIDGET);
-		if (target) target.value = promptEditor.value;
-		markChanged(node);
-	});
-	promptEditor.addEventListener("change", () => setWidgetValue(node, PROMPT_WIDGET, promptEditor.value));
-	promptEditor.addEventListener("keydown", (event) => event.stopPropagation());
-	bindActorMentionEditor(node, promptEditor);
+	const costumeChips = document.createElement("div");
+	costumeChips.className = "gjj-gemma-actor-chips";
+	const promptEditor = createMentionPromptEditor(node);
 	const actorButton = button("👤", "选择参与演员", () => {
 		toggleActorPicker(node).catch((error) => alert(`读取角色库失败：${error?.message || error}`));
 	});
@@ -2314,7 +3059,7 @@ function createPanel(node) {
 	settingsState.templateSettings.appendChild(floatingWindowActions(node));
 	modelState.panel.appendChild(floatingWindowActions(node));
 	settingsState.settings.appendChild(floatingWindowActions(node));
-	root.append(style, toolbar, templates, actorChips, sceneChips, promptEditor, settingsState.templateSettings, modelState.panel, settingsState.settings);
+	root.append(style, toolbar, templates, actorChips, sceneChips, costumeChips, promptEditor, settingsState.templateSettings, modelState.panel, settingsState.settings);
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
 		hideOnZoom: false,
@@ -2323,9 +3068,10 @@ function createPanel(node) {
 		const toolbarHeight = Number(toolbar.offsetHeight || 30);
 		const actorRowHeight = actorChips.style.display === "none" ? 0 : Number(actorChips.offsetHeight || 30);
 		const sceneRowHeight = sceneChips.style.display === "none" ? 0 : Number(sceneChips.offsetHeight || 30);
+		const costumeRowHeight = costumeChips.style.display === "none" ? 0 : Number(costumeChips.offsetHeight || 30);
 		const templateRowHeight = Number(templates.offsetHeight || 25);
 		const promptHeight = Number(promptEditor.offsetHeight || PROMPT_HEIGHT);
-		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + sceneRowHeight + templateRowHeight + promptHeight + 19);
+		const mainPanelHeight = Math.ceil(toolbarHeight + actorRowHeight + sceneRowHeight + costumeRowHeight + templateRowHeight + promptHeight + 19);
 		return [
 			Math.max(470, Number(width || node.size?.[0] || 470)),
 			Math.max(35, mainPanelHeight),
@@ -2341,6 +3087,7 @@ function createPanel(node) {
 		sceneButton,
 		sceneChips,
 		scenePicker: null,
+		costumeChips,
 		templates,
 		templateButtons: new Map(),
 		templateButton,
@@ -2384,6 +3131,7 @@ function createPanel(node) {
 		}
 		try { this.__gjjGemmaPanel?.actorPicker?.remove(); } catch (_) {}
 		try { this.__gjjGemmaPanel?.scenePicker?.remove(); } catch (_) {}
+		try { closeMentionMenu(this); } catch (_) {}
 		closeFloatingPreview();
 		try { clipName.__gjjSearchSelectPopup?.remove(); } catch (_) {}
 		return originalOnRemoved?.apply(this, args);
@@ -2404,6 +3152,9 @@ function createPanel(node) {
 	const restoredScenes = selectedScenes(node);
 	if (restoredScenes.length) saveScenes(node, restoredScenes);
 	else renderSceneChips(node);
+	const restoredCostumes = selectedCostumes(node);
+	if (restoredCostumes.length) saveCostumes(node, restoredCostumes);
+	else renderCostumeChips(node);
 	syncPanel(node);
 }
 

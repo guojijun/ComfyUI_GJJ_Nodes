@@ -87,9 +87,9 @@ const RUNNING_NODE_IDS = new Set();
 const IMPORTING_NODE_IDS = new Set();
 
 const SIZE_FIELDS = [
-	["video_size_mode", "尺寸来源", "segmented", { options: ["指定尺寸", "视频尺寸", "图片尺寸"], tooltip: "指定尺寸：使用下面的宽高；视频尺寸：使用原视频帧宽高；图片尺寸：使用参考图片宽高。" }],
-	["width", "宽度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸"]], tooltip: "指定尺寸模式下的输出宽度，范围 320-2048，并自动对齐到 16 的倍数。" }],
-	["height", "高度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸"]], tooltip: "指定尺寸模式下的输出高度，范围 320-2048，并自动对齐到 16 的倍数。" }],
+	["video_size_mode", "尺寸来源", "segmented", { options: ["指定尺寸", "视频尺寸", "图片尺寸", "百万像素"], tooltip: "画板尺寸：使用下面的宽高；视频尺寸：使用原视频帧宽高；图片尺寸：使用参考图片宽高；百万像素：按比例和 MP 自动计算。" }],
+	["width", "宽度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸", "百万像素"]], tooltip: "画板尺寸模式下的输出宽度，范围 320-2048，并自动对齐到 16 的倍数。" }],
+	["height", "高度", "number", { align: "multiple16", min: 320, max: 2048, disabledWhen: ["video_size_mode", ["视频尺寸", "图片尺寸", "原视频尺寸", "百万像素"]], tooltip: "画板尺寸模式下的输出高度，范围 320-2048，并自动对齐到 16 的倍数。" }],
 	["frame_rate", "帧率", "number", { min: 1, max: 240, disabledWhen: ["use_video_frame_rate", true], toggle: { name: "use_video_frame_rate", label: "视频帧率", default: true, tooltip: "默认开启并使用原视频帧率；关闭后可手动调整右侧帧率。" }, tooltip: "手动输出帧率。关闭“视频帧率”后才可调整；没有可读取的视频帧率时作为兜底值。" }],
 	["max_frames", "最大帧数", "number", { align: "frames4n1", min: 0, max: 100000, allowZero: true, tooltip: "最多生成多少帧。0 表示不限制；非 0 时会自动对齐到 4n+1。" }],
 	["window_length", "窗口帧数", "number", { align: "frames4n1", min: 5, max: 100000, tooltip: "每次采样窗口帧数。会自动对齐到 4n+1，例如 121。" }],
@@ -329,6 +329,32 @@ function finiteNumber(value) {
 	return Number.isFinite(number) ? number : null;
 }
 
+const MEGAPIXEL_RATIOS = ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"];
+
+function fitScailDimensions(width, height) {
+	const sourceWidth = Math.max(1, Number(width) || 1);
+	const sourceHeight = Math.max(1, Number(height) || 1);
+	let scale = Math.max(320 / sourceWidth, 320 / sourceHeight, 1);
+	if (sourceWidth * scale > 2048 || sourceHeight * scale > 2048) {
+		scale = Math.min(2048 / sourceWidth, 2048 / sourceHeight);
+	}
+	return [
+		Math.max(320, Math.min(2048, Math.round(sourceWidth * scale / 16) * 16)),
+		Math.max(320, Math.min(2048, Math.round(sourceHeight * scale / 16) * 16)),
+	];
+}
+
+function megapixelDimensions(node) {
+	const aspect = String(getWidget(node, "megapixel_aspect", "16:9") || "16:9");
+	let [ratioWidth, ratioHeight] = aspect.split(":", 2).map(Number);
+	if (!(ratioWidth > 0) || !(ratioHeight > 0)) [ratioWidth, ratioHeight] = [16, 9];
+	const megapixels = Math.max(0.2, Math.min(2, Number(getWidget(node, "megapixels", 0.4)) || 0.4));
+	const pixels = megapixels * 1024 * 1024;
+	const width = Math.max(32, Math.round(Math.sqrt(pixels * ratioWidth / ratioHeight) / 32) * 32);
+	const height = Math.max(32, Math.round(Math.sqrt(pixels * ratioHeight / ratioWidth) / 32) * 32);
+	return fitScailDimensions(width, height);
+}
+
 function setWidget(node, name, value) {
 	const item = widget(node, name);
 	if (!item) return;
@@ -362,6 +388,7 @@ function sanitizeWidgetValues(node) {
 		pose_start: [0, 0, 1],
 		pose_end: [1, 0, 1],
 		model_sampling_sd3_shift: [5, 0, 100],
+		megapixels: [0.4, 0.2, 2],
 		sam3_detection_threshold: [0.5, 0, 1],
 		sam3_max_objects: [1, 0, 64],
 		sam3_detect_interval: [1, 1, 999],
@@ -386,7 +413,8 @@ function sanitizeWidgetValues(node) {
 		sam3_sort_by: ["从左到右", ["从左到右", "面积从大到小", "保持原顺序"]],
 		reference_resize_mode: ["裁剪", ["补边", "裁剪", "拉伸", "原图"]],
 		reference_crop_keep_position: ["上", ["上", "下", "左", "右", "中"]],
-		video_size_mode: ["指定尺寸", ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸"]],
+		video_size_mode: ["指定尺寸", ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸", "百万像素"]],
+		megapixel_aspect: ["16:9", MEGAPIXEL_RATIOS],
 		reference_pad_color: ["黑色", ["黑色", "灰色", "白色", "边缘均色"]],
 	};
 	for (const [name, [fallback, values]] of Object.entries(enumDefaults)) {
@@ -675,6 +703,10 @@ function ensureSize(node) {
 }
 
 function previewAspect(node) {
+	if (getWidget(node, "video_size_mode", "指定尺寸") === "百万像素") {
+		const [width, height] = megapixelDimensions(node);
+		return Math.max(0.05, Math.min(6, height / width));
+	}
 	const stored = Number(node?.properties?.gjj_scail2_preview_aspect || 0);
 	if (Number.isFinite(stored) && stored > 0) return Math.max(0.05, Math.min(6, stored));
 	const width = Number(getWidget(node, "width", 512) || 512);
@@ -717,7 +749,7 @@ function buttonActive(node, key) {
 	if (key === "link") return hasLinkInfo(node);
 	if (key === "video") return hasVideoResource(node);
 	if (key === "image") return hasImageResource(node);
-	if (key === "size") return ["视频尺寸", "原视频尺寸", "图片尺寸"].includes(getWidget(node, "video_size_mode", "指定尺寸"));
+	if (key === "size") return ["视频尺寸", "原视频尺寸", "图片尺寸", "百万像素"].includes(getWidget(node, "video_size_mode", "指定尺寸"));
 	if (key === "director") return hasDirectorState(node);
 	if (key === "model") return hasModelState(node);
 	if (key === "other") return hasOtherState(node);
@@ -1800,6 +1832,110 @@ function refreshFieldDisabledState(node, inputs) {
 	}
 }
 
+function buildSizeModePanel(node, notifyChange) {
+	const host = document.createElement("div");
+	host.style.cssText = "display:flex;flex-direction:column;gap:10px;margin:0 0 14px;";
+	const tabs = document.createElement("div");
+	tabs.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;";
+	const choices = [
+		["图片尺寸", "图片尺寸"],
+		["视频尺寸", "视频尺寸"],
+		["画板尺寸", "指定尺寸"],
+		["百万像素", "百万像素"],
+	];
+	const makeChoice = (label, value) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = label;
+		button.style.cssText = "min-height:40px;border:1px solid #415861;border-radius:8px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:14px;cursor:pointer;";
+		button.onclick = () => {
+			setWidget(node, "video_size_mode", value);
+			notifyChange();
+			sync();
+		};
+		tabs.appendChild(button);
+		return button;
+	};
+	const tabButtons = choices.map(([label, value]) => makeChoice(label, value));
+
+	const megapixelPanel = document.createElement("div");
+	megapixelPanel.style.cssText = "display:flex;flex-direction:column;gap:10px;";
+	const ratioRow = document.createElement("div");
+	ratioRow.style.cssText = "display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;";
+	const ratioButtons = MEGAPIXEL_RATIOS.map((ratio) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = ratio;
+		button.style.cssText = "min-width:0;min-height:34px;padding:4px 1px;border:1px solid #415861;border-radius:7px;background:#111b20;color:#dbe6e7;font-weight:800;font-size:11px;cursor:pointer;";
+		button.onclick = () => {
+			setWidget(node, "megapixel_aspect", ratio);
+			notifyChange();
+			sync();
+		};
+		ratioRow.appendChild(button);
+		return button;
+	});
+	const mpRow = document.createElement("div");
+	mpRow.style.cssText = "display:grid;grid-template-columns:42px minmax(0,1fr) 90px;gap:10px;align-items:center;";
+	const mpLabel = document.createElement("div");
+	mpLabel.textContent = "◩ MP";
+	mpLabel.style.cssText = "color:#c9d7da;font-weight:800;";
+	const mpRange = document.createElement("input");
+	mpRange.type = "range";
+	mpRange.min = "0.2";
+	mpRange.max = "2";
+	mpRange.step = "0.1";
+	mpRange.style.cssText = "width:100%;accent-color:#19b7d0;";
+	const mpNumber = document.createElement("input");
+	mpNumber.type = "number";
+	mpNumber.min = "0.2";
+	mpNumber.max = "2";
+	mpNumber.step = "0.1";
+	mpNumber.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #415861;border-radius:7px;background:#111b20;color:#eaf5f6;padding:8px;text-align:center;font-weight:800;";
+	mpRow.append(mpLabel, mpRange, mpNumber);
+	const result = document.createElement("div");
+	result.style.cssText = "padding:9px;border:1px solid #31535b;border-radius:7px;background:#091215;color:#8fe1d5;text-align:center;font-weight:900;font-size:15px;";
+	megapixelPanel.append(ratioRow, mpRow, result);
+
+	const applyMegapixels = (raw) => {
+		const next = Math.round(Math.max(0.2, Math.min(2, Number(raw) || 0.4)) * 10) / 10;
+		setWidget(node, "megapixels", next);
+		notifyChange();
+		sync();
+	};
+	mpRange.oninput = () => applyMegapixels(mpRange.value);
+	mpNumber.onchange = () => applyMegapixels(mpNumber.value);
+
+	const sync = () => {
+		const rawMode = String(getWidget(node, "video_size_mode", "指定尺寸") || "指定尺寸");
+		const mode = rawMode === "面板尺寸" ? "指定尺寸" : rawMode === "原视频尺寸" ? "视频尺寸" : rawMode;
+		tabButtons.forEach((button, index) => {
+			const active = choices[index][1] === mode;
+			button.style.background = active ? "#12964d" : "#111b20";
+			button.style.borderColor = active ? "#27dda0" : "#415861";
+			button.style.color = active ? "#fff" : "#dbe6e7";
+		});
+		const megapixelMode = mode === "百万像素";
+		megapixelPanel.style.display = megapixelMode ? "flex" : "none";
+		const aspect = String(getWidget(node, "megapixel_aspect", "16:9") || "16:9");
+		ratioButtons.forEach((button, index) => {
+			const active = MEGAPIXEL_RATIOS[index] === aspect;
+			button.style.background = active ? "#0d8fb0" : "#111b20";
+			button.style.borderColor = active ? "#19d8df" : "#415861";
+			button.style.color = active ? "#fff" : "#dbe6e7";
+		});
+		const megapixels = Math.max(0.2, Math.min(2, Number(getWidget(node, "megapixels", 0.4)) || 0.4));
+		mpRange.value = String(megapixels);
+		mpNumber.value = String(megapixels);
+		const [width, height] = megapixelDimensions(node);
+		result.textContent = `实际尺寸：${width} × ${height}`;
+	};
+	host.append(tabs, megapixelPanel);
+	host.__gjjSync = sync;
+	sync();
+	return host;
+}
+
 function openFieldPopup(node, title, fields) {
 	const wrap = popupBase(title, title === "尺寸" || title === "参数" ? 540 : 420, node);
 	if (title === "参数") {
@@ -1811,6 +1947,10 @@ function openFieldPopup(node, title, fields) {
 	const grid = document.createElement("div");
 	grid.style.cssText = "display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center;";
 	const inputs = [];
+	const sizeModePanel = title === "尺寸"
+		? buildSizeModePanel(node, () => wrap.dispatchEvent(new CustomEvent("gjj-field-change", { bubbles: true })))
+		: null;
+	if (sizeModePanel) wrap.appendChild(sizeModePanel);
 	const booleanFields = title === "参数" ? fields.filter((field) => field[2] === "checkbox") : [];
 	if (booleanFields.length) {
 		const boolTitle = document.createElement("div");
@@ -1827,6 +1967,7 @@ function openFieldPopup(node, title, fields) {
 	}
 	for (const [name, label, type, meta = {}] of fields) {
 		if (title === "参数" && type === "checkbox") continue;
+		if (title === "尺寸" && name === "video_size_mode") continue;
 		const text = document.createElement("div");
 		text.textContent = label;
 		if (meta.tooltip) text.title = meta.tooltip;
@@ -1851,7 +1992,10 @@ function openFieldPopup(node, title, fields) {
 		}
 		grid.append(text, renderedInput);
 	}
-	wrap.addEventListener("gjj-field-change", () => refreshFieldDisabledState(node, inputs));
+	wrap.addEventListener("gjj-field-change", () => {
+		refreshFieldDisabledState(node, inputs);
+		sizeModePanel?.__gjjSync?.();
+	});
 	wrap.appendChild(grid);
 	refreshFieldDisabledState(node, inputs);
 }

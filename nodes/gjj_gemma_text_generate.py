@@ -1020,7 +1020,8 @@ def _inject_character_notes(prompt: str, selected_actors: Any = None) -> str:
     actor_lines: list[str] = []
     for name in names:
         notes = notes_by_name.get(name.casefold(), "")
-        actor_lines.append(f"@{name}{f'（{notes}）' if notes else ''}")
+        note_str = f"（{notes}）" if notes else ""
+        actor_lines.append(f"@{name}{note_str}")
 
     actor_refs = "、".join(f"@{name}" for name in names)
     actor_block = "\n".join(actor_lines)
@@ -1044,7 +1045,11 @@ def _inject_scene_notes(prompt: str, selected_scenes: Any = None) -> str:
     if not names:
         return user_text
     notes_by_name = _scene_library_notes()
-    scene_lines = [f"🏕️{name}{f'（{notes_by_name.get(name.casefold(), '')}）' if notes_by_name.get(name.casefold()) else ''}" for name in names]
+    scene_lines = []
+    for name in names:
+        note = notes_by_name.get(name.casefold(), "")
+        note_str = f"（{note}）" if note else ""
+        scene_lines.append(f"🏕️{name}{note_str}")
     preface = (
         "【场景库参考】以下是本次引用的场景名称和备注。生成结果涉及这些地点时，"
         "必须按场景库引用方式使用 🏕️场景名，保持名称完全一致，不得另起近义名称；"

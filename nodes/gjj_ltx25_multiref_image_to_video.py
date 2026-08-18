@@ -100,7 +100,7 @@ def _model_fields() -> list[dict[str, Any]]:
 
 def _defaults() -> dict[str, str]:
     result = {field["name"]: str(field["fallback"]) for field in _model_fields()}
-    result.setdefault("msr_lora_name", "LTX/LTX-2.3-Licon-MSR-V2.safetensors")
+    result.setdefault("msr_lora_name", "LTX/LTX-2.5-Licon-MSR-V1.safetensors")
     result.setdefault("msr_lora_strength", "1.0")
     return result
 

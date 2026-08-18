@@ -4032,50 +4032,47 @@ class GJJ_LazyImageStudio:
         vae = _load_vae(vae_name)
         return model, clip, vae
 
-    def create_image(
-        self,
-        prompt,
-        negative_prompt,
-        main_image_index,
-        width,
-        height,
-        batch_size,
-        unet_name,
-        unet_dtype,
-        clip_name1,
-        vae_name,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        denoise,
-        grow_mask_by,
-        lora_chain_config="",
-        lora_data="",
-        batch_source_images="[]",
-        mask=None,
-        disable_reference_auto_mask=False,
-        force_empty_latent_reference=False,
-        disable_equal_reference_canvas=False,
-        keep_model_loaded=False,
-        test_config="",
-        use_input_image_size=True,
-        model_source=DEFAULT_MODEL_SOURCE,
-        ckpt_name=DEFAULT_CHECKPOINT_NAME,
-        device_preference=DEFAULT_DEVICE_PREFERENCE,
-        enable_sage_attention=False,
-        sage_attention_mode="自动",
-        allow_sage_compile=False,
-        enable_fp16_accumulation_setting=False,
-        fp16_accumulation=True,
-        missing_sage_attention_policy="自动跳过SageAttention继续运行",
-        prompt_graph=None,
-        unique_id=None,
-        extra_pnginfo=None,
-        preserve_krea2_dimensions=False,
-        **kwargs,
-    ):
+    def create_image(self, **kwargs):
+        prompt = kwargs.get("prompt", "")
+        negative_prompt = kwargs.get("negative_prompt", "")
+        main_image_index = kwargs.get("main_image_index", 1)
+        width = kwargs.get("width", 1024)
+        height = kwargs.get("height", 1024)
+        batch_size = kwargs.get("batch_size", 1)
+        unet_name = kwargs.get("unet_name", "")
+        unet_dtype = kwargs.get("unet_dtype", "default")
+        clip_name1 = kwargs.get("clip_name1", "")
+        vae_name = kwargs.get("vae_name", "")
+        seed = kwargs.get("seed", 42)
+        steps = kwargs.get("steps", 20)
+        cfg = kwargs.get("cfg", 4.0)
+        sampler_name = kwargs.get("sampler_name", "euler")
+        scheduler = kwargs.get("scheduler", "beta")
+        denoise = kwargs.get("denoise", 1.0)
+        grow_mask_by = kwargs.get("grow_mask_by", 6)
+        lora_chain_config = kwargs.get("lora_chain_config", "")
+        lora_data = kwargs.get("lora_data", "")
+        batch_source_images = kwargs.get("batch_source_images", "[]")
+        mask = kwargs.get("mask", None)
+        disable_reference_auto_mask = kwargs.get("disable_reference_auto_mask", False)
+        force_empty_latent_reference = kwargs.get("force_empty_latent_reference", False)
+        disable_equal_reference_canvas = kwargs.get("disable_equal_reference_canvas", False)
+        keep_model_loaded = kwargs.get("keep_model_loaded", False)
+        test_config = kwargs.get("test_config", "")
+        use_input_image_size = kwargs.get("use_input_image_size", True)
+        model_source = kwargs.get("model_source", DEFAULT_MODEL_SOURCE)
+        ckpt_name = kwargs.get("ckpt_name", DEFAULT_CHECKPOINT_NAME)
+        device_preference = kwargs.get("device_preference", DEFAULT_DEVICE_PREFERENCE)
+        enable_sage_attention = kwargs.get("enable_sage_attention", False)
+        sage_attention_mode = kwargs.get("sage_attention_mode", "自动")
+        allow_sage_compile = kwargs.get("allow_sage_compile", False)
+        enable_fp16_accumulation_setting = kwargs.get("enable_fp16_accumulation_setting", False)
+        fp16_accumulation = kwargs.get("fp16_accumulation", True)
+        missing_sage_attention_policy = kwargs.get("missing_sage_attention_policy", "自动跳过SageAttention继续运行")
+        prompt_graph = kwargs.get("prompt_graph", None)
+        unique_id = kwargs.get("unique_id", None)
+        extra_pnginfo = kwargs.get("extra_pnginfo", None)
+        preserve_krea2_dimensions = kwargs.get("preserve_krea2_dimensions", False)
         vae_decode_tiled = bool(_unwrap_list_input(kwargs.pop("vae_decode_tiled", False)))
         vae_decode_tile_size = max(64, int(_unwrap_list_input(kwargs.pop("vae_decode_tile_size", 512))))
         raise_generation_errors = bool(_unwrap_list_input(kwargs.pop("raise_generation_errors", False)))
@@ -4366,23 +4363,23 @@ class GJJ_LazyImageStudio:
                                 lora_chain_config, model_name
                             )
                         item_result = self.create_image(
-                            prompt,
-                            negative_prompt,
-                            main_image_index,
-                            width,
-                            height,
-                            batch_size,
-                            item_unet_name,
-                            unet_dtype,
-                            item_clip_name1,
-                            item_vae_name,
-                            test_seed,
-                            item_steps,
-                            item_cfg,
-                            item_sampler_name,
-                            item_scheduler,
-                            item_denoise,
-                            grow_mask_by,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            main_image_index=main_image_index,
+                            width=width,
+                            height=height,
+                            batch_size=batch_size,
+                            unet_name=item_unet_name,
+                            unet_dtype=unet_dtype,
+                            clip_name1=item_clip_name1,
+                            vae_name=item_vae_name,
+                            seed=test_seed,
+                            steps=item_steps,
+                            cfg=item_cfg,
+                            sampler_name=item_sampler_name,
+                            scheduler=item_scheduler,
+                            denoise=item_denoise,
+                            grow_mask_by=grow_mask_by,
                             lora_chain_config=item_lora_chain_config,
                             lora_data=item_lora_data,
                             batch_source_images=batch_source_images,

@@ -554,7 +554,7 @@ def _tensor_to_bhwc(value: Any) -> torch.Tensor | None:
     elif tensor.shape[-1] != 3:
         return None
     tensor = torch.nan_to_num(tensor.float(), nan=0.0, posinf=1.0, neginf=0.0)
-    if tensor.numel() and (float(tensor.amin()) < 0.0 or float(tensor.amax()) > 1.0):
+    if int(tensor.numel()) > 0 and (float(tensor.amin()) < 0.0 or float(tensor.amax()) > 1.0):
         low, high = tensor.amin(), tensor.amax()
         tensor = (tensor - low) / (high - low) if float(high - low) > 1e-8 else torch.zeros_like(tensor)
     return tensor.clamp(0.0, 1.0).contiguous()

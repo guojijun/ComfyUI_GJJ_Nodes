@@ -356,7 +356,20 @@ def _video_size_mode(kwargs: dict[str, Any]) -> str:
     value = str(kwargs.get("video_size_mode") or "指定尺寸").strip()
     aliases = {"面板尺寸": "指定尺寸", "原视频尺寸": "视频尺寸"}
     normalized = aliases.get(value, value)
-    return normalized if normalized in {"指定尺寸", "视频尺寸", "图片尺寸"} else "指定尺寸"
+    return normalized if normalized in {"指定尺寸", "视频尺寸", "图片尺寸", "百万像素"} else "指定尺寸"
+
+
+def _megapixel_dimensions(kwargs: dict[str, Any]) -> tuple[int, int]:
+    """Resolve the LTX-style megapixel preset into SCAIL-safe dimensions."""
+    aspect = str(kwargs.get("megapixel_aspect") or "16:9").strip()
+    try:
+        ratio_width, ratio_height = (max(1.0, float(part)) for part in aspect.split(":", 1))
+    except (TypeError, ValueError):
+        ratio_width, ratio_height = 16.0, 9.0
+    total_pixels = _float_value(kwargs.get("megapixels"), 0.4, 0.2, 2.0) * 1024.0 * 1024.0
+    width = max(32, int(round((total_pixels * ratio_width / ratio_height) ** 0.5 / 32.0)) * 32)
+    height = max(32, int(round((total_pixels * ratio_height / ratio_width) ** 0.5 / 32.0)) * 32)
+    return _fit_source_dimensions(width, height)
 
 
 def _use_video_frame_rate(kwargs: dict[str, Any]) -> bool:
@@ -1197,7 +1210,7 @@ class GJJ_SCAIL2LongVideoAIO:
                     {"default": "裁剪", "hidden": True, "display": "hidden", "display_name": "图片视频缩放方法"},
                 ),
                 "video_size_mode": (
-                    ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸"],
+                    ["面板尺寸", "原视频尺寸", "指定尺寸", "视频尺寸", "图片尺寸", "百万像素"],
                     {"default": "指定尺寸", "hidden": True, "display": "hidden", "display_name": "尺寸来源"},
                 ),
                 "reference_pad_color": (
@@ -1243,6 +1256,14 @@ class GJJ_SCAIL2LongVideoAIO:
                 "relighting_lora_file": (
                     "STRING",
                     {"default": DEFAULT_SCAIL2_RELIGHTING_LORA, "hidden": True, "display": "hidden", "display_name": "Relighting LoRA"},
+                ),
+                "megapixel_aspect": (
+                    ["21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"],
+                    {"default": "16:9", "hidden": True, "display": "hidden", "display_name": "百万像素比例"},
+                ),
+                "megapixels": (
+                    "FLOAT",
+                    {"default": 0.4, "min": 0.2, "max": 2.0, "step": 0.1, "hidden": True, "display": "hidden", "display_name": "百万像素"},
                 ),
             },
             "optional": {
@@ -1942,11 +1963,20 @@ class GJJ_SCAIL2LongVideoAIO:
         else:
             source_fps = _float_value(kwargs.get("frame_rate"), 8.0, 1.0, 240.0)
             _progress(unique_id, f"1/9 使用手动帧率：{source_fps:.3g} fps", 0.061)
-        if _video_size_mode(kwargs) == "视频尺寸":
+        size_mode = _video_size_mode(kwargs)
+        if size_mode == "视频尺寸":
             source_height = int(video_frames.shape[1]) if isinstance(video_frames, torch.Tensor) and video_frames.ndim >= 3 else int(kwargs.get("height") or 896)
             source_width = int(video_frames.shape[2]) if isinstance(video_frames, torch.Tensor) and video_frames.ndim >= 3 else int(kwargs.get("width") or 512)
             kwargs["width"], kwargs["height"] = _fit_source_dimensions(source_width, source_height)
             _progress(unique_id, f"1/9 使用原视频尺寸：{kwargs['width']}x{kwargs['height']}", 0.062)
+        elif size_mode == "百万像素":
+            kwargs["width"], kwargs["height"] = _megapixel_dimensions(kwargs)
+            _progress(
+                unique_id,
+                f"1/9 使用百万像素尺寸：{kwargs['width']}x{kwargs['height']} "
+                f"({kwargs.get('megapixels', 0.4)} MP / {kwargs.get('megapixel_aspect', '16:9')})",
+                0.062,
+            )
         else:
             kwargs["width"] = _align_model_dimension(kwargs.get("width"), 512)
             kwargs["height"] = _align_model_dimension(kwargs.get("height"), 896)
