@@ -3,6 +3,14 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 import { GJJ_STANDARDIZE_NODE } from "./gjj_common_node_standardizer.js";
 
+function getLGraphCanvas() {
+	if (typeof LGraphCanvas !== "undefined") return LGraphCanvas;
+	if (globalThis.LGraphCanvas) return globalThis.LGraphCanvas;
+	if (typeof app !== "undefined" && app?.canvas?.constructor) return app.canvas.constructor;
+	if (typeof LiteGraph !== "undefined" && LiteGraph.LGraphCanvas) return LiteGraph.LGraphCanvas;
+	return null;
+}
+
 const SET_TYPE = "GJJ_SetNode";
 const GET_TYPE = "GJJ_GetNode";
 const TEMPLATE_SET_TYPE = "GJJ_TemplateSetVariables";
@@ -2997,7 +3005,7 @@ function collectBroadcastVisualLinks(sourceNode) {
 }
 
 function drawBroadcastCurve(ctx, from, to, type) {
-	const color = globalThis.LGraphCanvas?.link_type_colors?.[normalizeBroadcastType(type)] || "#7dd3fc";
+	const color = getLGraphCanvas()?.link_type_colors?.[normalizeBroadcastType(type)] || "#7dd3fc";
 	const dx = Math.max(60, Math.abs(to[0] - from[0]) * 0.5);
 	ctx.save();
 	ctx.strokeStyle = color;
@@ -3061,18 +3069,29 @@ function drawBroadcastLinksOnCanvas(ctx, graph) {
 }
 
 function installBroadcastDrawPatch() {
-	const proto = globalThis.LGraphCanvas?.prototype;
-	if (!proto || proto.__gjjVariableBroadcastDrawPatchInstalled) {
-		broadcastDrawConnectionsInstalled = Boolean(proto?.__gjjVariableBroadcastDrawPatchInstalled);
+	const canvas = app.canvas;
+	if (!canvas || typeof canvas.drawConnections !== "function") {
+		if (!installBroadcastDrawPatch._retries) installBroadcastDrawPatch._retries = 0;
+		if (installBroadcastDrawPatch._retries < 20) {
+			installBroadcastDrawPatch._retries += 1;
+			setTimeout(installBroadcastDrawPatch, 120);
+		}
 		return;
 	}
-	proto.__gjjVariableBroadcastDrawPatchInstalled = true;
+	if (broadcastDrawConnectionsInstalled || canvas.__gjjVariableBroadcastDrawPatchInstalled) return;
+	canvas.__gjjVariableBroadcastDrawPatchInstalled = true;
 	broadcastDrawConnectionsInstalled = true;
-	const originalDrawConnections = proto.drawConnections;
-	proto.drawConnections = function (ctx, ...args) {
+	const originalDrawConnections = canvas.drawConnections;
+	canvas.drawConnections = function (ctx, ...args) {
 		const result = originalDrawConnections?.apply(this, [ctx, ...args]);
 		try {
-			drawBroadcastLinksOnCanvas(ctx, this.graph || app.canvas?.graph || app.graph);
+			const connectionContext = ctx || this.bgctx || this.ctx;
+			const onConnectionLayer = !this?.bgcanvas
+				|| connectionContext?.canvas === this?.bgcanvas
+				|| connectionContext === this?.bgctx;
+			if (connectionContext && onConnectionLayer) {
+				drawBroadcastLinksOnCanvas(connectionContext, this.graph || app.canvas?.graph || app.graph);
+			}
 		} catch (error) {
 			console.warn("[GJJ] variable broadcast draw failed:", error);
 		}
@@ -3100,6 +3119,7 @@ app.registerExtension({
 	name: "Comfy.GJJ.SetGetNode",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
+		installBroadcastDrawPatch();
 		if (![TEMPLATE_SET_TYPE, TEMPLATE_PARAMS_TYPE].includes(nodeData?.name)) {
 			const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 			nodeType.prototype.onNodeCreated = function (...args) {
