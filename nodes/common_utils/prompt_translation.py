@@ -139,7 +139,7 @@ def _read_safetensors_bundle_header(path: Path) -> tuple[dict[str, str], list[st
 def _normalize_bundle_relpath(value: Any) -> str:
     text = str(value or "").replace("\\", "/").strip("/")
     posix = PurePosixPath(text)
-    if not text or posix.is_absolute() or any(part in {"", ".", ".."} for part in posix.parts):
+    if not text or "\x00" in text or "\\" in text or posix.is_absolute() or any(part in {"", ".", ".."} for part in posix.parts):
         raise ValueError(f"非法的翻译模型包内路径：{value}")
     return posix.as_posix()
 
