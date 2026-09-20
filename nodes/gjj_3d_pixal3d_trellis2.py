@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import importlib
+import inspect
 import io
 import json
 import os
@@ -211,6 +212,26 @@ def _core_node_class(node_id: str):
     return cls
 
 
+def _core_execute_accepts(node_id: str, param_name: str) -> bool:
+    """检测核心节点 execute 签名是否包含指定参数。
+
+    用于兼容新旧版 ComfyUI：例如新版 MoGeInference.execute 增加了
+    refine_steps 必填参数，旧版没有，调用前需按实际签名决定是否传参。
+    execute 带 **kwargs 时视为接受任意参数。
+    """
+    try:
+        cls = _core_node_class(node_id)
+        execute = getattr(cls, "execute", None)
+        if execute is None:
+            return False
+        params = inspect.signature(execute).parameters
+        if param_name in params:
+            return True
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except Exception:
+        return False
+
+
 # 当前 GJJ 节点的 hidden 上下文（UNIQUE_ID / PROMPT / EXTRA_PNGINFO）。
 # 新版 IO.ComfyNode（如 RemeshMesh / DecimateMesh / UnwrapMesh）执行时会
 # 读取 cls.hidden.unique_id 向前端推送进度，必须像官方执行器一样先注入。
@@ -390,6 +411,12 @@ class GJJ_Pixal3DTrellis2ImageToModel:
         required["geometry_batch"] = (
             "INT", _hidden_option({"default": 4, "min": 1, "max": 32, "step": 1,
                                    "display_name": "MoGe 批大小", "tooltip": "视显存调整。"}))
+        required["geometry_refine_steps"] = (
+            "INT", _hidden_option({"default": 3, "min": 0, "max": 8, "step": 1,
+                                   "display_name": "MoGe 几何精修步数",
+                                   "tooltip": "仅 MoGe-3 模型有效：对预测深度做稀疏体素精修的轮数，"
+                                              "0=关闭精修；数值越大边缘与细节越锐利，耗时近似线性增加。"
+                                              "MoGe-1 / MoGe-2 会自动忽略此参数。"}))
 
         # —— 结构 512 / 形状精修 / 高分辨率形状（🔺 面板） ——
         required["structure_seed"] = ("INT", _hidden_option({"default": 56, "min": 0, "max": 2**31 - 1,
@@ -532,6 +559,7 @@ class GJJ_Pixal3DTrellis2ImageToModel:
         fallback_fov: float = 49.13,
         geometry_level: int = 9,
         geometry_batch: int = 4,
+        geometry_refine_steps: int = 3,
         structure_seed: int = 56,
         structure_steps: int = 12,
         structure_cfg: float = 7.5,
@@ -629,6 +657,7 @@ class GJJ_Pixal3DTrellis2ImageToModel:
                 fallback_fov=fallback_fov,
                 geometry_level=geometry_level,
                 geometry_batch=geometry_batch,
+                geometry_refine_steps=geometry_refine_steps,
                 geometry_force=geometry_force,
                 geometry_mask=geometry_mask,
                 structure_seed=structure_seed,
@@ -741,11 +770,15 @@ class GJJ_Pixal3DTrellis2ImageToModel:
             if p["enable_geometry"]:
                 progress("📷 MoGe 估计相机内参 / FOV…", 0.11)
                 moge = _run_core("LoadMoGeModel", p["geometry_model"])[0]
-                geometry = _run_core(
-                    "MoGeInference", moge, cropped,
+                moge_args: tuple[Any, ...] = (
                     int(p["geometry_level"]), 0.0, int(p["geometry_batch"]),
                     bool(p["geometry_force"]), bool(p["geometry_mask"]),
-                )[0]
+                )
+                # 新版 ComfyUI 的 MoGeInference 增加了 refine_steps（MoGe-3 精修轮数），
+                # 旧版没有该参数；按 execute 实际签名决定是否追加，避免新旧版本报错。
+                if _core_execute_accepts("MoGeInference", "refine_steps"):
+                    moge_args = (*moge_args, int(p["geometry_refine_steps"]))
+                geometry = _run_core("MoGeInference", moge, cropped, *moge_args)[0]
                 fov_x = float(_run_core("MoGeGeometryToFOV", geometry, "horizontal", "degrees")[0])
                 progress(f"📷 MoGe 水平 FOV = {fov_x:.2f}°", 0.14)
             else:

@@ -84,7 +84,7 @@ import { api } from "/scripts/api.js";
 	const GROUPS = {
 		preprocess: [
 			"pipeline_mode", "crop_size", "pad_factor", "grow_mask", "background", "fallback_fov",
-			"geometry_level", "geometry_batch",
+			"geometry_level", "geometry_batch", "geometry_refine_steps",
 		],
 		structure: [
 			"structure_seed", "structure_steps", "structure_cfg", "structure_sampler", "structure_scheduler",
@@ -124,6 +124,7 @@ import { api } from "/scripts/api.js";
 		fallback_fov: "备用水平FOV（度）",
 		geometry_level: "MoGe 分辨率等级",
 		geometry_batch: "MoGe 批大小",
+		geometry_refine_steps: "MoGe 几何精修步数",
 		structure_seed: "结构种子",
 		structure_steps: "结构步数",
 		structure_cfg: "结构 CFG",
