@@ -586,11 +586,136 @@ def _load_caption_font(size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+# Qwen-Image 2.1 的 VAE 固定解码 4 通道：抠图时 alpha 为双峰（约 70%
+# 像素≈0、主体≈1），普通文生图时 alpha 恒接近 1（实测最低≈0.978）。
+# 低于该透明度阈值的像素占比超过该比例，即认定是“真透明图”，保留 RGBA。
+_ALPHA_TRANSPARENT_LEVEL = 0.95
+_ALPHA_TRANSPARENT_RATIO = 0.005
+
+
+def _alpha_has_real_transparency(alpha: torch.Tensor) -> bool:
+    """判断单张图的 alpha 是否承载了真实透明区域。"""
+    flat = alpha.detach().float().flatten()
+    if flat.numel() == 0:
+        return False
+    transparent_ratio = float(
+        (flat < _ALPHA_TRANSPARENT_LEVEL).to(torch.float32).mean().item()
+    )
+    return transparent_ratio > _ALPHA_TRANSPARENT_RATIO
+
+
+def _flatten_rgba_on_white(image: torch.Tensor) -> torch.Tensor:
+    """4 通道 RGBA 按白底合成 3 通道 RGB。"""
+    rgb = image[..., :3]
+    alpha = image[..., 3:4].clamp(0.0, 1.0)
+    return (rgb * alpha + (1.0 - alpha)).clamp(0.0, 1.0)
+
+
+def _coerce_image_output_channels(image: torch.Tensor) -> torch.Tensor:
+    """规整 VAE 解码输出的通道数，并自动保留透明图。
+
+    Qwen-Image 2.1 等模型的 VAE 会解码出 4 通道（RGBA）：
+    - 抠图/透明场景：alpha 呈双峰分布，保留 4 通道 RGBA 原样输出，
+      让“最终生成图像”接口和 PNG 保存都能携带透明通道；
+    - 普通场景：alpha 恒接近 1，按白底合成压平为 3 通道 RGB，
+      避免把无意义的近不透 alpha 传给只认 3 通道的下游节点；
+    - 1 通道扩 3 通道，更多通道取前 3 通道。
+    注意：绝不能用 PIL 把 4 通道字节流按 RGB 重解释，否则画面会
+    斜向错位（主体水平重复 + 条纹）。
+    """
+    if not isinstance(image, torch.Tensor) or image.ndim != 4:
+        return image
+    channels = int(image.shape[-1])
+    if channels == 3:
+        return image
+    if channels == 1:
+        return image.repeat(1, 1, 1, 3)
+    if channels > 4:
+        return image[..., :3].contiguous()
+
+    image = image.clamp(0.0, 1.0)
+    keep_alpha_flags = [
+        _alpha_has_real_transparency(image[index:index + 1, ..., 3:4])
+        for index in range(int(image.shape[0]))
+    ]
+    if not any(keep_alpha_flags):
+        # 整个批次都没有真实透明区域：统一压平为 RGB。
+        return _flatten_rgba_on_white(image).contiguous()
+    if all(keep_alpha_flags):
+        return image.contiguous()
+    # 批次内混合：统一保留 4 通道，不透明项先白底合成 RGB 再补不透明 alpha。
+    parts: list[torch.Tensor] = []
+    for index, keep_alpha in enumerate(keep_alpha_flags):
+        item = image[index:index + 1]
+        if keep_alpha:
+            parts.append(item)
+        else:
+            flat_rgb = _flatten_rgba_on_white(item)
+            parts.append(
+                torch.cat(
+                    [flat_rgb, torch.ones_like(item[..., 3:4])],
+                    dim=-1,
+                )
+            )
+    return torch.cat(parts, dim=0).contiguous()
+
+
+def _unify_image_batch_channels(images: list[torch.Tensor]) -> list[torch.Tensor]:
+    """拼接多张 BHWC 图前统一通道数：有任意 4 通道则全部提升为 RGBA。
+
+    典型场景：多张提示词批处理时其中一张失败，错误占位图是 3 通道，
+    而成功的抠图是 4 通道，直接 torch.cat 会因通道数不一致而报错。
+    3 通道图补一个全 1 的不透明 alpha，不改变其显示效果。
+    """
+    valid = [
+        item for item in images
+        if isinstance(item, torch.Tensor) and item.ndim == 4
+    ]
+    if not valid:
+        return images
+    channel_set = {int(item.shape[-1]) for item in valid}
+    if len(channel_set) == 1:
+        return images
+    target_channels = 4 if 4 in channel_set else 3
+    unified: list[torch.Tensor] = []
+    for item in images:
+        if not isinstance(item, torch.Tensor) or item.ndim != 4:
+            unified.append(item)
+            continue
+        channels = int(item.shape[-1])
+        if channels == target_channels:
+            unified.append(item)
+        elif target_channels == 4:
+            if channels == 1:
+                item = item.repeat(1, 1, 1, 3)
+            padded_alpha = torch.ones_like(item[..., 0:1])
+            unified.append(
+                torch.cat([item.clamp(0.0, 1.0)[..., :3], padded_alpha], dim=-1).contiguous()
+            )
+        else:
+            if channels == 1:
+                unified.append(item.repeat(1, 1, 1, 3).contiguous())
+            elif channels == 4:
+                unified.append(_flatten_rgba_on_white(item).contiguous())
+            else:
+                unified.append(item[..., :3].contiguous())
+    return unified
+
+
 def _tensor_to_pil_rgb(image: torch.Tensor) -> Image.Image:
     tensor = image.detach().cpu()
     if tensor.ndim == 4:
         tensor = tensor[0]
     tensor = tensor.clamp(0.0, 1.0)
+    if tensor.ndim == 3:
+        channels = int(tensor.shape[-1])
+        if channels == 4:
+            alpha = tensor[..., 3:4]
+            tensor = tensor[..., :3] * alpha + (1.0 - alpha)
+        elif channels == 1:
+            tensor = tensor.repeat(1, 1, 3)
+        elif channels != 3:
+            tensor = tensor[..., :3]
     array = (tensor.numpy() * 255.0).round().astype("uint8")
     return Image.fromarray(array, mode="RGB")
 
@@ -2289,7 +2414,20 @@ def _lazy_image_save_format(value: Any) -> tuple[str, str, str]:
 
 def _write_lazy_image_outputs(images: Any, save_format: str) -> list[dict[str, Any]]:
     _, pillow_format, suffix = _lazy_image_save_format(save_format)
-    return gjjutils_write_temp_tensor_images(images, format=pillow_format, suffix=suffix)
+    has_alpha = (
+        hasattr(images, "shape")
+        and int(getattr(images, "ndim", 0)) == 4
+        and int(images.shape[-1]) == 4
+    )
+    if has_alpha and pillow_format == "JPEG":
+        # JPEG 没有 alpha 通道：真透明图自动改存 PNG，避免透明信息丢失。
+        pillow_format, suffix = "PNG", ".png"
+    written = gjjutils_write_temp_tensor_images(images, format=pillow_format, suffix=suffix)
+    if has_alpha:
+        for info in written:
+            if isinstance(info, dict):
+                info["has_alpha"] = True
+    return written
 
 
 def _largest_input_canvas_size(
@@ -2532,6 +2670,140 @@ def _is_boogu_image_edit_turbo_family(preset: dict[str, Any], unet_name: str = "
     return "booguimageedit" in text
 
 
+def _is_qwen_image_21_family(preset: dict[str, Any], unet_name: str = "") -> bool:
+    """识别 Qwen-Image 2.1 模型族（文生图与图像编辑共用同一个模型）。"""
+    text = _canonical_model_text(
+        "|".join(
+            [
+                str(preset.get("id", "")),
+                str(preset.get("keywords", "")),
+                str(unet_name or ""),
+            ]
+        )
+    )
+    return "qwenimage21" in text
+
+
+def _qwen_image_21_tokenize(clip, text: str, images_vl: list, keep_vision: bool):
+    """兼容新旧内核的 Qwen-Image 2.1 分词调用。
+
+    keep_vision 仅在包含 qwen3vl 编码器的新内核中受支持，
+    旧内核没有该参数时自动降级，避免 TypeError。
+    """
+    tokenize_kwargs: dict[str, Any] = {
+        "images": images_vl,
+        "keep_vision": bool(keep_vision),
+        "prevent_empty_text": True,
+    }
+    try:
+        return clip.tokenize(str(text or ""), **tokenize_kwargs)
+    except TypeError:
+        tokenize_kwargs.pop("keep_vision", None)
+        return clip.tokenize(str(text or ""), **tokenize_kwargs)
+
+
+def _encode_qwen_image_21_conditioning(
+    clip,
+    vae,
+    prompt: str,
+    negative_prompt: str,
+    reference_images: dict[str, Any],
+    resolution: int = 1024,
+    latent_width: int = 1024,
+    latent_height: int = 1024,
+    batch_size: int = 1,
+) -> tuple[list, list, dict[str, Any], int, int]:
+    """内联复刻官方 TextEncodeQwenImage21 节点（零外部节点依赖）。
+
+    - 参考图统一缩放到约 resolution×resolution（32 的倍数，保持宽高比，lanczos）。
+    - 参考图同时送入 vision 编码器，并由 VAE 编码为参考 latent，
+      拼接到 positive 与 negative 两条条件上。
+    - 空 latent 为 64 通道、16 倍压缩；首张参考图尺寸决定编辑输出尺寸。
+    - 无参考图时走纯文生图，空 latent 使用外部传入的画布尺寸（16 的倍数）。
+    """
+    ref_latents: list[torch.Tensor] = []
+    images_vl: list[torch.Tensor] = []
+    target_resolution = max(0, int(resolution or 0))
+    out_latent_w = max(16, int(latent_width))
+    out_latent_h = max(16, int(latent_height))
+    for name in sorted(
+        reference_images, key=lambda item: int(str(item).rsplit("_", 1)[-1])
+    ):
+        image = reference_images[name]
+        if not isinstance(image, torch.Tensor):
+            continue
+        # 文本编码器和 VAE 使用相同缩放，保证每个 vision 槽位对应 2x2 个 latent。
+        samples = image[:1].movedim(-1, 1)
+        if target_resolution > 0:
+            ratio = float(samples.shape[3]) / float(max(1, samples.shape[2]))
+            resized_w = int(
+                round(math.sqrt(target_resolution * target_resolution * ratio) / 32.0) * 32
+            )
+            resized_h = int(
+                round(math.sqrt(target_resolution * target_resolution / ratio) / 32.0) * 32
+            )
+        else:
+            resized_w = int(round(float(samples.shape[3]) / 32.0) * 32)
+            resized_h = int(round(float(samples.shape[2]) / 32.0) * 32)
+        resized_w = max(32, resized_w)
+        resized_h = max(32, resized_h)
+        if (resized_w, resized_h) == (int(samples.shape[3]), int(samples.shape[2])):
+            scaled = image[:1]
+        else:
+            scaled = comfy.utils.common_upscale(
+                samples, resized_w, resized_h, "lanczos", "disabled"
+            ).movedim(1, -1)
+        if not images_vl:
+            # 第一张参考图决定编辑输出画布，任何尺寸偏移都会改变编辑结果。
+            out_latent_w = resized_w
+            out_latent_h = resized_h
+        rgb = scaled[:, :, :, :3]
+        if scaled.shape[-1] > 3:
+            # vision 塔看到的是白底合成图，VAE 仍保留完整四通道信息。
+            rgb = rgb * scaled[:, :, :, 3:] + (1.0 - scaled[:, :, :, 3:])
+        images_vl.append(rgb)
+        if vae is not None:
+            ref_latents.append(vae.encode(scaled))
+
+    # 有 VAE 参考 latent 时，LLM 不再需要 vision 输出（序列由 VAE latent 拼接）。
+    keep_vision = len(ref_latents) == 0
+    positive = clip.encode_from_tokens_scheduled(
+        _qwen_image_21_tokenize(clip, prompt, images_vl, keep_vision)
+    )
+    negative = clip.encode_from_tokens_scheduled(
+        _qwen_image_21_tokenize(clip, negative_prompt, images_vl, keep_vision)
+    )
+    if ref_latents:
+        positive = node_helpers.conditioning_set_values(
+            positive, {"reference_latents": ref_latents}, append=True
+        )
+        negative = node_helpers.conditioning_set_values(
+            negative, {"reference_latents": ref_latents}, append=True
+        )
+    latent_batch = max(1, int(batch_size))
+    latent = torch.zeros(
+        [
+            latent_batch,
+            64,
+            max(1, out_latent_h // 16),
+            max(1, out_latent_w // 16),
+        ],
+        device=comfy.model_management.intermediate_device(),
+    )
+    return positive, negative, {"samples": latent}, out_latent_w, out_latent_h
+
+
+def _patch_qwen_image_21_cache(model, device: str = "auto", dtype: str = "default"):
+    """内联复刻官方 QwenImage21Cache 节点：设置 KV Cache 设备与量化精度。"""
+    patched = model.clone()
+    transformer_options = patched.model_options.setdefault("transformer_options", {})
+    transformer_options["qwen_image21_cache"] = {
+        "device": str(device or "auto"),
+        "dtype": str(dtype or "default"),
+    }
+    return patched
+
+
 def _empty_sd3_latent(width: int, height: int, batch_size: int) -> dict[str, Any]:
     if EmptySD3LatentImage is not None:
         return EmptySD3LatentImage().generate(
@@ -2694,6 +2966,55 @@ def _standard_queue_images(images: list[Any]) -> list[dict[str, Any]]:
                 image[key] = item.get(key)
         result.append(image)
     return result
+
+
+# 模型测试模式会递归调用 create_image：这些参数在递归调用中显式传入，
+# 必须从外层 **kwargs 副本中剔除，否则 Python 会抛出
+# "got multiple values for keyword argument" 导致所有测试项秒失败。
+_LAZY_TEST_RECURSIVE_STRIP_KEYS = frozenset(
+    {
+        "prompt",
+        "negative_prompt",
+        "main_image_index",
+        "width",
+        "height",
+        "batch_size",
+        "unet_name",
+        "unet_dtype",
+        "clip_name1",
+        "vae_name",
+        "seed",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "denoise",
+        "grow_mask_by",
+        "lora_chain_config",
+        "lora_data",
+        "batch_source_images",
+        "mask",
+        "disable_reference_auto_mask",
+        "force_empty_latent_reference",
+        "disable_equal_reference_canvas",
+        "keep_model_loaded",
+        "test_config",
+        "use_input_image_size",
+        "model_source",
+        "ckpt_name",
+        "device_preference",
+        "enable_sage_attention",
+        "sage_attention_mode",
+        "allow_sage_compile",
+        "enable_fp16_accumulation_setting",
+        "fp16_accumulation",
+        "missing_sage_attention_policy",
+        "image_resize_config",
+        "prompt_graph",
+        "unique_id",
+        "extra_pnginfo",
+    }
+)
 
 
 class GJJ_LazyImageStudio:
@@ -4305,6 +4626,15 @@ class GJJ_LazyImageStudio:
                 progress = comfy.utils.ProgressBar(len(test_entries))
                 captioned_images: list[torch.Tensor] = []
                 effective_params_list: list[dict[str, Any]] = []
+                # 递归调用 create_image 时，下列参数已显式逐项传入；
+                # 必须从外层 kwargs 中剔除（仅保留动态 image_01 等透传输入），
+                # 否则会触发 "got multiple values for keyword argument"，
+                # 导致 UNET/LoRA 等所有测试项在 0.x 秒内全部失败。
+                recursive_extra_kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in _LAZY_TEST_RECURSIVE_STRIP_KEYS
+                }
                 for index, test_entry in enumerate(test_entries, start=1):
                     model_name = str(test_entry.get("model") or "").strip()
                     item_strength = test_entry.get("strength")
@@ -4403,7 +4733,8 @@ class GJJ_LazyImageStudio:
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
-                            **kwargs,
+                            save_format=save_format,
+                            **recursive_extra_kwargs,
                         )
                         item_image = item_result["result"][0]
                         item_elapsed = time.time() - item_started
@@ -4576,15 +4907,34 @@ class GJJ_LazyImageStudio:
                         exposed_clip_name=selected_t5_name,
                         legacy_clip_names=legacy_clip_names,
                     )
-                elif selected_clip_name:
+                elif selected_clip_name and (
+                    not preset_clip_names
+                    or _model_matches_preset_expression(
+                        selected_clip_name, preset_clip_names[0]
+                    )
+                ):
+                    # 用户在面板中选择的 CLIP 与当前模型族推荐一致
+                    # （允许 bf16/fp8/int8 等等量化变体），尊重用户选择。
                     resolved_clip_names = [selected_clip_name]
                 else:
+                    # widget 中的 CLIP 与模型族推荐不符（例如旧工作流残留
+                    # qwen_2.5_vl_7b，而当前 UNET 是 qwen_image_2.1 需要
+                    # qwen3vl_8b），强制按模型族预设重新解析，避免维度不匹配。
+                    if selected_clip_name and preset_clip_names:
+                        print(
+                            "[GJJ_LazyImageStudio] CLIP 与当前模型族不匹配，"
+                            f"自动切换为模型族推荐：{selected_clip_name} -> "
+                            f"{preset_clip_names[0]}（模型族：{preset.get('id', '')}）"
+                        )
                     resolved_clip_names = resolve_clip_names_for_preset(
                         preset,
                         clip_models,
                         exposed_clip_name=exposed_clip_name,
                         legacy_clip_names=legacy_clip_names,
                     )
+                    # 预设表达式解析失败时，最后才回退到用户选择的名称。
+                    if not resolved_clip_names and selected_clip_name:
+                        resolved_clip_names = [selected_clip_name]
                 if not resolved_clip_names:
                     if preset_driven_model:
                         raise RuntimeError(
@@ -4756,6 +5106,8 @@ class GJJ_LazyImageStudio:
             preset["resolved_ckpt_name"] = str(ckpt_name or "")
             preset["resolved_clip_type"] = str(resolved_clip_type or "")
             is_boogu_image_edit_turbo = False if use_checkpoint_model else _is_boogu_image_edit_turbo_family(preset, unet_name)
+            # Qwen-Image 2.1 文生图与图像编辑共用同一套模型，按是否有参考图区分编码方式。
+            is_qwen_image_21_runtime = False if use_checkpoint_model else _is_qwen_image_21_family(preset, unet_name)
 
             normalized_lora_parts = [
                 normalize_lora_chain_data(value)
@@ -4930,6 +5282,7 @@ class GJJ_LazyImageStudio:
                 krea2_style_reference_sample = False
                 krea2_patched_model = None
                 boogu_turbo_sample = False
+                qwen21_edit_sample = False
                 effective_negative_prompt = (
                     _ltx_negative_prompt_text(negative_prompt)
                     if is_ltx_runtime
@@ -5071,6 +5424,71 @@ class GJJ_LazyImageStudio:
                         )
                     )
                     flux2_sample_size = (int(flux2_width), int(flux2_height))
+                elif is_qwen_image_21_runtime:
+                    # Qwen-Image 2.1：文生图与图像编辑共用同一套模型，
+                    # 参考图直连 TextEncodeQwenImage21 等价编码（最多 16 张）。
+                    if task_pairs:
+                        _send_status(
+                            unique_id,
+                            f"4/6 按 Qwen-Image 2.1 图像编辑工作流编码{status_suffix}"
+                            f"（{min(len(task_pairs), 16)} 张参考图直连编码器，"
+                            "VAE 参考 latent 拼接）...",
+                        )
+                    else:
+                        _send_status(
+                            unique_id,
+                            f"4/6 按 Qwen-Image 2.1 文生图工作流编码{status_suffix}...",
+                        )
+                    if task_mask is not None:
+                        print(
+                            "[GJJ_LazyImageStudio] Qwen-Image 2.1 分支暂不使用遮罩输入，"
+                            "参考图整体参与编辑。"
+                        )
+                    # 官方节点中 image_1 是主图并决定编辑画布，先按主图序号重排。
+                    ordered_qwen21_pairs = _reorder_pairs_by_main_index(
+                        task_pairs, int(main_image_index)
+                    )
+                    qwen21_reference_images: dict[str, Any] = {}
+                    for ref_index, pair in enumerate(ordered_qwen21_pairs[:16], start=1):
+                        ref_image = pair.get("image")
+                        if isinstance(ref_image, torch.Tensor):
+                            qwen21_reference_images[f"image_{ref_index}"] = ref_image[:1]
+                    # 空 latent 为 64 通道 / 16 倍压缩，画布尺寸先对齐到 16 的倍数。
+                    qwen21_canvas_w = max(16, (int(local_width) // 16) * 16)
+                    qwen21_canvas_h = max(16, (int(local_height) // 16) * 16)
+                    # 参考图按面积等比缩放到约画布大小（32 的倍数，lanczos）。
+                    qwen21_resolution = max(
+                        32,
+                        int(
+                            round(
+                                math.sqrt(
+                                    max(1, qwen21_canvas_w) * max(1, qwen21_canvas_h)
+                                )
+                                / 32.0
+                            )
+                            * 32
+                        ),
+                    )
+                    (
+                        positive,
+                        negative,
+                        latent_out,
+                        qwen21_width,
+                        qwen21_height,
+                    ) = _encode_qwen_image_21_conditioning(
+                        clip=clip,
+                        vae=vae,
+                        prompt=prompt_text,
+                        negative_prompt=effective_negative_prompt,
+                        reference_images=qwen21_reference_images,
+                        resolution=qwen21_resolution,
+                        latent_width=qwen21_canvas_w,
+                        latent_height=qwen21_canvas_h,
+                        batch_size=int(batch_size),
+                    )
+                    qwen21_edit_sample = bool(qwen21_reference_images)
+                    local_width = int(qwen21_width)
+                    local_height = int(qwen21_height)
                 elif (
                     task_pairs
                     and task_mask is None
@@ -5163,6 +5581,15 @@ class GJJ_LazyImageStudio:
                         width=int(local_width),
                         height=int(local_height),
                     )[0]
+                elif qwen21_edit_sample:
+                    # 与官方 image_edit 工作流一致：编辑时启用 QwenImage21Cache。
+                    _send_status(
+                        unique_id,
+                        f"5/6 启用 Qwen-Image 2.1 KV Cache{status_suffix}（auto/default）...",
+                    )
+                    sample_model = _patch_qwen_image_21_cache(
+                        sample_model, "auto", "default"
+                    )
                 if is_ltx_runtime:
                     _send_status(unique_id, f"5/6 应用 LTX NAG 引导{status_suffix}...")
                     nag_conditioning = self._encode_text_conditioning(
@@ -5279,6 +5706,10 @@ class GJJ_LazyImageStudio:
                     output_image = VAEDecodeTiled().decode(vae, sampled_latent, vae_decode_tile_size)[0]
                 else:
                     output_image = VAEDecode().decode(vae, sampled_latent)[0]
+                # 通道规整：普通图统一为 3 通道 RGB；抠图等真透明图保留
+                # 4 通道 RGBA。必须在任何 PIL/保存/拼接之前处理，否则
+                # RGBA 字节流被按 RGB 重解释会造成画面错位（重脸+条纹）。
+                output_image = _coerce_image_output_channels(output_image)
                 return output_image, local_width, local_height
 
             generated_images: list[torch.Tensor] = []
@@ -5313,6 +5744,7 @@ class GJJ_LazyImageStudio:
                         unique_id,
                         f"第 {prompt_index + 1}/{len(prompt_items)} 张已完成并显示预览",
                     )
+            generated_images = _unify_image_batch_channels(generated_images)
             image = torch.cat(generated_images, dim=0) if len(generated_images) > 1 else generated_images[0]
             width = int(final_width)
             height = int(final_height)

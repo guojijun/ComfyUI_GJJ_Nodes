@@ -8,6 +8,7 @@ qwen_image_edit_2511	qwen_image_edit_2511	qwen_image	qwen_2.5_vl_7b	qwen_image_v
 krea2_turbo	krea2_turbo|krea2-turbo|krea2_raw|krea2-raw	krea2	qwen3vl_4b	qwen_image_vae.safetensors	Krea-2\realism_engine_krea2_v2.safetensors	0.5	Krea-2\krea2_identity_edit_v1_2.safetensors	1.0	8		1.0	euler	simple	1.0				false			1024	1024	krea2_turbo_fp8_scaled.safetensors	diffusion_models				true
 qwen_image_edit	qwen_image_edit	qwen_image	qwen_2.5_vl_7b	qwen_image_vae.safetensors	Qwen-Image-Lightning-4steps	1.0	qwen-edit-remove-clothes	0.7	4		1.0	euler	simple	1.0	aura	3.0	1.0	true	1024	512	1024	1024
 qwen_image_2512	qwen_image_2512	qwen_image	qwen_2.5_vl_7b	qwen_image_vae.safetensors	Qwen-Image-2512-Lightning	1.0		0.0	4		2.5	euler	simple	1.0	aura	3.1	1.0	false			1328	1328
+qwen_image_2.1	qwen_image_2.1	qwen_image	qwen3vl_8b	qwen_image_2.1_vae		0.0		0.0	25		1.0	euler	simple	1.0			0.0	true	1024	1024	1024	1024
 qwen_image	qwen_image_fp|qwen_image_distill	qwen_image	qwen_2.5_vl_7b	qwen_image_vae.safetensors	Qwen-Image-Lightning	1.0		0.0	8		2.5	euler	simple	1.0	aura	3.1	1.0	false			1328	1328			controlnet
 qwen_image_layered	qwen_image_layered	qwen_image	qwen_2.5_vl_7b	qwen_image_layered_vae.safetensors		0.0		0.0	50		4.0	euler	simple	1.0	aura	1.0	0.0	false			640	640
 boogu_image	boogu_image_turbo|boogu-image-turbo	boogu	qwen3vl_8b	flux1_vae_bf16.safetensors		0.0		0.0	4		1.0	euler	simple	1.0			0.0	false	1024	384	1024	1024	boogu_image_turbo_fp8_scaled.safetensors	diffusion_models				false

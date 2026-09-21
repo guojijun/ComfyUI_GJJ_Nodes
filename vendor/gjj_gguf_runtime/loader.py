@@ -9,7 +9,11 @@ import os
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "acestep-dit", "acestep_dit"}
+IMG_ARCH_LIST = {
+    "flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv",
+    "hyvid", "wan", "lumina2", "qwen_image", "qwen_image21", "qwenimage21",
+    "qwen-image-2.1", "acestep-dit", "acestep_dit",
+}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
@@ -96,9 +100,14 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     if arch_str in [None, "pig", "cow"]:
         if is_text_model:
             raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
-        raise ValueError(
-            "GJJ 内置 GGUF 加载器需要模型文件包含 general.architecture 元数据；"
-            f"当前文件未声明受支持的 Qwen/Image 架构：{path}"
+        # 部分新模型（如 Qwen-Image 2.1）的第三方 GGUF 转换不带
+        # general.architecture 元数据，但其张量名是标准 ComfyUI DiT 键。
+        # 扩散模型的真实架构由内核 comfy.sd.load_diffusion_model_state_dict
+        # 按张量键自动识别，因此这里放行（内核无法识别时会在下游明确报错）；
+        # 文本编码器仍需要架构信息做键名映射，不能放行。
+        logging.warning(
+            "GGUF 文件缺少 general.architecture 元数据，"
+            f"按无占位架构的扩散模型加载（由内核自动识别）：{path}"
         )
     elif arch_str not in TXT_ARCH_LIST and is_text_model:
         if type_str not in VIS_TYPE_LIST:

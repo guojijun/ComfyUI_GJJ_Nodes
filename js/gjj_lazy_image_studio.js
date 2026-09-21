@@ -21,6 +21,13 @@ const IMAGE_TOOLTIP = "参考图片输入；有连接时会自动补出下一个
 const PRIMARY_IMAGE_TOOLTIP = "可直接接入 GJJ · 多图片加载预览器 的批量图片输出；后端会按原图顺序恢复多图参考。";
 const MASK_TOOLTIP = "主图可选遮罩；存在时会走带 noise_mask 的局部编辑逻辑。";
 const ANY_PREVIEW_MEDIA_DRAG_MIME = "application/x-gjj-any-preview-media";
+// 透明图预览的棋盘格底（24px 灰白格）。
+const GJJ_ALPHA_CHECKERBOARD_CSS = [
+	"background-color:#ffffff",
+	"background-image:linear-gradient(45deg,#b8b8b8 25%,transparent 25%,transparent 75%,#b8b8b8 75%),linear-gradient(45deg,#b8b8b8 25%,#ffffff 25%,#ffffff 75%,#b8b8b8 75%)",
+	"background-size:24px 24px",
+	"background-position:0 0,12px 12px",
+].join(";");
 
 const EXECUTE_BUTTON_NAME = "__gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
@@ -5687,10 +5694,11 @@ function lazyPreviewAspectRatio(item) {
 
 function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 	if (!src) return;
-	const sources = (Array.isArray(items) ? items : [])
-		.map((item) => imageDataToUrl(item, true))
-		.filter(Boolean);
-	if (!sources.length) sources.push(src);
+	const sourcePairs = (Array.isArray(items) ? items : [])
+		.map((item) => ({ url: imageDataToUrl(item, true), alpha: Boolean(item?.has_alpha) }))
+		.filter((pair) => pair.url);
+	if (!sourcePairs.length) sourcePairs.push({ url: src, alpha: false });
+	const sources = sourcePairs.map((pair) => pair.url);
 	let currentIndex = Math.max(0, Math.min(sources.length - 1, Math.floor(Number(startIndex || 0) || 0)));
 	if (sources[currentIndex] !== src) {
 		const foundIndex = sources.indexOf(src);
@@ -5742,6 +5750,15 @@ function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 	const setOverlayImage = (index) => {
 		currentIndex = Math.max(0, Math.min(sources.length - 1, Math.floor(Number(index || 0) || 0)));
 		previewImg.src = sources[currentIndex] || src;
+		if (sourcePairs[currentIndex]?.alpha) {
+			previewImg.style.backgroundColor = "#ffffff";
+			previewImg.style.backgroundImage =
+				"linear-gradient(45deg,#b8b8b8 25%,transparent 25%,transparent 75%,#b8b8b8 75%),linear-gradient(45deg,#b8b8b8 25%,#ffffff 25%,#ffffff 75%,#b8b8b8 75%)";
+			previewImg.style.backgroundSize = "24px 24px";
+			previewImg.style.backgroundPosition = "0 0,12px 12px";
+		} else {
+			previewImg.style.backgroundImage = "none";
+		}
 		currentScale = 1;
 		previewImg.style.transform = `scale(${currentScale})`;
 		const counter = sources.length > 1 ? ` · ${currentIndex + 1}/${sources.length}` : "";
@@ -5855,13 +5872,16 @@ function createLazyPreviewCard(node, item, index = 0) {
 		"cursor:pointer",
 		"pointer-events:auto",
 	].join(";");
+	// 透明图（如 Qwen-Image 2.1 抠图）直接显示原 PNG 并铺棋盘格底，
+	// 不用白底 JPG 缩略图，否则看不出透明区域。
+	const isAlphaImage = Boolean(item?.has_alpha);
 	const image = document.createElement("img");
 	image.draggable = false;
 	image.loading = "eager";
 	image.decoding = "async";
 	image.fetchPriority = "high";
 	image.dataset.gjjCustomPreview = "true";
-	image.src = imageDataToUrl(item);
+	image.src = imageDataToUrl(item, isAlphaImage);
 	image.style.cssText = [
 		"width:100%",
 		"height:100%",
@@ -5869,7 +5889,8 @@ function createLazyPreviewCard(node, item, index = 0) {
 		"object-fit:cover",
 		"border-radius:0",
 		"transition:transform 0.2s ease",
-	].join(";");
+		isAlphaImage ? GJJ_ALPHA_CHECKERBOARD_CSS : "",
+	].filter(Boolean).join(";");
 	image.addEventListener("mouseenter", () => {
 		image.style.transform = "scale(1.02)";
 	});
@@ -6302,6 +6323,67 @@ function clearPresetLoras(node) {
 	replaceLoraRows(node, [{ ...DEFAULT_ROW }]);
 }
 
+function presetModelMatchesExpression(current, expression) {
+	// 判断当前 widget 中的模型名是否仍符合模型族推荐表达式，
+	// 兼容 bf16/fp8/int8_convrot 等量化后缀变体。
+	const wanted = String(expression || "").trim();
+	if (!wanted) {
+		return true;
+	}
+	const currentBase = String(current || "").split(/[\\/]/).pop();
+	const wantedBase = wanted.split(/[\\/]/).pop();
+	const currentCanonical = canonicalizeText(currentBase);
+	const wantedCanonical = canonicalizeText(wantedBase);
+	if (!wantedCanonical) {
+		return true;
+	}
+	return currentCanonical.includes(wantedCanonical);
+}
+
+function applyPresetClipVae(node, preset, force) {
+	const clipWidget = getWidget(node, "clip_name1");
+	const vaeWidget = getWidget(node, "vae_name");
+	if (!clipWidget || !vaeWidget) {
+		return;
+	}
+	const clipValues = Array.isArray(clipWidget.options?.values) ? clipWidget.options.values : [];
+	const vaeValues = Array.isArray(vaeWidget.options?.values) ? vaeWidget.options.values : [];
+	const currentClipName = String(clipWidget.value || "");
+	const currentVaeName = String(vaeWidget.value || "");
+	const desiredClipExpr = (preset.clipNames || [])[0] || "";
+	const desiredVaeExpr = preset.vaeName || "";
+	const isFluxDualClip = (
+		normalizeText(preset.clipType) === "flux"
+		&& canonicalizeText((preset.clipNames || [])[0]) === "cliplsafetensors"
+	);
+	if (isFluxDualClip) {
+		// 双 CLIP 预设暴露的是 T5 槽位，非强制时只在当前值不再像 T5 时纠正。
+		const t5Expression = (preset.clipNames || [])[1] || "t5xxl";
+		if (force || !presetModelMatchesExpression(currentClipName, t5Expression)) {
+			const preferredT5Names = [
+				(preset.clipNames || [])[1],
+				"t5xxl_int8_convrot.safetensors",
+				"t5xxl_int4_convrot.safetensors",
+				"t5xxl_fp16.safetensors",
+			].filter(Boolean);
+			const selectedT5 = preferredT5Names.find((name) => clipValues.includes(name))
+				|| clipValues.find((name) => canonicalizeText(name).includes("t5xxl"))
+				|| preferredValue(clipValues, preferredT5Names[0] || "");
+			setWidgetValue(clipWidget, selectedT5);
+		}
+	} else if (force || !presetModelMatchesExpression(currentClipName, desiredClipExpr)) {
+		// 非强制模式下保留用户已选的同族量化变体；只有跨模型族残留
+		// （如 qwen_2.5_vl_7b 残留在 qwen3vl_8b 模型族）才纠正。
+		const prioritizedClipValues = currentClipName
+			? [currentClipName, ...clipValues.filter((value) => String(value) !== currentClipName)]
+			: clipValues;
+		setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, desiredClipExpr));
+	}
+	if (force || !presetModelMatchesExpression(currentVaeName, desiredVaeExpr)) {
+		setWidgetValue(vaeWidget, preferredValue(vaeValues, desiredVaeExpr));
+	}
+}
+
 function applyPreset(node, force = false) {
 	const unetWidget = getWidget(node, "unet_name");
 	if (!unetWidget) {
@@ -6318,6 +6400,9 @@ function applyPreset(node, force = false) {
 		node.properties[LAST_PRESET_KEY] = currentUnet;
 		return;
 	}
+	// 即使因为已配置 LoRA 或预设未变化而提前结束，也要保证 CLIP/VAE
+	// 不残留其他模型族的旧值（新预设表发布、旧工作流复用的常见场景）。
+	applyPresetClipVae(node, preset, force);
 	if (!force && hasConfiguredLoraRows(node) && node.properties[LAST_PRESET_KEY] !== currentUnet) {
 		node.properties[LAST_PRESET_KEY] = currentUnet;
 		return;
@@ -6331,33 +6416,6 @@ function applyPreset(node, force = false) {
 	if (!force && node.properties[LAST_PRESET_KEY] === currentUnet) {
 		return;
 	}
-	const clipWidget = getWidget(node, "clip_name1");
-	const vaeWidget = getWidget(node, "vae_name");
-	const clipValues = Array.isArray(clipWidget?.options?.values) ? clipWidget.options.values : [];
-	const vaeValues = Array.isArray(vaeWidget?.options?.values) ? vaeWidget.options.values : [];
-	const currentClipName = String(clipWidget?.value || "");
-	const isFluxDualClip = (
-		normalizeText(preset.clipType) === "flux"
-		&& canonicalizeText((preset.clipNames || [])[0]) === "cliplsafetensors"
-	);
-	if (isFluxDualClip) {
-		const preferredT5Names = [
-			(preset.clipNames || [])[1],
-			"t5xxl_int8_convrot.safetensors",
-			"t5xxl_int4_convrot.safetensors",
-			"t5xxl_fp16.safetensors",
-		].filter(Boolean);
-		const selectedT5 = preferredT5Names.find((name) => clipValues.includes(name))
-			|| clipValues.find((name) => canonicalizeText(name).includes("t5xxl"))
-			|| preferredValue(clipValues, preferredT5Names[0] || "");
-		setWidgetValue(clipWidget, selectedT5);
-	} else {
-		const prioritizedClipValues = currentClipName
-			? [currentClipName, ...clipValues.filter((value) => String(value) !== currentClipName)]
-			: clipValues;
-		setWidgetValue(clipWidget, preferredValue(prioritizedClipValues, (preset.clipNames || [])[0] || ""));
-	}
-	setWidgetValue(vaeWidget, preferredValue(vaeValues, preset.vaeName || ""));
 	const isMageFlowPreset = canonicalizeText(preset.id) === "mageflow";
 	const isMageFlowTurbo = isMageFlowPreset && canonicalizeText(currentUnet).includes("turbo");
 	if (isMageFlowPreset) {
@@ -7918,16 +7976,19 @@ app.registerExtension({
 					renderLoraUi(this);
 				}
 				cleanupRedundantMultiLoaderLinks(this);
-				syncBatchSourceWidget(this);
-				void syncSizeFromPrimaryInput(this);
-				applyInputSizeButtonState(this);
-				stabilizeNode(this, false);
-				syncPanelFromLinkedSources(this);
-				updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
+			syncBatchSourceWidget(this);
+			void syncSizeFromPrimaryInput(this);
+			applyInputSizeButtonState(this);
+			stabilizeNode(this, false);
+			syncPanelFromLinkedSources(this);
+			updateTemplateSourcePanel(this, templateSourceFieldsForNode(this));
 
-			}, 0);
-			return result;
-		};
+		}, 0);
+		// 预设表可能晚于工作流节点加载；加载完成后再校正一次，
+		// 避免 CLIP/VAE 停留在其他模型族的旧值上。
+		void ensureModelPresetsLoaded().then(() => stabilizeNode(this, false));
+		return result;
+	};
 
 		const originalSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {

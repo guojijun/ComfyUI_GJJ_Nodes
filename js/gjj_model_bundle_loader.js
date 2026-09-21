@@ -267,6 +267,7 @@ const TEMPLATE_CHINESE_DESCRIPTIONS = {
 	qwen_image_edit_2511: "Qwen 图像编辑 2511",
 	qwen_image_edit: "Qwen 图像编辑",
 	qwen_image_2512: "Qwen 文生图 2512",
+	"qwen_image_2.1": "Qwen 图像 2.1（文生图/图像编辑）",
 	qwen_image: "Qwen 文生图通用",
 	qwen_image_layered: "Qwen 分层图像",
 	boogu_image: "Boogu 图像编辑",
