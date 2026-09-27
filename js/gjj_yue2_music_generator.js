@@ -1326,6 +1326,99 @@ async function loadWaveform(audioWidget, url) {
 	}
 }
 
+function parseSrtTime(value) {
+	const match = String(value || "").trim().match(/(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})/);
+	if (!match) return null;
+	const hours = Number(match[1] || 0);
+	const minutes = Number(match[2] || 0);
+	const seconds = Number(match[3] || 0);
+	const millis = Number(String(match[4] || "0").padEnd(3, "0").slice(0, 3));
+	return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+}
+
+// 解析标准 SRT 文本为 {start,end,text} 列表（兼容逗号/点毫秒分隔）。
+function parseSrtEntries(text) {
+	const entries = [];
+	const blocks = String(text || "").replace(/\r\n?/g, "\n").split(/\n{2,}/);
+	for (const block of blocks) {
+		const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+		if (lines.length < 2) continue;
+		const timeIndex = lines.findIndex((line) => line.includes("-->"));
+		if (timeIndex < 0) continue;
+		const [startRaw, endRaw] = lines[timeIndex].split("-->");
+		const start = parseSrtTime(startRaw);
+		const end = parseSrtTime(endRaw);
+		const lyric = lines.slice(timeIndex + 1).join("\n");
+		if (start == null || end == null || !lyric) continue;
+		entries.push({ start, end: Math.max(end, start + 0.2), text: lyric });
+	}
+	return entries.sort((a, b) => a.start - b.start);
+}
+
+function formatClock(seconds) {
+	const total = Math.max(0, Math.floor(Number(seconds) || 0));
+	const minutes = Math.floor(total / 60);
+	const secs = total % 60;
+	return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+// 从后端音频预览消息中提取 SRT 文本（兼容多种字段命名）。
+function extractSrtText(message) {
+	const candidates = [message?.srt_text, message?.text, message?.lyrics_srt];
+	for (const candidate of candidates) {
+		if (Array.isArray(candidate) && candidate.length) return String(candidate[0] || "");
+		if (typeof candidate === "string") return candidate;
+	}
+	return "";
+}
+
+// 按当前播放时间更新歌词区：高亮当前行，只渲染当前行附近的窗口，避免长歌词占高。
+function updateLyricsDisplay(audioWidget) {
+	const entries = audioWidget.lyricsEntries || [];
+	const currentTime = Number(audioWidget.audio.currentTime || 0);
+	let activeIndex = entries.findIndex((entry, index) => {
+		const next = entries[index + 1];
+		return currentTime >= entry.start && currentTime < Math.max(entry.end, next?.start ?? entry.end);
+	});
+	if (activeIndex < 0) {
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			if (entries[index].start <= currentTime) {
+				activeIndex = index;
+				break;
+			}
+		}
+	}
+	audioWidget.lyricsList.replaceChildren();
+	if (!entries.length) {
+		const empty = document.createElement("div");
+		empty.textContent = "生成 SRT 后将在这里按时间显示歌词";
+		empty.style.cssText = "color:#8ea0a4;font-size:12px;text-align:center;padding:12px 4px";
+		audioWidget.lyricsList.appendChild(empty);
+		return;
+	}
+	const start = Math.max(0, activeIndex - 1);
+	const end = Math.min(entries.length, Math.max(activeIndex + 3, 3));
+	for (let index = start; index < end; index += 1) {
+		const entry = entries[index];
+		const active = index === activeIndex;
+		const row = document.createElement("div");
+		row.textContent = entry.text;
+		row.title = `${formatClock(entry.start)} - ${formatClock(entry.end)}`;
+		row.style.cssText = [
+			"padding:3px 6px",
+			"border-radius:6px",
+			"font-size:12px",
+			"line-height:1.35",
+			"white-space:normal",
+			"overflow-wrap:anywhere",
+			`color:${active ? "#f7fbff" : "#9fb2b2"}`,
+			`background:${active ? "rgba(117,210,197,.16)" : "transparent"}`,
+			`font-weight:${active ? "800" : "500"}`,
+		].join(";");
+		audioWidget.lyricsList.appendChild(row);
+	}
+}
+
 function ensureAudioWidget(node) {
 	if (node.__gjjYue2MusicAudio) {
 		return node.__gjjYue2MusicAudio;
@@ -1354,6 +1447,23 @@ function ensureAudioWidget(node) {
 	audio.controls = true;
 	audio.preload = "metadata";
 	audio.style.cssText = "display:block;width:100%;height:34px;margin-top:6px";
+	// 歌词区：SRT 到达后随播放进度高亮当前句。
+	const lyricsList = document.createElement("div");
+	lyricsList.style.cssText = [
+		"margin-top:6px",
+		"min-height:60px",
+		"max-height:88px",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"justify-content:center",
+		"gap:2px",
+		"border:1px solid #31454d",
+		"border-radius:7px",
+		"background:#0d1519",
+		"padding:5px",
+		"box-sizing:border-box",
+	].join(";");
 	const row = document.createElement("div");
 	row.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:6px;font-size:12px";
 	const openLink = document.createElement("a");
@@ -1366,23 +1476,34 @@ function ensureAudioWidget(node) {
 	downloadLink.download = "";
 	downloadLink.style.cssText = "color:#9ecbff;text-decoration:none";
 	row.append(openLink, downloadLink);
-	box.append(canvas, audio, row);
+	box.append(canvas, audio, lyricsList, row);
 	const widget = node.addDOMWidget?.(AUDIO_WIDGET_NAME, AUDIO_WIDGET_NAME, box, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => (box.style.display === "none" ? 0 : 168),
+		getHeight: () => (box.style.display === "none" ? 0 : 220),
 	});
-	const audioWidget = { widget, box, canvas, audio, openLink, downloadLink, peaks: [] };
+	const audioWidget = {
+		widget, box, canvas, audio, lyricsList, openLink, downloadLink,
+		peaks: [], lyricsEntries: [],
+	};
 	canvas.addEventListener("click", (event) => {
 		if (!audio.duration) return;
 		const rect = canvas.getBoundingClientRect();
 		const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
 		audio.currentTime = ratio * audio.duration;
+		updateLyricsDisplay(audioWidget);
 		drawWaveform(audioWidget);
 	});
-	audio.addEventListener("timeupdate", () => drawWaveform(audioWidget));
-	audio.addEventListener("loadedmetadata", () => drawWaveform(audioWidget));
+	audio.addEventListener("timeupdate", () => {
+		updateLyricsDisplay(audioWidget);
+		drawWaveform(audioWidget);
+	});
+	audio.addEventListener("loadedmetadata", () => {
+		updateLyricsDisplay(audioWidget);
+		drawWaveform(audioWidget);
+	});
 	window.addEventListener("resize", () => drawWaveform(audioWidget));
+	updateLyricsDisplay(audioWidget);
 	node.__gjjYue2MusicAudio = audioWidget;
 	return node.__gjjYue2MusicAudio;
 }
@@ -1412,6 +1533,12 @@ function setAudioPreview(node, message) {
 		audioWidget.itemKey = itemKey;
 		audioWidget.audio.src = url;
 		loadWaveform(audioWidget, url);
+	}
+	// SRT 随音频一起到达：解析为歌词条目并立即刷新高亮。
+	const srtText = extractSrtText(message);
+	if (srtText) {
+		audioWidget.lyricsEntries = parseSrtEntries(srtText);
+		updateLyricsDisplay(audioWidget);
 	}
 	audioWidget.openLink.href = url;
 	audioWidget.downloadLink.href = url;

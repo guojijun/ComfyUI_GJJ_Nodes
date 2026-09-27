@@ -194,16 +194,19 @@ def _send_status(unique_id: Any, text: str) -> None:
         pass
 
 
-def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
+def _send_audio_preview(
+    unique_id: Any, audio_ui: dict[str, Any], srt_text: str = ""
+) -> None:
     if not unique_id or not audio_ui:
         return
     try:
         from server import PromptServer
 
-        PromptServer.instance.send_sync(
-            "gjj_node_audio",
-            {"node": str(unique_id), "audio": audio_ui.get("audio", [])},
-        )
+        payload: dict[str, Any] = {"node": str(unique_id), "audio": audio_ui.get("audio", [])}
+        # 随音频预览一起下发歌词 SRT，前端据此渲染随播放高亮的歌词区。
+        if srt_text:
+            payload["srt_text"] = str(srt_text)
+        PromptServer.instance.send_sync("gjj_node_audio", payload)
     except Exception:
         pass
 
@@ -222,6 +225,57 @@ def _save_audio_ui(audio: dict[str, Any], filename_prefix: str) -> dict[str, Any
         ).as_dict()
     except Exception as exc:
         raise RuntimeError(f"保存 FLAC 失败：{exc}") from exc
+
+
+# ─────────────── 歌词 SRT：复用 AudioAce 的强制对齐管线 ───────────────
+def _detect_lyrics_language(lyrics: Any, style: Any) -> str:
+    """按歌词/风格文本粗略判定语言，供 Qwen3-ForcedAligner 选择对齐语种。
+
+    YuE2 没有独立语言参数：日文必带假名、韩文必带谚文，需先于中文汉字判定；
+    其余按中文汉字与拉丁字母数量比较，全拉丁文本视为英语。
+    """
+    text = f"{lyrics or ''}\n{style or ''}"
+    has_kana = bool(re.search(r"[\u3040-\u30ff]", text))
+    has_hangul = bool(re.search(r"[\uac00-\ud7af]", text))
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin_count = len(re.findall(r"[A-Za-z]", text))
+    if has_kana:
+        return "ja"
+    if has_hangul:
+        return "ko"
+    if cjk_count and cjk_count >= latin_count:
+        return "zh"
+    return "en"
+
+
+def _build_lyrics_srt(
+    audio: dict[str, Any], lyrics: Any, style: Any, unique_id: Any
+) -> str:
+    """把原始歌词强制对齐到生成音频，返回标准 SRT 文本。
+
+    对齐逻辑直接复用 GJJ_AudioAceMusicGenerator 中已验证的实现
+    （Qwen3-ForcedAligner，可选 Qwen3-ASR 辅助定位首个人声），
+    懒加载导入：缺模型/依赖时只影响 SRT，不影响已生成的歌曲音频。
+    """
+    try:
+        from .gjj_audio_ace_music_generator import _align_lyrics_to_srt
+    except Exception:
+        from gjj_audio_ace_music_generator import _align_lyrics_to_srt
+
+    language = _detect_lyrics_language(lyrics, style)
+    return _align_lyrics_to_srt(audio, str(lyrics or ""), language, unique_id)
+
+
+def _has_singable_lyrics(lyrics: Any) -> bool:
+    """歌词去掉段落标签（[Verse] 等）后是否仍有需要演唱的内容。"""
+    for raw_line in str(lyrics or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        text = raw_line.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"(?:\[[^\]]+\]|\([^()]+\)|（[^（）]+）)", text):
+            continue
+        return True
+    return False
 
 
 # ───────────────────────── 各阶段内联实现（与官方节点等价） ─────────────────────────
@@ -352,9 +406,12 @@ class GJJ_Yue2MusicGenerator:
         "文生曲可先做 ABC 规划再生成；翻唱用 SheetSage2 从参考歌曲转录旋律后重新演绎。"
     )
     SEARCH_ALIASES = ["yue2", "yue", "音乐", "歌曲", "作曲", "翻唱", "cover", "文生曲", "music"]
-    RETURN_TYPES = ("AUDIO",)
-    RETURN_NAMES = ("音乐音频输出",)
-    OUTPUT_TOOLTIPS = ("生成的歌曲音频（默认无损 flac）。",)
+    RETURN_TYPES = ("AUDIO", "STRING")
+    RETURN_NAMES = ("音乐音频输出", "原歌词SRT")
+    OUTPUT_TOOLTIPS = (
+        "生成的歌曲音频（默认无损 flac）。",
+        "使用 Qwen3-ForcedAligner 将原歌词对齐到生成歌曲得到的 SRT 字幕；无歌词或缺少对齐模型时为空。",
+    )
 
     GJJ_HELP = {
         "title": "GJJ · 🎵 YuE2音乐生成器",
@@ -792,14 +849,29 @@ class GJJ_Yue2MusicGenerator:
         mode_cn = "歌曲翻唱" if cover_mode else "文生曲"
         prefix = "audio/YuE2_cover" if cover_mode else "audio/YuE2"
         audio_ui = _save_audio_ui(audio, prefix)
-        _send_audio_preview(unique_id, audio_ui)
+
+        # 歌词 SRT（对齐失败不阻断：音乐已生成，SRT 留空并在状态栏说明）。
+        srt_text = ""
+        if _has_singable_lyrics(lyrics):
+            _send_status(unique_id, "6/6 对齐原歌词 SRT 时间轴...")
+            try:
+                srt_text = _build_lyrics_srt(audio, lyrics, style, unique_id)
+            except Exception as exc:
+                srt_text = ""
+                print(f"[GJJ] YuE2 歌词 SRT 对齐失败（不影响音乐输出）：{exc}")
+
+        # UI 字典与音频预览都携带 SRT；前端歌词区随播放进度高亮。
+        if srt_text:
+            audio_ui["srt_text"] = [srt_text]
+        _send_audio_preview(unique_id, audio_ui, srt_text)
 
         actual_duration = float(audio["waveform"].shape[-1]) / float(audio["sample_rate"])
+        srt_suffix = " / 已输出歌词 SRT" if srt_text else ""
         _send_status(
             unique_id,
-            f"6/6 完成：{mode_cn} / 输出 {actual_duration:.1f}s / 耗时 {elapsed_seconds:.1f}s",
+            f"完成：{mode_cn} / 输出 {actual_duration:.1f}s / 耗时 {elapsed_seconds:.1f}s{srt_suffix}",
         )
-        return {"ui": audio_ui, "result": (audio,)}
+        return {"ui": audio_ui, "result": (audio, srt_text)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Yue2MusicGenerator}
