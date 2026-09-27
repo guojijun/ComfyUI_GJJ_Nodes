@@ -200,28 +200,9 @@ UI_PARAMETER_ORDER = (
     "lora_name",
     "lora_strength",
 )
-HIDDEN_UI_PARAMETERS = tuple(
-    name for name in UI_PARAMETER_ORDER
-)
+# 所有功能参数均在 INPUT_TYPES 中正常声明（py 声明）；
+# 默认显隐状态完全交给前端 JS 按 GJJ_UI 清单统一管理（js 管理）。
 _TIMESTAMP_ASR_CACHE: dict[tuple[str, str, str, str], Any] = {}
-
-
-def _mark_hidden_ui_parameters(input_data: dict[str, Any]) -> dict[str, Any]:
-    hidden_names = set(HIDDEN_UI_PARAMETERS)
-    for group_name in ("required", "optional"):
-        group = input_data.get(group_name)
-        if not isinstance(group, dict):
-            continue
-        for name, definition in group.items():
-            if name not in hidden_names or not isinstance(definition, tuple) or len(definition) < 2:
-                continue
-            options = definition[1]
-            if not isinstance(options, dict):
-                continue
-            options.setdefault("hidden", True)
-            options.setdefault("display", "hidden")
-            options.setdefault("advanced", True)
-    return input_data
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -984,7 +965,7 @@ class GJJ_AudioAceMusicGenerator:
     GJJ_UI = {
         "toolbar": ["🔄", "🎲", "🌐", "📒", "⏰", "🎛️", "🧠", "▶️", "🧪"],
         "parameter_order": list(UI_PARAMETER_ORDER),
-        "hidden_parameters": list(HIDDEN_UI_PARAMETERS),
+        "hidden_parameters": list(UI_PARAMETER_ORDER),
     }
 
     @classmethod
@@ -993,7 +974,7 @@ class GJJ_AudioAceMusicGenerator:
         clip_models = _list_visible_clip_models()
         vae_models = _list_visible_vae_models()
         lora_models = _list_visible_lora_models()
-        return _mark_hidden_ui_parameters({
+        return {
             "required": {
                 "model_name": (
                     models,
@@ -1278,7 +1259,7 @@ class GJJ_AudioAceMusicGenerator:
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
-        })
+        }
 
     def generate(
         self,

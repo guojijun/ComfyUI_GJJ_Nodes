@@ -1044,6 +1044,12 @@ export class GJJ_Utils {
                 /(^|[_\-. ])(?:v(?:er(?:sion)?)?\d+(?:[._-]\d+){0,3}|rev(?:ision)?[_-]?\d+(?:[._-]\d+)*|release[_-]?\d+(?:[._-]\d+)*|20\d{2}(?:[._-]\d{1,2}){1,2})(?=$|[_\-. ])/gi,
                 "$1",
             )
+            // 独立的参数规模 token（如 3b / 7b / 6.5b / 123m）也属于版本信息，
+            // 剥离后剩余的才是模型“组名”。不跟 b/m 的纯数字（如 Qwen3.5）不受影响。
+            .replace(
+                /(^|[_\-. ])(?:\d+(?:\.\d+)?[bm])(?=$|[_\-. ])/gi,
+                "$1",
+            )
             // A dot immediately following an architecture token is part of names such as
             // Qwen3.5, not the beginning of a standalone version suffix.
             .replace(/(^|[_\- ])\d+(?:[._-]\d+)+(?:[bmk])?(?=$|[_\-. ])/gi, "$1")
@@ -1199,6 +1205,30 @@ export class GJJ_Utils {
         app.graph?.setDirtyCanvas?.(true, true);
     }
 
+    // 通用控件错位自愈：当某个带“固定候选列表”的控件（combo）当前值不在候选中
+    // （典型为 configure 按位赋值时，模型名被错位塞进 seed 的 control_after_generate；
+    // 该控件在创建阶段可能已被折叠成 hidden），优先采用形参（named）中的同名合法值，
+    // 否则复位到第一个合法候选。以“有无候选列表”而非 type 判定，可同时修正 hidden 游离 combo。
+    // 没有候选列表的 number/text/DOM 控件会被自然跳过。返回被修复的控件数量。
+    static healComboWidgets(node, named = null) {
+        if (!node || !Array.isArray(node.widgets)) return 0;
+        const nameMap = named && typeof named === "object" ? named : null;
+        let healed = 0;
+        for (const widget of node.widgets) {
+            if (!widget) continue;
+            const values = GJJ_Utils._modelTreeWidgetChoices(widget);
+            if (!values.length) continue;
+            if (widget.value != null && values.includes(widget.value)) continue;
+            const namedValue = nameMap ? nameMap[widget.name] : undefined;
+            widget.value = namedValue != null && values.includes(namedValue) ? namedValue : values[0];
+            try {
+                widget.callback?.(widget.value);
+            } catch (_) {}
+            healed++;
+        }
+        return healed;
+    }
+
     static _modelTreeLine(prefix, icon, filename, { clickable = false, selected = false, missing = false, copyValue = "" } = {}) {
         const row = document.createElement("div");
         row.style.cssText = [
@@ -1316,7 +1346,9 @@ export class GJJ_Utils {
         const search = document.createElement("input");
         search.type = "text";
         search.placeholder = "输入关键词过滤；回车使用第一个匹配模型";
-        search.value = GJJ_Utils._modelTreeResolvedSearchValue(entry, widget, node);
+        // 过滤框初值：从“当前模型名”去掉路径/扩展名/版本号/量化标记后的组名；
+        // 即便当前模型已缺失（不在候选），也仍按其名称推导，方便在同族中找替代。
+        search.value = GJJ_Utils._modelTreeSearchValue(entry, widget, node);
         search.style.cssText = "width:100%;background:#0d1418;color:#dce7e2;border:1px solid #41535b;border-radius:6px;padding:5px 7px;box-sizing:border-box;";
         const list = document.createElement("div");
         list.style.cssText = floating

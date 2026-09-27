@@ -2,89 +2,81 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
-const TARGET_NODES = new Set(["GJJ_AudioAceMusicGenerator"]);
-const STATUS_WIDGET_NAME = "gjj_audio_ace_music_status";
-const AUDIO_WIDGET_NAME = "gjj_audio_ace_music_audio";
-const MODEL_SIZES_ENDPOINT = "/gjj/audio_ace_model_sizes";
+const TARGET_NODES = new Set(["GJJ_Yue2MusicGenerator"]);
+const STATUS_WIDGET_NAME = "gjj_yue2_music_status";
+const AUDIO_WIDGET_NAME = "gjj_yue2_music_audio";
 const COMPACT_PANEL_HEIGHT = 40;
-// 节点高度不再写死，统一由内容（工具栏 / 音频预览）自然计算。
-let modelSizesPromise = null;
+// 节点高度不写死，统一由内容（工具栏 / 音频预览）自然计算。
+
+// 与 py 的 UI_PARAMETER_ORDER 必须完全一致（25 个 widget）。
 const PARAM_ORDER = [
-	"model_name",
-	"tags",
+	"generation_mode",
+	"style",
 	"lyrics",
-	"duration",
-	"bpm",
-	"timesignature",
-	"language",
-	"keyscale",
+	"mode",
+	"max_duration",
 	"seed",
-	"lyrics_strength",
-	"generate_audio_codes",
-	"cfg_scale",
+	"ckpt_name",
+	"abc_planning",
+	"max_abc_tokens",
+	"abc_temperature",
+	"abc_top_p",
+	"abc_top_k",
+	"abc_repetition_penalty",
+	"penalty_window",
+	"audio_encoder_name",
 	"temperature",
 	"top_p",
 	"top_k",
-	"min_p",
-	"shift",
+	"repetition_penalty",
+	"cfg_scale",
 	"steps",
 	"cfg",
 	"sampler_name",
 	"scheduler",
 	"denoise",
-	"clip_1_name",
-	"clip_2_name",
-	"vae_name",
-	"model_test_mode",
-	"lora_enabled",
-	"lora_name",
-	"lora_strength",
 ];
 // 恢复显隐时用于把 widget.type 还原成 ComfyUI 原生类型。
 const RESTORE_WIDGET_TYPES = {
-	model_name: "combo",
-	tags: "text",
+	generation_mode: "combo",
+	style: "text",
 	lyrics: "text",
-	duration: "number",
-	bpm: "number",
-	timesignature: "combo",
-	language: "combo",
-	keyscale: "combo",
+	mode: "combo",
+	max_duration: "number",
 	seed: "number",
-	lyrics_strength: "number",
-	generate_audio_codes: "toggle",
-	cfg_scale: "number",
+	ckpt_name: "combo",
+	abc_planning: "toggle",
+	max_abc_tokens: "number",
+	abc_temperature: "number",
+	abc_top_p: "number",
+	abc_top_k: "number",
+	abc_repetition_penalty: "number",
+	penalty_window: "number",
+	audio_encoder_name: "combo",
 	temperature: "number",
 	top_p: "number",
 	top_k: "number",
-	min_p: "number",
-	shift: "number",
+	repetition_penalty: "number",
+	cfg_scale: "number",
 	steps: "number",
 	cfg: "number",
 	sampler_name: "combo",
 	scheduler: "combo",
 	denoise: "number",
-	clip_1_name: "combo",
-	clip_2_name: "combo",
-	vae_name: "combo",
-	model_test_mode: "toggle",
-	lora_enabled: "toggle",
-	lora_name: "combo",
-	lora_strength: "number",
 };
 const PANEL_GROUPS = {
 	seed: { title: "🎲 种子", names: ["seed"] },
-	music: { title: "🌐 音乐结构", names: ["bpm", "timesignature", "language", "keyscale"] },
-	text: { title: "📒 文本相关", names: ["tags", "lyrics", "lyrics_strength", "cfg_scale", "temperature", "top_p", "top_k", "min_p"] },
-	time: { title: "⏰ 时间相关", names: ["duration"] },
-	model: { title: "🧠 模型相关", names: ["shift", "generate_audio_codes", "lora_enabled", "lora_name", "lora_strength"] },
-	generate: { title: "🎛️ 生成参数", names: ["steps", "cfg", "sampler_name", "scheduler", "denoise"] },
+	text: { title: "📒 风格 / 歌词", names: ["style", "lyrics"] },
+	structure: { title: "🌐 规划模式与时长", names: ["mode", "max_duration"] },
+	abc: { title: "📝 ABC 规划（文生曲）", names: ["abc_planning", "max_abc_tokens", "abc_temperature", "abc_top_p", "abc_top_k", "abc_repetition_penalty", "penalty_window"] },
+	cover: { title: "🎤 参考歌曲接入", names: [] },
+	model: { title: "🧠 模型树", names: [] },
+	generate: { title: "🎛️ 生成参数", names: ["temperature", "top_p", "top_k", "repetition_penalty", "cfg_scale", "steps", "cfg", "sampler_name", "scheduler", "denoise"] },
 };
 
 function isExecutionOutputNode(node) {
 	if (!node) return false;
-	if (node === undefined || node === null) return false;
-	if (node.comfyClass === "GJJ_AudioAceMusicGenerator") return true;
+	if (node.comfyClass === "GJJ_Yue2MusicGenerator") return true;
 	if (node.constructor?.nodeData?.output_node === true) return true;
 	if (node.nodeData?.output_node === true) return true;
 	if (node.flags?.output === true) return true;
@@ -174,6 +166,69 @@ function applyOrderedWidgetValues(node, values) {
 	syncOrderedWidgetValues(node);
 }
 
+// 形参还原：直接按键名从 widgets_values_named 取值，彻底不依赖位置，
+// 这样即便 widget 顺序变化、中间插入控件也不会错位。
+function applyNamedWidgetValues(node, named) {
+	if (!node || !named || typeof named !== "object") return false;
+	let applied = 0;
+	for (const name of Object.keys(named)) {
+		if (!PARAM_ORDER.includes(name)) continue; // 只还原功能参数，忽略 DOM/临时控件
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		widget.value = named[name];
+		try {
+			widget.callback?.(widget.value);
+		} catch (_) {}
+		applied += 1;
+	}
+	if (applied > 0) syncOrderedWidgetValues(node);
+	return applied > 0;
+}
+
+// 模型类 combo 控件（其候选来自 models 目录扫描）。
+const MODEL_COMBO_NAMES = ["ckpt_name", "audio_encoder_name"];
+
+// 保证模型 combo 的候选列表始终包含当前值。
+// 核心模型扫描在“当前值不在候选列表”时会判缺失；启动时序下候选可能尚未就绪，
+// 这里把当前值补进列表，确保任何时刻扫描都不会误判。
+function ensureModelComboValues(node) {
+	if (!node) return;
+	for (const name of MODEL_COMBO_NAMES) {
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		widget.options = widget.options || {};
+		let values = widget.options.values;
+		if (typeof values === "function") values = values(widget);
+		if (!Array.isArray(values)) values = [];
+		const current = widget.value;
+		if (current != null && String(current).trim() && !values.includes(current)) {
+			values.push(current);
+		}
+		widget.options.values = values;
+	}
+}
+
+// 启动加载完成后，自动重跑一次核心“缺失模型”扫描。
+// 这与右键【重新加载节点】消除误报是同一机制，但自动、轻量、无需重建节点。
+function scheduleStartupModelRescan(node) {
+	if (!node || node.__gjjYue2RescanScheduled) return;
+	node.__gjjYue2RescanScheduled = true;
+	const rescan = async () => {
+		try {
+			ensureModelComboValues(node);
+			if (typeof app?.refreshMissingModels === "function") {
+				// 只按已知模型重扫当前图，避免重新拉取节点定义带来的额外开销。
+				await app.refreshMissingModels({ silent: true, reloadDefs: false });
+			}
+		} catch (error) {
+			console.warn("[GJJ] 启动后重扫缺失模型失败:", error);
+		}
+	};
+	// loadGraphData 末尾会先跑一次扫描；这里在其完成之后再纠正，分次延迟覆盖不同启动速度。
+	setTimeout(rescan, 300);
+	setTimeout(rescan, 1000);
+}
+
 function writePromptInputsFromWidgets(node, promptData) {
 	const promptNode = promptData?.prompt?.[String(node?.id)] || promptData?.prompt?.[node?.id];
 	if (!promptNode?.inputs) return;
@@ -205,9 +260,9 @@ function setWidgetValue(node, name, value) {
 
 // 记录 widget 被前端接管前的原始状态，保证显隐可完全还原（与懒人工作室一致）。
 function rememberWidgetState(widget) {
-	if (!widget || widget.__gjjAudioAceVisibilityState) return;
+	if (!widget || widget.__gjjYue2VisibilityState) return;
 	widget.options = widget.options || {};
-	widget.__gjjAudioAceVisibilityState = {
+	widget.__gjjYue2VisibilityState = {
 		type: widget.type,
 		hidden: widget.hidden,
 		disabled: widget.disabled,
@@ -230,7 +285,7 @@ function setWidgetHidden(widget, hidden) {
 	if (!widget) return;
 	rememberWidgetState(widget);
 	widget.options = widget.options || {};
-	const state = widget.__gjjAudioAceVisibilityState || {};
+	const state = widget.__gjjYue2VisibilityState || {};
 	if (hidden) {
 		widget.hidden = true;
 		widget.disabled = true;
@@ -281,6 +336,15 @@ function hideParameterWidgets(node) {
 	for (const name of PARAM_ORDER) {
 		setWidgetHidden(getWidget(node, name), true);
 	}
+	// 功能参数之外的“游离原生控件”也一并折叠，典型是 ComfyUI 给 seed 自动生成的
+	// control_after_generate：它不在参数清单里，但会被核心当作 combo 扫描；configure
+	// 按位赋值时一旦把模型名错位塞给它，就会被核心永久判为“缺失模型”。排除本节点 DOM 控件。
+	const domNames = new Set([STATUS_WIDGET_NAME, AUDIO_WIDGET_NAME]);
+	for (const widget of node.widgets || []) {
+		if (!widget || domNames.has(widget.name)) continue;
+		if (widget.type === "hidden") continue;
+		setWidgetHidden(widget, true);
+	}
 }
 
 function restoreParameterWidgetOrder(node) {
@@ -304,7 +368,7 @@ function restoreParameterWidgetOrder(node) {
 }
 
 function placeToolbarFirst(node) {
-	const status = node?.__gjjAudioAceMusicStatus?.widget;
+	const status = node?.__gjjYue2MusicStatus?.widget;
 	if (!status || !Array.isArray(node.widgets)) return;
 	const rest = node.widgets.filter((widget) => widget !== status);
 	node.widgets = [status, ...rest];
@@ -351,10 +415,10 @@ function patchPromptData(promptData) {
 }
 
 function installGraphToPromptPatch() {
-	if (app.__gjjAudioAceMusicGraphToPromptPatched || typeof app.graphToPrompt !== "function") {
+	if (app.__gjjYue2GraphToPromptPatched || typeof app.graphToPrompt !== "function") {
 		return;
 	}
-	app.__gjjAudioAceMusicGraphToPromptPatched = true;
+	app.__gjjYue2GraphToPromptPatched = true;
 	const originalGraphToPrompt = app.graphToPrompt.bind(app);
 	app.graphToPrompt = async function (...args) {
 		const result = await originalGraphToPrompt(...args);
@@ -374,7 +438,7 @@ function floatingPanelStyle() {
 		"position:fixed",
 		"z-index:900",
 		"width:min(440px, calc(100vw - 28px))",
-		"max-height:min(520px, calc(100vh - 32px))",
+		"max-height:min(560px, calc(100vh - 32px))",
 		"overflow:auto",
 		"display:none",
 		"flex-direction:column",
@@ -394,7 +458,7 @@ function createFloatingPanel(node, key) {
 	const config = PANEL_GROUPS[key];
 	if (!config) return null;
 	const panel = document.createElement("div");
-	panel.className = `gjj-audio-ace-floating-panel gjj-audio-ace-${key}-panel`;
+	panel.className = `gjj-yue2-floating-panel gjj-yue2-${key}-panel`;
 	panel.style.cssText = floatingPanelStyle();
 	protectPanelEvents(panel);
 
@@ -431,88 +495,17 @@ function widgetChoices(widget) {
 	return Array.isArray(values) ? values : [];
 }
 
-function modelWidgetChoices(node, name) {
-	return widgetChoices(getWidget(node, name)).map((item) => String(item || "").trim()).filter(Boolean);
-}
-
-function loadAudioAceModelSizes() {
-	if (!modelSizesPromise) {
-		modelSizesPromise = api.fetchApi(MODEL_SIZES_ENDPOINT)
-			.then((response) => response.ok ? response.json() : {})
-			.then((data) => data?.sizes || {})
-			.catch(() => ({}));
-	}
-	return modelSizesPromise;
-}
-
-function formatModelSize(bytes) {
-	const value = Number(bytes);
-	if (!Number.isFinite(value) || value < 0) return "未知";
-	const units = ["B", "KB", "MB", "GB", "TB"];
-	let size = value;
-	let unitIndex = 0;
-	while (size >= 1024 && unitIndex < units.length - 1) {
-		size /= 1024;
-		unitIndex += 1;
-	}
-	const digits = size < 10 && unitIndex > 0 ? 2 : 1;
-	return `${size.toFixed(digits)} ${units[unitIndex]}`;
-}
-
-function aceMainModelTreeEntries(node) {
-	const mainChoices = modelWidgetChoices(node, "model_name");
-	return [
-		{
-			widget: "model_name",
-			label: "ACE 主模型 / UNET",
-			folder: "diffusion_models",
-			icon: "🟣",
-			models: mainChoices,
-			keywords: ["ace", "step"],
-			fallback: getWidget(node, "model_name")?.value || "未找到 ACE/Step 主模型",
-			description: "ACE 主模型；.safetensors 与 .gguf 写入同一个 model_name，二者互斥。GGUF 执行时走 GJJ 内置 GGUF UNET 加载器。",
-		},
-		{
-			widget: "clip_1_name",
-			label: "CLIP 1",
-			folder: "text_encoders",
-			icon: "🟡",
-			models: modelWidgetChoices(node, "clip_1_name"),
-			anyKeywords: ["ace", "qwen"],
-			fallback: getWidget(node, "clip_1_name")?.value || "qwen_0.6b_ace15.safetensors",
-			description: "ACE 文本编码器 1。",
-		},
-		{
-			widget: "clip_2_name",
-			label: "CLIP 2",
-			folder: "text_encoders",
-			icon: "🟡",
-			models: modelWidgetChoices(node, "clip_2_name"),
-			anyKeywords: ["ace", "qwen"],
-			fallback: getWidget(node, "clip_2_name")?.value || "qwen_1.7b_ace15.safetensors",
-			description: "ACE 文本编码器 2。",
-		},
-		{
-			widget: "vae_name",
-			label: "VAE",
-			folder: "vae",
-			icon: "🔴",
-			models: modelWidgetChoices(node, "vae_name"),
-			anyKeywords: ["ace", "vae"],
-			fallback: getWidget(node, "vae_name")?.value || "ace_1.5_vae.safetensors",
-			description: "ACE 音频 VAE。",
-		},
-		{
-			widget: "lora_name",
-			label: "ACE LoRA",
-			folder: "loras",
-			icon: "🟢",
-			models: modelWidgetChoices(node, "lora_name"),
-			keywords: ["ace", "step"],
-			fallback: getWidget(node, "lora_name")?.value || "未找到 ACE LoRA",
-			description: "可选的 ACE 音乐主模型 LoRA；文件名需同时包含 ace 和 step，不区分大小写。",
-		},
-	];
+// 通用多行文本判定，兼容三种形态：
+// 1) 显式 options.multiline（标准 STRING 参数声明 {"multiline": true}）；
+// 2) 核心为多行文本创建的 DOM widget（原始 type='customtext'，element 为 textarea）；
+// 3) 已被本节点折叠（type='hidden'）时，从折叠前快照的原始类型/元素判断。
+function isMultilineWidget(widget) {
+	if (!widget) return false;
+	if (widget.options?.multiline === true) return true;
+	if (widget.element?.tagName === "TEXTAREA") return true;
+	const state = widget.__gjjYue2VisibilityState;
+	if (state?.type === "customtext" || state?.type === "textarea") return true;
+	return widget.type === "customtext" || widget.type === "textarea";
 }
 
 function createFloatingControl(node, name) {
@@ -528,6 +521,8 @@ function createFloatingControl(node, name) {
 	label.style.cssText = "font-size:12px;color:#aebfbd;line-height:1.25";
 
 	let input;
+	// 多行文本：通用判定，兼容 options.multiline 与核心 customtext DOM widget。
+	const multiline = isMultilineWidget(widget);
 	const choices = widgetChoices(widget);
 	if (choices.length) {
 		input = document.createElement("select");
@@ -540,6 +535,10 @@ function createFloatingControl(node, name) {
 	} else if (typeof widget.value === "boolean") {
 		input = document.createElement("input");
 		input.type = "checkbox";
+	} else if (multiline) {
+		input = document.createElement("textarea");
+		input.rows = 4;
+		input.wrap = "soft";
 	} else {
 		input = document.createElement("input");
 		input.type = typeof widget.value === "number" ? "number" : "text";
@@ -562,6 +561,13 @@ function createFloatingControl(node, name) {
 		"padding:5px 7px",
 		"outline:none",
 	].join(";");
+	// 多行文本：更高的编辑区、可纵向拖拽调整大小，标签改为顶部对齐。
+	if (input.tagName === "TEXTAREA") {
+		input.style.minHeight = "70px";
+		input.style.resize = "vertical";
+		row.style.alignItems = "start";
+		label.style.paddingTop = "6px";
+	}
 
 	const readInputValue = () => {
 		if (input.type === "checkbox") return input.checked;
@@ -572,67 +578,123 @@ function createFloatingControl(node, name) {
 		if (input.type === "checkbox") input.checked = !!widget.value;
 		else input.value = widget.value ?? "";
 	};
-	input.addEventListener("input", () => setWidgetValue(node, name, readInputValue()));
+	// change/blur 保存，避免输入即保存导致失焦。
 	input.addEventListener("change", () => setWidgetValue(node, name, readInputValue()));
+	if (input.type !== "checkbox") {
+		input.addEventListener("blur", () => setWidgetValue(node, name, readInputValue()));
+	}
 	row.__gjjRefresh = refresh;
 	row.append(label, input);
 	refresh();
 	return row;
 }
 
-function createLoraInlineControls(node) {
-	const enabled = createFloatingControl(node, "lora_enabled");
-	const model = createFloatingControl(node, "lora_name");
-	const strength = createFloatingControl(node, "lora_strength");
-	if (!enabled || !model || !strength) return null;
+// ───────────────────── 翻唱：参考歌曲连接状态 ─────────────────────
+function referenceAudioConnected(node) {
+	const slotIndex = node?.inputs?.findIndex((item) => item?.name === "reference_audio");
+	if (slotIndex == null || slotIndex < 0) return false;
+	// 新版 API 更准确，但在 onNodeCreated / configure 创建节点阶段（节点尚未加入 graph），
+	// getInputLink / isInputConnected 会抛 NullGraphError。必须空安全，失败再回退原始值。
+	if (typeof node.getInputLink === "function") {
+		try { if (node.getInputLink(slotIndex) != null) return true; } catch (_) {}
+	}
+	if (typeof node.isInputConnected === "function") {
+		try { if (node.isInputConnected(slotIndex)) return true; } catch (_) {}
+	}
+	return Boolean(node.inputs[slotIndex]?.link);
+}
 
+function createReferenceAudioRow(node) {
 	const row = document.createElement("div");
-	row.style.cssText = [
-		"display:grid",
-		"grid-template-columns:76px minmax(0,1fr) 112px",
+	row.style.cssText = "display:grid;grid-template-columns:112px minmax(0,1fr);align-items:center;gap:8px";
+	const label = document.createElement("span");
+	label.textContent = "参考歌曲";
+	label.style.cssText = "font-size:12px;color:#aebfbd;line-height:1.25";
+	const value = document.createElement("div");
+	value.style.cssText = [
+		"box-sizing:border-box",
+		"min-height:28px",
+		"display:flex",
 		"align-items:center",
-		"gap:8px",
-		"min-width:0",
+		"padding:5px 7px",
+		"border:1px solid rgba(255,255,255,.1)",
+		"border-radius:6px",
+		"background:#2d3034",
+		"font-size:12px",
 	].join(";");
-
-	enabled.style.cssText = "display:grid;grid-template-columns:auto 20px;align-items:center;gap:6px;min-width:0";
-	enabled.firstElementChild.textContent = "LoRA";
-	enabled.lastElementChild.style.cssText = "width:18px;height:18px;min-height:18px;margin:0;padding:0;accent-color:#8fc7ff";
-
-	model.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr);align-items:center;min-width:0";
-	model.firstElementChild.style.display = "none";
-	model.lastElementChild.style.minWidth = "0";
-
-	strength.style.cssText = "display:grid;grid-template-columns:auto minmax(58px,1fr);align-items:center;gap:6px;min-width:0";
-	strength.firstElementChild.textContent = "强度";
-
 	row.__gjjRefresh = () => {
-		enabled.__gjjRefresh?.();
-		model.__gjjRefresh?.();
-		strength.__gjjRefresh?.();
+		const connected = referenceAudioConnected(node);
+		value.textContent = connected
+			? "✅ 已接入参考歌曲（自动进入歌曲翻唱）"
+			: "❌ 未接入（接入后自动进入翻唱模式）";
+		value.style.color = connected ? "#8fe6b0" : "#ff9d9d";
 	};
-	row.append(enabled, model, strength);
-	row.__gjjRefresh();
+	row.append(label, value);
 	return row;
 }
 
+// 只读的当前模式行：文生曲 / 歌曲翻唱按参考歌曲接入状态自动判定，不提供手动选择入口。
+function createAutoModeRow(node) {
+	const row = document.createElement("div");
+	row.style.cssText = "display:grid;grid-template-columns:112px minmax(0,1fr);align-items:center;gap:8px";
+	const label = document.createElement("span");
+	label.textContent = "当前模式";
+	label.style.cssText = "font-size:12px;color:#aebfbd;line-height:1.25";
+	const value = document.createElement("div");
+	value.style.cssText = [
+		"box-sizing:border-box",
+		"min-height:28px",
+		"display:flex",
+		"align-items:center",
+		"padding:5px 7px",
+		"border:1px solid rgba(255,255,255,.1)",
+		"border-radius:6px",
+		"background:#2d3034",
+		"font-size:12px",
+	].join(";");
+	row.__gjjRefresh = () => {
+		const cover = referenceAudioConnected(node);
+		value.textContent = cover
+			? "🎤 歌曲翻唱：已接入参考歌曲，模式自动切换"
+			: "🎵 文生曲：接入参考歌曲即自动转为翻唱";
+		value.style.color = cover ? "#8fe6c8" : "#9cc8ff";
+	};
+	row.append(label, value);
+	return row;
+}
+
+// ───────────────────── 面板提示行（模式相关性） ─────────────────────
+function appendPanelHint(body, text, warn = false) {
+	const hint = document.createElement("div");
+	hint.textContent = text;
+	hint.style.cssText = [
+		"font-size:12px",
+		"line-height:1.35",
+		"padding:6px 8px",
+		"border-radius:6px",
+		warn ? "background:rgba(255,160,90,.12);color:#ffc99a;border:1px solid rgba(255,160,90,.3)"
+			: "background:rgba(110,170,255,.1);color:#a9cdff;border:1px solid rgba(110,170,255,.28)",
+	].join(";");
+	body.appendChild(hint);
+}
+
 function ensureFloatingPanels(node) {
-	node.__gjjAudioAcePanels ||= {};
+	node.__gjjYue2Panels ||= {};
 	for (const key of Object.keys(PANEL_GROUPS)) {
-		if (!node.__gjjAudioAcePanels[key]) {
-			node.__gjjAudioAcePanels[key] = createFloatingPanel(node, key);
+		if (!node.__gjjYue2Panels[key]) {
+			node.__gjjYue2Panels[key] = createFloatingPanel(node, key);
 		}
 	}
-	return node.__gjjAudioAcePanels;
+	return node.__gjjYue2Panels;
 }
 
 function panelOpenKey(node) {
-	return String(node?.properties?.gjj_audio_ace_open_panel || "");
+	return String(node?.properties?.gjj_yue2_open_panel || "");
 }
 
 function setPanelOpen(node, key, open) {
 	node.properties ||= {};
-	node.properties.gjj_audio_ace_open_panel = open ? key : "";
+	node.properties.gjj_yue2_open_panel = open ? key : "";
 	syncFloatingPanels(node);
 }
 
@@ -647,44 +709,104 @@ function positionFloatingPanel(node, panel, anchor) {
 	panel.style.top = `${Math.round(top)}px`;
 }
 
+function modelWidgetChoices(node, name) {
+	const widget = getWidget(node, name);
+	const values = widget?.options?.values || widget?.options?.items || widget?.values;
+	return (Array.isArray(values) ? values : [])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+}
+
+// 🧠 模型树条目：参照 GJJ_LazyImageStudio，按目录自动分组。
+function yue2ModelTreeEntries(node) {
+	return [
+		{
+			widget: "ckpt_name",
+			label: "YuE2 主模型 checkpoint",
+			folder: "checkpoints",
+			icon: "🟣",
+			models: modelWidgetChoices(node, "ckpt_name"),
+			keywords: ["yue2"],
+			fallback: getWidget(node, "ckpt_name")?.value || "yue2_3b_int8_convrot.safetensors",
+			description: "YuE2 3B int8 整包 checkpoint，自带 MODEL / CLIP / VAE，文生曲与翻唱共用。",
+		},
+		{
+			widget: "audio_encoder_name",
+			label: "SheetSage2 音频编码器",
+			folder: "audio_encoders",
+			icon: "🟢",
+			models: modelWidgetChoices(node, "audio_encoder_name"),
+			keywords: ["sheetsage"],
+			fallback: getWidget(node, "audio_encoder_name")?.value || "sheetsage2_bf16.safetensors",
+			description: "仅歌曲翻唱需要：把参考歌曲转录成 ABC 旋律；文生曲用不到。",
+		},
+	];
+}
+
+function renderModelPanel(node, panelInfo) {
+	if (!panelInfo?.body) return;
+	panelInfo.body.replaceChildren();
+	const tree = GJJ_Utils.createModelTreeView({
+		node,
+		entries: yue2ModelTreeEntries(node).map((entry) => ({ ...entry, floatingChoices: true })),
+		refresh: () => {
+			syncOrderedWidgetValues(node);
+			GJJ_Utils.refreshNode(node);
+			syncFloatingPanels(node);
+		},
+		onApply: () => {
+			syncOrderedWidgetValues(node);
+			GJJ_Utils.refreshNode(node);
+		},
+	});
+	tree.style.maxHeight = "320px";
+	panelInfo.body.appendChild(tree);
+
+	const mode = referenceAudioConnected(node) ? "cover" : "text2music";
+	if (mode === "cover") {
+		appendPanelHint(panelInfo.body, "歌曲翻唱：上方两个模型都会用到；参考歌曲请在 🎤 面板确认已接入。");
+	} else {
+		appendPanelHint(panelInfo.body, "文生曲：只需要 checkpoints 下的主模型；audio_encoders 下的 SheetSage2 用不到。");
+	}
+}
+
 function renderPanelControls(node, panelInfo, names) {
 	if (!panelInfo?.body) return;
 	panelInfo.body.replaceChildren();
+	const mode = referenceAudioConnected(node) ? "cover" : "text2music";
+	// 📒 面板顶部显示只读的当前模式行（模式自动判定，无手动入口）。
+	if (panelInfo.key === "text") {
+		const modeRow = createAutoModeRow(node);
+		modeRow.__gjjRefresh?.();
+		panelInfo.body.appendChild(modeRow);
+	}
 	for (const name of names) {
 		const control = createFloatingControl(node, name);
 		if (!control) continue;
 		control.__gjjRefresh?.();
 		panelInfo.body.appendChild(control);
 	}
+	// 各面板附加模式相关性提示。
+	if (panelInfo.key === "abc") {
+		if (mode === "cover") {
+			appendPanelHint(panelInfo.body, "当前为歌曲翻唱：ABC 旋律由 SheetSage2 从参考歌曲转录，本组参数不生效。", true);
+		} else {
+			appendPanelHint(panelInfo.body, "当前为文生曲：开启 ABC 规划后先生成符号乐谱，再生成歌曲。");
+		}
+	} else if (panelInfo.key === "cover") {
+		if (mode === "cover") {
+			appendPanelHint(panelInfo.body, "翻唱流程：参考歌曲（本面板确认接入，也可用工具栏 📂 载入）→ SheetSage2（在 🧠 模型树选择）转 ABC 旋律 → YuE2 按新风格/歌词重新演绎。");
+		} else {
+			appendPanelHint(panelInfo.body, "当前为文生曲：接入参考歌曲后将自动切换为歌曲翻唱，无需手动选择。", false);
+		}
+	}
 }
 
-function renderModelPanelControls(node, panelInfo) {
-	if (!panelInfo?.body) return;
-	panelInfo.body.replaceChildren();
-	const tree = GJJ_Utils.createModelTreeView({
-		node,
-		entries: aceMainModelTreeEntries(node),
-		refresh: () => {
-			syncOrderedWidgetValues(node);
-			refreshNode(node);
-			syncFloatingPanels(node);
-		},
-		onApply: () => {
-			syncOrderedWidgetValues(node);
-			refreshNode(node);
-		},
-	});
-	tree.style.maxHeight = "360px";
-	panelInfo.body.appendChild(tree);
-	for (const name of PANEL_GROUPS.model.names) {
-		if (name === "lora_enabled" || name === "lora_name" || name === "lora_strength") continue;
-		const control = createFloatingControl(node, name);
-		if (!control) continue;
-		control.__gjjRefresh?.();
-		panelInfo.body.appendChild(control);
-	}
-	const loraControls = createLoraInlineControls(node);
-	if (loraControls) panelInfo.body.appendChild(loraControls);
+function renderCoverPanel(node, panelInfo) {
+	renderPanelControls(node, panelInfo, PANEL_GROUPS.cover.names);
+	const referenceRow = createReferenceAudioRow(node);
+	referenceRow.__gjjRefresh?.();
+	panelInfo.body.appendChild(referenceRow);
 }
 
 function syncFloatingPanels(node) {
@@ -692,22 +814,23 @@ function syncFloatingPanels(node) {
 	const openKey = panelOpenKey(node);
 	for (const [key, panelInfo] of Object.entries(panels)) {
 		if (!panelInfo) continue;
-		if (key === "model") renderModelPanelControls(node, panelInfo);
+		if (key === "cover") renderCoverPanel(node, panelInfo);
+		else if (key === "model") renderModelPanel(node, panelInfo);
 		else renderPanelControls(node, panelInfo, PANEL_GROUPS[key]?.names || []);
 		const open = key === openKey;
 		panelInfo.panel.style.display = open ? "flex" : "none";
 		if (open) {
-			positionFloatingPanel(node, panelInfo.panel, node.__gjjAudioAceButtons?.[key]);
+			positionFloatingPanel(node, panelInfo.panel, node.__gjjYue2Buttons?.[key]);
 		}
 	}
 }
 
 function positionOpenFloatingPanels(node) {
-	const panels = node?.__gjjAudioAcePanels;
+	const panels = node?.__gjjYue2Panels;
 	const openKey = panelOpenKey(node);
 	const panelInfo = panels?.[openKey];
 	if (!panelInfo?.panel || panelInfo.panel.style.display === "none") return;
-	positionFloatingPanel(node, panelInfo.panel, node.__gjjAudioAceButtons?.[openKey]);
+	positionFloatingPanel(node, panelInfo.panel, node.__gjjYue2Buttons?.[openKey]);
 }
 
 function positionAllOpenFloatingPanels() {
@@ -719,15 +842,15 @@ function positionAllOpenFloatingPanels() {
 }
 
 function removeFloatingPanels(node) {
-	for (const panelInfo of Object.values(node?.__gjjAudioAcePanels || {})) {
+	for (const panelInfo of Object.values(node?.__gjjYue2Panels || {})) {
 		panelInfo?.panel?.remove?.();
 	}
-	node.__gjjAudioAcePanels = {};
+	node.__gjjYue2Panels = {};
 }
 
 function installWindowPositionHandlers() {
-	if (app.__gjjAudioAceWindowHandlersInstalled || typeof window === "undefined") return;
-	app.__gjjAudioAceWindowHandlersInstalled = true;
+	if (app.__gjjYue2WindowHandlersInstalled || typeof window === "undefined") return;
+	app.__gjjYue2WindowHandlersInstalled = true;
 	window.addEventListener("resize", positionAllOpenFloatingPanels);
 	window.addEventListener("scroll", positionAllOpenFloatingPanels, true);
 }
@@ -765,299 +888,203 @@ function createIconButton({ icon, title, color = "#293340", onClick }) {
 	return button;
 }
 
-function createButton(text, title, onClick) {
-	const button = document.createElement("button");
-	button.type = "button";
-	button.textContent = text;
-	button.title = title || "";
-	button.style.cssText = [
-		"height:28px",
-		"border:1px solid #40535d",
-		"border-radius:6px",
-		"background:#1b252b",
-		"color:#edf7f4",
-		"font:700 12px/1 sans-serif",
-		"padding:0 10px",
-		"cursor:pointer",
-		"white-space:nowrap",
-	].join(";");
-	if (onClick) {
-		button.addEventListener("click", onClick);
+// 按参考音频连接状态同步生成模式：接入→翻唱(melody)，断开→文生曲(full)。
+// silent 用于 configure 恢复阶段：只更新值，不刷新 DOM（避免重建/递归）。
+function syncModeByReference(node, { silent = false } = {}) {
+	if (!node) return;
+	const connected = referenceAudioConnected(node);
+	const modeWidget = getWidget(node, "generation_mode");
+	const planWidget = getWidget(node, "mode");
+	let changed = false;
+	if (connected) {
+		if (modeWidget && modeWidget.value !== "cover") { modeWidget.value = "cover"; changed = true; }
+		if (planWidget && planWidget.value !== "melody") { planWidget.value = "melody"; changed = true; }
+	} else {
+		if (modeWidget && modeWidget.value !== "text2music") { modeWidget.value = "text2music"; changed = true; }
+		if (planWidget && planWidget.value !== "full") { planWidget.value = "full"; changed = true; }
 	}
-	return button;
-}
-
-function selectedModelChoices(dialog) {
-	return [...dialog.querySelectorAll("input[data-model-choice]:checked")].map((input) => input.value);
-}
-
-function applyModelTestFilter(dialog, value) {
-	const terms = String(value || "").toLowerCase().split(/\s+/).filter(Boolean);
-	for (const row of dialog.querySelectorAll("[data-model-row]")) {
-		const text = String(row.dataset.modelRow || "").toLowerCase();
-		row.style.display = terms.every((term) => text.includes(term)) ? "flex" : "none";
+	if (changed) {
+		syncOrderedWidgetValues(node);
+		if (!silent) refreshNode(node);
 	}
 }
 
-function sortModelTestRows(list, key, direction) {
-	const factor = direction === "desc" ? -1 : 1;
-	const rows = [...list.querySelectorAll("[data-model-row]")];
-	rows.sort((a, b) => {
-		if (key === "size") {
-			const aSize = Number(a.dataset.modelSize);
-			const bSize = Number(b.dataset.modelSize);
-			const aKnown = Number.isFinite(aSize);
-			const bKnown = Number.isFinite(bSize);
-			if (aKnown !== bKnown) return aKnown ? -1 : 1;
-			if (aKnown && aSize !== bSize) return (aSize - bSize) * factor;
-		}
-		return String(a.dataset.modelRow || "").localeCompare(
-			String(b.dataset.modelRow || ""),
-			undefined,
-			{ numeric: true, sensitivity: "base" },
-		) * factor;
-	});
-	list.append(...rows);
+// 监听参考音频插槽的连接/断开，实时同步生成模式。
+function installReferenceAudioBehavior(node) {
+	if (!node || node.__gjjRefAudioBehavior) return;
+	node.__gjjRefAudioBehavior = true;
+	const original = node.onConnectionsChange;
+	node.onConnectionsChange = function (type, slotIndex, connected, linkInfo, inputSlot) {
+			try {
+				original?.apply(this, arguments);
+			} catch (_) {}
+			// inputSlot 即被改动的输入槽；用其名称确认是参考音频。
+			const slotName = inputSlot?.name ?? this.inputs?.[slotIndex]?.name;
+			if (slotName !== "reference_audio") return;
+			// 延迟到当前 connect / graph.configure 操作完成后再同步，
+			// 避免在 configure 恢复链接的中途刷新 DOM 而导致整图加载失败。
+			if (this.__gjjRefConnRaf) cancelAnimationFrame(this.__gjjRefConnRaf);
+			this.__gjjRefConnRaf = requestAnimationFrame(() => {
+				this.__gjjRefConnRaf = null;
+				syncModeByReference(this, { silent: false });
+				refreshToolbarButtons(this);
+			});
+		};
 }
 
-async function queueModelTestBatch(node, models, dialog, testKind = "model") {
-	const targetWidgetName = testKind === "lora" ? "lora_name" : "model_name";
-	const targetWidget = getWidget(node, targetWidgetName);
-	if (!targetWidget || !models.length) return;
-	const original = targetWidget.value;
-	const originalTestMode = getWidget(node, "model_test_mode")?.value;
-	const originalLoraEnabled = getWidget(node, "lora_enabled")?.value;
-	const runButton = dialog?.querySelector("[data-model-test-run]");
-	const testLabel = testKind === "lora" ? "LoRA 测试" : "主模型测试";
-	try {
-		if (runButton) {
-			runButton.disabled = true;
-			runButton.style.opacity = "0.6";
-		}
-		for (let index = 0; index < models.length; index += 1) {
-			const model = models[index];
-			setWidgetValue(node, targetWidgetName, model);
-			if (testKind === "lora") setWidgetValue(node, "lora_enabled", true);
-			setWidgetValue(node, "model_test_mode", true);
-			setStatus(node, `${testLabel} ${index + 1}/${models.length}: ${model}`);
-			await queueOnlyCurrentNode(node);
-		}
-		setStatus(node, `已加入${testLabel}队列：${models.length} 个`);
-	} catch (error) {
-		console.error(`[GJJ] ${testLabel}排队失败:`, error);
-		setStatus(node, `${testLabel}排队失败`);
-	} finally {
-		setWidgetValue(node, targetWidgetName, original);
-		if (testKind === "lora") setWidgetValue(node, "lora_enabled", Boolean(originalLoraEnabled));
-		setWidgetValue(node, "model_test_mode", Boolean(originalTestMode));
-		dialog?.remove?.();
-	}
+// ===== 参考音频：本地文件载入 / 链接挂起与恢复 / 随机种子开关 =====
+
+const OPEN_FILE_OFF_COLOR = "#5a4630";
+const LINK_BTN_CONNECTED_COLOR = "#31508f";
+const LINK_BTN_SUSPENDED_COLOR = "#a6530c";
+const DICE_OFF_COLOR = "#4a4f5c";
+const DICE_ON_COLOR = "#0f8a52";
+
+function referenceSlotIndex(node) {
+	return node?.inputs?.findIndex((item) => item?.name === "reference_audio") ?? -1;
 }
 
-function openModelTestDialog(node, testKind = "model") {
-	document.querySelector(".gjj-audio-ace-model-test-dialog")?.remove?.();
-	const targetWidgetName = testKind === "lora" ? "lora_name" : "model_name";
-	const testLabel = testKind === "lora" ? "LoRA 测试" : "主模型测试";
-	const choices = modelWidgetChoices(node, targetWidgetName).filter((name) => !String(name).startsWith("[未找到"));
-	const current = String(getWidget(node, targetWidgetName)?.value || "");
-	const overlay = document.createElement("div");
-	overlay.className = "gjj-audio-ace-model-test-dialog";
-	overlay.style.cssText = [
-		"position:fixed",
-		"inset:0",
-		"z-index:1100",
-		"background:rgba(0,0,0,.35)",
-		"display:flex",
-		"align-items:center",
-		"justify-content:center",
-		"padding:18px",
-		"box-sizing:border-box",
-	].join(";");
-	protectPanelEvents(overlay);
+// 通用上传：把本地音频文件上传到 input 目录，返回 {name, subfolder, type}。
+// 复用 ComfyUI 内置 /upload/image（该端点不限制文件类型），不引入额外依赖。
+async function uploadAudioFile(file) {
+	const form = new FormData();
+	form.append("image", file, file.name);
+	form.append("type", "input");
+	const response = api?.fetchApi
+		? await api.fetchApi("/upload/image", { method: "POST", body: form })
+		: await fetch("/upload/image", { method: "POST", body: form });
+	if (!response?.ok) throw new Error(`上传失败：HTTP ${response?.status || "?"}`);
+	const data = await response.json().catch(() => ({}));
+	return { name: data.name || file.name, subfolder: data.subfolder || "", type: data.type || "input" };
+}
 
-	const panel = document.createElement("div");
-	panel.style.cssText = [
-		"width:min(720px, calc(100vw - 36px))",
-		"max-height:min(620px, calc(100vh - 36px))",
-		"display:flex",
-		"flex-direction:column",
-		"gap:10px",
-		"border:1px solid #41535b",
-		"border-radius:8px",
-		"background:#10171b",
-		"color:#dce7e2",
-		"box-shadow:0 18px 48px rgba(0,0,0,.48)",
-		"padding:12px",
-		"box-sizing:border-box",
-	].join(";");
-
-	const header = document.createElement("div");
-	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
-	const title = document.createElement("div");
-	title.textContent = `🧪 ${testLabel}`;
-	title.style.cssText = "font-size:14px;font-weight:800;color:#f2fbff";
-	const close = createIconButton({ icon: "×", title: "关闭", color: "#1b252b", onClick: () => overlay.remove() });
-	header.append(title, close);
-
-	const controls = document.createElement("div");
-	controls.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
-	const filter = document.createElement("input");
-	filter.placeholder = "关键词过滤，支持空格 AND";
-	filter.style.cssText = [
-		"flex:1",
-		"height:30px",
-		"box-sizing:border-box",
-		"border:1px solid #40535d",
-		"border-radius:6px",
-		"background:#0d1418",
-		"color:#edf7f4",
-		"padding:0 10px",
-		"outline:none",
-	].join(";");
-	filter.addEventListener("input", () => applyModelTestFilter(overlay, filter.value));
-	const selectAll = createButton("全选", "选择当前过滤结果", () => {
-		for (const row of overlay.querySelectorAll("[data-model-row]")) {
-			if (row.style.display === "none") continue;
-			const input = row.querySelector("input[data-model-choice]");
-			if (input) input.checked = true;
-		}
-	});
-	const clear = createButton("清空", "清空选择", () => {
-		for (const input of overlay.querySelectorAll("input[data-model-choice]")) {
-			input.checked = false;
-		}
-	});
-	const nameSort = createButton("名称 ↑", "按模型名称升序排列；再次点击切换降序", null);
-	const sizeSort = createButton("大小 ↑", "按模型文件大小升序排列；再次点击切换降序", null);
-	controls.append(filter, nameSort, sizeSort, selectAll, clear);
-
-	const list = document.createElement("div");
-	list.style.cssText = [
-		"min-height:140px",
-		"max-height:390px",
-		"overflow:auto",
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
-		"border:1px solid #263b43",
-		"border-radius:8px",
-		"padding:8px",
-		"background:#0b1418",
-	].join(";");
-	const folder = testKind === "lora" ? "loras" : "diffusion_models";
-	const sizeMapPromise = loadAudioAceModelSizes().then((sizes) => sizes?.[folder] || {});
-	for (const name of choices) {
-		const row = document.createElement("label");
-		row.dataset.modelRow = name;
-		row.style.cssText = "display:flex;align-items:center;gap:8px;min-height:28px;padding:4px 6px;border-radius:6px;background:#132329;color:#ecf7f3;font:12px/1.3 monospace";
-		const checkbox = document.createElement("input");
-		checkbox.type = "checkbox";
-		checkbox.value = name;
-		checkbox.dataset.modelChoice = "1";
-		checkbox.checked = name === current;
-		const text = document.createElement("span");
-		text.textContent = name;
-		text.style.cssText = "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-		const size = document.createElement("span");
-		size.textContent = "读取中…";
-		size.style.cssText = "flex:0 0 auto;color:#91a8ad;font:11px/1.3 monospace";
-		row.append(checkbox, text, size);
-		list.appendChild(row);
-		sizeMapPromise.then((sizeMap) => {
-			const bytes = Number(sizeMap?.[name]);
-			if (Number.isFinite(bytes)) row.dataset.modelSize = String(bytes);
-			size.textContent = formatModelSize(bytes);
-		});
+// 创建内置 LoadAudio 节点并接入本节点参考音频插槽。
+function attachAudioLoader(node, filename) {
+	const loader = LiteGraph.createNode("LoadAudio");
+	const fileWidget = loader.widgets?.find((w) => w.name === "audio");
+	if (fileWidget) {
+		const values = GJJ_Utils._modelTreeWidgetChoices(fileWidget);
+		if (values.length && !values.includes(filename)) values.push(filename);
+		fileWidget.value = filename;
 	}
-	const sortState = { name: "asc", size: "asc" };
-	const activateSort = (key, button) => {
-		const direction = sortState[key];
-		sortModelTestRows(list, key, direction);
-		button.textContent = `${key === "name" ? "名称" : "大小"} ${direction === "asc" ? "↑" : "↓"}`;
-		sortState[key] = direction === "asc" ? "desc" : "asc";
+	// 放置在本节点左侧，避免遮挡。
+	const loaderWidth = loader.size?.[0] || 270;
+	loader.pos = [Math.max(20, node.pos[0] - loaderWidth - 60), node.pos[1]];
+	(node.graph || app.graph).add(loader);
+	const slot = referenceSlotIndex(node);
+	loader.connect(0, node, slot);
+	return loader;
+}
+
+// 弹出文件选择框，选择后上传并接入。
+function chooseLocalAudioFile(node) {
+	if (!node) return;
+	if (referenceAudioConnected(node)) {
+		setStatus(node, "参考歌曲已连接外部音频，📂 已灰显禁用；如需本地载入请先用 🔗 断开。");
+		return;
+	}
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = "audio/*,video/*";
+	input.multiple = false;
+	input.onchange = async () => {
+		const file = (input.files || [])[0];
+		if (!file) return;
+		setStatus(node, `📤 正在上传参考歌曲：${file.name}…`, 0.1);
+		try {
+			const info = await uploadAudioFile(file);
+			node.__gjjRefSuspended = false;
+			node.__gjjSavedRef = null;
+			attachAudioLoader(node, info.name);
+			setStatus(node, `📂 已载入参考歌曲：${info.name}`, 0);
+			refreshToolbarButtons(node);
+		} catch (error) {
+			setStatus(node, `参考歌曲载入失败：${error?.message || error}`, 0);
+		}
 	};
-	nameSort.addEventListener("click", () => activateSort("name", nameSort));
-	sizeSort.addEventListener("click", async () => {
-		await sizeMapPromise;
-		activateSort("size", sizeSort);
-	});
-
-	const footer = document.createElement("div");
-	footer.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
-	const note = document.createElement("div");
-	note.textContent = testKind === "lora"
-		? `固定主模型「${String(getWidget(node, "model_name")?.value || "")}」和全部参数，只更换 LoRA。`
-		: "固定当前歌词、音乐标签和采样参数，只更换主模型。";
-	note.style.cssText = "font-size:12px;color:#9eb2b4;min-width:0";
-	const run = createButton("加入队列", "按选择的模型逐个生成音乐", () => {
-		const models = selectedModelChoices(overlay);
-		if (!models.length) {
-			setStatus(node, `${testLabel}：未选择项目`);
-			return;
-		}
-		queueModelTestBatch(node, models, overlay, testKind);
-	});
-	run.dataset.modelTestRun = "1";
-	run.title = testKind === "lora" ? "固定主模型和其它参数，按选择的 LoRA 逐个生成" : "按选择的主模型逐个生成音乐";
-	footer.append(note, run);
-
-	panel.append(header, controls, list, footer);
-	overlay.appendChild(panel);
-	document.body.appendChild(overlay);
-	filter.focus();
+	input.click();
 }
 
-function openTestTypeDialog(node) {
-	document.querySelector(".gjj-audio-ace-model-test-dialog")?.remove?.();
-	const overlay = document.createElement("div");
-	overlay.className = "gjj-audio-ace-model-test-dialog";
-	overlay.style.cssText = [
-		"position:fixed",
-		"inset:0",
-		"z-index:1100",
-		"background:rgba(0,0,0,.35)",
-		"display:flex",
-		"align-items:center",
-		"justify-content:center",
-		"padding:18px",
-		"box-sizing:border-box",
-	].join(";");
-	protectPanelEvents(overlay);
-
-	const panel = document.createElement("div");
-	panel.style.cssText = [
-		"width:min(460px, calc(100vw - 36px))",
-		"display:flex",
-		"flex-direction:column",
-		"gap:10px",
-		"border:1px solid #41535b",
-		"border-radius:8px",
-		"background:#10171b",
-		"color:#dce7e2",
-		"box-shadow:0 18px 48px rgba(0,0,0,.48)",
-		"padding:12px",
-		"box-sizing:border-box",
-	].join(";");
-	const header = document.createElement("div");
-	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px";
-	const title = document.createElement("div");
-	title.textContent = "🧪 选择测试类型";
-	title.style.cssText = "font-size:14px;font-weight:800;color:#f2fbff";
-	const close = createIconButton({ icon: "×", title: "关闭", color: "#1b252b", onClick: () => overlay.remove() });
-	header.append(title, close);
-
-	const options = document.createElement("div");
-	options.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:10px";
-	const modelTest = createButton("主模型测试", "固定其它参数，只更换主模型", () => openModelTestDialog(node, "model"));
-	const loraTest = createButton("LoRA 测试", "固定主模型和其它参数，只更换 LoRA", () => openModelTestDialog(node, "lora"));
-	for (const button of [modelTest, loraTest]) {
-		button.style.height = "42px";
-		button.style.fontSize = "13px";
+// 🔗：已连接→记住来源并断开；已挂起→恢复原连接。
+function toggleReferenceLink(node) {
+	if (!node) return;
+	const slot = referenceSlotIndex(node);
+	if (slot < 0) return;
+	if (referenceAudioConnected(node)) {
+		let link = null;
+		try { link = node.getInputLink(slot); } catch (_) { link = null; }
+		if (link) {
+			node.__gjjSavedRef = { originId: link.origin_id, originSlot: link.origin_slot };
+		}
+		node.disconnectInput(slot);
+		node.__gjjRefSuspended = true;
+	} else {
+		const saved = node.__gjjSavedRef;
+		const source = saved ? (node.graph || app.graph).getNodeById(saved.originId) : null;
+		if (source && saved) {
+			source.connect(saved.originSlot, node, slot);
+			node.__gjjRefSuspended = false;
+		} else {
+			// 来源节点已被删除，无法恢复，重置挂起状态。
+			node.__gjjRefSuspended = false;
+			node.__gjjSavedRef = null;
+		}
 	}
-	options.append(modelTest, loraTest);
-	panel.append(header, options);
-	overlay.appendChild(panel);
-	document.body.appendChild(overlay);
+	refreshToolbarButtons(node);
+}
+
+// 🎲：切换“每次执行随机种子”。本质是设置 seed 自带的 control_after_generate
+// （randomize=随机 / fixed=固定），核心在排队前的 beforeQueued 阶段应用。
+function setRandomizeMode(node, on, { sync = true } = {}) {
+	const control = node?.widgets?.find((w) => w.name === "control_after_generate");
+	if (control) {
+		control.value = on ? "randomize" : "fixed";
+		try { control.callback?.(control.value); } catch (_) {}
+	}
+	const button = node?.__gjjYue2Buttons?.dice;
+	if (button) {
+		button.style.background = on ? DICE_ON_COLOR : DICE_OFF_COLOR;
+		button.title = on
+			? "已开启每次随机：每次执行自动更换种子（左键关闭）；右键设置种子"
+			: "左键开启每次随机；右键设置种子";
+	}
+	if (sync) syncOrderedWidgetValues(node);
+}
+
+// 根据连接/挂起/随机状态刷新工具栏按钮外观。
+function refreshToolbarButtons(node) {
+	if (!node?.__gjjYue2Buttons) return;
+	const buttons = node.__gjjYue2Buttons;
+	const connected = referenceAudioConnected(node);
+	const saved = node.__gjjSavedRef;
+	const graph = node.graph || app.graph;
+	const sourceAlive = saved ? graph.getNodeById(saved.originId) != null : false;
+	const suspended = node.__gjjRefSuspended === true && !connected && sourceAlive;
+
+	// 📂：有真实连接时灰显禁用。
+	buttons.openFile.disabled = connected;
+	buttons.openFile.style.opacity = connected ? ".45" : "1";
+	buttons.openFile.style.cursor = connected ? "not-allowed" : "pointer";
+	buttons.openFile.title = connected
+		? "参考歌曲已连接外部音频，已禁用；如需本地载入请先用 🔗 断开"
+		: "从磁盘任意位置选择音频文件作为参考歌曲（自动创建 LoadAudio 并连接）";
+
+	// 🔗：连接中或挂起（且来源仍在）时显示。
+	buttons.toggleLink.style.display = connected || suspended ? "inline-flex" : "none";
+	buttons.toggleLink.style.background = connected
+		? LINK_BTN_CONNECTED_COLOR
+		: LINK_BTN_SUSPENDED_COLOR;
+	buttons.toggleLink.title = connected
+		? "记住并断开参考歌曲链接（再次点击恢复）"
+		: "恢复参考歌曲链接";
+
+	// 🎲：以 control_after_generate 当前值为准。
+	const control = node.widgets?.find((w) => w.name === "control_after_generate");
+	const randomOn = control?.value === "randomize";
+	buttons.dice.style.background = randomOn ? DICE_ON_COLOR : DICE_OFF_COLOR;
+	buttons.dice.title = randomOn
+		? "已开启每次随机：每次执行自动更换种子（左键关闭）；右键设置种子"
+		: "左键开启每次随机；右键设置种子";
 }
 
 function progressFromText(text) {
@@ -1065,8 +1092,8 @@ function progressFromText(text) {
 	if (value.includes("完成")) return 100;
 	if (value.includes("解码")) return 83;
 	if (value.includes("采样")) return 66;
-	if (value.includes("构建")) return 50;
-	if (value.includes("编码")) return 33;
+	if (value.includes("条件")) return 50;
+	if (value.includes("规划") || value.includes("转谱") || value.includes("转录")) return 33;
 	if (value.includes("加载")) return 16;
 	if (value.includes("失败")) return 100;
 	return 0;
@@ -1081,8 +1108,8 @@ function normalizeProgress(progress, fallback) {
 }
 
 function ensureStatusWidget(node) {
-	if (node.__gjjAudioAceMusicStatus) {
-		return node.__gjjAudioAceMusicStatus;
+	if (node.__gjjYue2MusicStatus) {
+		return node.__gjjYue2MusicStatus;
 	}
 	const box = document.createElement("div");
 	box.style.cssText = [
@@ -1124,8 +1151,7 @@ function ensureStatusWidget(node) {
 	track.appendChild(bar);
 	statusContent.append(track, label);
 
-	const generateBtn = createIconButton({ icon: "▶️", title: "只执行当前节点，生成音乐", color: "#16845a" });
-	const testBtn = createIconButton({ icon: "🧪", title: "测试主模型或 LoRA", color: "#355f76" });
+	const generateBtn = createIconButton({ icon: "▶️", title: "只执行当前节点，生成歌曲", color: "#16845a" });
 	const buttons = {};
 	const panelButton = (key, icon, title, color) => {
 		const button = createIconButton({
@@ -1137,16 +1163,54 @@ function ensureStatusWidget(node) {
 		buttons[key] = button;
 		return button;
 	};
+
+	// 📂 第一位：从磁盘任意位置载入参考音频。
+	const openFileBtn = createIconButton({
+		icon: "📂",
+		title: "从磁盘任意位置选择音频文件作为参考歌曲（自动创建 LoadAudio 并连接）",
+		color: OPEN_FILE_OFF_COLOR,
+		onClick: () => chooseLocalAudioFile(node),
+	});
+	buttons.openFile = openFileBtn;
+
+	// 🔗 紧随其后：记住并断开 / 恢复参考链接（无连接时隐藏）。
+	const toggleLinkBtn = createIconButton({
+		icon: "🔗",
+		title: "记住并断开参考歌曲链接（再次点击恢复）",
+		color: LINK_BTN_CONNECTED_COLOR,
+		onClick: () => toggleReferenceLink(node),
+	});
+	toggleLinkBtn.style.display = "none";
+	buttons.toggleLink = toggleLinkBtn;
+
+	// 🎲 随机种子开关：左键切换每次随机，右键打开种子面板设置固定种子。
+	const diceBtn = createIconButton({
+		icon: "🎲",
+		title: "左键开启每次随机；右键设置种子",
+		color: DICE_OFF_COLOR,
+		onClick: () => {
+			const control = node.widgets?.find((w) => w.name === "control_after_generate");
+			setRandomizeMode(node, control?.value !== "randomize");
+		},
+	});
+	diceBtn.addEventListener("contextmenu", (event) => {
+		event.preventDefault();
+		setPanelOpen(node, "seed", panelOpenKey(node) !== "seed");
+	});
+	buttons.dice = diceBtn;
+
 	statusRow.append(
+		openFileBtn,
+		toggleLinkBtn,
 		createIconButton({ icon: "🔄", title: "刷新节点", color: "#315db9", onClick: () => refreshNode(node) }),
-		panelButton("seed", "🎲", "种子", "#4a4f5c"),
-		panelButton("music", "🌐", "音乐结构", "#16728d"),
-		panelButton("text", "📒", "文本相关：音乐标签、歌词与文本采样", "#a65f00"),
-		panelButton("time", "⏰", "时间相关：音乐生成时长", "#16697a"),
-		panelButton("generate", "🎛️", "生成参数", "#72500f"),
-		panelButton("model", "🧠", "模型相关", "#4d3d83"),
+		diceBtn,
+		panelButton("text", "📒", "音乐风格 / 歌词（模式按参考歌曲自动切换）", "#a65f00"),
+		panelButton("structure", "🌐", "规划模式与最大时长", "#16728d"),
+		panelButton("abc", "📝", "ABC 规划（文生曲）", "#7a3b16"),
+		panelButton("cover", "🎤", "参考歌曲接入状态：接入即自动进入歌曲翻唱", "#16697a"),
+		panelButton("model", "🧠", "模型树：checkpoint 与 SheetSage2", "#4d3d83"),
+		panelButton("generate", "🎛️", "生成参数：音乐采样与主采样", "#72500f"),
 		generateBtn,
-		testBtn,
 		statusContent,
 	);
 
@@ -1161,16 +1225,14 @@ function ensureStatusWidget(node) {
 		widget.computeSize = (width) => [Math.max(320, Number(width || node.size?.[0] || 360)), COMPACT_PANEL_HEIGHT];
 	}
 
-	node.__gjjAudioAceButtons = buttons;
-	node.__gjjAudioAceMusicStatus = { widget, box, label, bar, generateBtn, testBtn };
-	return node.__gjjAudioAceMusicStatus;
+	node.__gjjYue2Buttons = buttons;
+	node.__gjjYue2MusicStatus = { widget, box, label, bar, generateBtn };
+	return node.__gjjYue2MusicStatus;
 }
 
 function setStatus(node, text, progress = null) {
-	const status = node?.__gjjAudioAceMusicStatus;
-	if (!status) {
-		return;
-	}
+	const status = node?.__gjjYue2MusicStatus;
+	if (!status) return;
 	const message = String(text || "等待执行");
 	status.label.textContent = message;
 	status.label.title = message;
@@ -1188,53 +1250,6 @@ function buildViewUrl(item) {
 	}
 	params.set("rand", String(Date.now()));
 	return `/view?${params.toString()}`;
-}
-
-function parseSrtTime(value) {
-	const match = String(value || "").trim().match(/(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})/);
-	if (!match) return null;
-	const hours = Number(match[1] || 0);
-	const minutes = Number(match[2] || 0);
-	const seconds = Number(match[3] || 0);
-	const millis = Number(String(match[4] || "0").padEnd(3, "0").slice(0, 3));
-	return hours * 3600 + minutes * 60 + seconds + millis / 1000;
-}
-
-function parseSrtEntries(text) {
-	const blocks = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split(/\n{2,}/);
-	const entries = [];
-	for (const block of blocks) {
-		const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-		const timeIndex = lines.findIndex((line) => line.includes("-->"));
-		if (timeIndex < 0) continue;
-		const [startText, endText] = lines[timeIndex].split("-->").map((part) => part.trim());
-		const start = parseSrtTime(startText);
-		const end = parseSrtTime(endText);
-		const lyric = lines.slice(timeIndex + 1).join(" ").trim();
-		if (start == null || end == null || !lyric) continue;
-		entries.push({ start, end: Math.max(end, start + 0.2), text: lyric });
-	}
-	return entries.sort((a, b) => a.start - b.start);
-}
-
-function formatClock(seconds) {
-	const total = Math.max(0, Math.floor(Number(seconds) || 0));
-	const minutes = Math.floor(total / 60);
-	const secs = total % 60;
-	return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
-function extractSrtText(message) {
-	const candidates = [message?.srt_text, message?.text, message?.lyrics_srt];
-	for (const candidate of candidates) {
-		if (Array.isArray(candidate) && candidate.length) {
-			return String(candidate[0] || "");
-		}
-		if (typeof candidate === "string") {
-			return candidate;
-		}
-	}
-	return "";
 }
 
 function buildAudioPeaks(audioBuffer, count = 240) {
@@ -1311,57 +1326,9 @@ async function loadWaveform(audioWidget, url) {
 	}
 }
 
-function updateLyricsDisplay(audioWidget) {
-	const entries = audioWidget.lyricsEntries || [];
-	const currentTime = Number(audioWidget.audio.currentTime || 0);
-	const currentIndex = entries.findIndex((entry, index) => {
-		const next = entries[index + 1];
-		return currentTime >= entry.start && currentTime < Math.max(entry.end, next?.start ?? entry.end);
-	});
-	let activeIndex = currentIndex;
-	if (activeIndex < 0) {
-		for (let index = entries.length - 1; index >= 0; index -= 1) {
-			if (entries[index].start <= currentTime) {
-				activeIndex = index;
-				break;
-			}
-		}
-	}
-	audioWidget.lyricsList.replaceChildren();
-	if (!entries.length) {
-		const empty = document.createElement("div");
-		empty.textContent = "生成 SRT 后将在这里按时间显示歌词";
-		empty.style.cssText = "color:#8ea0a4;font-size:12px;text-align:center;padding:12px 4px";
-		audioWidget.lyricsList.appendChild(empty);
-		return;
-	}
-	const start = Math.max(0, activeIndex - 1);
-	const end = Math.min(entries.length, Math.max(activeIndex + 3, 3));
-	for (let index = start; index < end; index += 1) {
-		const entry = entries[index];
-		const row = document.createElement("div");
-		const active = index === activeIndex;
-		row.textContent = entry.text;
-		row.title = `${formatClock(entry.start)} - ${formatClock(entry.end)}`;
-		row.style.cssText = [
-			"padding:3px 6px",
-			"border-radius:6px",
-			"font-size:12px",
-			"line-height:1.35",
-			"white-space:normal",
-			"overflow-wrap:anywhere",
-			`color:${active ? "#f7fbff" : "#9fb2b2"}`,
-			`background:${active ? "rgba(117,210,197,.16)" : "transparent"}`,
-			`font-weight:${active ? "800" : "500"}`,
-			`transform:${active ? "scale(1.01)" : "none"}`,
-		].join(";");
-		audioWidget.lyricsList.appendChild(row);
-	}
-}
-
 function ensureAudioWidget(node) {
-	if (node.__gjjAudioAceMusicAudio) {
-		return node.__gjjAudioAceMusicAudio;
+	if (node.__gjjYue2MusicAudio) {
+		return node.__gjjYue2MusicAudio;
 	}
 	const box = document.createElement("div");
 	box.style.cssText = [
@@ -1387,22 +1354,6 @@ function ensureAudioWidget(node) {
 	audio.controls = true;
 	audio.preload = "metadata";
 	audio.style.cssText = "display:block;width:100%;height:34px;margin-top:6px";
-	const lyricsList = document.createElement("div");
-	lyricsList.style.cssText = [
-		"margin-top:6px",
-		"min-height:60px",
-		"max-height:88px",
-		"overflow:hidden",
-		"display:flex",
-		"flex-direction:column",
-		"justify-content:center",
-		"gap:2px",
-		"border:1px solid #31454d",
-		"border-radius:7px",
-		"background:#0d1519",
-		"padding:5px",
-		"box-sizing:border-box",
-	].join(";");
 	const row = document.createElement("div");
 	row.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:6px;font-size:12px";
 	const openLink = document.createElement("a");
@@ -1415,33 +1366,25 @@ function ensureAudioWidget(node) {
 	downloadLink.download = "";
 	downloadLink.style.cssText = "color:#9ecbff;text-decoration:none";
 	row.append(openLink, downloadLink);
-	box.append(canvas, audio, lyricsList, row);
+	box.append(canvas, audio, row);
 	const widget = node.addDOMWidget?.(AUDIO_WIDGET_NAME, AUDIO_WIDGET_NAME, box, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => (box.style.display === "none" ? 0 : 220),
+		getHeight: () => (box.style.display === "none" ? 0 : 168),
 	});
-	const audioWidget = { widget, box, canvas, audio, lyricsList, openLink, downloadLink, peaks: [], lyricsEntries: [] };
+	const audioWidget = { widget, box, canvas, audio, openLink, downloadLink, peaks: [] };
 	canvas.addEventListener("click", (event) => {
 		if (!audio.duration) return;
 		const rect = canvas.getBoundingClientRect();
 		const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
 		audio.currentTime = ratio * audio.duration;
-		updateLyricsDisplay(audioWidget);
 		drawWaveform(audioWidget);
 	});
-	audio.addEventListener("timeupdate", () => {
-		updateLyricsDisplay(audioWidget);
-		drawWaveform(audioWidget);
-	});
-	audio.addEventListener("loadedmetadata", () => {
-		updateLyricsDisplay(audioWidget);
-		drawWaveform(audioWidget);
-	});
+	audio.addEventListener("timeupdate", () => drawWaveform(audioWidget));
+	audio.addEventListener("loadedmetadata", () => drawWaveform(audioWidget));
 	window.addEventListener("resize", () => drawWaveform(audioWidget));
-	updateLyricsDisplay(audioWidget);
-	node.__gjjAudioAceMusicAudio = audioWidget;
-	return node.__gjjAudioAceMusicAudio;
+	node.__gjjYue2MusicAudio = audioWidget;
+	return node.__gjjYue2MusicAudio;
 }
 
 function extractAudioItem(message) {
@@ -1461,9 +1404,7 @@ function extractAudioItem(message) {
 
 function setAudioPreview(node, message) {
 	const item = extractAudioItem(message);
-	if (!item) {
-		return;
-	}
+	if (!item) return;
 	const audioWidget = ensureAudioWidget(node);
 	const url = buildViewUrl(item);
 	const itemKey = `${item.type || "output"}\n${item.subfolder || ""}\n${item.filename || ""}`;
@@ -1472,14 +1413,9 @@ function setAudioPreview(node, message) {
 		audioWidget.audio.src = url;
 		loadWaveform(audioWidget, url);
 	}
-	const srtText = extractSrtText(message);
-	if (srtText) {
-		audioWidget.lyricsEntries = parseSrtEntries(srtText);
-		updateLyricsDisplay(audioWidget);
-	}
 	audioWidget.openLink.href = url;
 	audioWidget.downloadLink.href = url;
-	audioWidget.downloadLink.download = item.filename || "GJJ_ACEMusic.mp3";
+	audioWidget.downloadLink.download = item.filename || "GJJ_YuE2.flac";
 	audioWidget.box.style.display = "block";
 	refreshNode(node);
 	// 音频区展开后，让节点按内容长高（不预留大片空白）。
@@ -1487,13 +1423,15 @@ function setAudioPreview(node, message) {
 }
 
 function patchNode(node) {
-	if (!node || node.__gjjAudioAceMusicPatched) {
+	if (!node || node.__gjjYue2MusicPatched) {
 		return;
 	}
-	node.__gjjAudioAceMusicPatched = true;
+	node.__gjjYue2MusicPatched = true;
 	ensureStatusWidget(node);
 	ensureAudioWidget(node);
+	installReferenceAudioBehavior(node);
 	syncOrderedWidgetValues(node);
+	ensureModelComboValues(node);
 	hideParameterWidgets(node);
 	ensureFloatingPanels(node);
 	syncFloatingPanels(node);
@@ -1503,10 +1441,10 @@ function patchNode(node) {
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 
-	const status = node.__gjjAudioAceMusicStatus;
+	const status = node.__gjjYue2MusicStatus;
 	if (status?.generateBtn) {
 		status.generateBtn.addEventListener("click", async () => {
-			console.log("[GJJ] 生成音乐: 只执行当前节点");
+			console.log("[GJJ] 生成歌曲: 只执行当前节点");
 			const btn = status.generateBtn;
 			const originalText = btn.textContent;
 
@@ -1517,32 +1455,25 @@ function patchNode(node) {
 				btn.style.cursor = "not-allowed";
 				btn.style.opacity = "0.65";
 
-				setStatus(node, "正在生成音乐...");
-				setWidgetValue(node, "model_test_mode", false);
-
+				setStatus(node, "正在生成歌曲...");
 				const ok = await queueOnlyCurrentNode(node);
 
 				if (!ok) {
-					console.warn("[GJJ] 生成音乐失败：queueOnlyCurrentNode 返回 false");
+					console.warn("[GJJ] 生成歌曲失败：queueOnlyCurrentNode 返回 false");
 					setStatus(node, "生成失败");
 				}
 			} catch (err) {
-				console.error("[GJJ] 生成音乐失败:", err);
+				console.error("[GJJ] 生成歌曲失败:", err);
 				setStatus(node, "生成失败");
 			} finally {
 				setTimeout(() => {
 					btn.textContent = originalText;
-					btn.title = "只执行当前节点，生成音乐";
+					btn.title = "只执行当前节点，生成歌曲";
 					btn.disabled = false;
 					btn.style.cursor = "pointer";
 					btn.style.opacity = "1";
 				}, 500);
 			}
-		});
-	}
-	if (status?.testBtn) {
-		status.testBtn.addEventListener("click", () => {
-			openTestTypeDialog(node);
 		});
 	}
 }
@@ -1567,7 +1498,7 @@ api.addEventListener("gjj_node_audio", (event) => {
 });
 
 app.registerExtension({
-	name: "GJJ.AudioAceMusicGenerator",
+	name: "GJJ.Yue2MusicGenerator",
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(String(nodeData?.name || ""))) {
 			return;
@@ -1608,16 +1539,40 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			restoreParameterWidgetOrder(this);
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
-			if (Array.isArray(serializedNode?.widgets_values)) {
+			// 优先按键名（形参）还原，避免任何位置错位；无命名数据时才回退到位参。
+			const named = serializedNode?.widgets_values_named;
+			if (named && typeof named === "object" && Object.keys(named).length) {
+				applyNamedWidgetValues(this, named);
+			} else if (Array.isArray(serializedNode?.widgets_values)) {
 				applyOrderedWidgetValues(this, serializedNode.widgets_values);
 			} else {
 				syncOrderedWidgetValues(this);
 			}
+			// 折叠前先对所有 combo 做错位自愈：configure 按位赋值可能把模型名错位塞进
+			// seed 的 control_after_generate 等附属 combo，按形参（或首个候选）校正。
+			GJJ_Utils.healComboWidgets(this, named);
+			// 还原后立即保证模型 combo 候选包含当前值，避免启动扫描误判缺失。
+			ensureModelComboValues(this);
 			// 幂等再折叠：防止 configure 过程中 widget 类型被还原成原生可见控件。
 			hideParameterWidgets(this);
 			patchNode(this);
 			scheduleToolbarFirst(this);
 			scheduleFitNodeToContent(this);
+			// 启动加载完成后自动重扫，清除时序误报（等同右键重新加载节点的效果）。
+			scheduleStartupModelRescan(this);
+			// graph 的 links 在节点 configure 之后才恢复，延迟到连接恢复后，
+			// 再按参考音频连接状态同步生成模式（处理“加载时已接好参考音频”的情况）。
+			if (!this.__gjjRefSyncScheduled) {
+				this.__gjjRefSyncScheduled = true;
+				requestAnimationFrame(() => {
+					syncModeByReference(this, { silent: true });
+					refreshToolbarButtons(this);
+				});
+				setTimeout(() => {
+					syncModeByReference(this, { silent: true });
+					refreshToolbarButtons(this);
+				}, 300);
+			}
 			return result;
 		};
 
@@ -1627,6 +1582,12 @@ app.registerExtension({
 			syncOrderedWidgetValues(this);
 			if (data) {
 				data.widgets_values = orderedParamValues(this);
+				// 同时写一份按键名的形参快照，供下次加载时按名还原。
+				const named = {};
+				for (const widget of this.widgets || []) {
+					if (widget && widget.name) named[widget.name] = widget.value;
+				}
+				data.widgets_values_named = named;
 			}
 			return result;
 		};
