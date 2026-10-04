@@ -270,6 +270,7 @@ const TEMPLATE_CHINESE_DESCRIPTIONS = {
 	"qwen_image_2.1": "Qwen 图像 2.1（文生图/图像编辑）",
 	qwen_image: "Qwen 文生图通用",
 	qwen_image_layered: "Qwen 分层图像",
+	ming_image: "Ming 图像 0.1 Design（文生图/图像编辑）",
 	boogu_image: "Boogu 图像编辑",
 	boogu_image_edit_turbo: "Boogu 图像编辑 Turbo",
 	lotus_depth: "Lotus 深度图",

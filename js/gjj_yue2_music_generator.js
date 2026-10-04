@@ -743,12 +743,107 @@ function yue2ModelTreeEntries(node) {
 	];
 }
 
-function renderModelPanel(node, panelInfo) {
+// SRT 相关模型（models/ASR）不是节点 widget，🧠 模型树里以只读条目展示安装情况。
+const SRT_MODEL_META = [
+	{
+		name: "Qwen3-ASR-1.7B",
+		label: "歌词起点检测 ASR（推荐）",
+		description: "用于检测首个人声起点，让 SRT 时间轴更准；与 Qwen3-ASR-0.6B 二选一。",
+	},
+	{
+		name: "Qwen3-ASR-0.6B",
+		label: "歌词起点检测 ASR（轻量）",
+		description: "轻量 ASR，用于检测首个人声起点；与 Qwen3-ASR-1.7B 二选一。",
+	},
+	{
+		name: "Qwen3-ForcedAligner-0.6B",
+		label: "歌词强制对齐模型（SRT 必需）",
+		description: "生成原歌词 SRT 时间轴必需：把每句歌词强制对齐到生成的歌曲。",
+	},
+];
+
+// 拉取 ASR 模型安装情况（带短时缓存，避免每次打开面板都请求）。
+let __srtModelStatusCache = { at: 0, data: null };
+async function fetchSrtModelStatus() {
+	const now = Date.now();
+	if (__srtModelStatusCache.data && now - __srtModelStatusCache.at < 5000) {
+		return __srtModelStatusCache.data;
+	}
+	try {
+		const response = await api.fetchApi("/gjj/yue2_srt_models", { method: "GET" });
+		if (!response?.ok) throw new Error(`HTTP ${response?.status || "?"}`);
+		const data = await response.json();
+		__srtModelStatusCache = { at: now, data };
+		return data;
+	} catch (error) {
+		console.warn("[GJJ] 获取 SRT 模型安装情况失败:", error);
+		return { installed: {}, extra: {} };
+	}
+}
+
+// 根据安装情况构建 🧠 模型树中的只读 ASR 条目（已安装 ✅ / 未安装 ⬜）。
+function buildSrtModelTreeEntries(status) {
+	const installed = status?.installed || {};
+	const extra = status?.extra || {};
+	const entries = SRT_MODEL_META.map((meta) => {
+		const isInstalled = installed[meta.name] === true;
+		// 注意：展示串中不能出现 “/”，否则通用模型树 _modelTreeFilename 会按斜杠取末段而丢名。
+		const display = `${meta.name}  ${isInstalled ? "✅ 已安装" : "⬜ 未安装"}`;
+		// 只读 adapter：承载展示值与单一候选，使通用模型树无需真实 widget 即可渲染。
+		const adapter = { value: display, options: { values: [display] } };
+		return {
+			label: meta.label,
+			folder: "ASR",
+			icon: isInstalled ? "📄" : "🗋",
+			models: [display],
+			fallback: display,
+			readOnly: true,
+			autoSelect: false,
+			getWidget: () => adapter,
+			description: `${meta.description}（${isInstalled ? "已安装" : "未安装"}）`,
+		};
+	});
+	// models/ASR 下检测到的其它目录，作为只读信息行一并展示。
+	for (const [base, rel] of Object.entries(extra)) {
+		const display = `📁 ${base}`;
+		const adapter = { value: display, options: { values: [display] } };
+		entries.push({
+			label: base,
+			folder: "ASR",
+			icon: "📁",
+			models: [display],
+			fallback: display,
+			readOnly: true,
+			autoSelect: false,
+			getWidget: () => adapter,
+			description: `models/ASR/${rel}`,
+		});
+	}
+	return entries;
+}
+
+async function renderModelPanel(node, panelInfo) {
 	if (!panelInfo?.body) return;
 	panelInfo.body.replaceChildren();
+	// 渲染令牌：快速连续同步时，只接受最后一次拉取结果，避免旧结果覆盖。
+	const token = (panelInfo.__renderToken = Number(panelInfo.__renderToken || 0) + 1);
+	const loading = document.createElement("div");
+	loading.textContent = "正在读取模型安装情况…";
+	loading.style.cssText = "color:#8ea0a4;font-size:12px;padding:8px";
+	panelInfo.body.appendChild(loading);
+
+	const srtStatus = await fetchSrtModelStatus();
+	if (panelInfo.__renderToken !== token) return; // 已有更新的渲染，放弃本次结果。
+
+	panelInfo.body.replaceChildren();
+	// 可选模型（checkpoint / SheetSage2）+ 只读的 ASR / 对齐模型，并入同一棵树。
+	const entries = [
+		...yue2ModelTreeEntries(node).map((entry) => ({ ...entry, floatingChoices: true })),
+		...buildSrtModelTreeEntries(srtStatus),
+	];
 	const tree = GJJ_Utils.createModelTreeView({
 		node,
-		entries: yue2ModelTreeEntries(node).map((entry) => ({ ...entry, floatingChoices: true })),
+		entries,
 		refresh: () => {
 			syncOrderedWidgetValues(node);
 			GJJ_Utils.refreshNode(node);
@@ -759,14 +854,14 @@ function renderModelPanel(node, panelInfo) {
 			GJJ_Utils.refreshNode(node);
 		},
 	});
-	tree.style.maxHeight = "320px";
+	tree.style.maxHeight = "360px";
 	panelInfo.body.appendChild(tree);
 
 	const mode = referenceAudioConnected(node) ? "cover" : "text2music";
 	if (mode === "cover") {
-		appendPanelHint(panelInfo.body, "歌曲翻唱：上方两个模型都会用到；参考歌曲请在 🎤 面板确认已接入。");
+		appendPanelHint(panelInfo.body, "歌曲翻唱：上方主模型与 SheetSage2 都会用到；参考歌曲请在 🎤 面板确认已接入。");
 	} else {
-		appendPanelHint(panelInfo.body, "文生曲：只需要 checkpoints 下的主模型；audio_encoders 下的 SheetSage2 用不到。");
+		appendPanelHint(panelInfo.body, "文生曲：只需要 checkpoints 下的主模型；SheetSage2 与 ASR 仅用于歌词 SRT。");
 	}
 }
 

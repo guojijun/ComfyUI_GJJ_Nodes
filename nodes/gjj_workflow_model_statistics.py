@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -205,10 +206,11 @@ def _build_report(items: list[dict[str, Any]]) -> dict[str, Any]:
     models_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     tree_index = _models_tree_index()
     expanded_items = list(items)
+    # ACE 与 YuE2 都会在“有可演唱歌词”时使用同一套 ASR/强制对齐模型生成歌词 SRT。
     ace_markers = [
         item for item in items
         if (
-        str(item.get("widget_name") or "") == "__implicit_ace_asr__"
+        str(item.get("widget_name") or "") in {"__implicit_ace_asr__", "__implicit_yue2_asr__"}
         and bool(item.get("enabled"))
         )
     ]
@@ -271,6 +273,7 @@ def _build_report(items: list[dict[str, Any]]) -> dict[str, Any]:
     for item in expanded_items:
         if str(item.get("widget_name") or "") in {
             "__implicit_ace_asr__",
+            "__implicit_yue2_asr__",
             "__implicit_matting_models__",
         }:
             continue
@@ -371,6 +374,22 @@ def _build_report(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _has_singable_lyrics(lyrics: Any) -> bool:
+    """歌词去掉纯段落标签行（[Verse]/(副歌) 等）后是否还有需要演唱的内容。
+
+    YuE2 节点只有在存在可演唱歌词时才会做强制对齐、使用 ASR 模型；
+    纯音乐或仅标签文本不应计入 ASR 依赖。
+    """
+    for raw_line in str(lyrics or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        text = raw_line.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"(?:\[[^\]]+\]|\([^()]+\)|（[^（）]+）)", text):
+            continue
+        return True
+    return False
+
+
 class GJJ_WorkflowModelStatistics:
     CATEGORY = "GJJ/🧠 模型/统计"
     FUNCTION = "format_report"
@@ -411,6 +430,16 @@ class GJJ_WorkflowModelStatistics:
                             "widget_name": "translation",
                             "name": "opus-mt-zh-en.safetensors",
                             "folder": "translation",
+                        })
+                # YuE2 节点：歌词 SRT 用到的 ASR / 强制对齐模型不是 widget，
+                # 有可演唱歌词时追加隐式标记，由 _build_report 展开成依赖项。
+                if node_type == "GJJ_Yue2MusicGenerator":
+                    if _has_singable_lyrics(inputs.get("lyrics", "")):
+                        items.append({
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "widget_name": "__implicit_yue2_asr__",
+                            "enabled": True,
                         })
                 for widget_name, value in inputs.items():
                     if str(widget_name).lower() not in MODEL_WIDGETS:

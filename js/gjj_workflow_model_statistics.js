@@ -118,11 +118,61 @@ function omitObjectKeys(value, omittedKeys, visited = new WeakMap()) {
 	return copy;
 }
 
-function collectWorkflowModels() {
-	const items = [];
-	for (const graphNode of app.graph?._nodes || []) {
+// 从根图出发递归收集所有图（根图 + 全部子图，含嵌套）。
+// ComfyUI 子图的内部节点不在 app.graph._nodes 中：它们挂在 Subgraph
+// 实例节点的 .subgraph（LGraph）上，并在根图 _subgraphs（Map）里注册。
+// 只扫主画布会漏掉封装在子图内部的模型加载器。
+function collectAllWorkflowGraphs() {
+	const graphs = [];
+	const seenGraphs = new Set();
+	const visitGraph = (graph) => {
+		if (!graph || seenGraphs.has(graph)) return;
+		seenGraphs.add(graph);
+		graphs.push(graph);
+		// 官方注册表：Map<子图 UUID, Subgraph>，嵌套子图也可能挂在这里。
+		if (graph._subgraphs instanceof Map) {
+			for (const subgraph of graph._subgraphs.values()) visitGraph(subgraph);
+		}
+		// 兼容实例节点直接持有 .subgraph 的情况（含逐层嵌套）。
+		for (const graphNode of graph?._nodes || []) {
+			if (graphNode?.subgraph) visitGraph(graphNode.subgraph);
+		}
+	};
+	// 无论用户当前是否正“进入”某个子图，始终从根图统计整个工作流。
+	visitGraph(app?.rootGraphInternal || app?.graph);
+	return graphs;
+}
+
+// 按节点标题/类型在根图及全部子图中查找节点，返回进入该子图所需的实例链。
+function findNodeAcrossGraphs(targetTitle) {
+	const title = String(targetTitle || "");
+	if (!title) return null;
+	let found = null;
+	const matches = (graphNode) => graphNode?.type !== NODE_NAME
+		&& (String(graphNode?.title || "") === title || String(graphNode?.type || "") === title);
+	const walk = (graph, chain) => {
+		if (found || !graph) return;
+		for (const graphNode of graph?._nodes || []) {
+			if (matches(graphNode)) {
+				found = { node: graphNode, graph, chain: chain.slice() };
+				return;
+			}
+		}
+		for (const graphNode of graph?._nodes || []) {
+			if (graphNode?.subgraph) {
+				walk(graphNode.subgraph, [...chain, graphNode]);
+				if (found) return;
+			}
+		}
+	};
+	walk(app?.rootGraphInternal || app?.graph, []);
+	return found;
+}
+
+function scanGraphNode(graphNode, items) {
+	{
 		const graphNodeType = String(graphNode?.comfyClass || graphNode?.type || graphNode?.constructor?.nodeData?.name || "");
-		if (graphNode?.type === NODE_NAME) continue;
+		if (graphNode?.type === NODE_NAME) return;
 		const nodeTitle = String(graphNode?.title || graphNode?.type || "");
 		const lazyModelSource = graphNode?.type === "GJJ_LazyImageStudio"
 			? String(
@@ -140,11 +190,30 @@ function collectWorkflowModels() {
 			const modelTestMode = widgetValue("model_test_mode") === true
 				|| String(widgetValue("model_test_mode") || "").toLowerCase() === "true";
 			items.push({
+			node_id: graphNode.id,
+			node_type: graphNode.type,
+			node_title: nodeTitle,
+			widget_name: "__implicit_ace_asr__",
+			enabled: hasLyrics && !modelTestMode,
+		});
+		}
+		if (graphNode?.type === "GJJ_Yue2MusicGenerator") {
+			// 与后端统计口径一致：存在可演唱歌词（去掉纯段落标签行）才需要 ASR/对齐模型。
+			const lyrics = String(graphNode.widgets?.find((widget) => widget?.name === "lyrics")?.value || "");
+			const hasSingable = lyrics
+				.replace(/\r\n?/g, "\n")
+				.split("\n")
+				.some((rawLine) => {
+					const line = rawLine.trim();
+					if (!line) return false;
+					return !/^(?:\[[^\]]+\]|\([^()]+\)|（[^（）]+）)$/.test(line);
+				});
+			items.push({
 				node_id: graphNode.id,
 				node_type: graphNode.type,
 				node_title: nodeTitle,
-				widget_name: "__implicit_ace_asr__",
-				enabled: hasLyrics && !modelTestMode,
+				widget_name: "__implicit_yue2_asr__",
+				enabled: hasSingable,
 			});
 		}
 		if (graphNode?.type === "GJJ_ComprehensiveMatting") {
@@ -228,7 +297,7 @@ function collectWorkflowModels() {
 			}
 			// 此节点会持久化模板默认值、旧选择和关闭的可选模型。只统计
 			// 帮助面板提供的当前生效清单，避免把这些备用值误判为已加载模型。
-			continue;
+			return;
 		}
 		if (graphNode?.type === "GJJ_VideoUniversalModelLoader") {
 			let activeEntries = [];
@@ -255,7 +324,7 @@ function collectWorkflowModels() {
 			}
 			// 此节点属性中包含完整预设库和备用资源；继续通用扫描会把字体、
 			// LatentSync VAE、其它预设 LoRA 等未启用资源误判为当前模型。
-			continue;
+			return;
 		}
 		if (graphNode?.type === "GJJ_SCAIL2LongVideoAIO") {
 			let activeEntries = [];
@@ -277,7 +346,7 @@ function collectWorkflowModels() {
 			}
 			// The node also persists storyboard/media state.  Only its explicit
 			// current-model provider is authoritative for model statistics.
-			continue;
+			return;
 		}
 		if (graphNode?.type === "GJJ_WanAnimate2LongVideoAIO") {
 			let activeEntries = [];
@@ -298,7 +367,7 @@ function collectWorkflowModels() {
 				});
 			}
 			// 参数属性中保留旧工作流快照；当前生效清单是唯一统计来源。
-			continue;
+			return;
 		}
 		if (graphNode?.type === "GJJ_StoryboardGridGenerator") {
 			const currentWidgetValue = (name) => graphNode.widgets?.find((widget) => widget?.name === name)?.value;
@@ -337,7 +406,7 @@ function collectWorkflowModels() {
 			}
 			// Storyboard properties contain model-family presets and old saved
 			// snapshots. Only the live widgets above represent execution inputs.
-			continue;
+			return;
 		}
 		for (const widget of graphNode?.widgets || []) {
 			if (lazyUsesUnet && widget?.name === "ckpt_name") continue;
@@ -367,6 +436,16 @@ function collectWorkflowModels() {
 				widget_name: "auto",
 				name,
 			});
+		}
+	}
+}
+
+function collectWorkflowModels() {
+	const items = [];
+	// 统计范围：根图 + 所有子图（含嵌套）内部的全部节点。
+	for (const graph of collectAllWorkflowGraphs()) {
+		for (const graphNode of graph?._nodes || []) {
+			scanGraphNode(graphNode, items);
 		}
 	}
 	return items;
@@ -439,18 +518,38 @@ function createPanel(node) {
 		return String(usedBy[0] || model?.node_title || model?.node_type || model?.node_id || "");
 	};
 	const locateWorkflowNode = (title) => {
-		const targetTitle = String(title || "");
-		const target = (app.graph?._nodes || []).find((graphNode) =>
-			graphNode?.type !== NODE_NAME
-			&& (
-				String(graphNode?.title || "") === targetTitle
-				|| String(graphNode?.type || "") === targetTitle
-			));
-		if (!target) return false;
+		// 节点可能位于某个子图内部：先在根图 + 全部子图中找到它，
+		// 必要时进入对应子图后再居中选中。
+		const hit = findNodeAcrossGraphs(title);
+		if (!hit) return false;
 		try {
-			app.canvas?.selectNode?.(target, false);
-			app.canvas?.centerOnNode?.(target);
-			app.canvas?.setDirty?.(true, true);
+			const focusTarget = () => {
+				try {
+					const canvas = app.canvas;
+					// 新版前端画布使用 deselectAll + selectOnly；旧版回退到 selectNode。
+					if (typeof canvas?.deselectAll === "function" && typeof canvas?.selectOnly === "function") {
+						canvas.deselectAll();
+						canvas.selectOnly(hit.node);
+					} else {
+						canvas?.selectNode?.(hit.node, false);
+					}
+					canvas?.centerOnNode?.(hit.node);
+					canvas?.setDirty?.(true, true);
+				} catch (error) {
+					console.warn("[GJJ WorkflowModelStatistics] 定位子图内节点失败：", error);
+				}
+			};
+			const currentGraph = app.canvas?.graph;
+			if (
+				currentGraph
+				&& currentGraph !== hit.graph
+				&& typeof app.canvas?.openSubgraph === "function"
+			) {
+				app.canvas.openSubgraph(hit.graph, hit.chain[hit.chain.length - 1]);
+				setTimeout(focusTarget, 80);
+			} else {
+				focusTarget();
+			}
 			return true;
 		} catch {
 			return false;

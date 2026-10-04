@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Any
+
+try:
+    from aiohttp import web
+except Exception:
+    web = None
 
 try:
     from server import PromptServer
@@ -142,12 +148,37 @@ YUe2_MODEL_TREE = [
         "url": "https://huggingface.co/Comfy-Org/YuE2/resolve/main/audio_encoders/sheetsage2_bf16.safetensors",
         "description": "翻唱模式用它把参考歌曲转录成 ABC 旋律；文生曲不需要。",
     },
+    {
+        "label": "歌词起点检测 ASR（推荐）",
+        "folder": "ASR",
+        "filename": "Qwen3-ASR-1.7B/",
+        "url": "https://pan.quark.cn/s/4b5a36d50e9c",
+        "description": "歌词 SRT 用：检测首个人声起点；与 Qwen3-ASR-0.6B 二选一。",
+    },
+    {
+        "label": "歌词起点检测 ASR（轻量）",
+        "folder": "ASR",
+        "filename": "Qwen3-ASR-0.6B/",
+        "url": "https://pan.quark.cn/s/4b5a36d50e9c",
+        "description": "歌词 SRT 用：轻量 ASR，检测首个人声起点；与 1.7B 二选一。",
+    },
+    {
+        "label": "歌词强制对齐模型（SRT 必需）",
+        "folder": "ASR",
+        "filename": "Qwen3-ForcedAligner-0.6B/",
+        "url": "https://pan.quark.cn/s/4b5a36d50e9c",
+        "description": "歌词 SRT 必需：把每句歌词强制对齐到生成的歌曲。",
+    },
 ]
 YUe2_MODEL_TREE_TEXT = f"""models/
 ├─ checkpoints/
 │  └─ {DEFAULT_CKPT}  # 文生曲 / 翻唱共用整包
-└─ audio_encoders/
-   └─ {DEFAULT_AUDIO_ENCODER}  # 仅歌曲翻唱需要"""
+├─ audio_encoders/
+│  └─ {DEFAULT_AUDIO_ENCODER}  # 仅歌曲翻唱需要
+└─ ASR/  # 歌词 SRT 用（夸克网盘下载）
+   ├─ Qwen3-ASR-1.7B/  # 起点检测，与 0.6B 二选一
+   ├─ Qwen3-ASR-0.6B/  # 轻量起点检测
+   └─ Qwen3-ForcedAligner-0.6B/  # SRT 强制对齐，必需"""
 
 
 # ───────────────────────── 通用工具 ─────────────────────────
@@ -876,3 +907,47 @@ class GJJ_Yue2MusicGenerator:
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Yue2MusicGenerator}
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🎵 YuE2音乐生成器"}
+
+
+# ───── 🧠 模型树：歌词 SRT 用到的 ASR / 强制对齐模型安装情况 ─────
+def _get_srt_model_status(_request: Any = None) -> "web.Response":
+    """扫描 models/ASR 目录，返回 SRT 相关模型是否已安装。
+
+    复用 gjj_qwen3_asr_text_formats 中已有的目录扫描逻辑；
+    前端 🧠 模型树据此以只读条目展示「已安装 / 未安装」。
+    """
+    status = {
+        "Qwen3-ASR-1.7B": False,
+        "Qwen3-ASR-0.6B": False,
+        "Qwen3-ForcedAligner-0.6B": False,
+    }
+    extra: dict[str, str] = {}
+    try:
+        try:
+            from .gjj_qwen3_asr_text_formats import _list_local_model_names
+        except Exception:
+            from gjj_qwen3_asr_text_formats import _list_local_model_names
+
+        for name in _list_local_model_names("asr"):
+            base = os.path.basename(str(name).replace("\\", "/"))
+            if base in status:
+                status[base] = True
+            else:
+                extra[base] = str(name)
+        for name in _list_local_model_names("aligner"):
+            base = os.path.basename(str(name).replace("\\", "/"))
+            if base in status:
+                status[base] = True
+            else:
+                extra[base] = str(name)
+    except Exception as exc:  # 扫描失败不应让模型树崩溃
+        print(f"[GJJ] YuE2 扫描 ASR 模型失败：{exc}")
+
+    return web.json_response({"ok": True, "installed": status, "extra": extra})
+
+
+if web is not None and PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
+    _yue2_server = PromptServer.instance
+    if not getattr(_yue2_server, "_gjj_yue2_srt_models_api_registered", False):
+        _yue2_server.routes.get("/gjj/yue2_srt_models")(_get_srt_model_status)
+        _yue2_server._gjj_yue2_srt_models_api_registered = True
