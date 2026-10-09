@@ -32,6 +32,9 @@ MODEL_SPECS: tuple[tuple[str, str, tuple[str, ...], str, str], ...] = (
     ("diffusion_model", "diffusion_models",
      ("pixal3d_int8_convrot.safetensors", "trellis_2_int8_convrot.safetensors"),
      "3D 扩散模型（Pixal3D / Trellis.2）", "🟣"),
+    ("multiview_diffusion_model", "diffusion_models",
+     ("pixal3d_multiview_int8_convrot.safetensors",),
+     "多视图 3D 扩散模型（Pixal3D 多视图）", "🟣"),
     ("clip_vision_model", "clip_vision",
      ("dino_v3_L_naf_fp32.safetensors",),
      "DINOv3 视觉模型", "🔵"),
@@ -55,6 +58,14 @@ PIPELINE_MODES = ("自动", "Pixal3D", "Trellis.2")
 SIGN_MODES = ("udf", "sdf")
 PLACEMENT_MODES = ("midpoint", "qem")
 SEGMENTERS = ("pec", "adaptive")
+
+# 智能多视图：抠图后遮罩上的连通域（像素岛）即转视图（turnaround sheet）。
+# 岛按从左到右顺序映射到固定方位：前 / 左 / 后 / 右（与官方多视图工作流一致），
+# 3 个岛 = 前/左/后三视图，4 个岛 = 前/左/后/右四视图；核心节点会自动以第一视图为正面重基方位角。
+MULTIVIEW_MODES = ("自动", "单视图", "多视图")
+MULTIVIEW_VIEW_NAMES = ("front", "left", "back", "right")
+MULTIVIEW_VIEW_LABELS = ("正面", "左侧", "背面", "右侧")
+MULTIVIEW_MAX_VIEWS = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +207,196 @@ def _resolve_pipeline(mode: str, diffusion_name: str) -> str:
         "无法识别 3D 管线分支。\n请在「✂️ 预处理」面板手动选择 Pixal3D 或 Trellis.2，"
         "或更换文件名包含 pixal / trellis 关键字的扩散模型。"
     )
+
+
+def _resolve_single_view_unet(pipeline_mode: str, chosen: str):
+    """单视图分支选择扩散模型。
+
+    若用户当前选中的是多视图模型（例如目录里只有 pixal3d_multiview 时的默认项），
+    自动按种子文件名回退匹配单视图模型；返回 (branch, unet_name)。
+    """
+    name = str(chosen or "").strip()
+    key = name.replace("\\", "/").split("/")[-1].lower()
+    if "multiview" in key:
+        seeds = ("pixal3d_int8_convrot.safetensors", "trellis_2_int8_convrot.safetensors")
+        if "Trellis" in str(pipeline_mode):
+            seeds = ("trellis_2_int8_convrot.safetensors", "pixal3d_int8_convrot.safetensors")
+        for seed in seeds:
+            hit = gjjutils_resolve_model_by_extensionless_seed(seed, "diffusion_models")
+            if hit and "multiview" not in hit.replace("\\", "/").split("/")[-1].lower():
+                return _resolve_pipeline("自动", hit), hit
+        raise RuntimeError(
+            "当前选中的扩散模型是「多视图模型」，不能用于单视图生成。\n"
+            "请在 🧠 模型树的「3D 扩散模型（Pixal3D / Trellis.2）」行选择单视图模型，"
+            "或在 ✂️ 面板把多视图模式设为「多视图」并输入转视图。\n"
+            f"模型下载地址：{MODEL_DOWNLOAD_URL}"
+        )
+    return _resolve_pipeline(pipeline_mode, name), name
+
+
+# --------------------------------------------------------------------------- #
+# 像素岛（连通域）检测 —— 智能多视图核心
+# --------------------------------------------------------------------------- #
+def _connected_component_boxes(binary: Any) -> list[dict[str, int]]:
+    """对二值 uint8 图做 8 连通域分析，返回 [{x0,y0,x1,y1,area}, ...]（原图坐标）。
+
+    优先使用 cv2.connectedComponentsWithStats；cv2 缺失时退化为纯 numpy
+    “逐行游程 + 并查集”实现（先降采样到长边 960 以内保证速度），
+    坐标会按降采样比例还原，调用方再向外扩 1 个原图像素避免裁到边缘。
+    """
+    import numpy as np
+
+    src = binary.astype(bool)
+    h0, w0 = src.shape
+
+    # 纯 numpy 回退路径先降采样；cv2 路径保持原分辨率（速度足够快）。
+    max_side = 960
+    scale_x = scale_y = 1.0
+    work = src
+    try:
+        import cv2  # type: ignore  # noqa: F401
+        use_cv2 = True
+    except Exception:
+        use_cv2 = False
+        if max(h0, w0) > max_side:
+            step = max(1, int(max(h0, w0) // max_side))
+            work = src[::step, ::step]
+            scale_x = w0 / float(work.shape[1])
+            scale_y = h0 / float(work.shape[0])
+
+    if use_cv2:
+        import cv2  # type: ignore
+
+        num, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            work.astype(np.uint8), connectivity=8)
+        boxes: list[dict[str, int]] = []
+        for idx in range(1, num):
+            x, y, bw, bh, area = (int(v) for v in stats[idx].tolist())
+            if bw <= 0 or bh <= 0:
+                continue
+            boxes.append({
+                "x0": int(round(x * scale_x)),
+                "y0": int(round(y * scale_y)),
+                "x1": int(round((x + bw) * scale_x)),
+                "y1": int(round((y + bh) * scale_y)),
+                "area": int(round(area * scale_x * scale_y)),
+            })
+    else:
+        boxes = _numpy_runs_collect(work, scale_x, scale_y)
+
+    # 坐标夹取 + 1 像素安全边
+    result: list[dict[str, int]] = []
+    for box in boxes:
+        x0 = max(0, box["x0"] - 1)
+        y0 = max(0, box["y0"] - 1)
+        x1 = min(w0, box["x1"] + 1)
+        y1 = min(h0, box["y1"] + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        result.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                       "area": max(1, int(box.get("area", (x1 - x0) * (y1 - y0))))})
+    return result
+
+
+def _numpy_runs_collect(arr: Any, scale_x: float, scale_y: float) -> list[dict[str, int]]:
+    """纯 numpy 回退的连通域实现：逐行游程 + 并查集并直接累计面积/包围盒。"""
+    import numpy as np
+
+    h, w = arr.shape
+    parent: list[int] = []
+
+    def new_label() -> int:
+        parent.append(len(parent))
+        return len(parent) - 1
+
+    def find(idx: int) -> int:
+        root = idx
+        while parent[root] != root:
+            root = parent[root]
+        while parent[idx] != root:
+            parent[idx], idx = root, parent[idx]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # 每个游程记录 (x0, y0, x1, y1, label)，并查集合并后再按根标签累计
+    runs: list[tuple[int, int, int, int, int]] = []
+    prev_runs: list[tuple[int, int, int]] = []
+    for y in range(h):
+        padded = np.zeros(w + 2, dtype=np.int8)
+        padded[1:w + 1] = arr[y].astype(np.int8)
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0] - 1
+        cur_runs: list[tuple[int, int, int]] = []
+        for x0, x1 in zip(starts.tolist(), ends.tolist()):
+            label = new_label()
+            for px0, px1, plabel in prev_runs:
+                if x0 <= px1 + 1 and px0 <= x1 + 1:
+                    union(label, plabel)
+            cur_runs.append((int(x0), int(x1), label))
+            runs.append((int(x0), y, int(x1), y, label))
+        prev_runs = cur_runs
+
+    merged: dict[int, list[int]] = {}
+    for x0, y0, x1, y1, label in runs:
+        root = find(label)
+        item = merged.get(root)
+        if item is None:
+            merged[root] = [x0, y0, x1, y1, (x1 - x0 + 1) * (y1 - y0 + 1)]
+        else:
+            item[0] = min(item[0], x0)
+            item[1] = min(item[1], y0)
+            item[2] = max(item[2], x1)
+            item[3] = max(item[3], y1)
+            item[4] += (x1 - x0 + 1) * (y1 - y0 + 1)
+
+    boxes: list[dict[str, int]] = []
+    for x0, y0, x1, y1, area in merged.values():
+        boxes.append({
+            "x0": int(round(x0 * scale_x)),
+            "y0": int(round(y0 * scale_y)),
+            "x1": int(round((x1 + 1) * scale_x)),
+            "y1": int(round((y1 + 1) * scale_y)),
+            "area": int(round(area * scale_x * scale_y)),
+        })
+    return boxes
+
+
+def _detect_mask_islands(mask: Any, min_ratio: float) -> list[dict[str, int]]:
+    """检测遮罩上的有效像素岛，按阅读顺序（横排从左到右 / 竖排从上到下）返回。"""
+    import numpy as np
+
+    arr = mask.detach().float().cpu().numpy()
+    if arr.ndim == 3:
+        arr = arr[0]
+    binary = (arr > 0.5).astype(np.uint8)
+    total = max(1, binary.shape[0] * binary.shape[1])
+    min_area = max(4.0, float(min_ratio) * total)
+
+    boxes = [box for box in _connected_component_boxes(binary)
+             if float(box.get("area", 0)) >= min_area]
+    if not boxes:
+        return []
+
+    # 横向转视图（turnaround sheet）按 x 排序；若岛实际纵向排列则按 y 排序。
+    cx = [0.5 * (b["x0"] + b["x1"]) for b in boxes]
+    cy = [0.5 * (b["y0"] + b["y1"]) for b in boxes]
+    horizontal = (max(cx) - min(cx)) >= (max(cy) - min(cy))
+    boxes.sort(key=lambda b: (0.5 * (b["x0"] + b["x1"]) if horizontal
+                              else 0.5 * (b["y0"] + b["y1"])))
+    return boxes
+
+
+def _crop_image_box(image: Any, box: dict[str, int]) -> Any:
+    """按包围盒裁切 BHWC 图片 / BHW 遮罩（坐标已夹取）。"""
+    x0, y0, x1, y1 = box["x0"], box["y0"], box["x1"], box["y1"]
+    if image.ndim == 4:
+        return image[:, y0:y1, x0:x1, :].contiguous()
+    return image[:, y0:y1, x0:x1].contiguous()
 
 
 # --------------------------------------------------------------------------- #
@@ -347,9 +548,13 @@ class GJJ_Pixal3DTrellis2ImageToModel:
                   "2) 模型在 🧠 面板以模型树选择；源模型缺失时自动按组名匹配，过滤为 0 时红显官方默认模型。\n"
                   "3) Pixal3D 默认 pad_factor=1.1；Trellis.2 建议 pad_factor=1.0（切换分支时自动设置）。\n"
                   "4) 默认只输出「🧊 最终网格」；GLB 文件与五张 PBR 贴图在 🔌 面板按需启用，设置随工作流保存。\n"
-                  "5) 全管线较重，建议显存 ≥ 12GB；结构 512 → 形状精修 → 1536 升采样 → 纹理 12 步。",
+                  "5) 全管线较重，建议显存 ≥ 12GB；结构 512 → 形状精修 → 1536 升采样 → 纹理 12 步。\n"
+                  "6) 🖼️ 智能多视图：输入角色转视图（各视图横向分开）抠图后若遮罩存在 2~4 个像素岛，\n"
+                  "   自动切换 Pixal3D 多视图管线（岛序 = 前/左/后/右，3 岛=三视图、4 岛=四视图），\n"
+                  "   需多视图模型 pixal3d_multiview_int8_convrot.safetensors；单岛或普通图片自动走单视图。",
         "models": [
             "models/diffusion_models/pixal3d_int8_convrot.safetensors",
+            "models/diffusion_models/pixal3d_multiview_int8_convrot.safetensors",
             "models/diffusion_models/trellis_2_int8_convrot.safetensors",
             "models/clip_vision/dino_v3_L_naf_fp32.safetensors",
             "models/geometry_estimation/moge_2_vitl_normal_fp16.safetensors",
@@ -389,6 +594,22 @@ class GJJ_Pixal3DTrellis2ImageToModel:
             PIPELINE_MODES,
             _hidden_option({"default": "自动", "display_name": "3D 管线分支",
                             "tooltip": "自动 = 按扩散模型文件名识别；也可手动强制 Pixal3D / Trellis.2。"}),
+        )
+        required["multiview_mode"] = (
+            MULTIVIEW_MODES,
+            _hidden_option({"default": "自动", "display_name": "多视图模式",
+                            "tooltip": "自动 = 抠图后检测遮罩像素岛，2~4 个岛自动走多视图（前/左/后/右），"
+                                       "单岛走单视图；也可手动强制单视图或多视图。"}),
+        )
+        required["multiview_fov"] = (
+            "FLOAT", _hidden_option({"default": 20.0, "min": 1.0, "max": 170.0, "step": 0.01,
+                                     "display_name": "多视图水平FOV",
+                                     "tooltip": "多视图固定轨道相机的水平视场角；官方 rig 渲染与多数转视图生成器用 20°。"})
+        )
+        required["island_min_ratio"] = (
+            "FLOAT", _hidden_option({"default": 0.005, "min": 0.0001, "max": 0.5, "step": 0.0005,
+                                     "display_name": "像素岛最小面积占比",
+                                     "tooltip": "小于整张图该比例的连通域视为噪点忽略（默认 0.5%），防止杂点被误判成视图。"})
         )
         required["crop_size"] = (
             "INT", _hidden_option({"default": 1024, "min": 256, "max": 4096, "step": 8,
@@ -546,12 +767,16 @@ class GJJ_Pixal3DTrellis2ImageToModel:
         image: Any = None,
         *,
         diffusion_model: str,
+        multiview_diffusion_model: str,
         clip_vision_model: str,
         shape_vae_model: str,
         texture_vae_model: str,
         geometry_model: str,
         matting_model: str,
         pipeline_mode: str = "自动",
+        multiview_mode: str = "自动",
+        multiview_fov: float = 20.0,
+        island_min_ratio: float = 0.005,
         crop_size: int = 1024,
         pad_factor: float = 1.1,
         grow_mask: int = 0,
@@ -642,7 +867,11 @@ class GJJ_Pixal3DTrellis2ImageToModel:
                 image=image,
                 reference_info=reference_info,
                 pipeline_mode=pipeline_mode,
+                multiview_mode=multiview_mode,
+                multiview_fov=multiview_fov,
+                island_min_ratio=island_min_ratio,
                 diffusion_model=diffusion_model,
+                multiview_diffusion_model=multiview_diffusion_model,
                 clip_vision_model=clip_vision_model,
                 shape_vae_model=shape_vae_model,
                 texture_vae_model=texture_vae_model,
@@ -726,19 +955,8 @@ class GJJ_Pixal3DTrellis2ImageToModel:
     def _run_pipeline(self, *, progress, **p: Any):
         nodes_mod = importlib.import_module("nodes")
 
-        branch = _resolve_pipeline(p["pipeline_mode"], p["diffusion_model"])
-        progress(f"🧊 管线分支：{'Pixal3D' if branch == 'pixal3d' else 'Trellis.2'}，开始校验模型…", 0.01)
-
-        # 1) 模型校验 ----------------------------------------------------- #
-        for widget_name, folder_type, _seeds, label, _icon in MODEL_SPECS:
-            if widget_name == "geometry_model":
-                continue  # MoGe 仅 Pixal3D 相机估计分支需要，下面单独校验
-            _ensure_model(folder_type, p[widget_name], label)
-        if branch == "pixal3d" and p["enable_geometry"]:
-            _ensure_model("geometry_estimation", p["geometry_model"], "MoGe 相机几何模型")
-
-        # 2) 参考图 ------------------------------------------------------- #
-        progress("🖼️ 读取参考图片…", 0.03)
+        # 1) 参考图（先读图：抠图后的像素岛数量决定单/多视图分支） --------- #
+        progress("🖼️ 读取参考图片…", 0.02)
         image = None
         if p["image"] is not None:
             image = _coerce_image_tensor(p["image"])
@@ -748,7 +966,13 @@ class GJJ_Pixal3DTrellis2ImageToModel:
             raise RuntimeError("没有参考图片：请点节点面板的 📂 选择本地图片，或向图片接口连接 IMAGE 输出。")
         batch_size = int(image.shape[0])
 
-        # 3) 抠图 + 裁剪 -------------------------------------------------- #
+        # 公共必选模型（具体扩散模型与 MoGe 待分支确定后再校验）
+        for widget_name, folder_type, _seeds, label, _icon in MODEL_SPECS:
+            if widget_name in ("diffusion_model", "multiview_diffusion_model", "geometry_model"):
+                continue
+            _ensure_model(folder_type, p[widget_name], label)
+
+        # 2) 全图抠图：单视图直接复用整张遮罩；多视图用它做像素岛检测 ------ #
         if p["enable_matting"]:
             progress("✂️ 官方背景移除（抠图）…", 0.05)
             bg_model = _run_core("LoadBackgroundRemovalModel", p["matting_model"])[0]
@@ -757,44 +981,117 @@ class GJJ_Pixal3DTrellis2ImageToModel:
             progress("✂️ 跳过抠图，使用全白遮罩…", 0.05)
             mask = torch.ones((batch_size, int(image.shape[1]), int(image.shape[2])),
                               dtype=torch.float32, device=image.device)
-        progress("📐 按遮罩居中裁剪到方形…", 0.08)
-        cropped = _run_core(
-            "ImageCropToMask", image, mask,
-            int(p["crop_size"]), int(p["crop_size"]),
-            float(p["pad_factor"]), int(p["grow_mask"]), str(p["background"]),
-        )[0]
 
-        # 4) 相机 FOV（仅 Pixal3D 需要） ---------------------------------- #
-        fov_x = float(p["fallback_fov"])
-        if branch == "pixal3d":
-            if p["enable_geometry"]:
-                progress("📷 MoGe 估计相机内参 / FOV…", 0.11)
-                moge = _run_core("LoadMoGeModel", p["geometry_model"])[0]
-                moge_args: tuple[Any, ...] = (
-                    int(p["geometry_level"]), 0.0, int(p["geometry_batch"]),
-                    bool(p["geometry_force"]), bool(p["geometry_mask"]),
-                )
-                # 新版 ComfyUI 的 MoGeInference 增加了 refine_steps（MoGe-3 精修轮数），
-                # 旧版没有该参数；按 execute 实际签名决定是否追加，避免新旧版本报错。
-                if _core_execute_accepts("MoGeInference", "refine_steps"):
-                    moge_args = (*moge_args, int(p["geometry_refine_steps"]))
-                geometry = _run_core("MoGeInference", moge, cropped, *moge_args)[0]
-                fov_x = float(_run_core("MoGeGeometryToFOV", geometry, "horizontal", "degrees")[0])
-                progress(f"📷 MoGe 水平 FOV = {fov_x:.2f}°", 0.14)
+        # 3) 智能多视图判定（遮罩连通域 = 转视图的各个人物） -------------- #
+        mv_mode = str(p["multiview_mode"] or "自动").strip()
+        force_multi = "多视图" in mv_mode
+        force_single = "单视图" in mv_mode
+        can_detect = bool(p["enable_matting"]) and batch_size == 1
+        islands: list[dict[str, int]] = []
+        if force_multi and not can_detect:
+            if not p["enable_matting"]:
+                raise RuntimeError("多视图模式依赖抠图后的遮罩检测像素岛，请先在 ✂️ 面板开启「官方背景移除抠图」。")
+            raise RuntimeError("多视图模式仅支持单张转视图图片（检测到的是图片批次），请只输入一张含多个视图的图片。")
+        if not force_single:
+            if can_detect:
+                progress("🔍 检测遮罩像素岛（智能多视图）…", 0.07)
+                islands = _detect_mask_islands(mask[0:1], float(p["island_min_ratio"]))
+            elif not p["enable_matting"]:
+                progress("ℹ️ 未启用抠图，无法检测像素岛，按单视图处理。", 0.07)
             else:
-                progress(f"📷 使用备用水平 FOV = {fov_x:.2f}°", 0.14)
+                progress("ℹ️ 输入为图片批次，跳过多视图检测，按单视图批处理。", 0.07)
 
-        # 5) 视觉条件 ----------------------------------------------------- #
-        progress("🧠 加载 DINOv3 视觉模型…", 0.15)
-        clip_vision = nodes_mod.CLIPVisionLoader().load_clip(p["clip_vision_model"])[0]
-        if branch == "pixal3d":
-            positive, negative = _run_core("Pixal3DConditioning", clip_vision, cropped, fov_x)
+        use_multiview = force_multi or (not force_single and len(islands) >= 2)
+        if force_multi and len(islands) < 2:
+            raise RuntimeError(
+                "已强制多视图，但抠图后未检测到 2~4 个有效像素岛。\n"
+                "请确认输入是各视图横向分开的转视图；可在 ✂️ 面板调小「像素岛最小面积占比」，"
+                "或把多视图模式改回「自动」。")
+
+        if use_multiview:
+            if len(islands) > MULTIVIEW_MAX_VIEWS:
+                islands = sorted(islands, key=lambda b: -int(b["area"]))[:MULTIVIEW_MAX_VIEWS]
+                cx = [0.5 * (b["x0"] + b["x1"]) for b in islands]
+                cy = [0.5 * (b["y0"] + b["y1"]) for b in islands]
+                horizontal = (max(cx) - min(cx)) >= (max(cy) - min(cy))
+                islands.sort(key=lambda b: (0.5 * (b["x0"] + b["x1"]) if horizontal
+                                            else 0.5 * (b["y0"] + b["y1"])))
+                progress(f"⚠️ 像素岛超过 {MULTIVIEW_MAX_VIEWS} 个，已按面积保留最大的 {MULTIVIEW_MAX_VIEWS} 个。", 0.08)
+            view_count = len(islands)
+            view_word = {2: "两视图（前/左）", 3: "三视图（前/左/后）", 4: "四视图（前/左/后/右）"}.get(
+                view_count, f"{view_count} 视图")
+            progress(f"🖼️ 检测到 {view_count} 个像素岛 → 启用{view_word}多视图管线…", 0.09)
+
+            # 3a) 逐岛裁切：同一整张抠图遮罩按岛裁出，再按遮罩居中成方形，
+            #     与官方工作流每视图 ImageCropToMask(pad_factor=1.1) 对齐。
+            view_tensors: dict[str, Any] = {}
+            for idx, box in enumerate(islands):
+                name = MULTIVIEW_VIEW_NAMES[idx]
+                label = MULTIVIEW_VIEW_LABELS[idx]
+                progress(f"🖼️ 裁切{label}视图（{idx + 1}/{view_count}）…", 0.10 + 0.01 * idx)
+                sub_image = _crop_image_box(image, box)
+                sub_mask = _crop_image_box(mask, box)
+                view_tensors[name] = _run_core(
+                    "ImageCropToMask", sub_image, sub_mask,
+                    int(p["crop_size"]), int(p["crop_size"]),
+                    float(p["pad_factor"]), int(p["grow_mask"]), str(p["background"]),
+                )[0]
+
+            # 3b) 模型校验 + 多视图固定轨道相机条件（无 MoGe，FOV 固定）
+            _ensure_model("diffusion_models", p["multiview_diffusion_model"],
+                          "多视图 3D 扩散模型（Pixal3D 多视图）")
+            unet_name = str(p["multiview_diffusion_model"])
+            progress("🧠 加载 DINOv3 视觉模型…", 0.15)
+            clip_vision = nodes_mod.CLIPVisionLoader().load_clip(p["clip_vision_model"])[0]
+            mv_fov = float(p["multiview_fov"])
+            progress(f"🖼️ 多视图条件（固定轨道相机，水平 FOV={mv_fov:g}°）…", 0.16)
+            positive, negative = _run_core(
+                "Pixal3DMultiViewConditioning", clip_vision, mv_fov, **view_tensors)
         else:
-            positive, negative = _run_core("Trellis2Conditioning", clip_vision, cropped)
+            # 4) 单视图：解析分支（误选多视图模型时自动回退）→ 裁剪 → 相机 → 条件
+            branch, unet_name = _resolve_single_view_unet(p["pipeline_mode"], p["diffusion_model"])
+            progress(f"🧊 管线分支：{'Pixal3D' if branch == 'pixal3d' else 'Trellis.2'}（单视图）…", 0.08)
+            _ensure_model("diffusion_models", unet_name,
+                          "3D 扩散模型（Pixal3D / Trellis.2）")
+            if branch == "pixal3d" and p["enable_geometry"]:
+                _ensure_model("geometry_estimation", p["geometry_model"], "MoGe 相机几何模型")
 
-        # 6) 扩散模型 ----------------------------------------------------- #
-        progress("🟣 加载 3D 扩散模型…", 0.18)
-        model = nodes_mod.UNETLoader().load_unet(p["diffusion_model"], "default")[0]
+            progress("📐 按遮罩居中裁剪到方形…", 0.09)
+            cropped = _run_core(
+                "ImageCropToMask", image, mask,
+                int(p["crop_size"]), int(p["crop_size"]),
+                float(p["pad_factor"]), int(p["grow_mask"]), str(p["background"]),
+            )[0]
+
+            fov_x = float(p["fallback_fov"])
+            if branch == "pixal3d":
+                if p["enable_geometry"]:
+                    progress("📷 MoGe 估计相机内参 / FOV…", 0.11)
+                    moge = _run_core("LoadMoGeModel", p["geometry_model"])[0]
+                    moge_args: tuple[Any, ...] = (
+                        int(p["geometry_level"]), 0.0, int(p["geometry_batch"]),
+                        bool(p["geometry_force"]), bool(p["geometry_mask"]),
+                    )
+                    # 新版 ComfyUI 的 MoGeInference 增加了 refine_steps（MoGe-3 精修轮数），
+                    # 旧版没有该参数；按 execute 实际签名决定是否追加，避免新旧版本报错。
+                    if _core_execute_accepts("MoGeInference", "refine_steps"):
+                        moge_args = (*moge_args, int(p["geometry_refine_steps"]))
+                    geometry = _run_core("MoGeInference", moge, cropped, *moge_args)[0]
+                    fov_x = float(_run_core("MoGeGeometryToFOV", geometry, "horizontal", "degrees")[0])
+                    progress(f"📷 MoGe 水平 FOV = {fov_x:.2f}°", 0.14)
+                else:
+                    progress(f"📷 使用备用水平 FOV = {fov_x:.2f}°", 0.14)
+
+            progress("🧠 加载 DINOv3 视觉模型…", 0.15)
+            clip_vision = nodes_mod.CLIPVisionLoader().load_clip(p["clip_vision_model"])[0]
+            if branch == "pixal3d":
+                positive, negative = _run_core("Pixal3DConditioning", clip_vision, cropped, fov_x)
+            else:
+                positive, negative = _run_core("Trellis2Conditioning", clip_vision, cropped)
+
+        # 5) 扩散模型（单/多视图共用 Trellis2 采样链与 CFG 调度） ---------- #
+        progress(f"🟣 加载 3D 扩散模型：{unet_name.split('/')[-1]}…", 0.18)
+        model = nodes_mod.UNETLoader().load_unet(unet_name, "default")[0]
         structure_model = _patch_chain(
             model, 1.0, p["structure_cfg_start"], p["structure_rescale"], p["sd3_shift"])
         refine_model = _patch_chain(

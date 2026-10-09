@@ -25,8 +25,9 @@ import { api } from "/scripts/api.js";
 
 	// 模型定义（与 Python MODEL_SPECS 对应，通用，不硬编码绝对路径）
 	const MODEL_DEFS = [
-		{ widget: "diffusion_model", label: "3D 扩散模型（Pixal3D / Trellis.2）", folder: "models/diffusion_models", icon: "🟣", fallback: "pixal3d_int8_convrot.safetensors" },
-		{ widget: "clip_vision_model", label: "DINOv3 视觉模型", folder: "models/clip_vision", icon: "🔵", fallback: "dino_v3_L_naf_fp32.safetensors" },
+	{ widget: "diffusion_model", label: "3D 扩散模型（Pixal3D / Trellis.2）", folder: "models/diffusion_models", icon: "🟣", fallback: "pixal3d_int8_convrot.safetensors" },
+	{ widget: "multiview_diffusion_model", label: "多视图 3D 扩散模型（Pixal3D 多视图）", folder: "models/diffusion_models", icon: "🟣", fallback: "pixal3d_multiview_int8_convrot.safetensors" },
+	{ widget: "clip_vision_model", label: "DINOv3 视觉模型", folder: "models/clip_vision", icon: "🔵", fallback: "dino_v3_L_naf_fp32.safetensors" },
 		{ widget: "shape_vae_model", label: "结构 VAE（Shape VAE）", folder: "models/vae", icon: "🔴", fallback: "trellis_2_shape_vae_bf16.safetensors" },
 		{ widget: "texture_vae_model", label: "纹理 VAE（Texture VAE）", folder: "models/vae", icon: "🔴", fallback: "trellis_2_texture_vae_bf16.safetensors" },
 		{ widget: "geometry_model", label: "MoGe 相机几何模型", folder: "models/geometry_estimation", icon: "🟤", fallback: "moge_2_vitl_normal_fp16.safetensors" },
@@ -82,10 +83,14 @@ import { api } from "/scripts/api.js";
 	}
 
 	const GROUPS = {
-		preprocess: [
-			"pipeline_mode", "crop_size", "pad_factor", "grow_mask", "background", "fallback_fov",
-			"geometry_level", "geometry_batch", "geometry_refine_steps",
-		],
+	preprocessMain: ["pipeline_mode", "crop_size", "pad_factor", "grow_mask", "background"],
+	multiview: ["multiview_mode", "multiview_fov", "island_min_ratio"],
+	geometry: ["fallback_fov", "geometry_level", "geometry_batch", "geometry_refine_steps"],
+	preprocess: [
+		"pipeline_mode", "crop_size", "pad_factor", "grow_mask", "background",
+		"multiview_mode", "multiview_fov", "island_min_ratio",
+		"fallback_fov", "geometry_level", "geometry_batch", "geometry_refine_steps",
+	],
 		structure: [
 			"structure_seed", "structure_steps", "structure_cfg", "structure_sampler", "structure_scheduler",
 			"sd3_shift", "structure_cfg_start", "structure_rescale", "structure_resolution",
@@ -117,6 +122,9 @@ import { api } from "/scripts/api.js";
 	// 浮动窗内各参数的中文显示名（保证全中文 UI，不依赖后端 option 回传）
 	const WIDGET_LABELS = {
 		pipeline_mode: "3D 管线分支",
+		multiview_mode: "多视图模式",
+		multiview_fov: "多视图水平FOV（度）",
+		island_min_ratio: "像素岛最小面积占比",
 		crop_size: "裁剪输出尺寸",
 		pad_factor: "主体留白倍数",
 		grow_mask: "遮罩扩张像素",
@@ -181,6 +189,7 @@ import { api } from "/scripts/api.js";
 	// 分段选择型 widget（用按钮组而不是下拉框）
 	const SEGMENTED = {
 		pipeline_mode: ["自动", "Pixal3D", "Trellis.2"],
+		multiview_mode: ["自动", "单视图", "多视图"],
 		structure_resolution: ["32", "64"],
 		sign_mode: ["udf", "sdf"],
 		placement_mode: ["midpoint", "qem"],
@@ -992,9 +1001,22 @@ import { api } from "/scripts/api.js";
 		const fileBtn = makeToolButton("📂", "打开本地参考图片", () => chooseReferenceImage(node));
 		const modelBtn = makeToolButton("🧠", "模型树：选择全部模型", (btn) => showModelPanel(node, btn));
 		const preBtn = makeToolButton("✂️", "预处理与相机参数", (btn) => {
-			showFloatingPanel(node, btn, "✂️ 预处理 / 相机（Pixal3D）", 420, (body) => {
-				buildFields(node, body, GROUPS.preprocess, {
-					props: ["enable_matting", "enable_geometry", "geometry_force_projection", "geometry_apply_mask"],
+			showFloatingPanel(node, btn, "✂️ 预处理 / 智能多视图 / 相机", 440, (body) => {
+				body.appendChild(sectionTitle("✂️ 抠图与裁剪"));
+				buildFields(node, body, GROUPS.preprocessMain, { props: ["enable_matting"] });
+
+				body.appendChild(sectionTitle("🖼️ 智能多视图（像素岛自动识别）"));
+				buildFields(node, body, GROUPS.multiview);
+				const mvHint = document.createElement("div");
+				mvHint.textContent = "自动模式：抠图后遮罩有 2~4 个像素岛（如角色转视图）时自动切换多视图管线，"
+					+ "岛按从左到右映射为 前 / 左 / 后 / 右（3 岛=三视图，4 岛=四视图）；单岛图片自动走单视图。"
+					+ "多视图使用固定轨道相机 FOV（默认 20°）与多视图扩散模型，无需 MoGe。";
+				mvHint.style.cssText = "margin:2px 0 4px;padding:6px 8px;color:#8fa1a8;font-size:11px;line-height:1.5;border:1px dashed #354952;border-radius:6px;";
+				body.appendChild(mvHint);
+
+				body.appendChild(sectionTitle("📷 MoGe 相机估计（仅单视图 Pixal3D）"));
+				buildFields(node, body, GROUPS.geometry, {
+					props: ["enable_geometry", "geometry_force_projection", "geometry_apply_mask"],
 				});
 			});
 		});
