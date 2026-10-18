@@ -876,9 +876,70 @@ def _format_memory_allocation_error(exc: Exception, *, unet_name: str, width: An
     )
 
 
+def _is_flux3_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
+    """识别 Flux3 Klein 模型族。
+
+    Flux3 Klein 主模型文件名同样包含 "klein"/"flux" 子串，必须先于
+    Flux2 判定，否则会被误识别成 Flux2 而强制改写 clip_type。
+    """
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    preset_text = _normalize_text(
+        "|".join(
+            [
+                str((preset or {}).get("id", "")),
+                str((preset or {}).get("clip_type", "")),
+            ]
+        )
+    )
+    return (
+        normalized_clip == "flux3"
+        or "flux3" in normalized_unet
+        or "flux-3" in str(unet_name or "").lower()
+        or "flux3" in preset_text
+    )
+
+
+def _is_moss_image_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
+    """识别 MOSS-Image（SFT / Base）模型族。"""
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    preset_text = _normalize_text(
+        "|".join(
+            [
+                str((preset or {}).get("id", "")),
+                str((preset or {}).get("clip_type", "")),
+                str((preset or {}).get("keywords", "")),
+            ]
+        )
+    )
+    return (
+        normalized_clip == "moss_image"
+        or "mossimage" in normalized_unet
+        or "moss-image" in str(unet_name or "").lower()
+        or "mossimage" in preset_text
+    )
+
+
 def _is_flux2_family(unet_name: str | None = "", clip_type: str | None = "") -> bool:
     normalized_unet = _normalize_text(unet_name)
     normalized_clip = _normalize_text(clip_type)
+    # Flux3 / MOSS 虽然也走 Flux2 同款 latent/VAE，但属于独立模型族，
+    # 不能被 "klein" 等子串规则误判为 Flux2。
+    if normalized_clip in {"flux3", "moss_image"}:
+        return False
+    if "flux3" in normalized_unet or "flux-3" in str(unet_name or "").lower():
+        return False
+    if "moss" in normalized_unet:
+        return False
     return (
         normalized_clip == "flux2"
         or "flux2" in normalized_unet
@@ -2684,6 +2745,48 @@ def _is_qwen_image_21_family(preset: dict[str, Any], unet_name: str = "") -> boo
     return "qwenimage21" in text
 
 
+# Qwen-Image-2.1-Turbo 官方工作流固定 8 步 ManualSigmas 调度
+# （文生图 t2i 与图像编辑 image_edit 共用同一条 sigma 曲线）。
+QWEN_IMAGE_21_TURBO_SIGMAS = (
+    "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+)
+QWEN_IMAGE_21_TURBO_STEPS = 8
+
+
+def _is_qwen_image_21_turbo_family(preset: dict[str, Any], unet_name: str = "") -> bool:
+    """识别 Qwen-Image 2.1 Turbo 主模型。
+
+    优先检测 image2.1 主模型文件名中的 turbo 关键词（预设 id/keywords 含
+    turbo 同样识别）。Turbo 与标准版共用同一套 CLIP/VAE，但采样必须使用
+    官方固定 8 步 ManualSigmas + euler + CFG 1，且文生图/编辑都启用 KV Cache。
+    """
+    if not _is_qwen_image_21_family(preset, unet_name):
+        return False
+    text = _canonical_model_text(
+        "|".join(
+            [
+                str(preset.get("id", "")),
+                str(preset.get("keywords", "")),
+                str(unet_name or ""),
+                str(preset.get("model_name", "")),
+            ]
+        )
+    )
+    return "turbo" in text
+
+
+def _qwen_image_21_turbo_sigmas() -> torch.Tensor:
+    """解析 Qwen-Image-2.1-Turbo 官方 ManualSigmas（等价 ManualSigmas 节点）。"""
+    values = [
+        float(part)
+        for part in str(QWEN_IMAGE_21_TURBO_SIGMAS).split(",")
+        if str(part).strip()
+    ]
+    if len(values) < 2:
+        raise RuntimeError("Qwen-Image 2.1 Turbo sigma 调度解析失败，请检查内置常数。")
+    return torch.tensor(values, dtype=torch.float32)
+
+
 def _qwen_image_21_tokenize(clip, text: str, images_vl: list, keep_vision: bool):
     """兼容新旧内核的 Qwen-Image 2.1 分词调用。
 
@@ -3122,7 +3225,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "gguf", "ernie"]
+        _diffusion_keywords = ["flux", "flux3", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "moss", "gguf", "ernie"]
         _filtered = [
             m
             for m in _raw_diffusion_models
@@ -3859,6 +3962,80 @@ class GJJ_LazyImageStudio:
         out["samples"] = samples
         return out
 
+    def _sample_qwen_image_21_turbo_workflow(
+        self,
+        model,
+        positive,
+        negative,
+        latent_out,
+        seed: int,
+    ):
+        """内联复刻 Qwen-Image-2.1-Turbo 官方工作流采样（t2i / image_edit 通用）。
+
+        与官方模板完全一致：
+        SamplerCustomAdvanced(
+            RandomNoise(seed),
+            CFGGuider(cfg=1),
+            KSamplerSelect("euler"),
+            ManualSigmas("1.0,...,0")  # 固定 8 步
+        )
+        外部传入的步数/CFG/采样器/调度器在 Turbo 分支一律不生效，
+        避免误用 25 步 simple 调度导致出图发糊或过曝。
+        """
+        sigmas = _qwen_image_21_turbo_sigmas()
+        cfg = 1.0
+        sampler_name = "euler"
+        try:
+            from comfy_extras.nodes_custom_sampler import KSamplerSelect as OfficialKSamplerSelect
+            from comfy_extras.nodes_custom_sampler import Noise_RandomNoise
+            import comfy.sample
+            import latent_preview
+        except Exception as exc:
+            print(
+                "[GJJ_LazyImageStudio] Qwen-Image 2.1 Turbo 官方 SamplerCustom 路径不可用，"
+                f"回退兼容采样：{exc}"
+            )
+            noise = RandomNoise(int(seed))
+            sampler = KSamplerSelect(sampler_name)
+            guider = CFGGuider(model, positive, negative, float(cfg))
+            result = SamplerCustomAdvanced(noise, guider, sampler, sigmas, latent_out)
+            return {"samples": result["output"]}
+
+        latent = latent_out.copy()
+        latent_image = latent["samples"]
+        latent_image = comfy.sample.fix_empty_latent_channels(
+            model,
+            latent_image,
+            latent.get("downscale_ratio_spacial", None),
+            latent.get("downscale_ratio_temporal", None),
+        )
+        latent["samples"] = latent_image
+        noise = Noise_RandomNoise(int(seed)).generate_noise(latent)
+        noise_mask = latent.get("noise_mask")
+        sampler = OfficialKSamplerSelect().get_sampler(sampler_name)[0]
+        x0_output = {}
+        callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1, x0_output)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        samples = comfy.sample.sample_custom(
+            model,
+            noise,
+            float(cfg),
+            sampler,
+            sigmas,
+            positive,
+            negative,
+            latent_image,
+            noise_mask=noise_mask,
+            callback=callback,
+            disable_pbar=disable_pbar,
+            seed=int(seed),
+        )
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out.pop("downscale_ratio_temporal", None)
+        out["samples"] = samples
+        return out
+
     def _encode_krea2_image_edit(
         self,
         model,
@@ -4239,6 +4416,11 @@ class GJJ_LazyImageStudio:
         clip_type = str(preset.get("resolved_clip_type") or preset.get("clip_type") or "")
         unet_name = str(preset.get("resolved_unet_name") or preset.get("unet_name") or "")
         is_flux2_model = _is_flux2_family(unet_name, clip_type)
+        # Flux3 Klein 与 MOSS-Image 官方工作流同样使用 EmptyFlux2LatentImage
+        # （16 通道 latent）与 Flux2 VAE 系列。
+        is_flux_latent_family = is_flux2_model or _is_flux3_family(
+            unet_name, clip_type, preset
+        ) or _is_moss_image_family(unet_name, clip_type, preset)
 
         if not image_pairs:
             if _normalize_text(preset.get("clip_type", "")) == "lumina2":
@@ -4251,7 +4433,7 @@ class GJJ_LazyImageStudio:
                     return EmptyLatentImage().generate(
                         int(width), int(height), int(batch_size)
                     )[0]
-            if is_flux2_model:
+            if is_flux_latent_family:
                 latent_dict = EmptyFlux2LatentImage(
                     int(width), int(height), int(batch_size)
                 )
@@ -5002,6 +5184,40 @@ class GJJ_LazyImageStudio:
             )
             if is_flux2_runtime:
                 resolved_clip_type = "flux2"
+            is_flux3_runtime = (
+                not use_checkpoint_model
+                and _is_flux3_family(unet_name, resolved_clip_type, preset)
+            )
+            if is_flux3_runtime:
+                # 官方 Flux3 Klein 工作流统一使用 flux3 CLIP 类型，
+                # 避免被 Flux2 的 "klein" 子串规则改写。
+                resolved_clip_type = "flux3"
+            is_moss_image_runtime = (
+                not use_checkpoint_model
+                and _is_moss_image_family(unet_name, resolved_clip_type, preset)
+            )
+            if is_moss_image_runtime:
+                resolved_clip_type = "moss_image"
+            if is_flux3_runtime and pairs:
+                # Flux3 Klein 图像编辑（ReferenceMultiLatent）官方固定
+                # euler / simple / CFG 1；文生图则沿用预设的 er_sde。
+                flux3_preset_id = _normalize_text(preset.get("id", ""))
+                if "distilled" in flux3_preset_id and int(steps) != 16:
+                    print(
+                        "[GJJ] LazyImageStudio 检测到 Flux3 蒸馏版图像编辑："
+                        f"步数 {int(steps)} -> 16。"
+                    )
+                    steps = 16
+                if str(sampler_name or "") != "euler" or str(scheduler or "") != "simple":
+                    print(
+                        "[GJJ] LazyImageStudio 检测到 Flux3 图像编辑参考图："
+                        f"采样器 {sampler_name}/{scheduler} -> euler/simple，"
+                        f"CFG {float(cfg):g} -> 1.0。"
+                    )
+                sampler_name = "euler"
+                scheduler = "simple"
+                cfg = 1.0
+                denoise = 1.0
             is_ltx_runtime = _is_ltx_family(unet_name, resolved_clip_type, preset)
             is_flux1_krea_runtime = (
                 str(preset.get("id", "")) == "flux1_krea_dev"
@@ -5108,6 +5324,16 @@ class GJJ_LazyImageStudio:
             is_boogu_image_edit_turbo = False if use_checkpoint_model else _is_boogu_image_edit_turbo_family(preset, unet_name)
             # Qwen-Image 2.1 文生图与图像编辑共用同一套模型，按是否有参考图区分编码方式。
             is_qwen_image_21_runtime = False if use_checkpoint_model else _is_qwen_image_21_family(preset, unet_name)
+            # 主模型文件名含 turbo 时强制走官方 Turbo 8 步 ManualSigmas 分支。
+            is_qwen_image_21_turbo = (
+                False if use_checkpoint_model else _is_qwen_image_21_turbo_family(preset, unet_name)
+            )
+            if is_qwen_image_21_turbo:
+                print(
+                    "[GJJ_LazyImageStudio] 检测到 Qwen-Image 2.1 Turbo 主模型："
+                    f"{unet_name}；采样固定使用官方 8 步 ManualSigmas（euler / CFG 1），"
+                    "文生图与图像编辑均启用 QwenImage21Cache。"
+                )
 
             normalized_lora_parts = [
                 normalize_lora_chain_data(value)
@@ -5278,6 +5504,7 @@ class GJJ_LazyImageStudio:
                     else mask
                 )
                 flux2_sample_size = None
+                flux3_reference_sample = False
                 krea2_reference_sample = False
                 krea2_style_reference_sample = False
                 krea2_patched_model = None
@@ -5404,6 +5631,30 @@ class GJJ_LazyImageStudio:
                         identity_lora_strength=float(krea2_edit_lora_strength),
                     )
                     krea2_reference_sample = True
+                elif task_pairs and is_flux3_runtime:
+                    # Flux3 Klein 图像编辑：官方工作流使用
+                    # ReferenceMultiLatent（多张参考图 VAE latent 拼接进 conditioning），
+                    # 机制与 Flux2 多参考图编辑完全一致，直接复用同一套编码。
+                    _send_status(
+                        unique_id,
+                        f"4/6 编码 Flux3 图片编辑条件{status_suffix}（{len(task_pairs)} 张）...",
+                    )
+                    positive, negative, latent_out, flux2_width, flux2_height = (
+                        self._encode_flux2_multi_reference(
+                            clip=clip,
+                            vae=vae,
+                            prompt=prompt_text,
+                            negative_prompt=effective_negative_prompt,
+                            main_image_index=main_image_index,
+                            pairs=task_pairs,
+                            width=local_width,
+                            height=local_height,
+                            batch_size=int(batch_size),
+                            preset=preset,
+                        )
+                    )
+                    flux2_sample_size = (int(flux2_width), int(flux2_height))
+                    flux3_reference_sample = True
                 elif task_pairs and resolved_clip_type == "flux2":
                     _send_status(
                         unique_id,
@@ -5427,17 +5678,20 @@ class GJJ_LazyImageStudio:
                 elif is_qwen_image_21_runtime:
                     # Qwen-Image 2.1：文生图与图像编辑共用同一套模型，
                     # 参考图直连 TextEncodeQwenImage21 等价编码（最多 16 张）。
+                    qwen21_family_label = (
+                        "Qwen-Image 2.1 Turbo" if is_qwen_image_21_turbo else "Qwen-Image 2.1"
+                    )
                     if task_pairs:
                         _send_status(
                             unique_id,
-                            f"4/6 按 Qwen-Image 2.1 图像编辑工作流编码{status_suffix}"
+                            f"4/6 按 {qwen21_family_label} 图像编辑工作流编码{status_suffix}"
                             f"（{min(len(task_pairs), 16)} 张参考图直连编码器，"
                             "VAE 参考 latent 拼接）...",
                         )
                     else:
                         _send_status(
                             unique_id,
-                            f"4/6 按 Qwen-Image 2.1 文生图工作流编码{status_suffix}...",
+                            f"4/6 按 {qwen21_family_label} 文生图工作流编码{status_suffix}...",
                         )
                     if task_mask is not None:
                         print(
@@ -5581,12 +5835,20 @@ class GJJ_LazyImageStudio:
                         width=int(local_width),
                         height=int(local_height),
                     )[0]
-                elif qwen21_edit_sample:
-                    # 与官方 image_edit 工作流一致：编辑时启用 QwenImage21Cache。
-                    _send_status(
-                        unique_id,
-                        f"5/6 启用 Qwen-Image 2.1 KV Cache{status_suffix}（auto/default）...",
-                    )
+                elif qwen21_edit_sample or is_qwen_image_21_turbo:
+                    # 标准版仅编辑时启用 Cache；Turbo 官方 t2i/image_edit 两个
+                    # 工作流都串了 QwenImage21Cache，因此 Turbo 文生图也要启用。
+                    if is_qwen_image_21_turbo:
+                        _send_status(
+                            unique_id,
+                            f"5/6 启用 Qwen-Image 2.1 Turbo KV Cache{status_suffix}"
+                            "（文生图/编辑均启用，auto/default）...",
+                        )
+                    else:
+                        _send_status(
+                            unique_id,
+                            f"5/6 启用 Qwen-Image 2.1 KV Cache{status_suffix}（auto/default）...",
+                        )
                     sample_model = _patch_qwen_image_21_cache(
                         sample_model, "auto", "default"
                     )
@@ -5623,6 +5885,27 @@ class GJJ_LazyImageStudio:
                         model_sampling=str(preset.get("model_sampling", "aura") or "aura"),
                         model_shift=float(preset.get("model_shift", 3.16) or 3.16),
                     )
+                elif flux3_reference_sample:
+                    flux2_width, flux2_height = flux2_sample_size
+                    # 官方 Flux3 Klein 图像编辑使用普通 KSampler：
+                    # euler / simple / CFG 1，而非 Flux2Scheduler。
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Flux3 图像编辑工作流采样{status_suffix}"
+                        f"（{flux2_width} x {flux2_height}，{effective_steps} 步，euler/simple，CFG=1）...",
+                    )
+                    sampled_latent = common_ksampler(
+                        sample_model,
+                        sample_seed,
+                        effective_steps,
+                        1.0,
+                        "euler",
+                        "simple",
+                        positive,
+                        negative,
+                        latent_out,
+                        1.0,
+                    )[0]
                 elif flux2_sample_size is not None:
                     flux2_width, flux2_height = flux2_sample_size
                     _send_status(
@@ -5685,6 +5968,21 @@ class GJJ_LazyImageStudio:
                             latent_out,
                             denoise=1.0,
                         )[0]
+                elif is_qwen_image_21_turbo:
+                    # Qwen-Image 2.1 Turbo：官方固定 8 步 ManualSigmas 调度，
+                    # euler + CFGGuider(1)，忽略面板步数/CFG/采样器/调度器。
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Qwen-Image 2.1 Turbo 工作流采样{status_suffix}"
+                        "（固定 8 步 ManualSigmas，euler，CFG=1）...",
+                    )
+                    sampled_latent = self._sample_qwen_image_21_turbo_workflow(
+                        model=sample_model,
+                        positive=positive,
+                        negative=negative,
+                        latent_out=latent_out,
+                        seed=sample_seed,
+                    )
                 else:
                     sampled_latent = common_ksampler(
                         sample_model,
@@ -5791,6 +6089,20 @@ class GJJ_LazyImageStudio:
                 "save_format": save_format,
                 **optimization_params,
             }
+            if is_qwen_image_21_turbo:
+                # Turbo 分支强制使用官方调度，面板上的步数/CFG/采样器并不生效，
+                # 上报实际参数避免前端信息误导。
+                effective_params.update(
+                    {
+                        "model_family_branch": "qwen_image_2.1_turbo",
+                        "steps": QWEN_IMAGE_21_TURBO_STEPS,
+                        "cfg": 1.0,
+                        "sampler_name": "euler",
+                        "scheduler": "manual_sigmas",
+                        "manual_sigmas": QWEN_IMAGE_21_TURBO_SIGMAS,
+                        "denoise": 1.0,
+                    }
+                )
 
             # 准备返回值（在清理资源之前）
             result_data = {

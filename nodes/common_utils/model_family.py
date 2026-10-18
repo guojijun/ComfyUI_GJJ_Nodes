@@ -912,7 +912,11 @@ def gjjutils_match_model_family_preset(
 # ============================================================================
 
 # CLIP 类型关键词映射
+# 注意：flux3 / moss_image 必须排在 flux2("klein") 与 flux 之前，
+# 因为 Flux3 Klein 主模型文件名同样包含 "klein"/"flux" 子串。
 CLIP_TYPE_KEYWORDS = [
+    (("flux3", "flux-3"), "flux3"),
+    (("moss_image", "moss-image", "mossimage"), "moss_image"),
     (("mage-flow", "mage_flow", "mageflow"), "mage"),
     (("krea2", "krea-2", "krea2_turbo", "krea2-turbo"), "krea2"),
     (("boogu", "boogu_image", "boogu-image"), "boogu"),
