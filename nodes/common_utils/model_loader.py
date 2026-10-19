@@ -733,5 +733,9 @@ def gjjutils_patch_model_sampling(model, sampling_mode: str, shift: float):
 
     model_sampling = ModelSamplingAdvanced(patched.model.model_config)
     model_sampling.set_parameters(shift=float(shift), multiplier=multiplier)
+    # 与 core ModelSamplingSD3.patch 一致：继承原采样器的 noise_scale
+    original = patched.get_model_object("model_sampling")
+    if hasattr(original, "noise_scale"):
+        model_sampling.set_noise_scale(original.noise_scale)
     patched.add_object_patch("model_sampling", model_sampling)
     return patched

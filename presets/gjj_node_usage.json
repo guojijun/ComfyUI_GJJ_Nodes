@@ -34,8 +34,8 @@
       "last_used": 1785551414930
     },
     "GJJ_WorkflowModelStatistics": {
-      "use_count": 85,
-      "last_used": 1791986097139
+      "use_count": 89,
+      "last_used": 1792419647168
     },
     "GJJ_LazyImageStudio": {
       "use_count": 26,
@@ -110,8 +110,8 @@
       "last_used": 1785900241418
     },
     "GJJ_SpectrumApplyMiniMaxH3": {
-      "use_count": 3,
-      "last_used": 1785917451874
+      "use_count": 4,
+      "last_used": 1792312846800
     },
     "GJJ_ModelUpscaler": {
       "use_count": 2,
@@ -144,6 +144,18 @@
     "GJJ_Pixal3DTrellis2ImageToModel": {
       "use_count": 1,
       "last_used": 1791519248775
+    },
+    "GJJ_CreateBoundingBoxes": {
+      "use_count": 4,
+      "last_used": 1792333669119
+    },
+    "GJJ_MultiImageLoader": {
+      "use_count": 1,
+      "last_used": 1792326643228
+    },
+    "GJJ_TemplateParams": {
+      "use_count": 1,
+      "last_used": 1792331515423
     }
   },
   "sort_reverse": true
