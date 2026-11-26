@@ -153,7 +153,10 @@
   "user": {},
   "execution_timer": {
     "enabled": true,
-    "position": null,
+    "position": {
+      "left": 1488.9815673828125,
+      "top": 371.16900634765625
+    },
     "newest_first": true,
     "collapsed": false
   },
@@ -194,10 +197,7 @@
     "scene_default_notes": "严格保持场景库环境与空间设定。"
   },
   "workflow_screenshot_toolbar": {
-    "position": {
-      "left": 137,
-      "top": 48
-    }
+    "position": null
   },
   "zero_dependency_file_browser": {
     "auto_execute": false,

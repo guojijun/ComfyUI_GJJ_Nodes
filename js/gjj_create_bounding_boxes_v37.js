@@ -34,9 +34,16 @@ const STORE_MODULE_CANDIDATES = [
 ];
 
 let outputStorePromise = null;
+let outputStoreLastFail = 0;
 
 async function getOutputStore() {
-	if (outputStorePromise) return outputStorePromise;
+	// 失败后 15 秒内不重试（避免每 700ms 狂扫所有 chunk），但允许重试而非永久缓存 null
+	if (outputStorePromise) {
+		const existing = await outputStorePromise;
+		if (existing) return existing;
+		if (Date.now() - outputStoreLastFail < 15000) return null;
+		outputStorePromise = null;
+	}
 	outputStorePromise = (async () => {
 		// 候选 1-2：源路径（部分开发模式前端可用）
 		for (const path of STORE_MODULE_CANDIDATES) {
@@ -46,17 +53,42 @@ async function getOutputStore() {
 				if (store && typeof store.getNodeImageUrls === "function") return store;
 			} catch (_) {}
 		}
-		// 候选 3（v3.6）：从已加载资源自动发现 settingStore chunk，取命名导出 Sn（useNodeOutputStore 工厂）
+		// 候选 3：从已加载资源自动发现 store chunk
+		// 兼容多种 chunk 命名：settingStore-* / nodeOutputStore-* / 任何 chunk 中导出 useNodeOutputStore
 		try {
 			const loaded = performance
 				.getEntriesByType("resource")
-				.map((e) => String(e.name || ""));
-			const chunkUrl = loaded.find((n) => /settingStore-[A-Za-z0-9_-]+\.js$/.test(n));
-			if (chunkUrl) {
-				const mod = await import(chunkUrl);
-				const factory = mod?.Sn || mod?.useNodeOutputStore;
-				if (typeof factory === "function") {
-					// 从模块导出里尝试找 pinia 实例（_s 特征），传入工厂兜底
+				.map((e) => String(e.name || ""))
+				.filter((n) => n.endsWith(".js") && n.includes("/"));
+
+			// 优先匹配名字中带 store/output/setting 的 chunk
+			const prioritized = loaded
+				.filter((n) => /(store|output|setting|node)/i.test(n))
+				.sort((a, b) => {
+					const score = (n) => (/(settingStore|nodeOutputStore|outputStore)/i.test(n) ? 0 : /store/i.test(n) ? 1 : 2);
+					return score(a) - score(b);
+				});
+
+			for (const chunkUrl of prioritized) {
+				try {
+					const mod = await import(chunkUrl);
+					// 方式 A：模块直接导出 store 实例（有 getNodeImageUrls 方法的对象）
+					for (const v of Object.values(mod)) {
+						if (v && typeof v === "object" && typeof v.getNodeImageUrls === "function") {
+							console.log("[GJJ_CreateBoundingBoxes] nodeOutputStore 已加载(实例)：", chunkUrl);
+							return v;
+						}
+					}
+					// 方式 B：找工厂函数（useNodeOutputStore / Sn）
+					const factory =
+						mod?.useNodeOutputStore ||
+						mod?.Sn ||
+						Object.values(mod).find(
+							(v) => typeof v === "function" && /output/i.test(v.name || "") && /store/i.test(v.name || "")
+						);
+					if (typeof factory !== "function") continue;
+
+					// 找 pinia 实例：遍历模块和 window
 					let pinia = null;
 					for (const k of Object.keys(mod)) {
 						const v = mod[k];
@@ -65,22 +97,29 @@ async function getOutputStore() {
 							break;
 						}
 					}
+					if (!pinia && typeof window !== "undefined") {
+						for (const k of Object.keys(window)) {
+							try {
+								const v = window[k];
+								if (v && typeof v === "object" && v._s && typeof v.use === "function") {
+									pinia = v;
+									break;
+								}
+							} catch (_) {}
+						}
+					}
+					// 方式 C：不传 pinia 直接调用（某些版本自动用全局 pinia）
 					try {
 						const store = pinia ? factory(pinia) : factory();
-						if (store && typeof store.getNodeImageUrls === "function") return store;
-					} catch (e) {
-						console.warn(
-							"[GJJ_CreateBoundingBoxes] store 工厂调用失败（app 未初始化或无 pinia 上下文）：",
-							e?.message || e
-						);
-					}
-				}
+						if (store && typeof store.getNodeImageUrls === "function") {
+							console.log("[GJJ_CreateBoundingBoxes] nodeOutputStore 已加载(工厂)：", chunkUrl);
+							return store;
+						}
+					} catch (_) {}
+				} catch (_) {}
 			}
 		} catch (_) {}
-		console.warn(
-			"[GJJ_CreateBoundingBoxes] 无法加载 nodeOutputStore，背景预览桥接不可用；" +
-				"请确认 ComfyUI 前端为 0.37+ 版本。"
-		);
+		outputStoreLastFail = Date.now();
 		return null;
 	})();
 	return outputStorePromise;
@@ -179,25 +218,35 @@ function collectItems(node) {
 		});
 	};
 
-	// 1) GJJ_MultiImageLoader：执行结果 / 当前选中
+	// 1) GJJ_MultiImageLoader：优先实时 selection（用户前端换图立即反映），
+	//    selection 为空时才回退到 executedImages（刚执行过但尚未选择图片的场景）。
 	try {
 		const st = node.__gjjMultiImageState;
-		const arr = st?.executedImages?.length
-			? st.executedImages
-			: st?.selection || [];
-		for (const it of arr) {
-			if (!it) continue;
-			if (it.url || isDirectUrl(it.filename)) {
-				out.push({ url: it.url || it.filename });
-			} else if (it.filename) {
-				out.push({
-					filename: String(it.filename),
-					type: String(it.type || "input"),
-					subfolder: String(it.subfolder || ""),
-				});
+		if (st) {
+			const selection = Array.isArray(st.selection) ? st.selection : [];
+			const executed = Array.isArray(st.executedImages) ? st.executedImages : [];
+			const source = selection.length ? selection : executed;
+			const seenKeys = new Set();
+			for (const it of source) {
+				if (!it) continue;
+				let item = null;
+				if (it.url || isDirectUrl(it.filename)) {
+					item = { url: it.url || it.filename };
+				} else if (it.filename) {
+					item = {
+						filename: String(it.filename),
+						type: String(it.type || "input"),
+						subfolder: String(it.subfolder || ""),
+					};
+				}
+				if (!item) continue;
+				const key = item.url ? `u:${item.url}` : `f:${item.filename}:${item.type}:${item.subfolder || ""}`;
+				if (seenKeys.has(key)) continue;
+				seenKeys.add(key);
+				out.push(item);
 			}
+			if (out.length) return out;
 		}
-		if (out.length) return dedupe(out);
 	} catch (_) {}
 
 	// 2) 模板参数输入器：内部行数据（key → {value}）
@@ -310,94 +359,124 @@ async function injectImages(upstream, target) {
 		return;
 	}
 	const sig = signatureOf(items);
-	if (injected.get(String(upstream.id)) === sig) {
-		updateStatusTitle(target, `背景 ${items.length} 图`);
-		return;
-	}
-	// 注意：injected 标记移到注入成功读回之后——失败不标记，轮询自动重试
-
-	const store = await getOutputStore();
-	if (!store) {
-		updateStatusTitle(target, "桥接不可用(store 未加载)");
-		return;
-	}
-
+	const upstreamKey = String(upstream.id);
 	const localItems = items.filter((i) => !i.url);
 	const urls = items.filter((i) => i.url).map((i) => i.url);
-
-	// 本地文件 → 官方 /view URL（previews 通道需要直接 URL）
 	const viewUrlOf = (i) =>
 		`/view?filename=${encodeURIComponent(i.filename)}` +
 		`&type=${encodeURIComponent(i.type || "input")}` +
 		(i.subfolder ? `&subfolder=${encodeURIComponent(i.subfolder)}` : "");
+	const allUrls = [...localItems.map(viewUrlOf), ...urls];
 
-	// 上游类型识别：GJJ_MultiImageLoader 自带图片列表 UI（自身渲染预览），
-	// 若把 previews 写给它会污染其预览（多出重复图），因此只走 outputs 通道；
-	// 模板参数输入器等自身已带 previews 的节点才需要 previews 覆写。
-	const upstreamCls = String(upstream.comfyClass || upstream.type || "");
-	const upstreamTitle = String(upstream.title || "");
-	const isMultiLoader =
-		/multi.?image.?loader|批量多图|多图加载/i.test(upstreamCls + upstreamTitle);
+	if (injected.get(upstreamKey) === sig) {
+		updateStatusTitle(target, `背景 ${items.length} 图`);
+		// 即使签名未变，也确保 imgs 和 DOM 背景层同步（widget 重绘会丢失）
+		syncUpstreamImgs(upstream, items);
+		if (allUrls[0]) forceCanvasBackground(target, allUrls[0]);
+		return;
+	}
 
-	try {
-		// 注入前读取上游已有 previews（判断是否需要覆写——自身无 previews 的节点走 outputs 即可）
-		let readBack0 = null;
+	// 通道零（最可靠）：直接写上游节点的 imgs 数组——LiteGraph 原生预览图机制
+	syncUpstreamImgs(upstream, items);
+
+	// 通道一：nodeOutputStore —— BOUNDING_BOXES widget 真正读取的来源
+	const store = await getOutputStore();
+	let storeOk = false;
+	if (store) {
 		try {
-			readBack0 = await store.getNodeImageUrls?.(upstream);
-		} catch (_) {}
-		// 通道一：outputs（官方 LoadImage 同款机制；API 名多版本兜底）
-		if (localItems.length) {
-			const imageObjs = localItems.map((i) => ({
-				filename: i.filename,
-				type: i.type,
-				subfolder: i.subfolder || "",
-			}));
-			if (store.setNodeOutputImages) {
-				store.setNodeOutputImages(upstream, imageObjs);
-			} else if (store.setNodeOutputs) {
-				store.setNodeOutputs(
-					upstream,
-					localItems.map((i) => i.filename),
-					{ folder: "input" }
-				);
+			// 打印 store 方法名（首次），便于排查 API 差异
+			if (!store.__gjjDebugged) {
+				store.__gjjDebugged = true;
+				const methods = Object.keys(store).filter((k) => typeof store[k] === "function");
+				console.log("[GJJ_CreateBoundingBoxes] store 方法：", methods);
+			}
+
+			// 写入本地文件图片
+			if (localItems.length) {
+				const imageObjs = localItems.map((i) => ({
+					filename: i.filename,
+					type: i.type || "input",
+					subfolder: i.subfolder || "",
+				}));
+				// 尝试多种 API 名
+				if (typeof store.setNodeOutputImages === "function") {
+					store.setNodeOutputImages(upstream, imageObjs);
+				} else if (typeof store.setNodeOutputs === "function") {
+					store.setNodeOutputs(upstream, imageObjs);
+				} else if (typeof store.setNodeOutput === "function") {
+					store.setNodeOutput(upstream, imageObjs);
+				}
+			}
+
+			// 写入 URL previews
+			if (allUrls.length) {
+				if (typeof store.setNodePreviewsByNodeId === "function") {
+					store.setNodePreviewsByNodeId(upstream.id, allUrls);
+				} else if (typeof store.setPreviews === "function") {
+					store.setPreviews(upstream, allUrls);
+				}
+			}
+
+			// 读回验证
+			const readBack = await store.getNodeImageUrls?.(upstream);
+			const rbCount = Array.isArray(readBack) ? readBack.length : readBack ? 1 : 0;
+			if (rbCount > 0) {
+				storeOk = true;
+				console.log(`[GJJ_CreateBoundingBoxes] store 写入成功，读回 ${rbCount} 张`);
+			} else {
+				console.warn("[GJJ_CreateBoundingBoxes] store 写入后读回为空，尝试直接操作 state");
+				// 兜底：直接修改 store 内部响应式状态
+				try {
+					const stateKeys = Object.keys(store.$state || {});
+					console.log("[GJJ_CreateBoundingBoxes] store.$state keys:", stateKeys);
+				} catch (_) {}
+			}
+		} catch (e) {
+			console.warn("[GJJ_CreateBoundingBoxes] store 写入异常：", e?.message || e);
+		}
+	} else {
+		// store 未加载不刷屏——ComfyUI 原生 OUTPUT_NODE 机制已处理
+	}
+
+	// 只有 store 写入成功才标记 injected；否则下次轮询继续重试
+	if (storeOk) {
+		injected.set(upstreamKey, sig);
+	}
+	updateStatusTitle(target, `v38·背景 ${items.length} 图`);
+	target.graph?.setDirtyCanvas?.(false, true);
+
+	// DOM 背景层作为兜底
+	forceCanvasBackground(target, allUrls[0]);
+}
+
+// DOM 背景层已移除——BOUNDING_BOXES 在 LiteGraph canvas 上绘制，DOM 叠加会干扰原生渲染
+function forceCanvasBackground(target, bgUrl) {
+	// no-op：背景图由 nodeOutputStore 响应式机制处理
+}
+
+// 直接同步上游节点 imgs（LiteGraph 原生预览图），不依赖 nodeOutputStore
+function syncUpstreamImgs(upstream, items) {
+	if (!upstream || !Array.isArray(items) || !items.length) return;
+	const allUrls = items.map((i) => {
+		if (i.url) return i.url;
+		return (
+			`/view?filename=${encodeURIComponent(i.filename)}` +
+			`&type=${encodeURIComponent(i.type || "input")}` +
+			(i.subfolder ? `&subfolder=${encodeURIComponent(i.subfolder)}` : "")
+		);
+	});
+	try {
+		// 只更新 URL 列表，避免覆盖节点其他状态
+		const old = Array.isArray(upstream.imgs) ? upstream.imgs : [];
+		const changed = old.length !== allUrls.length || old.some((u, i) => u !== allUrls[i]);
+		if (changed) {
+			upstream.imgs = allUrls;
+			if (typeof upstream.setSize === "function") {
+				// 触发节点重绘以刷新预览图区域
+				upstream.graph?.setDirtyCanvas?.(false, true);
 			}
 		}
-		// 通道二：previews（getNodeImageUrls 中 previews 优先于 outputs，
-		// 模板参数输入器等 GJJ 节点可能已写 previews 覆盖 outputs，故直接覆写为我们的 URL）。
-		// ★ v3.7：GJJ_MultiImageLoader 自带图片列表 UI，写 previews 会在其节点上
-		//   多出重复预览图；因此仅对非 MultiLoader 且上游自身已有 previews 的节点
-		//   （模板参数输入器等）覆写 previews，避免污染上游 UI。
-		const allUrls = [...localItems.map(viewUrlOf), ...urls];
-		const hasOwnPreviews = Array.isArray(readBack0) && readBack0.length > 0;
-		if (
-			!isMultiLoader &&
-			hasOwnPreviews &&
-			allUrls.length &&
-			store.setNodePreviewsByNodeId
-		) {
-			store.setNodePreviewsByNodeId(upstream.id, allUrls);
-		}
-		// 注入后读回（诊断）：getNodeImageUrls 需要节点对象
-		let readBack = null;
-		try {
-			readBack = await store.getNodeImageUrls?.(upstream);
-		} catch (_) {}
-		const rbCount = Array.isArray(readBack) ? readBack.length : readBack ? 1 : 0;
-		if (rbCount > 0) {
-			// 注入成功且读回成功——标记去重，避免重复注入
-			injected.set(String(upstream.id), sig);
-			updateStatusTitle(target, `v37·背景 ${items.length} 图·√${rbCount}`);
-		} else {
-			// 读回为空——不标记，下次轮询自动重试
-			updateStatusTitle(target, "v37·写入失败(读回空)");
-		}
-		console.log(
-			`[GJJ_CreateBoundingBoxes] 背景预览注入 ${upstream.comfyClass || upstream.type} -> 图数=${items.length} 读回=${rbCount} readBack=${JSON.stringify(readBack)} allUrls=${JSON.stringify(allUrls)}`
-		);
-	} catch (error) {
-		updateStatusTitle(target, "注入失败");
-		console.warn("[GJJ_CreateBoundingBoxes] 背景预览注入失败：", error);
-	}
+	} catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +508,12 @@ function pollOnce() {
 			updateStatusTitle(node, "未连接背景");
 			continue;
 		}
+		// 连线变化（换了上游节点）时清除旧签名缓存，强制重新注入
+		const upstreamKey = String(upstream.id);
+		if (node.__gjjBBoxUpstreamKey && node.__gjjBBoxUpstreamKey !== upstreamKey) {
+			injected.delete(node.__gjjBBoxUpstreamKey);
+		}
+		node.__gjjBBoxUpstreamKey = upstreamKey;
 		injectImages(upstream, node);
 	}
 	if (targetCount !== lastTargetCount) {

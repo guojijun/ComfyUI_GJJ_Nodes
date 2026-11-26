@@ -133,7 +133,21 @@ def _bg_from_image(image) -> Image.Image | None:
     if image is None:
         return None
     try:
-        arr = (image[0].detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        # GJJ_MultiImageLoader 的批量队列输出是 list/tuple of tensors（每张图 [1,H,W,C]）；
+        # 普通 IMAGE 输入则是单个 [B,H,W,C] tensor。统一取第一张。
+        if isinstance(image, (list, tuple)):
+            if not image:
+                return None
+            image = image[0]
+        arr = image.detach().cpu().numpy()
+        # arr 可能是 [1,H,W,C]（单图 tensor）或 [B,H,W,C]（batch）；统一取第 0 帧
+        if arr.ndim == 4:
+            arr = arr[0]
+        arr = (arr * 255).clip(0, 255).astype(np.uint8)
+        if arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        elif arr.shape[-1] == 4:
+            arr = arr[..., :3]
         return Image.fromarray(arr)
     except Exception:
         return None

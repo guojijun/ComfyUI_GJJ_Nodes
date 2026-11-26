@@ -965,7 +965,9 @@ def _iter_input_image_tensors(value: Any, seen: set[int] | None = None):
 class GJJ_MultiImageLoader:
     CATEGORY = "GJJ/🖼️ 图像/加载"
     FUNCTION = "load_images"
-    OUTPUT_NODE = False
+    # OUTPUT_NODE=True：执行后 ui.preview_images 会被 ComfyUI 自动写入 nodeOutputStore，
+    # 使下游 GJJ_CreateBoundingBoxes 的 BOUNDING_BOXES 画布能读到上游图片作为背景。
+    OUTPUT_NODE = True
     DESCRIPTION = "一次选择多张 input 目录里的图片，在节点中网格预览并按选择数量同步扩展图片输出接口。可作为主图图片、输入图像、原图来源的默认加载节点。"
     SEARCH_ALIASES = ["multi image loader", "image loader", "多图加载", "图片预览", "批量图片", "主图图片", "输入图像", "原图输入", "主图加载", "多图片加载预览器"]
     RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
@@ -1163,6 +1165,7 @@ class GJJ_MultiImageLoader:
             # 超过20张：只返回批量图片队列（原图列表）
             return {
                 "ui": {
+                    "images": preview_entries,
                     "preview_images": preview_entries,
                     "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
                     "merged_image_count": [len(preview_entries)],
@@ -1179,6 +1182,7 @@ class GJJ_MultiImageLoader:
                 single_outputs.append(empty_image_tensor())
             return {
                 "ui": {
+                    "images": preview_entries,
                     "preview_images": preview_entries,
                     "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
                     "merged_image_count": [len(preview_entries)],

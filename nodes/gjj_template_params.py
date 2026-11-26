@@ -1702,6 +1702,9 @@ def _prepare_image_fields(fields: list[dict[str, Any]], value_map: dict[str, Any
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/🔀 逻辑与流程/逻辑控制"
     FUNCTION = "output_params"
+    # OUTPUT_NODE=True：执行后 ui.preview_images 会被 ComfyUI 自动写入 nodeOutputStore，
+    # 使下游 GJJ_CreateBoundingBoxes 的画布能读到上游图片作为背景。
+    OUTPUT_NODE = True
     DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n提示词：《基础提示》 与 【风格】｛真实、日漫｝ 会生成 TextMerge 风格的组合提示词输出。\n是否启用：[enable,disable] # 枚举\n媒体资源优先读取当前本地文件；本地文件不存在时，自动下载设置模板中的默认 URL。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [
         "template params",
@@ -1792,7 +1795,8 @@ class GJJ_TemplateParams:
                 externally_supplied.add(key)
         outputs: list[Any] = []
         warnings: list[str] = []
-        
+        preview_images: list[dict[str, str]] = []
+
         for field in fields:
             key = str(field.get("key") or "")
             label = str(field.get("label") or "")
@@ -1808,10 +1812,10 @@ class GJJ_TemplateParams:
             if field.get("type") == "ENUM":
                 outputs.append(_coerce_enum_value(raw_value, list(field.get("options", []))))
                 continue
-            
+
             # 检测是否为媒体文件
             media_type = _template_field_media_type(field, raw_value, default_value)
-            
+
             if media_type:
                 if key in externally_supplied and not isinstance(raw_value, (str, os.PathLike)):
                     outputs.append(raw_value)
@@ -1821,6 +1825,19 @@ class GJJ_TemplateParams:
                 try:
                     media_obj = _load_media_with_url_fallback(raw_value, default_value, media_type)
                     outputs.append(media_obj)
+                    # 收集 IMAGE 文件路径，供 ui.preview_images 写入 nodeOutputStore
+                    if media_type == "IMAGE" and isinstance(raw_value, str) and raw_value.strip():
+                        try:
+                            resolved = _resolve_media_file(raw_value, "IMAGE")
+                            if resolved:
+                                rel = Path(_input_relative_media_path(resolved))
+                                preview_images.append({
+                                    "filename": rel.name,
+                                    "subfolder": str(rel.parent).replace("\\", "/") if rel.parent.name else "",
+                                    "type": "input",
+                                })
+                        except Exception:
+                            pass
                 except Exception as exc:
                     warning = _build_media_warning(label, media_type, raw_value, exc)
                     warnings.append(warning)
@@ -1829,23 +1846,25 @@ class GJJ_TemplateParams:
             else:
                 # 非媒体类型：正常解析
                 outputs.append(parse_value(raw_value))
-        
+
         while len(outputs) < MAX_OUTPUTS:
             outputs.append(None)
         result = tuple(outputs[:MAX_OUTPUTS])
+        ui_data: dict[str, Any] = {"gjj_template_params_warnings": warnings}
+        if preview_images:
+            ui_data["images"] = preview_images
+            ui_data["preview_images"] = preview_images
         if warnings:
             warning_text = "\n".join(warnings)
             return {
                 "ui": {
                     "text": (warning_text,),
-                    "gjj_template_params_warnings": warnings,
+                    **ui_data,
                 },
                 "result": result,
             }
         return {
-            "ui": {
-                "gjj_template_params_warnings": [],
-            },
+            "ui": ui_data,
             "result": result,
         }
 
