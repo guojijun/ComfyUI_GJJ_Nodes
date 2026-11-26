@@ -156,6 +156,18 @@
     "GJJ_TemplateParams": {
       "use_count": 1,
       "last_used": 1792331515423
+    },
+    "GJJ_RelayVSRVideoUpscalerX4": {
+      "use_count": 1,
+      "last_used": 1795674648791
+    },
+    "GJJ_RelayVSRVideoUpscalerX2": {
+      "use_count": 1,
+      "last_used": 1795675583065
+    },
+    "GJJ_RelayVSRVideoUpscaler": {
+      "use_count": 1,
+      "last_used": 1795676261476
     }
   },
   "sort_reverse": true
