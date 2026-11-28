@@ -201,6 +201,18 @@ QWEN_IMAGE_EDIT_LLAMA_TEMPLATE = (
 )
 QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES = 3
+MING_IMAGE_MAX_REFERENCE_IMAGES = 8
+MING_IMAGE_SAMPLING_MAX_SHIFT = 1.15
+MING_IMAGE_SAMPLING_BASE_SHIFT = 0.5
+# MiniMax-H3-Image：官方 t2i / image_edit / character_swap 三条工作流都用
+# MiniMaxH3ImageConditioning（<Picture n> 视觉块 + minimax_refs 参考 latent）。
+H3_IMAGE_DEFAULT_SIZE = 2048
+H3_IMAGE_CANVAS_MULTIPLE = 32
+H3_IMAGE_REF_SHORT_EDGE = 1024
+H3_IMAGE_REF_MAX_SHORT_EDGE = 2048
+H3_IMAGE_MAX_REFERENCE_IMAGES = 8
+H3_IMAGE_LATENT_CHANNELS = 24
+H3_IMAGE_LATENT_DOWNSCALE = 16
 KREA2_STYLE_REFERENCE_LORA_STEM = "krea2_style_reference"
 KREA2_STYLE_REFERENCE_WORKFLOW_VERSION = 10
 
@@ -926,6 +938,69 @@ def _is_moss_image_family(
         or "mossimage" in normalized_unet
         or "moss-image" in str(unet_name or "").lower()
         or "mossimage" in preset_text
+    )
+
+
+def _is_ming_image_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
+    """识别 Ming-Image（0.1 / 0.2 设计版）模型族。
+
+    Ming-Image 用同一个主模型同时承担文生图与图片编辑：入参有参考图时走
+    官方图片编辑工作流（视觉塔 + reference_latents），无参考图时走官
+    方文生图工作流（纯文本条件）。
+    """
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    preset_text = _canonical_model_text(
+        "|".join(
+            [
+                str((preset or {}).get("id", "")),
+                str((preset or {}).get("clip_type", "")),
+                str((preset or {}).get("keywords", "")),
+                str((preset or {}).get("model_name", "")),
+            ]
+        )
+    )
+    return (
+        normalized_clip in {"mingimage", "ming"}
+        or "mingimage" in normalized_unet
+        or "ming-image" in str(unet_name or "").lower()
+        or "mingimage" in preset_text
+    )
+
+
+def _is_minimax_h3_image_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
+    """识别 MiniMax-H3-Image 模型族（minimax_h3_image_*）。
+
+    该族一个主模型同时承担文生图 / 图片编辑 / 换人：无参考图走
+    image_t2i 工作流，有参考图走 image_edit（多图时即 character_swap），
+    区别只在参考图张数与提示词写法。
+    """
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    preset_text = _canonical_model_text(
+        "|".join(
+            [
+                str((preset or {}).get("id", "")),
+                str((preset or {}).get("clip_type", "")),
+                str((preset or {}).get("keywords", "")),
+                str((preset or {}).get("model_name", "")),
+            ]
+        )
+    )
+    if "minimax" in normalized_unet and "h3" in normalized_unet:
+        # 排除 H3 的视频/音乐主模型（fl2va / ref2va / music），只认图像版。
+        return "image" in normalized_unet
+    return (
+        normalized_clip.startswith("minimaxh3")
+        or "minimaxh3image" in preset_text
     )
 
 
@@ -1925,7 +2000,7 @@ def apply_lora_to_model_and_clip(
 
 def _should_skip_clip_lora_for_family(clip_type: str) -> bool:
     normalized = _normalize_text(clip_type)
-    return normalized in {"qwen_image", "boogu"}
+    return normalized in {"qwen_image", "boogu", "ming_image", "ming", "minimax"}
 
 
 # 以下函数已迁移到 common_utils.model_family，使用导入的别名
@@ -3225,11 +3300,28 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "flux3", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "moss", "gguf", "ernie"]
+        _diffusion_keywords = ["flux", "flux3", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "mageflow", "moss", "ming", "minimax", "gguf", "ernie"]
         _filtered = [
             m
             for m in _raw_diffusion_models
             if any(k in str(m).lower() for k in _diffusion_keywords)
+            # 本节点只出图：排除 MiniMax-H3 / 其它模型的视频、音频变体
+            # （fl2va、ref2va、i2va、music、audio 等），只保留图像主模型。
+            and not any(
+                k in str(m).lower()
+                for k in (
+                    "_fl2va",
+                    "_ref2va",
+                    "_i2va",
+                    "_fl2v",
+                    "_ref2v",
+                    "music",
+                    "_audio",
+                    "_video",
+                    "fasth3",
+                    "fastvideo",
+                )
+            )
         ]
         diffusion_models = _filtered if _filtered else _raw_diffusion_models
         clip_models = _list_lazy_clip_models() or [DEFAULT_LAZY_CLIP_NAME]
@@ -3894,6 +3986,215 @@ class GJJ_LazyImageStudio:
             **encoder_kwargs,
         )
         return positive, negative, latent_out, latent_width, latent_height
+
+    def _encode_ming_image_workflow(
+        self,
+        clip,
+        vae,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[torch.Tensor],
+        width: int,
+        height: int,
+        batch_size: int,
+        cfg: float = 1.0,
+    ):
+        """按 Ming-Image 官方工作流编码条件。
+
+        无参考图：文生图工作流，纯文本条件 + 空 latent；
+        有参考图：图片编辑工作流，参考图进视觉塔（tokenize images），
+        VAE 潜变量作为 ``reference_latents`` 追加到序列尾部。
+        """
+        image_tokens: list[torch.Tensor] = []
+        reference_latents: list[torch.Tensor] = []
+        for image in reference_images[:MING_IMAGE_MAX_REFERENCE_IMAGES]:
+            if not isinstance(image, torch.Tensor):
+                continue
+            image = image[:1, :, :, :3].contiguous()
+            image_tokens.append(image)
+            if vae is not None:
+                reference_latents.append(vae.encode(image))
+
+        if image_tokens:
+            tokens = clip.tokenize(str(prompt or ""), images=image_tokens)
+        else:
+            tokens = clip.tokenize(str(prompt or ""))
+        positive = clip.encode_from_tokens_scheduled(tokens)
+        if reference_latents:
+            positive = node_helpers.conditioning_set_values(
+                positive, {"reference_latents": reference_latents}, append=True
+            )
+
+        # 官方两条工作流都是 CFG-Free（BasicGuider）；只有用户手动把 CFG
+        # 调到 1 以上时才需要真正的负向条件，否则用 zero-out 省掉一次编码。
+        if str(negative_prompt or "").strip() and float(cfg) > 1.0 + 1e-3:
+            if image_tokens:
+                negative = clip.encode_from_tokens_scheduled(
+                    clip.tokenize(str(negative_prompt), images=image_tokens)
+                )
+                if reference_latents:
+                    negative = node_helpers.conditioning_set_values(
+                        negative,
+                        {"reference_latents": reference_latents},
+                        append=True,
+                    )
+            else:
+                negative = self._encode_text_conditioning(clip, negative_prompt)
+        else:
+            negative = zero_out_conditioning(positive)
+
+        latent_width = max(8, int(width))
+        latent_height = max(8, int(height))
+        latent_out = EmptyLatentImage().generate(
+            latent_width,
+            latent_height,
+            max(1, int(batch_size)),
+        )[0]
+
+        del image_tokens
+        del reference_latents
+        import gc
+
+        gc.collect()
+        if hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
+
+        return positive, negative, latent_out, latent_width, latent_height
+
+    @staticmethod
+    def _h3_resize_to_short_edge(image: torch.Tensor, short_edge: int) -> torch.Tensor:
+        """把单张图等比缩放到指定短边，并对齐 H3 画布网格（32 的倍数）。
+
+        官方节点 ``_size_short_edge`` 会把宽高四舍五入到 32 的倍数，否则 VAE
+        latent 会出现奇数边长（如 107），DiT 的 2x2 打包会直接报 shape 不匹配。
+        """
+        image = image[:1, :, :, :3].contiguous()
+        height = int(image.shape[1])
+        width = int(image.shape[2])
+        current = min(height, width)
+        if current <= 0:
+            return image
+        scale = float(short_edge) / float(current)
+        grid = H3_IMAGE_CANVAS_MULTIPLE
+        new_w = max(grid, int(round(width * scale / grid)) * grid)
+        new_h = max(grid, int(round(height * scale / grid)) * grid)
+        if (new_w, new_h) == (width, height):
+            return image
+        samples = image.movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, new_w, new_h, "lanczos", "disabled")
+        return samples.movedim(1, -1)
+
+    def _encode_minimax_h3_image_workflow(
+        self,
+        clip,
+        vae,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[torch.Tensor],
+        width: int,
+        height: int,
+        batch_size: int,
+        cfg: float = 1.0,
+    ):
+        """按 MiniMax-H3-Image 官方工作流编码条件。
+
+        无参考图 = image_t2i：纯文本条件 + 24 通道空 latent（1 帧）；
+        有参考图 = image_edit（多图即 character_swap）：参考图按
+        ``<Picture n>: <vision block>`` 拼进 Qwen3-VL 序列，同时把 VAE
+        latent 挂到 conditioning 的 ``minimax_refs`` 上由 DiT 每步重注入。
+        """
+        vision_images: list[torch.Tensor] = []
+        refs: list[dict[str, Any]] = []
+        for image in reference_images[:H3_IMAGE_MAX_REFERENCE_IMAGES]:
+            if not isinstance(image, torch.Tensor):
+                continue
+            # Qwen 视觉塔：短边固定 1024；VAE 参考：短边夹在 1024~2048
+            vision_images.append(
+                self._h3_resize_to_short_edge(image, H3_IMAGE_REF_SHORT_EDGE)
+            )
+            if vae is not None:
+                vae_image = image[:1, :, :, :3]
+                short = max(
+                    H3_IMAGE_REF_SHORT_EDGE,
+                    min(
+                        H3_IMAGE_REF_MAX_SHORT_EDGE,
+                        min(int(vae_image.shape[1]), int(vae_image.shape[2])),
+                    ),
+                )
+                vae_image = self._h3_resize_to_short_edge(vae_image, short)
+                z = vae.encode(vae_image)
+                refs.append(
+                    {
+                        "kind": "image",
+                        "latent_h": int(z.shape[-2]),
+                        "latent_w": int(z.shape[-1]),
+                        "latent": z,
+                    }
+                )
+
+        def _encode(text: str, with_images: bool):
+            kwargs = {}
+            if with_images:
+                # 官方节点用 "Picture %d: " 作为图注（无尖括号）
+                kwargs = {"images": vision_images, "picture_label": "Picture %d: "}
+            try:
+                tokens = clip.tokenize(str(text or ""), **kwargs)
+            except TypeError:
+                # 旧核心的 tokenizer 没有 picture_label 参数
+                kwargs.pop("picture_label", None)
+                tokens = clip.tokenize(str(text or ""), **kwargs)
+            cond = clip.encode_from_tokens_scheduled(tokens)
+            if refs:
+                cond = node_helpers.conditioning_set_values(
+                    cond, {"minimax_refs": refs}
+                )
+            return cond
+
+        positive = _encode(prompt, bool(vision_images))
+        if str(negative_prompt or "").strip() and float(cfg) > 1.0 + 1e-3:
+            negative = _encode(negative_prompt, bool(vision_images))
+        else:
+            negative = zero_out_conditioning(positive)
+
+        if refs:
+            # 官方 image_edit / character_swap 的画布等于 <Picture 1> 的 VAE 尺寸：
+            # latent 与参考 latent 必须同尺寸，否则打包 layout 会报 shape 不匹配。
+            latent_width = int(refs[0]["latent_w"]) * H3_IMAGE_LATENT_DOWNSCALE
+            latent_height = int(refs[0]["latent_h"]) * H3_IMAGE_LATENT_DOWNSCALE
+        else:
+            latent_width = max(
+                H3_IMAGE_CANVAS_MULTIPLE,
+                int(round(int(width) / H3_IMAGE_CANVAS_MULTIPLE)) * H3_IMAGE_CANVAS_MULTIPLE,
+            )
+            latent_height = max(
+                H3_IMAGE_CANVAS_MULTIPLE,
+                int(round(int(height) / H3_IMAGE_CANVAS_MULTIPLE)) * H3_IMAGE_CANVAS_MULTIPLE,
+            )
+        latent = torch.zeros(
+            [
+                max(1, int(batch_size)),
+                H3_IMAGE_LATENT_CHANNELS,
+                1,
+                latent_height // H3_IMAGE_LATENT_DOWNSCALE,
+                latent_width // H3_IMAGE_LATENT_DOWNSCALE,
+            ],
+            device=comfy.model_management.intermediate_device(),
+        )
+        print(
+            f"[GJJ] MiniMax-H3-Image 画布 {latent_width}x{latent_height}，"
+            f"latent {tuple(latent.shape)}，参考图 {len(reference_images)} 张"
+        )
+
+        del vision_images
+        del refs
+        import gc
+
+        gc.collect()
+        if hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
+
+        return positive, negative, {"samples": latent}, latent_width, latent_height
+
 
     def _sample_boogu_image_edit_turbo_workflow(
         self,
@@ -5108,10 +5409,13 @@ class GJJ_LazyImageStudio:
                             f"自动切换为模型族推荐：{selected_clip_name} -> "
                             f"{preset_clip_names[0]}（模型族：{preset.get('id', '')}）"
                         )
+                    # 注意：这里必须清空 exposed_clip_name，否则解析函数会优先
+                    # 返回用户残留的旧 CLIP（例如 Ming 主模型配 EVA02），
+                    # 等于没有切换，最终加载到不匹配的文本编码器。
                     resolved_clip_names = resolve_clip_names_for_preset(
                         preset,
                         clip_models,
-                        exposed_clip_name=exposed_clip_name,
+                        exposed_clip_name="",
                         legacy_clip_names=legacy_clip_names,
                     )
                     # 预设表达式解析失败时，最后才回退到用户选择的名称。
@@ -5198,6 +5502,24 @@ class GJJ_LazyImageStudio:
             )
             if is_moss_image_runtime:
                 resolved_clip_type = "moss_image"
+            is_ming_image_runtime = (
+                not use_checkpoint_model
+                and _is_ming_image_family(unet_name, resolved_clip_type, preset)
+            )
+            if is_ming_image_runtime:
+                resolved_clip_type = "ming_image"
+                if abs(float(cfg) - 1.0) > 1e-3:
+                    print(
+                        "[GJJ] LazyImageStudio 按 Ming-Image 工作流联动采样参数："
+                        f"CFG {float(cfg):g} -> 1.0（官方文生图/图片编辑均为 CFG-Free）"
+                    )
+                    cfg = 1.0
+            is_h3_image_runtime = (
+                not use_checkpoint_model
+                and _is_minimax_h3_image_family(unet_name, resolved_clip_type, preset)
+            )
+            if is_h3_image_runtime:
+                resolved_clip_type = "minimax"
             if is_flux3_runtime and pairs:
                 # Flux3 Klein 图像编辑（ReferenceMultiLatent）官方固定
                 # euler / simple / CFG 1；文生图则沿用预设的 er_sde。
@@ -5455,7 +5777,19 @@ class GJJ_LazyImageStudio:
                         lora_data,
                         use_checkpoint_model,
                     )
-                if not is_boogu_image_edit_turbo:
+                if is_ming_image_runtime:
+                    # Ming-Image 官方工作流使用 ModelSamplingFlux（shift 1.15 / base 0.5）
+                    model = _patch_flux_model_sampling(
+                        model,
+                        int(width),
+                        int(height),
+                        MING_IMAGE_SAMPLING_MAX_SHIFT,
+                        MING_IMAGE_SAMPLING_BASE_SHIFT,
+                    )
+                    model = _apply_cfg_norm(
+                        model, float(preset.get("cfg_norm_strength", 0.0))
+                    )
+                elif not is_boogu_image_edit_turbo and not is_h3_image_runtime:
                     model = _patch_model_sampling(
                         model,
                         str(preset.get("model_sampling", "")),
@@ -5559,6 +5893,96 @@ class GJJ_LazyImageStudio:
                         local_width,
                         local_height,
                         int(batch_size),
+                    )
+                elif is_ming_image_runtime:
+                    ordered_ming_pairs = _reorder_pairs_by_main_index(
+                        task_pairs, int(main_image_index)
+                    )
+                    reference_images = [
+                        pair["image"]
+                        for pair in ordered_ming_pairs[
+                            :MING_IMAGE_MAX_REFERENCE_IMAGES
+                        ]
+                        if isinstance(pair.get("image"), torch.Tensor)
+                    ]
+                    if task_mask is not None and reference_images:
+                        print(
+                            "[GJJ_LazyImageStudio] Ming-Image 图片编辑分支暂不使用遮罩输入。"
+                        )
+                    _send_status(
+                        unique_id,
+                        (
+                            f"4/6 按 Ming-Image 图片编辑工作流编码{status_suffix}"
+                            f"（{len(reference_images)} 张参考图：视觉塔 + reference_latents）..."
+                            if reference_images
+                            else f"4/6 按 Ming-Image 文生图工作流编码{status_suffix}"
+                            "（无参考图，纯文本条件 + 空 latent）..."
+                        ),
+                    )
+                    (
+                        positive,
+                        negative,
+                        latent_out,
+                        local_width,
+                        local_height,
+                    ) = self._encode_ming_image_workflow(
+                        clip=clip,
+                        vae=vae,
+                        prompt=prompt_text,
+                        negative_prompt=effective_negative_prompt,
+                        reference_images=reference_images,
+                        width=local_width,
+                        height=local_height,
+                        batch_size=int(batch_size),
+                        cfg=float(cfg),
+                    )
+                elif is_h3_image_runtime:
+                    ordered_h3_pairs = _reorder_pairs_by_main_index(
+                        task_pairs, int(main_image_index)
+                    )
+                    h3_reference_images = [
+                        pair["image"]
+                        for pair in ordered_h3_pairs[:H3_IMAGE_MAX_REFERENCE_IMAGES]
+                        if isinstance(pair.get("image"), torch.Tensor)
+                    ]
+                    if task_mask is not None and h3_reference_images:
+                        print(
+                            "[GJJ_LazyImageStudio] MiniMax-H3-Image 分支暂不使用遮罩输入。"
+                        )
+                    _send_status(
+                        unique_id,
+                        (
+                            f"4/6 按 MiniMax-H3 图片编辑工作流编码{status_suffix}"
+                            f"（{len(h3_reference_images)} 张参考图："
+                            + (
+                                "换人模式"
+                                if len(h3_reference_images) > 1
+                                else "单图编辑"
+                            )
+                            + "，视觉块 + minimax_refs）..."
+                        )
+                        if h3_reference_images
+                        else (
+                            f"4/6 按 MiniMax-H3 文生图工作流编码{status_suffix}"
+                            "（无参考图，纯文本条件 + 24 通道空 latent）..."
+                        ),
+                    )
+                    (
+                        positive,
+                        negative,
+                        latent_out,
+                        local_width,
+                        local_height,
+                    ) = self._encode_minimax_h3_image_workflow(
+                        clip=clip,
+                        vae=vae,
+                        prompt=prompt_text,
+                        negative_prompt=effective_negative_prompt,
+                        reference_images=h3_reference_images,
+                        width=local_width,
+                        height=local_height,
+                        batch_size=int(batch_size),
+                        cfg=float(cfg),
                     )
                 elif is_boogu_image_edit_turbo:
                     if not task_pairs:

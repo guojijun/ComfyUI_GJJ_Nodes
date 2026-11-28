@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "ming",
     "page_size": 8,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -154,7 +154,7 @@
   "execution_timer": {
     "enabled": true,
     "position": {
-      "left": 1488.9815673828125,
+      "left": 1063.9931640625,
       "top": 371.16900634765625
     },
     "newest_first": true,

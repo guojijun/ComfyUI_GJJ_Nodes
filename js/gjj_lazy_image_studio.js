@@ -3228,6 +3228,21 @@ function lazyModelTreeEntries(node) {
 	const useCheckpoint = checkpointModelSourceEnabled(node);
 	const selectedUnet = widgetValue(node, "unet_name") || "";
 	const preset = matchPreset(selectedUnet);
+	// 打开“模型参数”前先按预设校正一次 CLIP：旧工作流里常残留其它模型族的
+	// CLIP（例如 Ming 主模型配着 EVA02），会让 text_encoders 只过滤出那一个
+	// 文件，看起来“CLIP 没跟着模型更新”。这里在同族不匹配时换成预设 CLIP。
+	if (!useCheckpoint && preset) {
+		const clipWidget = getWidget(node, "clip_name1");
+		const desiredClip = (preset.clipNames || [])[0] || "";
+		const currentClip = String(clipWidget?.value || "");
+		if (clipWidget && desiredClip && !presetModelMatchesExpression(currentClip, desiredClip)) {
+			const clipValues = Array.isArray(clipWidget.options?.values) ? clipWidget.options.values : [];
+			const resolvedClip = preferredValue(clipValues, desiredClip);
+			if (resolvedClip && presetModelMatchesExpression(resolvedClip, desiredClip)) {
+				setWidgetValue(clipWidget, resolvedClip);
+			}
+		}
+	}
 	const presetKeywords = Array.isArray(preset?.keywords) ? preset.keywords : [];
 	const normalizedUnet = normalizeText(selectedUnet);
 	const canonicalUnet = canonicalizeText(selectedUnet);
@@ -3264,7 +3279,7 @@ function lazyModelTreeEntries(node) {
 			label: "UNET 主模型",
 			folder: "models/diffusion_models",
 			icon: "🟣",
-			anyKeywords: ["flux", "flux3", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "moss", "gguf", "ernie"],
+			anyKeywords: ["flux", "flux3", "f2k", "krea", "zimage", "zit", "qwen", "firered", "boogu", "anima", "mage-flow", "mage_flow", "moss", "ming", "minimax", "gguf", "ernie"],
 			searchValue: familySearchValue,
 			fallback: widgetValue(node, "unet_name") || "未找到可用 UNET 主模型",
 			description: "主扩散模型；执行时加载为采样主模型，并根据模型族联动 CLIP、VAE、采样器和 LoRA。",
@@ -3274,9 +3289,11 @@ function lazyModelTreeEntries(node) {
 			label: "CLIP 编码器",
 			folder: "models/text_encoders",
 			icon: "🟡",
-			anyKeywords: ["qwen", "t5", "clip", "mistral", "ministral", "ernie"],
+			anyKeywords: ["qwen", "t5", "clip", "mistral", "ministral", "ernie", "ming", "ling", "minimax"],
 			searchValue: modelFamilyStem(
-				widgetValue(node, "clip_name1") || (preset?.clipNames || [])[0],
+				// 优先跟随预设声明的 CLIP，避免旧工作流里残留的其它模型族 CLIP
+				// （如 EVA02）把 text_encoders 过滤成只剩它自己。
+				(preset?.clipNames || [])[0] || widgetValue(node, "clip_name1"),
 			),
 			fallback: widgetValue(node, "clip_name1") || "未找到可用 CLIP 编码器",
 			description: "文本编码器；将提示词编码为当前模型族需要的条件。",
@@ -3286,7 +3303,7 @@ function lazyModelTreeEntries(node) {
 			label: "VAE 解码器",
 			folder: "models/vae",
 			icon: "🔴",
-			anyKeywords: ["flux2", "vae", "qwen", "ae", "default"],
+			anyKeywords: ["flux2", "vae", "qwen", "ae", "default", "minimax"],
 			searchValue: modelFamilyStem(
 				widgetValue(node, "vae_name") || preset?.vaeName,
 			),

@@ -57,12 +57,14 @@ CLIP_TYPE_OPTIONS = [
     "flux2",
     "flux3",
     "moss_image",
+    "ming_image",
     "ovis",
     "newbie",
     "longcat_image",
     "boogu",
     "joyimage",
     "mage",
+    "minimax",
 ]
 CLIP_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32"]
 CLIP_DEVICE_OPTIONS = ["default", "cpu"]
